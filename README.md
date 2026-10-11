@@ -1,9 +1,11 @@
 # ESP32 GPS Logger
 
 MicroPython GPS track logger for the ESP32. Away from home it records your
-position to GPX files on the internal flash; once it sees a configured WiFi
-network it stops logging and uploads the finished tracks to a
-[Dawarich](https://dawarich.app) server via its Overland API endpoint.
+position to GPX files on the internal flash. On a **home** WiFi network it
+stops logging and uploads finished tracks to a
+[Dawarich](https://dawarich.app) server via its Overland API. On a
+**non-home** network (a phone hotspot in the car) it keeps logging and
+uploads already-finished files in the background.
 
 ## Features
 
@@ -11,11 +13,11 @@ network it stops logging and uploads the finished tracks to a
 - Samples the position every second and records a point only after moving more than 10 m from the last recorded one, to GPX 1.1 files named `/gpx/YYYYMMDD_HHMMSS.gpx`. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
 - Power-loss safe: each file is always a complete GPX document, written in batches every 60 s (LittleFS commits on close).
 - Short fix losses start a new track segment; a gap over 5 minutes starts a new file.
-- Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked each sample) or after an online→offline cycle.
-- Up to three WiFi networks. After a scan, visible known APs are tried strongest-RSSI first (~12 s connect timeout, WDT fed while waiting). A network that fails to associate is remembered briefly and tried last next time. If the scan fails or none of ours are visible, config order 1→2→3 is used. If all fail, logging continues offline and reconnects with capped exponential backoff.
-- On WiFi: uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.gpx.pos` sidecar (byte offset). LittleFS rename is atomic; a crash between POST and the offset commit resends the same points. Dawarich deduplicates on `(user, timestamp, lon, lat)`. Truncated or non-numeric `<trkpt>` lines are skipped. HTTP 400/413/422 appends that batch to `<file>.gpx.bad` and continues with the rest of the file. Other 4xx/5xx use exponential backoff (honours `Retry-After`); 401 retries after 30 minutes (Dawarich also uses 401 for plan/point limits).
-- 128×64 OLED status screen: connected SSID (never the password), GPS fix, mode (LOG/UPLOAD), free flash and points left. If the display is missing or drops out at runtime, the logger runs headless.
-- Hardware watchdog (120 s) fed in the main loop and inside long scans/`count_points`/POST. Uncaught exceptions print, flush, wait ~1 s and `machine.reset()`. Ctrl-C leaves the WDT armed but a timer keeps feeding it; for `mpremote cp` of large files use the GPIO25 boot-bypass. The watchdog is not started if GPIO25 is held at reset.
+- Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds) or after leaving a home network.
+- Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, visible known APs are tried strongest-RSSI first (one SSID, strongest BSSID). Hidden SSIDs (`SSID2_HIDDEN=1`) are tried after visible ones. If the scan sees none of ours, only hidden nets are tried (no blind 1→2→3). If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked.
+- Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.gpx.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.gpx.bad`. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
+- 128×64 OLED: connected SSID (never the password), GPS fix, mode (`LOG` / `LOG+UP` / `UPLOAD` / `BAD FULL`), free flash and points left. Missing or dropping display → headless.
+- Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush, wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. GPIO25 at reset skips the logger entirely.
 
 ## Hardware
 
@@ -64,36 +66,54 @@ python3 -m venv .venv
 Create `.env` and copy it to the device root:
 
 ```ini
+# Network #1 is HOME by default: at this SSID the logger stops recording
+# and uploads. A single-network .env is unchanged from earlier versions.
 SSID=MyHomeWifi
 WPA2=wifi-password
-# optional extra networks (ignored if empty / omitted)
+
+# Phone hotspot for a car trip: NOT home, so the trip is still logged
+# and finished files upload when the hotspot has data.
 SSID2=PhoneHotspot
 WPA2_2=hotspot-password
+# HOME2=0          # default for #2/#3; set HOME2=1 to treat as home
+# SSID2_HIDDEN=1   # try even when the scan does not list it
+
+# Optional third network
 SSID3=CabinWifi
 WPA2_3=cabin-password
+# HOME3=1
+# SSID3_HIDDEN=1
 
 GEO_URL=https://dawarich.example.com
 API_KEY=your-dawarich-api-key
 
-# Overland tracker id and DHCP hostname (defaults match the field device)
+# [A-Za-z0-9._-]{1,32} — invalid values fall back to the default
 DEVICE_ID=Dawarich-GPS-tracker
 HOSTNAME=Dawarich-GPS-tracker
 ```
 
-A single-network `.env` with only `SSID` / `WPA2` still works as network #1.
+`HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` accept
+`1`/`0` (also `true`/`false`). Network #1 defaults to home; #2 and #3 do not.
 
 **How a network is chosen**
 
-1. Scan once.
-2. Keep the configured SSIDs that the scan actually saw, strongest RSSI first.
-3. Try each with a ~12 s connect timeout (WDT fed while waiting). Wrong
-   password, no DHCP, or an overloaded AP → mark that SSID “recently failed”
-   and move on.
-4. If the scan itself fails or none of our SSIDs are visible, try config
-   order 1→2→3 instead of RSSI order.
-5. If every attempt fails, stay in LOG mode and retry later with capped
-   exponential backoff. A recently failed SSID is not tried first on the
-   next round.
+1. Scan once (this is the only blocking radio step).
+2. Deduplicate by SSID (strongest BSSID wins).
+3. Try visible known APs, strongest RSSI first. Each try is polled from
+   the main loop with a ~12 s deadline (WDT fed; GPS keeps sampling).
+   Wrong password / no DHCP → mark that SSID “recently failed” and move on.
+   The first ~1.5 s of a try ignore a leftover fail reason from the
+   previous SSID (MicroPython 1.29 `connect()` does not always clear it;
+   confirm on device with a bad password on #1 and a good #2).
+4. Then try nets marked `SSIDn_HIDDEN=1` that were not in the scan.
+5. If the scan succeeded and listed none of our SSIDs, **do not** blindly
+   try 1→2→3; only hidden nets are attempted. If the scan itself failed,
+   fall back to config order, still under backoff.
+6. If every attempt fails, stay in LOG mode and retry later with capped
+   exponential backoff (up to 10 minutes).
+
+OLED / log show the connected SSID, never the password. Mode is `UPLOAD`
+on a home net, `LOG+UP` on a hotspot, `LOG` when offline.
 
 The API key is sent as `Authorization: Bearer <key>` (Dawarich accepts that
 header as well as `?api_key=`). Prefer `https://` for `GEO_URL`: an `http://`
@@ -108,7 +128,7 @@ and a tiny HTTP client; that is not wired up here because mbedTLS already
 sits close to the ~40 kB IDF-heap budget. Use a trusted LAN or a VPN if
 that matters.
 
-micropython-lib `requests` also follows 301/302/303 with a GET and no body.
+micropython-lib `requests` follows 301/302/303 with a GET and no body.
 An `http://`→`https://` redirect therefore becomes a 404, not an upload.
 Put the https origin in `GEO_URL` directly.
 
@@ -136,35 +156,32 @@ HTTPS uploads fail with `ENOMEM`.
 ## Usage
 
 - Power on: the logger starts automatically, scans once for configured
-  networks, then shows the status screen (or runs headless). The OLED WiFi
-  line is the connected SSID.
+  networks, then shows the status screen (or runs headless).
 - **Skip the logger** (REPL / `mpremote`, **no watchdog**): hold GPIO25
-  while resetting. Use this for copying files off the device. Ctrl-C from a
-  running logger leaves the WDT armed; a timer keeps feeding it so the REPL
-  does not reboot after 120 s, but the GPIO25 bypass is still the reliable
-  way to pull a large `/gpx` file (`mpremote cp` of ~1 MB can take longer
-  than one WDT period if the timer is not running).
-- An uncaught exception is printed, the pending GPX batch is flushed, and
-  the board resets after about a second. Init (point count, OLED, WiFi)
-  runs inside the same handler. If a call hangs past ~120 s, the watchdog
-  resets the chip.
-- Logs live in `/gpx/` on the device; pull them with the GPIO25 bypass:
+  while resetting. Use this for copying files off the device.
+- Ctrl-C from a running logger leaves the WDT armed; a timer feeds it for
+  **10 minutes**, then the chip resets (so a stray 0x03 on USB-UART in the
+  field does not leave the device in REPL forever). The next `run()` deinit's
+  that timer. GPIO25 bypass is still the reliable way to pull a large `/gpx`.
+- Repeated import/crash at boot: increasing delay (5 s, 10 s, … cap 30 s),
+  then the board stays in the REPL after 5 failures (RTC memory counter,
+  `/boot_fail` fallback).
+- Logs live in `/gpx/`; pull them with the GPIO25 bypass:
 
   ```bash
   .venv/bin/mpremote cp :/gpx/20261005_101500.gpx .
   ```
 
-  Upload progress for a file is `/gpx/20261005_101500.gpx.pos`. Batches
-  Dawarich rejected as payload errors are appended to
-  `/gpx/20261005_101500.gpx.bad`. After a successful upload the logger will
-  retry a `.bad` file a few times. To re-queue by hand (GPIO25 bypass):
+  Progress is `/gpx/20261005_101500.gpx.pos`. Payload-rejected batches are
+  appended to `/gpx/20261005_101500.gpx.bad`. After a successful upload the
+  logger retries a `.bad` file a few times per boot. To re-queue by hand:
 
   ```bash
   .venv/bin/mpremote exec "import os; os.rename('/gpx/20261005_101500.gpx.bad', '/gpx/20261005_101500.gpx')"
   ```
 
-  `.bad` files count against free flash. They are capped at 64 kB of
-  appended points; pull or delete them if the logger reports flash full.
+  If `.bad` reaches 64 kB the OLED shows `BAD FULL` and **no more points
+  are dropped** — pull or delete the `.bad` file, then reset.
 
 ## Configuration
 
@@ -179,12 +196,14 @@ Constants at the top of `gps_logger.py`:
 | `MIN_FREE` | 32 kB | Flash reserve |
 | `MAX_HDOP` | 5 | Skip samples with a fresh GGA dilution worse than this |
 | `UPLOAD_BATCH` | 50 | Points per POST |
-| `CONNECT_TIMEOUT` | 12 s | Per-network wait for DHCP |
+| `CONNECT_TIMEOUT` | 12 s | Per-network wait for DHCP (polled, not a blocking sleep) |
 | `BACKOFF_START` | 15 s | First retry after net/5xx/4xx |
-| `BACKOFF_MAX` | 30 min | Cap on upload backoff |
+| `BACKOFF_MAX` | 30 min | Cap on upload backoff and `Retry-After` |
 | `AUTH_BACKOFF` | 30 min | Retry after HTTP 401 |
-| `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (wall clock can be longer; WDT is the cap) |
+| `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (WDT 120 s is the wall-clock cap) |
 | `WDT_TIMEOUT` | 120 s | Hardware watchdog |
-| `MAX_BAD_BYTES` | 64 kB | Cap on `<file>.gpx.bad` |
-| `DEVICE_ID` | `Dawarich-GPS-tracker` | Overland tracker id (override with `.env`) |
-| `HOSTNAME` | `Dawarich-GPS-tracker` | DHCP hostname (override with `.env`) |
+| `KEEPALIVE_MAX` | 10 min | Ctrl-C timer may feed the WDT this long |
+| `MAX_BAD_BYTES` | 64 kB | Cap on `<file>.gpx.bad`; uploads pause when full |
+| `MAX_GLOBAL_PAYLOAD` | 3 | Consecutive 400/422 without 2xx → backoff, no quarantine |
+| `DEVICE_ID` | `Dawarich-GPS-tracker` | Overland tracker id (`.env`, `[A-Za-z0-9._-]{1,32}`) |
+| `HOSTNAME` | `Dawarich-GPS-tracker` | DHCP hostname (`.env`, `[A-Za-z0-9-]{1,32}`) |

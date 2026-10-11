@@ -80,6 +80,10 @@ class Timer(object):
         self.period = period
         self.mode = mode
         self.callback = callback
+        self.deinited = False
+
+    def deinit(self):
+        self.deinited = True
 
 
 def _reset():
@@ -111,15 +115,32 @@ class SSD1306_I2C(object):
         self.ops.append(("show",))
 
 
+class RTC(object):
+    mem = b""
+
+    def memory(self, data=None):
+        if data is None:
+            return RTC.mem
+        RTC.mem = data if isinstance(data, bytes) else bytes(data)
+        return None
+
+
 class WLAN(object):
     scan_aps = []
     scan_error = False
     ok = set()
     last_ssid = None
     connects = []
+    delay = 0
+    stale_fail = 0
+    leftover = 4
+    flaky = False
 
     def __init__(self, iface):
         self._status = 0
+        self._left = 0
+        self._stale = 0
+        self._want_ok = False
         self.iface = iface
         WLAN.instances.append(self)
 
@@ -130,24 +151,65 @@ class WLAN(object):
         if WLAN.scan_error:
             raise OSError("scan fail")
         out = []
-        for ssid, rssi in WLAN.scan_aps:
-            out.append((ssid.encode(), b"\x00" * 6, 1, rssi, 4, False))
+        for item in WLAN.scan_aps:
+            ssid, rssi = item[0], item[1]
+            bssid = item[2] if len(item) > 2 else (b"\x00" * 6)
+            out.append((ssid.encode(), bssid, 1, rssi, 4, False))
         return out
 
-    def connect(self, s, p):
+    def connect(self, s, p, bssid=None):
         WLAN.last_ssid = s
-        WLAN.connects.append((s, p))
-        if s in WLAN.ok:
-            self._status = 3
+        WLAN.connects.append((s, p, bssid))
+        self._want_ok = s in WLAN.ok
+        if self._want_ok:
+            if WLAN.stale_fail:
+                self._status = WLAN.leftover
+                self._stale = WLAN.stale_fail
+                self._left = WLAN.delay
+            elif WLAN.delay:
+                self._status = 1
+                self._left = WLAN.delay
+            else:
+                self._status = 3
         else:
-            self._status = 4
+            if WLAN.stale_fail:
+                self._status = WLAN.leftover
+                self._stale = WLAN.stale_fail
+                self._left = 0
+            else:
+                self._status = 4
 
     def disconnect(self):
         if self._status == 3:
             self._status = 0
 
     def status(self, arg=None):
-        return -50 if arg == "rssi" else self._status
+        if arg == "rssi":
+            return -50
+        if self._stale > 0:
+            self._stale -= 1
+            leftover = self._status
+            if self._stale == 0:
+                if self._want_ok:
+                    if self._left > 0:
+                        self._status = 1
+                    else:
+                        self._status = 3
+                else:
+                    self._status = 4
+            return leftover
+        if self._left > 0:
+            self._left -= 1
+            if self._left == 0 and self._status == 1:
+                self._status = 3
+            else:
+                return 1
+        if WLAN.flaky and self._status == 3:
+            WLAN.flaky = False
+            self._status = 1
+            self._left = 1
+            return 1
+        return self._status
 
     def ifconfig(self):
         return ("192.168.1.8", "255.255.255.0", "192.168.1.1", "1.1.1.1")
@@ -197,6 +259,7 @@ def _install_mocks():
     machine.UART = UART
     machine.WDT = WDT
     machine.Timer = Timer
+    machine.RTC = RTC
     machine.reset = _reset
     sys.modules["machine"] = machine
 
@@ -295,6 +358,10 @@ def reset_wlan():
     WLAN.ok = set()
     WLAN.last_ssid = None
     WLAN.connects = []
+    WLAN.delay = 0
+    WLAN.stale_fail = 0
+    WLAN.leftover = 4
+    WLAN.flaky = False
     WLAN.instances = []
 
 
@@ -395,7 +462,7 @@ try:
     online(tmpdir)
     path = os.path.join(tmpdir, "20261005_100000.gpx")
     make_gpx(path, 3, extra=b'<trkpt lat="52.9" lon="13.9"><time>2026-10-05T11:00:00Z')
-    n, n_ok, size, new_off = gl.read_batch(path, 0)
+    n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
     check("truncated: consumed 4 trkpt lines (3 good + 1 truncated)", n == 4)
     check("truncated: encoded only 3 valid points", n_ok == 3)
     check("truncated: produced a JSON body", size > 0)
@@ -570,8 +637,8 @@ try:
               os.path.exists(path) and not os.path.exists(path + ".bad"),
               "state=%s" % gl.up["state"])
         if code == 429:
-            check("http429: Retry-After 7s honoured",
-                  gl.up["next_at"] == _clock[0] + 7000,
+            check("http429: Retry-After 7s clamped to BACKOFF_START",
+                  gl.up["next_at"] == _clock[0] + gl.BACKOFF_START,
                   "next_at=%s clock=%s" % (gl.up["next_at"], _clock[0]))
         _post_headers[0] = {}
 
@@ -611,15 +678,15 @@ try:
     make_gpx(path, 3)
     orig_id = gl.DEVICE_ID
     gl.DEVICE_ID = "Dawarich-GPS-tracker"  # 21 chars, the field default
-    n, n_ok, size, new_off = gl.read_batch(path, 0)
+    n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
     check("device_id default encodes all 3 points", n_ok == 3 and size > 0)
-    gl.DEVICE_ID = "X" * 80
-    n, n_ok, size, new_off = gl.read_batch(path, 0)
-    check("long device_id: points still encoded (no silent drop)",
+    gl.DEVICE_ID = "X" * 32
+    n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
+    check("32-char device_id: points still encoded (no silent drop)",
           n_ok == 3 and size > 0, "n_ok=%s size=%s" % (n_ok, size))
     body = json.loads(bytes(gl._body[:size]).decode())
-    check("long device_id appears in JSON",
-          body["locations"][0]["properties"]["device_id"] == "X" * 80)
+    check("32-char device_id appears in JSON",
+          body["locations"][0]["properties"]["device_id"] == "X" * 32)
     gl.DEVICE_ID = orig_id
 
     # inf / nan / bad timestamp skipped
@@ -629,7 +696,7 @@ try:
     times = ["2026-10-05T00:00:00Z", "2026-10-05T00:00:01Z",
              '2026-10-05T00:00:02Z"injected']
     make_gpx(path, 3, extras=extras, times=times)
-    n, n_ok, size, new_off = gl.read_batch(path, 0)
+    n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
     check("K6: inf ele omitted but point kept; bad timestamp skipped",
           n == 3 and n_ok == 2, "n=%s n_ok=%s" % (n, n_ok))
     body = json.loads(bytes(gl._body[:size]).decode())
@@ -883,6 +950,14 @@ try:
     SSD1306_I2C.raise_show = False
 
     # --- multi-WiFi --------------------------------------------------------
+    def drain_wifi():
+        for _ in range(12):
+            if gl.wifi["state"] in ("connected", "not found", "error",
+                                    "off", "no .env"):
+                return
+            _clock[0] += max(gl.CONNECT_TIMEOUT, gl.IGNORE_STALE_MS)
+            gl.wifi_tick()
+
     def start_wifi(env_text, aps, ok):
         reset_wlan()
         WLAN.scan_aps = aps
@@ -890,7 +965,11 @@ try:
         write_env(tmpdir, env_text)
         gl.wifi_reset()
         gl.up_reset()
+        stale = gl.IGNORE_STALE_MS
+        gl.IGNORE_STALE_MS = 0
         gl.wifi_start()
+        drain_wifi()
+        gl.IGNORE_STALE_MS = stale
         return gl.wifi
 
     single = "SSID=home\nWPA2=secret1\nGEO_URL=https://d.example\nAPI_KEY=k\n"
@@ -917,10 +996,26 @@ try:
           "state=%s ssid=%s connects=%s" % (w["state"], w["ssid"], WLAN.connects))
     check("wifi tried strongest first",
           WLAN.connects and WLAN.connects[0][0] == "home")
+    # duplicate BSSIDs must not produce two tries of the same SSID first
+    reset_wlan()
+    WLAN.scan_aps = [("home", -20, b"\x01" * 6), ("home", -40, b"\x02" * 6),
+                     ("phone", -50, b"\x03" * 6)]
+    WLAN.ok = set(["home"])
+    write_env(tmpdir, triple)
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.IGNORE_STALE_MS = 0
+    gl.wifi_start()
+    drain_wifi()
+    home_tries = [c for c in WLAN.connects if c[0] == "home"]
+    check("wifi duplicate BSSID: home tried once (strongest)",
+          len(home_tries) == 1, "connects=%s" % (WLAN.connects,))
 
     w = start_wifi(triple, [], [])
     check("wifi all absent -> offline (not connected)",
           w["state"] != "connected")
+    check("wifi all absent: no blind 1-2-3 tries (none hidden)",
+          WLAN.connects == [], "connects=%s" % (WLAN.connects,))
     # logging continues
     gl.log_reset()
     gl.log["online"] = False
@@ -946,6 +1041,11 @@ try:
         WLAN.instances[-1]._status = 5  # beacon timeout
     WLAN.connects = []
     gl.wifi_tick()
+    check("wifi loss first leaves LOG (not blocking connect)",
+          gl.wifi["state"] != "connected" and gl.at_home() is False)
+    gl.mode_tick()
+    gl.IGNORE_STALE_MS = 0
+    drain_wifi()
     check("wifi failover after disconnect uses the other known net",
           gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "phone",
           "state=%s ssid=%s connects=%s" % (
@@ -958,7 +1058,9 @@ try:
     write_env(tmpdir, triple)
     gl.wifi_reset()
     gl.up_reset()
+    gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
+    drain_wifi()
     check("wifi scan fail: config order reaches #2",
           gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "phone",
           "state=%s ssid=%s" % (gl.wifi["state"], gl.wifi["ssid"]))
@@ -973,12 +1075,520 @@ try:
           os.path.exists(path + ".bad"))
     _post_code[0] = 201
     gl.up["allow_bad"] = True
-    gl.up["bad_tries"] = 0
+    gl.up["bad_try"] = {}
     pump()
     check("recovery: .bad retried and consumed after success path",
           not os.path.exists(path + ".bad") or gl.up["sent"] > 0,
           "bad=%s sent=%s posts=%s" % (
               os.path.exists(path + ".bad"), gl.up["sent"], len(_posts)))
+
+    # --- B1: persistent 400 on 2000-pt file must not drop points -----------
+    online(tmpdir)
+    path = os.path.join(tmpdir, "20261005_19e1.gpx")
+    make_gpx(path, 2000)
+    _post_code[0] = 400
+    for _ in range(8):
+        pump()
+        gl.up["next_at"] = _clock[0]
+    remain = 0
+    if os.path.exists(path):
+        remain += gl.count_points()
+    badp = path + ".bad"
+    bad_n = 0
+    if os.path.exists(badp):
+        with open(badp, "rb") as f:
+            bad_n = sum(1 for line in f if line.startswith(b"<trkpt"))
+    check("B1 E1: persistent 400 does not delete unsent points",
+          os.path.exists(path) and remain + bad_n == 2000,
+          "remain=%s bad=%s exists=%s state=%s" % (
+              remain, bad_n, os.path.exists(path), gl.up["state"]))
+    check("B1 E1: global payload errors stop quarantining",
+          gl.up.get("fail4", 0) >= gl.MAX_GLOBAL_PAYLOAD
+          and bad_n <= gl.UPLOAD_BATCH * (gl.MAX_GLOBAL_PAYLOAD - 1),
+          "fail4=%s bad_n=%s" % (gl.up.get("fail4"), bad_n))
+
+    # --- B1 E2: .bad retry + 422 must keep the quarantined file ------------
+    online(tmpdir)
+    path = os.path.join(tmpdir, "20261005_19e2.gpx")
+    make_gpx(path, 10)
+    _post_code[0] = 422
+    pump()
+    check("B1 E2: first 422 parked the batch", os.path.exists(path + ".bad"))
+    _post_code[0] = 422
+    gl.up["allow_bad"] = True
+    gl.up["next_at"] = _clock[0]
+    pump()
+    check("B1 E2: .bad still on flash after retry 422",
+          os.path.exists(path + ".bad"),
+          "state=%s" % gl.up["state"])
+    with open(path + ".bad", "rb") as f:
+        still = sum(1 for line in f if line.startswith(b"<trkpt"))
+    check("B1 E2: quarantined points not deleted",
+          still == 10, "still=%s" % still)
+
+    # --- B1: .bad full: do not advance offset ------------------------------
+    online(tmpdir)
+    path = os.path.join(tmpdir, "20261005_19full.gpx")
+    make_gpx(path, 80)
+    with open(path + ".bad", "wb") as f:
+        f.write(b"x" * (gl.MAX_BAD_BYTES))
+    _post_code[0] = 400
+    off0 = gl.read_offset(path)
+    pump()
+    check("B1 bad-full: offset not advanced",
+          gl.read_offset(path) == off0 and os.path.exists(path),
+          "off=%s state=%s" % (gl.read_offset(path), gl.up["state"]))
+    check("B1 bad-full: state is bad full",
+          gl.up["state"] == "bad full")
+    check("B1 bad-full: OLED mode BAD FULL",
+          gl._mode_line() == "Mode BAD FULL")
+    with open(path, "rb") as f:
+        kept = sum(1 for line in f if line.startswith(b"<trkpt"))
+    check("B1 bad-full: original 80 points still in GPX",
+          kept == 80)
+
+    # --- B2: 200 kB line without newline must not MemoryError/boot-loop ----
+    online(tmpdir)
+    path = os.path.join(tmpdir, "20261005_20long.gpx")
+    with open(path, "wb") as f:
+        f.write((gl.HEADER % "20261005_20long").encode())
+        f.write(b'<trkpt lat="52.500000" lon="13.400000">'
+                b'<time>2026-10-05T00:00:00Z</time></trkpt>\n')
+        f.write(b"A" * 200000 + b"\n")
+        f.write(b'<trkpt lat="52.500100" lon="13.400100">'
+                b'<time>2026-10-05T00:00:01Z</time></trkpt>\n')
+        f.write(gl.FOOTER.encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
+    check("B2: 200 kB over-long line skipped, both points encoded",
+          n_ok == 2 and eof,
+          "n=%s n_ok=%s eof=%s" % (n, n_ok, eof))
+    left = gl.count_points()
+    check("B2: count_points survives a 200 kB line",
+          left == 2, "left=%s" % left)
+    memerr = []
+    orig_rl = gl._readline
+
+    def boom_line(f):
+        memerr.append(1)
+        raise MemoryError("heap")
+
+    gl._readline = boom_line
+    try:
+        gl.up_reset()
+        check("B2: count_points/up_reset catch MemoryError (no reset)",
+              True)
+    except MemoryError:
+        check("B2: count_points/up_reset catch MemoryError (no reset)", False)
+    finally:
+        gl._readline = orig_rl
+        gl.up["url"] = "https://dawarich.example.com"
+        gl.up["key"] = "secret-key"
+        gl.wifi["state"] = "connected"
+
+    gl._readline = boom_line
+    try:
+        pump()
+        check("B2: upload_tick MemoryError skips the file (no infinite loop)",
+              gl.up["skip"] == path and gl.up["state"] == "low mem")
+    except MemoryError:
+        check("B2: upload_tick MemoryError skips the file (no infinite loop)",
+              False, "MemoryError escaped")
+    finally:
+        gl._readline = orig_rl
+
+    # --- B3: hotspot (non-home) keeps logging + opportunistic upload ------
+    def gps_fix(lat=52.5):
+        gl.st.update(valid=True, date="2026-10-05", time="12:00:00",
+                     lat=lat, lon=13.4, alt=10.0, pos_at=_clock[0],
+                     hdop=1.0, hdop_at=_clock[0], status="A", quality=1,
+                     fixtype=3)
+
+    env_hot = ("SSID=home\nWPA2=h\nSSID2=PhoneHotspot\nWPA2_2=p\n"
+               "GEO_URL=https://d.example\nAPI_KEY=k\n")
+    w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
+    check("B3: connected to non-home hotspot",
+          w["state"] == "connected" and w["ssid"] == "PhoneHotspot"
+          and w["home"] is False)
+    check("B3: at_home() is False on hotspot", gl.at_home() is False)
+    gl.log_reset()
+    gl.log["online"] = True
+    gl.mode_tick()
+    check("B3: mode_tick does not enter upload-only on hotspot",
+          gl.log["online"] is False)
+    gps_fix(52.50)
+    gl.log["fix"] = False
+    gl.log["lost_at"] = None
+    gl.log["file"] = None
+    gl.log["last_sample"] = None
+    gl.log_tick()
+    check("B3: hotspot trip still records GPS points",
+          len(gl.log["batch"]) == 1 or gl.log["file"] is not None,
+          "batch=%s file=%s" % (gl.log.get("batch"), gl.log.get("file")))
+    check("B3: OLED mode LOG+UP on hotspot",
+          gl._mode_line() == "Mode LOG+UP")
+
+    current = gl.log.get("file")
+    for n in os.listdir(tmpdir):
+        p = os.path.join(tmpdir, n)
+        if p == current:
+            continue
+        if n.endswith((".gpx", ".pos", ".tmp", ".bad")):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    finished = os.path.join(tmpdir, "20261004_210000.gpx")
+    make_gpx(finished, 4)
+    gl.up["url"] = "https://d.example"
+    gl.up["key"] = "k"
+    gl.up["next_at"] = _clock[0]
+    gl.up["state"] = "idle"
+    _post_code[0] = 201
+    _posts[:] = []
+    pump()
+    check("B3: hotspot still uploads finished files in background",
+          len(_posts) == 1 and not os.path.exists(finished),
+          "posts=%s exists=%s state=%s" % (
+              len(_posts), os.path.exists(finished), gl.up["state"]))
+
+    w = start_wifi(env_hot, [("home", -30)], ["home"])
+    check("B3: home network is marked home",
+          w["state"] == "connected" and w["home"] is True)
+    gl.log_reset()
+    gl.log["online"] = False
+    gl.mode_tick()
+    check("B3: home SSID stops logging (upload-only)",
+          gl.log["online"] is True)
+    gps_fix(52.51)
+    gl.log["last_sample"] = None
+    gl.log_tick()
+    check("B3: log_tick is a no-op on home",
+          gl.log["batch"] == [] and gl.log["file"] is None)
+    check("B3: OLED mode UPLOAD on home",
+          gl._mode_line() == "Mode UPLOAD")
+
+    # HOME2 override
+    env_h2 = env_hot + "HOME2=1\n"
+    w = start_wifi(env_h2, [("PhoneHotspot", -40)], ["PhoneHotspot"])
+    check("B3: HOME2=1 treats hotspot as home",
+          w["home"] is True, "home=%s" % w["home"])
+
+    # --- K1: keepalive deinit + deadline -----------------------------------
+    _resets[:] = []
+    _timers[:] = []
+    gl._wdt = WDT(timeout=gl.WDT_TIMEOUT)
+    gl._keep = None
+    gl._running = False
+    orig_loop = gl._loop
+
+    def ki():
+        raise KeyboardInterrupt
+
+    gl._loop = ki
+    try:
+        gl.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        gl._loop = orig_loop
+    t0 = _timers[-1] if _timers else None
+    check("K1: Ctrl-C starts a keepalive Timer",
+          t0 is not None and t0.callback is not None)
+    fed0 = gl._wdt.fed
+    t0.callback(t0)
+    check("K1: callback feeds WDT before the deadline",
+          gl._wdt.fed > fed0)
+    _clock[0] += gl.KEEPALIVE_MAX + 1
+    t0.callback(t0)
+    check("K1: after KEEPALIVE_MAX the timer is deinited",
+          getattr(t0, "deinited", False) is True)
+    fed1 = gl._wdt.fed
+    t0.callback(t0)
+    check("K1: after deadline the WDT is no longer fed",
+          gl._wdt.fed == fed1)
+
+    gl._wdt = WDT(timeout=gl.WDT_TIMEOUT)
+    gl._keep = t0
+    t0.deinited = False
+    gl._running = False
+    orig_loop2 = gl._loop
+
+    def stop_now():
+        raise KeyboardInterrupt
+
+    gl._loop = stop_now
+    try:
+        gl.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        gl._loop = orig_loop2
+    check("K1: run() deinit's the previous keepalive Timer",
+          t0.deinited is True)
+
+    gl._running = True
+    gl._keep_from = _clock[0]
+    fed2 = gl._wdt.fed
+    if _timers:
+        cb = _timers[-1].callback
+        if cb:
+            cb(_timers[-1])
+    check("K1: callback does not feed while _running",
+          gl._wdt.fed == fed2)
+    gl._running = False
+
+    # --- K2: boot-failure counter ------------------------------------------
+    RTC.mem = b""
+    boot_path = os.path.join(ROOT, "main.py")
+    boot_src = open(boot_path).read()
+    boot_ns = {
+        "Pin": Pin, "RTC": RTC, "machine": sys.modules["machine"],
+        "time": time, "__name__": "boot_helpers",
+    }
+    exec(compile(boot_src, boot_path, "exec"), boot_ns)
+    check("K2: fresh boot-fail counter is 0",
+          boot_ns["_boot_fail_get"]() == 0)
+    boot_ns["_boot_fail_set"](2)
+    check("K2: RTC memory stores the counter",
+          boot_ns["_boot_fail_get"]() == 2)
+    check("K2: delay grows with the counter and caps at 30s",
+          boot_ns["_boot_fail_delay"](1) == 5
+          and boot_ns["_boot_fail_delay"](2) == 10
+          and boot_ns["_boot_fail_delay"](10) == 30)
+    _resets[:] = []
+    RTC.mem = b"4"
+    did = boot_ns["_boot_handle_error"]()
+    check("K2: 5th failure drops to REPL (no reset)",
+          did is False and boot_ns["_boot_fail_get"]() >= 5)
+    RTC.mem = b"%d" % boot_ns["BOOT_FAIL_MAX"]
+    printed = []
+    real_print = (print if not isinstance(__builtins__, dict)
+                  else __builtins__["print"])
+
+    def cap(*a, **k):
+        printed.append(" ".join(str(x) for x in a))
+
+    if isinstance(__builtins__, dict):
+        __builtins__["print"] = cap
+    else:
+        __builtins__.print = cap
+    try:
+        boot_ns["_boot_start"]()
+    finally:
+        if isinstance(__builtins__, dict):
+            __builtins__["print"] = real_print
+        else:
+            __builtins__.print = real_print
+    check("K2: at BOOT_FAIL_MAX the logger is not started (REPL)",
+          any("REPL" in line for line in printed),
+          repr(printed))
+
+    # --- K3: delayed CONNECTING does not block GPS sampling ----------------
+    reset_wlan()
+    WLAN.scan_aps = [("PhoneHotspot", -40)]
+    WLAN.ok = set(["PhoneHotspot"])
+    WLAN.delay = 8
+    write_env(tmpdir, env_hot)
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.IGNORE_STALE_MS = 0
+    t_before = _clock[0]
+    gl.wifi_start()
+    dt = _clock[0] - t_before
+    check("K3: wifi_start does not sleep CONNECT_TIMEOUT",
+          dt < gl.CONNECT_TIMEOUT,
+          "dt=%s state=%s" % (dt, gl.wifi["state"]))
+    check("K3: still connecting after one tick",
+          gl.wifi["state"] == "connecting")
+    gl.log_reset()
+    gl.log["online"] = False
+    gps_fix(52.52)
+    gl.log["fix"] = False
+    gl.log["lost_at"] = None
+    gl.log["file"] = None
+    gl.log["last_sample"] = None
+    gl.log_tick()
+    check("K3: GPS sampling continues while WiFi is CONNECTING",
+          len(gl.log["batch"]) == 1 or gl.log["file"] is not None,
+          "batch=%s file=%s" % (gl.log.get("batch"), gl.log.get("file")))
+    # one wifi_tick must not jump CONNECT_TIMEOUT of clock
+    t_before = _clock[0]
+    gl.wifi_tick()
+    check("K3: wifi_tick is non-blocking (no 12s sleep)",
+          _clock[0] - t_before < 1000,
+          "dt=%s" % (_clock[0] - t_before))
+    WLAN.delay = 0
+
+    # --- K4: point that does not fit must not drop the remainder -----------
+    online(tmpdir)
+    path = os.path.join(tmpdir, "20261005_22k4.gpx")
+    make_gpx(path, 100)
+    orig_id = gl.DEVICE_ID
+    orig_body = gl._body
+    gl.DEVICE_ID = "X" * 32
+    gl._body = bytearray(16 * 256 + 32)
+    n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
+    check("K4: undersized buffer returns eof=False when a point does not fit",
+          n_ok > 0 and n_ok < 50 and eof is False,
+          "n=%s n_ok=%s eof=%s" % (n, n_ok, eof))
+    _post_code[0] = 201
+    gl.up["next_at"] = _clock[0]
+    # simulate commit of that partial batch
+    gl.commit_offset(path, n, new_off, eof)
+    check("K4: commit_offset does not delete the remainder",
+          os.path.exists(path),
+          "exists=%s eof=%s" % (os.path.exists(path), eof))
+    rest = 0
+    with open(path, "rb") as f:
+        f.seek(new_off)
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            if line.startswith(b"<trkpt"):
+                rest += 1
+    check("K4: unread points remain in the file",
+          n_ok + rest == 100,
+          "n_ok=%s rest=%s" % (n_ok, rest))
+    gl.DEVICE_ID = orig_id
+    gl._body = orig_body
+
+    # --- K5: DEVICE_ID / HOSTNAME validation -------------------------------
+    check("K5: quote in DEVICE_ID falls back to default",
+          gl._safe_name('foo"bar', "Dawarich-GPS-tracker")
+          == "Dawarich-GPS-tracker")
+    check("K5: backslash in DEVICE_ID falls back",
+          gl._safe_name("foo\\bar", "Dawarich-GPS-tracker")
+          == "Dawarich-GPS-tracker")
+    check("K5: 80-char DEVICE_ID falls back",
+          gl._safe_name("X" * 80, "Dawarich-GPS-tracker")
+          == "Dawarich-GPS-tracker")
+    check("K5: valid 32-char id accepted",
+          gl._safe_name("A" * 32, "d") == "A" * 32)
+    check("K5: hostname rejects underscore and dots",
+          gl._safe_name("bad_name.host", "Dawarich-GPS-tracker", host=True)
+          == "Dawarich-GPS-tracker")
+    check("K5: hostname accepts hyphen",
+          gl._safe_name("esp32-gps", "d", host=True) == "esp32-gps")
+    write_env(tmpdir, 'SSID=home\nWPA2=x\nDEVICE_ID="quoted"\n'
+              "GEO_URL=https://d.example\nAPI_KEY=k\n")
+    gl.wifi_reset()
+    gl.up_reset()
+    reset_wlan()
+    WLAN.ok = set()
+    gl.wifi_start()
+    # quotes are stripped by load_env, "quoted" becomes quoted (valid)
+    check("K5: surrounding quotes stripped by load_env",
+          gl.DEVICE_ID == "quoted")
+    write_env(tmpdir, "SSID=home\nWPA2=x\nDEVICE_ID=bad\"id\n"
+              "GEO_URL=https://d.example\nAPI_KEY=k\n")
+    gl.wifi_reset()
+    gl.wifi_start()
+    check("K5: embedded quote in DEVICE_ID uses default (valid JSON)",
+          gl.DEVICE_ID == "Dawarich-GPS-tracker")
+    loc = ('{"type":"Feature","geometry":{"type":"Point",'
+           '"coordinates":[13.4,52.5]},"properties":{'
+           '"timestamp":"2026-10-05T00:00:00Z","device_id":"%s"}}'
+           % gl.DEVICE_ID)
+    json.loads('{"locations":[%s]}' % loc)
+    check("K5: default device_id produces valid JSON", True)
+
+    # --- K6: hidden SSID tried after / when nothing visible ----------------
+    env_hid = (env_hot + "SSID2_HIDDEN=1\n")
+    w = start_wifi(env_hid, [("home", -40)], ["home"])
+    # visible home first; hidden phone after if home fails
+    reset_wlan()
+    WLAN.scan_aps = [("home", -40)]
+    WLAN.ok = set(["PhoneHotspot"])
+    write_env(tmpdir, env_hid)
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.IGNORE_STALE_MS = 0
+    gl.wifi_start()
+    drain_wifi()
+    check("K6 W3: hidden #2 tried after visible #1 fails",
+          gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot",
+          "state=%s ssid=%s connects=%s" % (
+              gl.wifi["state"], gl.wifi["ssid"], WLAN.connects))
+    reset_wlan()
+    WLAN.scan_aps = []  # none of ours visible
+    WLAN.ok = set(["PhoneHotspot"])
+    write_env(tmpdir, env_hid)
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.IGNORE_STALE_MS = 0
+    gl.wifi_start()
+    drain_wifi()
+    check("K6: empty scan tries only the hidden net",
+          WLAN.connects and all(c[0] == "PhoneHotspot" for c in WLAN.connects),
+          "connects=%s" % (WLAN.connects,))
+    check("K6: hidden net connects when not in the scan",
+          gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot")
+
+    # --- K7: leftover fail reason is ignored for IGNORE_STALE_MS -----------
+    reset_wlan()
+    WLAN.scan_aps = [("home", -30), ("PhoneHotspot", -50)]
+    WLAN.ok = set(["PhoneHotspot"])
+    WLAN.stale_fail = 2
+    WLAN.leftover = 4  # STAT_WRONG_PASSWORD leftover
+    write_env(tmpdir, env_hot)
+    gl.wifi_reset()
+    gl.up_reset()
+    # keep IGNORE_STALE_MS so leftover is ignored
+    gl.wifi_start()
+    # first poll may still be leftover; advance a little but not the timeout
+    for _ in range(6):
+        _clock[0] += 200
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            break
+    check("K7: leftover status does not immediately fail a good net",
+          gl.wifi["state"] in ("connecting", "connected"),
+          "state=%s ssid=%s connects=%s" % (
+              gl.wifi["state"], gl.wifi.get("ssid"), WLAN.connects))
+    WLAN.stale_fail = 0
+    drain_wifi()
+    check("K7: good net still reached after leftover clears",
+          gl.wifi["state"] == "connected",
+          "state=%s ssid=%s" % (gl.wifi["state"], gl.wifi.get("ssid")))
+
+    # --- E4 / E5 Retry-After clamp -----------------------------------------
+    online(tmpdir)
+    path = os.path.join(tmpdir, "20261005_23ra.gpx")
+    make_gpx(path, 5)
+    _post_code[0] = 429
+    _post_headers[0] = {"Retry-After": "-3"}
+    pump()
+    check("E4: negative Retry-After clamped to BACKOFF_START",
+          gl.up["next_at"] == _clock[0] + gl.BACKOFF_START,
+          "next_at=%s" % gl.up["next_at"])
+    online(tmpdir)
+    path = os.path.join(tmpdir, "20261005_24ra.gpx")
+    make_gpx(path, 5)
+    _post_code[0] = 503
+    _post_headers[0] = {"Retry-After": "604800"}
+    pump()
+    check("E5: 7-day Retry-After clamped to BACKOFF_MAX",
+          gl.up["next_at"] == _clock[0] + gl.BACKOFF_MAX,
+          "next_at=%s" % gl.up["next_at"])
+    _post_headers[0] = {}
+
+    # --- orphan .gpx.bad.pos -----------------------------------------------
+    online(tmpdir)
+    orphan_bad = os.path.join(tmpdir, "gone.gpx.bad.pos")
+    with open(orphan_bad, "w") as f:
+        f.write("0\n")
+    gl.up_reset()
+    gl.up["url"] = "https://dawarich.example.com"
+    gl.up["key"] = "secret-key"
+    check("orphan .gpx.bad.pos cleaned by up_reset",
+          not os.path.exists(orphan_bad))
+
+    # HOME1=0 override
+    env_nh = "SSID=cafe\nWPA2=x\nHOME1=0\nGEO_URL=https://d.example\nAPI_KEY=k\n"
+    w = start_wifi(env_nh, [("cafe", -40)], ["cafe"])
+    check("HOME1=0: network #1 is not home",
+          w["home"] is False, "home=%s" % w["home"])
 
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
