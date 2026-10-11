@@ -139,7 +139,6 @@ class WLAN(object):
     ok = set()
     last_ssid = None
     connects = []
-    assoc_bssid = None
     assoc_channel = 1
     delay = 0
     stale_fail = 0
@@ -411,7 +410,6 @@ def reset_wlan():
     WLAN.ok = set()
     WLAN.last_ssid = None
     WLAN.connects = []
-    WLAN.assoc_bssid = None
     WLAN.delay = 0
     WLAN.stale_fail = 0
     WLAN.leftover = 4
@@ -1794,7 +1792,6 @@ try:
     WLAN.connects = []
     gl.st["speed"] = None
     gl.wifi["failed"].pop("home", None)
-    gl.wifi["home_bssid"] = None
     gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
     gl.wifi_tick()
     check("HID: roam does not pin to a stronger neighbour hidden AP",
@@ -1811,7 +1808,6 @@ try:
     gl.wifi["roam_backoff"] = gl.ROAM_BACKOFF_MAX
     gl.wifi["moved_at"] = _clock[0] - 60000
     gl.wifi["roam_at"] = _clock[0]
-    gl.wifi["home_bssid"] = None
     gl.wifi["failed"].pop("home", None)
     gl.st.update(valid=True, date="2026-10-05", time="18:00:00",
                  lat=52.5, lon=13.4, pos_at=_clock[0], speed=0,
@@ -1823,21 +1819,6 @@ try:
           and WLAN.connects == [],
           "backoff=%s connects=%s" % (
               gl.wifi.get("roam_backoff"), WLAN.connects))
-    gl.wifi["home_bssid"] = home_b
-    gl.wifi["moved_at"] = _clock[0] - 60000
-    gl.wifi["roam_at"] = _clock[0]
-    gl.wifi["roam_backoff"] = gl.ROAM_BACKOFF_MAX
-    WLAN.ok = set(["home", "phone"])
-    WLAN.connects = []
-    gl.wifi_tick()
-    check("HID: learned home BSSID is used even if a neighbour is stronger",
-          WLAN.connects and WLAN.connects[0][0] == "home"
-          and WLAN.connects[0][2] == home_b
-          and (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
-          "connects=%s backoff=%s" % (
-              WLAN.connects, gl.wifi.get("roam_backoff")))
-    WLAN.ok = set(["phone"])
-    drain_wifi()
     gl.st["speed"] = None
 
     raised = False
@@ -1848,40 +1829,12 @@ try:
     check("HID: mock config('bssid') raises ValueError (v1.29)",
           raised)
 
-    w = start_wifi(env_hid_home, [("", -55, home_b), ("phone", -70)],
-                   ["home", "phone"])
-    check("HID: unique strong blank AP is learned after home connect",
-          w["ssid"] == "home" and w.get("home_bssid") == home_b,
-          "ssid=%s bssid=%s" % (w.get("ssid"), w.get("home_bssid")))
-
-    w = start_wifi(env_hid_home,
-                   [("", -40, neighbour), ("", -65, home_b), ("phone", -70)],
-                   ["home", "phone"])
-    check("HID: two strong blank APs are not learned as home_bssid",
-          w["ssid"] == "home" and w.get("home_bssid") is None,
-          "ssid=%s bssid=%s" % (w.get("ssid"), w.get("home_bssid")))
-
-    WLAN.assoc_channel = 6
-    w = start_wifi(env_hid_home, [("", -55, home_b, 1), ("phone", -70)],
-                   ["home", "phone"])
-    check("HID: blank AP on a different channel is not learned",
-          w.get("home_bssid") is None,
-          "bssid=%s ch=%s" % (w.get("home_bssid"), WLAN.assoc_channel))
-    WLAN.assoc_channel = 1
-
-    env_mixed = (triple + "SSID2_HOME=1\nSSID2_HIDDEN=1\n")
-    w = start_wifi(env_mixed, [("home", -40, b"\x02" * 6)], ["home"])
-    check("HID: visible home BSSID is not stored as hidden home_bssid",
-          w["ssid"] == "home" and w.get("home_bssid") is None,
-          "ssid=%s bssid=%s" % (w.get("ssid"), w.get("home_bssid")))
-
     w = start_wifi(env_hid_home, [("phone", -40)], ["phone"])
     WLAN.scan_aps = [("", -55, neighbour), ("phone", -40)]
     WLAN.ok = set(["phone"])
     WLAN.connects = []
     gl.st["speed"] = None
     gl.wifi["failed"].pop("home", None)
-    gl.wifi["home_bssid"] = None
     gl.wifi["roam_backoff"] = gl.ROAM_CHECK
     gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
     gl.wifi_tick()
@@ -1908,26 +1861,6 @@ try:
     check("HID: repeated hidden-home fails do not grow backoff",
           (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
           "backoff=%s" % gl.wifi.get("roam_backoff"))
-
-    gl.wifi["home_bssid"] = home_b
-    gl.wifi["home_bssid_fail"] = 0
-    WLAN.scan_aps = [("", -55, home_b), ("phone", -40)]
-    WLAN.ok = set(["phone"])
-    for _ in range(2):
-        _clock[0] += gl.FAIL_HOLD
-        gl.wifi["failed"].pop("home", None)
-        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
-        if WLAN.instances:
-            WLAN.instances[-1]._status = 3
-        gl.wifi["state"] = "connected"
-        gl.wifi["home"] = False
-        gl.wifi["ssid"] = "phone"
-        gl.wifi_tick()
-        drain_wifi()
-    check("HID: repeated learned-BSSID fails forget the BSSID",
-          gl.wifi.get("home_bssid") is None,
-          "bssid=%s fails=%s" % (
-              gl.wifi.get("home_bssid"), gl.wifi.get("home_bssid_fail")))
 
     # exponential roam backoff (wrong home PSK / unseen home)
     w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
