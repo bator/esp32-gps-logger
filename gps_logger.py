@@ -397,7 +397,7 @@ def wifi_reset():
                 backoff=WIFI_RETRY, last_check=time.ticks_ms(),
                 cand=[], cand_i=0, try_at=None, saw_connecting=False,
                 roam_at=time.ticks_ms(), prev_status=None,
-                roam_backoff=ROAM_CHECK)
+                roam_backoff=ROAM_CHECK, moved_at=None, roaming=False)
 
 def _set_hostname(name):
     if not name:
@@ -422,6 +422,10 @@ def _recently_failed(ssid, now):
 def _mark_failed(ssid):
     wifi["failed"][ssid] = time.ticks_ms()
     print("wifi fail", ssid)
+    if wifi.get("roaming") and _net_home(ssid):
+        b = wifi.get("roam_backoff") or ROAM_CHECK
+        wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
+        wifi["roaming"] = False
 
 def _scan_known(w):
     """Visible known nets, strongest BSSID per SSID, or None if scan fails."""
@@ -473,7 +477,7 @@ def _candidate_order(w):
         homes, rest = [], []
         for n in rows:
             rssi = n.get("rssi")
-            if n.get("home") and (rssi is None or rssi >= ROAM_MIN_RSSI):
+            if n.get("home") and rssi is not None and rssi >= ROAM_MIN_RSSI:
                 homes.append(n)
             else:
                 rest.append(n)
@@ -552,6 +556,7 @@ def _wifi_got_ip(w):
     wifi["failed"].pop(wifi.get("ssid"), None)
     wifi["backoff"] = WIFI_RETRY
     wifi["roam_at"] = time.ticks_ms()
+    wifi["roaming"] = False
     if wifi["home"]:
         wifi["roam_backoff"] = ROAM_CHECK
     print("wifi ok", wifi.get("ssid") or "")
@@ -625,8 +630,7 @@ def _try_roam_home(w):
             target = n
             break
     if target is None:
-        b = wifi.get("roam_backoff") or ROAM_CHECK
-        wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
+        wifi["roam_backoff"] = ROAM_CHECK
         return
     cur = None
     for x in wifi.get("nets") or []:
@@ -635,8 +639,7 @@ def _try_roam_home(w):
             break
     wifi["cand"] = [target] + ([cur] if cur else [])
     wifi["cand_i"] = 0
-    b = wifi.get("roam_backoff") or ROAM_CHECK
-    wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
+    wifi["roaming"] = True
     print("wifi roam", target["ssid"])
     _wifi_connect(w, target)
 
@@ -693,11 +696,20 @@ def wifi_tick():
                 wifi["last_check"] = now
             interval = wifi.get("roam_backoff") or ROAM_CHECK
             if (not wifi.get("home")
-                    and any(n.get("home") for n in wifi.get("nets") or [])
-                    and time.ticks_diff(now, wifi.get("roam_at") or now)
-                    >= interval):
+                    and any(n.get("home") for n in wifi.get("nets") or [])):
                 spd = st.get("speed")
-                if spd is None or spd < 5:
+                moving = has_fix(now) and spd is not None and spd >= 5
+                if moving:
+                    wifi["moved_at"] = now
+                elif (wifi.get("moved_at") is not None
+                      and time.ticks_diff(now, wifi["moved_at"]) >= 60000):
+                    wifi["moved_at"] = None
+                    wifi["roam_backoff"] = ROAM_CHECK
+                    wifi["roam_at"] = time.ticks_add(now, -ROAM_CHECK)
+                    interval = ROAM_CHECK
+                if (not moving
+                        and time.ticks_diff(now, wifi.get("roam_at") or now)
+                        >= interval):
                     wifi["roam_at"] = now
                     _try_roam_home(w)
         return
@@ -804,26 +816,37 @@ def flush():
         del batch[:]
         return
     pts = "".join(batch)
+    f = None
+    wrote = False
     try:
         if log["created"]:
             f = open(path, "r+b")
-            try:
-                f.seek(-len(FOOTER), 2)
-                f.write(((NEW_SEG if log["new_seg"] else "") + pts
-                         + FOOTER).encode())
-            finally:
-                f.close()
+            f.seek(-len(FOOTER), 2)
+            f.write(((NEW_SEG if log["new_seg"] else "") + pts
+                     + FOOTER).encode())
+            wrote = True
         else:
             name = path[len(LOG_DIR) + 1:-4]
             f = open(path, "wb")
-            try:
-                f.write((HEADER % name + pts + FOOTER).encode())
-            finally:
-                f.close()
+            f.write((HEADER % name + pts + FOOTER).encode())
+            wrote = True
             log["created"] = True
     except OSError:
-        log["err"] += 1                  # keep the batch, retry next FLUSH
+        log["err"] += 1                  # keep the batch unless write landed
+        if wrote:
+            # Bytes are on flash; dropping the RAM copy avoids ROT-11
+            # duplicates if only close() failed.
+            log["points"] += len(batch)
+            up["left"] += len(batch)
+            del batch[:]
+            log["new_seg"] = False
         return
+    finally:
+        if f is not None:
+            try:
+                f.close()
+            except OSError:
+                pass
     log["points"] += len(batch)
     up["left"] += len(batch)
     del batch[:]
@@ -855,11 +878,11 @@ def log_tick():
     if (log["file"] is not None and log.get("file_at") is not None
             and wifi["state"] == "connected" and not wifi.get("home")
             and log["points"] + len(log["batch"]) > 0
-            and time.ticks_diff(now, log["file_at"]) >= NEW_FILE_GAP * 1000):
+            and time.ticks_diff(now, log["file_at"]) >= NEW_FILE_GAP * 1000
+            and time.ticks_diff(now, log["last_flush"]) >= FLUSH):
         flush()
-        if log["batch"]:
-            return                       # write failed: keep points, retry
-        log.update(file=None, created=False, file_at=None)
+        if not log["batch"]:
+            log.update(file=None, created=False, file_at=None)
     if log["full"]:
         if time.ticks_diff(now, log.get("full_check") or 0) < FULL_CHECK:
             return
@@ -877,12 +900,12 @@ def log_tick():
         log["fix"] = True
         if (log["file"] is not None and log.get("lost_at") is not None
                 and time.ticks_diff(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
-            flush()
-            if log["batch"]:
-                return                   # write failed: keep points, retry
-            log.update(file=None, created=False, file_at=None)
-            log["prev"] = None           # first point of the new trip is kept
-            log["new_seg"] = False
+            if time.ticks_diff(now, log["last_flush"]) >= FLUSH:
+                flush()
+            if not log["batch"]:
+                log.update(file=None, created=False, file_at=None)
+                log["prev"] = None       # first point of the new trip is kept
+                log["new_seg"] = False
         elif log["file"] is not None:
             log["new_seg"] = True
             log["prev"] = None           # start the segment with this fix
@@ -970,7 +993,8 @@ def up_reset():
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
-              bad_try={}, skip=None, hold={}, next_at=time.ticks_ms())
+              bad_try={}, skip=None, hold={}, bad_full={},
+              next_at=time.ticks_ms())
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -1220,12 +1244,9 @@ def commit_offset(path, n, new_off, eof=False):
     up["left"] = max(up["left"] - n, 0)
     if not eof:
         return
-    if path.endswith(".bad"):
-        _rm(path)
-        _rm(path + ".pos")
-        return
     _rm(path)
     _rm(path + ".pos")
+    _clear_bad_full(path)
 
 def _append_bad(path, off, new_off):
     """Copy consumed <trkpt> lines to <path>.bad. False if not durable."""
@@ -1260,6 +1281,9 @@ def _quarantine_batch(path, off, n, new_off, eof):
         return False
     if not _append_bad(path, off, new_off):
         up["state"] = "bad full"
+        bf = up.get("bad_full") or {}
+        bf[path] = True
+        up["bad_full"] = bf
         return False
     commit_offset(path, n, new_off, eof)
     up["allow_bad"] = False
@@ -1294,6 +1318,24 @@ def _hold_file(path, now, ms):
     h = up.get("hold") or {}
     h[path] = time.ticks_add(now, ms)
     up["hold"] = h
+
+def _bad_full_left():
+    """True while a .bad that hit MAX_BAD_BYTES still exists on flash."""
+    bf = up.get("bad_full") or {}
+    if not bf:
+        return False
+    keep = {}
+    for p in bf:
+        if _file_size(p) is not None:
+            keep[p] = True
+    up["bad_full"] = keep
+    return bool(keep)
+
+def _clear_bad_full(path):
+    bf = up.get("bad_full") or {}
+    if path in bf:
+        bf.pop(path, None)
+        up["bad_full"] = bf
 
 def _http_post(size):
     """POST _body[:size]. Returns (status_code or None, retry_after_ms or None).
@@ -1359,7 +1401,9 @@ def upload_tick():
                 due.append(p)
         files = due
     if not files:
-        if up["state"] != "bad full":
+        if _bad_full_left():
+            up["state"] = "bad full"
+        else:
             up["state"] = "idle"
         up["next_at"] = time.ticks_add(now, BACKOFF_START)
         return
@@ -1371,15 +1415,17 @@ def upload_tick():
         fsize = _file_size(path) or 0
         if not n:
             if eof or fsize == 0:
-                if not path.endswith(".bad"):
-                    _rm(path)
-                    _rm(path + ".pos")
+                _rm(path)                # empty / EOF .gpx and .bad
+                _rm(path + ".pos")
+                _clear_bad_full(path)
             else:
                 print("pos skip", path, off, new_off, fsize)
                 write_offset(path, 0)
+            up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
             return
         if not size:
             commit_offset(path, n, new_off, eof)
+            up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
             return
     except OSError:
         up["err"] += 1
@@ -1390,7 +1436,7 @@ def upload_tick():
         up["skip"] = path
         _low_mem(now)
         return
-    if up.get("state") != "bad full":
+    if not _bad_full_left():
         up["state"] = "sending"
     read_uart()                          # drain NMEA before blocking
     gc.collect()
@@ -1420,11 +1466,12 @@ def upload_tick():
         held = up.get("hold") or {}
         held.pop(path, None)
         up["hold"] = held
+        _clear_bad_full(path)
         if from_bad:
             bt = up.get("bad_try") or {}
             bt[path] = bt.get(path, 0) + 1
             up["bad_try"] = bt
-        if up.get("state") != "bad full":
+        if not _bad_full_left():
             up["state"] = "ok"
         up["next_at"] = time.ticks_add(now, gap)
     elif code in PAYLOAD_ERR:
@@ -1482,7 +1529,7 @@ def _wifi_line():
     return "WiFi " + wifi["state"]
 
 def _mode_line():
-    if up.get("state") == "bad full":
+    if _bad_full_left() or up.get("state") == "bad full":
         return "Mode BAD FULL"
     if log["online"]:
         return "Mode UPLOAD"

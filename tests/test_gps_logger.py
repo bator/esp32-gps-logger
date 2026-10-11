@@ -1064,6 +1064,12 @@ try:
     check("home-first: home below -75 dBm is not preferred",
           WLAN.connects and WLAN.connects[0][0] == "phone",
           "connects=%s" % (WLAN.connects,))
+    env_hid_home = (triple + "SSID_HIDDEN=1\n")
+    w = start_wifi(env_hid_home, [("phone", -40)], ["phone"])
+    check("home-first: hidden home not tried before a visible hotspot",
+          WLAN.connects and WLAN.connects[0][0] == "phone"
+          and w["ssid"] == "phone",
+          "connects=%s ssid=%s" % (WLAN.connects, w.get("ssid")))
     # duplicate BSSIDs must not produce two tries of the same SSID first
     reset_wlan()
     WLAN.scan_aps = [("home", -20, b"\x01" * 6), ("home", -40, b"\x02" * 6),
@@ -1225,6 +1231,17 @@ try:
         kept = sum(1 for line in f if line.startswith(b"<trkpt"))
     check("B1 bad-full: original 80 points still in GPX",
           kept == 80)
+    _post_code[0] = 201
+    gl.up["hold"] = {}
+    n_pump = 0
+    while os.path.exists(path) and n_pump < 6:
+        gl.up["next_at"] = _clock[0]
+        pump()
+        n_pump += 1
+    check("B1: BAD FULL clears after the stuck file is gone",
+          not gl._bad_full_left() and gl._mode_line() != "Mode BAD FULL",
+          "state=%s mode=%s exists=%s" % (
+              gl.up["state"], gl._mode_line(), os.path.exists(path)))
 
     # --- B2: 200 kB line without newline must not MemoryError/boot-loop ----
     online(tmpdir)
@@ -1752,30 +1769,108 @@ try:
           "connects=%s" % (WLAN.connects,))
     WLAN.ok = set(["PhoneHotspot"])
     drain_wifi()
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "PhoneHotspot"
+    gl.wifi["roam_backoff"] = gl.ROAM_CHECK
     WLAN.scan_aps = [("PhoneHotspot", -40)]
+    WLAN.connects = []
+    gl.st.update(valid=True, date="2026-10-05", time="18:00:00",
+                 lat=52.5, lon=13.4, pos_at=_clock[0], speed=0,
+                 status="A", quality=1, fixtype=3)
+    for _ in range(6):
+        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        gl.wifi_tick()
+        drain_wifi()
+        if WLAN.instances:
+            WLAN.instances[-1]._status = 3
+        gl.wifi["state"] = "connected"
+        gl.wifi["home"] = False
+        gl.wifi["ssid"] = "PhoneHotspot"
+    check("roam backoff: unseen home keeps the 5 min interval",
+          (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK
+          and WLAN.connects == [],
+          "backoff=%s connects=%s" % (
+              gl.wifi.get("roam_backoff"), WLAN.connects))
+    # long trip then home appears: still due in 5 min, not 45–60
+    gl.wifi["failed"].pop("home", None)
+    _clock[0] += gl.FAIL_HOLD
+    WLAN.scan_aps = [("home", -55), ("PhoneHotspot", -40)]
+    WLAN.ok = set(["home", "PhoneHotspot"])
     WLAN.connects = []
     if WLAN.instances:
         WLAN.instances[-1]._status = 3
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "PhoneHotspot"
-    b_unseen = gl.wifi.get("roam_backoff")
-    gl.wifi["roam_at"] = _clock[0] - (b_unseen or gl.ROAM_CHECK)
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
     gl.wifi_tick()
-    check("roam backoff: unseen home also backs off (fewer scans)",
-          (gl.wifi.get("roam_backoff") or 0) > b_unseen
-          and WLAN.connects == [],
-          "before=%s after=%s" % (b_unseen, gl.wifi.get("roam_backoff")))
+    check("roam: after a long hotspot trip, visible home is tried at 5 min",
+          WLAN.connects and WLAN.connects[0][0] == "home",
+          "connects=%s backoff=%s" % (
+              WLAN.connects, gl.wifi.get("roam_backoff")))
+    WLAN.ok = set(["PhoneHotspot"])
+    drain_wifi()
     gl.st["speed"] = 50
+    gl.st["pos_at"] = _clock[0]
     WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
     WLAN.ok = set(["home", "PhoneHotspot"])
     WLAN.connects = []
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "PhoneHotspot"
     gl.wifi["roam_backoff"] = gl.ROAM_CHECK
     gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
     gl.wifi_tick()
     check("roam: skip scan while moving >= 5 km/h",
           WLAN.connects == [],
           "connects=%s" % (WLAN.connects,))
+    # stale speed (no fresh fix) must not block
+    gl.wifi["failed"].pop("home", None)
+    gl.st["pos_at"] = _clock[0] - gl.STALE - 1
+    gl.st["speed"] = 50
+    WLAN.connects = []
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "PhoneHotspot"
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    check("roam: stale speed does not skip the home scan",
+          WLAN.connects and WLAN.connects[0][0] == "home",
+          "connects=%s" % (WLAN.connects,))
+    gl.st["pos_at"] = _clock[0]
+    gl.st["speed"] = None
+    WLAN.ok = set(["PhoneHotspot"])
+    drain_wifi()
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "PhoneHotspot"
+    gl.wifi["failed"].pop("home", None)
+    gl.wifi["roam_backoff"] = gl.ROAM_BACKOFF_MAX
+    gl.wifi["moved_at"] = _clock[0] - 60000
+    gl.st["speed"] = 0
+    gl.st["pos_at"] = _clock[0]
+    WLAN.connects = []
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "PhoneHotspot"
+    gl.wifi["roam_at"] = _clock[0]
+    gl.wifi_tick()
+    check("roam: stop after driving resets backoff and scans",
+          (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK
+          and WLAN.connects and WLAN.connects[0][0] == "home",
+          "backoff=%s connects=%s" % (
+              gl.wifi.get("roam_backoff"), WLAN.connects))
     gl.st["speed"] = None
 
     # --- K-LL: v1.29 beacon timeout is CONNECTING --------------------------
@@ -1893,6 +1988,7 @@ try:
     gl.log["created"] = True
     gl.log["points"] = 3
     gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
     gl.log["batch"] = []
     gl.log["prev"] = (52.5, 13.4)
     gl.log["last_t"] = "2026-10-05T18:00:00Z"
@@ -1912,6 +2008,7 @@ try:
     gl.log["file"] = open_path
     gl.log["created"] = True
     gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
     gl.log["points"] = 3
     gl.wifi["state"] = "offline"
     gl.wifi["home"] = False
@@ -1922,6 +2019,7 @@ try:
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = True
     gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
     gl.log_tick()
     check("rotate: home net does not age-rotate (mode_tick closes instead)",
           gl.log["file"] == open_path)
@@ -1932,6 +2030,7 @@ try:
     gl.log["file"] = open_path
     gl.log["created"] = True
     gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
     keep_pt = '<trkpt lat="52.5" lon="13.4"><time>t</time></trkpt>\n'
     gl.log["batch"] = [keep_pt]
     gl.log["err"] = 0
@@ -1944,13 +2043,34 @@ try:
     builtins.open = _fail_open
     try:
         gl.log_tick()
+        n0 = len(gl.log["batch"])
+        opens = [0]
+        real_fail = _fail_open
+
+        def _count_fail(*a, **k):
+            opens[0] += 1
+            raise OSError("flash")
+
+        builtins.open = _count_fail
+        for i in range(30):
+            _clock[0] += 1000
+            gl.st.update(valid=True, date="2026-10-05",
+                         time="18:%02d:%02d" % ((i + 1) // 60, (i + 1) % 60),
+                         lat=52.5 + i * 0.0002, lon=13.4, alt=10.0,
+                         pos_at=_clock[0], hdop=1.0, hdop_at=_clock[0],
+                         status="A", quality=1, fixtype=3)
+            gl.log_tick()
     finally:
         builtins.open = orig_open
     check("rotate: failed write keeps the batch and the file",
-          gl.log["batch"] == [keep_pt] and gl.log["file"] == open_path
+          keep_pt in gl.log["batch"] and gl.log["file"] == open_path
           and gl.log["err"] >= 1,
           "batch=%s file=%s err=%s" % (
               gl.log["batch"], gl.log.get("file"), gl.log.get("err")))
+    check("ROT-8: write errors keep sampling into RAM (retry at FLUSH)",
+          len(gl.log["batch"]) > n0 and opens[0] <= 2,
+          "batch=%s n0=%s opens=%s" % (
+              len(gl.log["batch"]), n0, opens[0]))
 
     # ROT-1: 1 h offline driving → one file
     drive_dir = os.path.join(tmpdir, "drive")
@@ -2032,6 +2152,105 @@ try:
     check("ROT-2: hotspot parking does not keep opening files",
           len(opened) <= 1 and len(hot_disk) <= 1,
           "opened=%s disk=%s file=%s" % (opened, hot_disk, gl.log.get("file")))
+
+    # --- close() error after a successful write must not duplicate points --
+    close_dir = os.path.join(tmpdir, "close")
+    os.mkdir(close_dir)
+    gl.LOG_DIR = close_dir
+    gl.log_reset()
+    gl.log["online"] = False
+    close_path = os.path.join(close_dir, "c.gpx")
+    make_gpx(close_path, 2)
+    gl.log.update(file=close_path, created=True, points=2, batch=[
+        '<trkpt lat="52.510000" lon="13.410000"><time>2026-10-05T00:00:02Z</time></trkpt>\n'
+    ])
+    orig_open = builtins.open
+
+    class _CloseBoom(object):
+        def __init__(self, inner):
+            self._inner = inner
+
+        def seek(self, *a, **k):
+            return self._inner.seek(*a, **k)
+
+        def write(self, *a, **k):
+            return self._inner.write(*a, **k)
+
+        def close(self):
+            self._inner.close()
+            raise OSError("close")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            try:
+                self.close()
+            except OSError:
+                pass
+            return False
+
+    def _open_close_boom(*a, **k):
+        return _CloseBoom(orig_open(*a, **k))
+
+    builtins.open = _open_close_boom
+    try:
+        gl.flush()
+        gl.flush()
+    finally:
+        builtins.open = orig_open
+    with orig_open(close_path, "rb") as f:
+        n_pts = sum(1 for line in f if line.startswith(b"<trkpt"))
+    check("ROT-11: close() error does not rewrite the batch",
+          n_pts == 3 and gl.log["batch"] == [],
+          "n_pts=%s batch=%s" % (n_pts, gl.log["batch"]))
+
+    # --- empty / EOF .bad must be deleted, not spun (~50 read_batch/s) -----
+    online(tmpdir)
+    empty_bad = os.path.join(tmpdir, "empty.gpx.bad")
+    with open(empty_bad, "wb"):
+        pass
+    reads = [0]
+    orig_batch = gl.read_batch
+
+    def _count_batch(*a, **k):
+        reads[0] += 1
+        return orig_batch(*a, **k)
+
+    gl.read_batch = _count_batch
+    gl.up["allow_bad"] = True
+    gl.up["next_at"] = _clock[0]
+    gl.upload_tick()
+    check("BUSY: empty .bad is deleted",
+          not os.path.exists(empty_bad),
+          "exists=%s" % os.path.exists(empty_bad))
+    n1 = reads[0]
+    _clock[0] += 20
+    gl.upload_tick()
+    check("BUSY: empty .bad does not spin (next_at in the future)",
+          reads[0] == n1,
+          "reads %s -> %s next_at=%s now=%s" % (
+              n1, reads[0], gl.up["next_at"], _clock[0]))
+
+    eof_bad = os.path.join(tmpdir, "tail.gpx.bad")
+    with open(eof_bad, "wb") as f:
+        f.write(b'<trkpt lat="52.5" lon="13.4"><time>2026-10-05T00:00:00Z</time></trkpt>\n')
+    gl.write_offset(eof_bad, os.path.getsize(eof_bad))
+    gl.up["allow_bad"] = True
+    gl.up["next_at"] = _clock[0]
+    reads[0] = 0
+    gl.upload_tick()
+    check("BUSY: .bad with .pos at EOF is deleted (power-loss commit)",
+          not os.path.exists(eof_bad) and not os.path.exists(eof_bad + ".pos"),
+          "bad=%s pos=%s" % (os.path.exists(eof_bad),
+                             os.path.exists(eof_bad + ".pos")))
+    n2 = reads[0]
+    _clock[0] += 20
+    gl.upload_tick()
+    check("BUSY: EOF .bad does not spin",
+          reads[0] == n2,
+          "reads %s -> %s" % (n2, reads[0]))
+    gl.read_batch = orig_batch
 
     # --- boot-fail is not cleared on import; WDT counts; _boot_ok clears --
     RTC.mem = b"2"
