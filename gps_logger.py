@@ -398,9 +398,7 @@ def wifi_reset():
                 cand=[], cand_i=0, try_at=None, saw_connecting=False,
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
-                blank_rssi=None, blank_bssid=None, blank_channel=None,
-                blank_n=0, home_bssid=None, home_bssid_fail=0,
-                try_bssid=None)
+                blank_rssi=None, blank_bssid=None)
 
 def _set_hostname(name):
     if not name:
@@ -426,25 +424,17 @@ def _mark_failed(ssid):
     wifi["failed"][ssid] = time.ticks_ms()
     print("wifi fail", ssid)
     if wifi.get("roaming") and _net_home(ssid):
-        if _net_hidden(ssid):
-            # Hidden home: keep the 5 min interval (neighbour blanks must
-            # not grow backoff to 40–60 min). Forget a learned BSSID after
-            # repeated fails (mesh / router swap); it is RAM-only anyway.
-            n = (wifi.get("home_bssid_fail") or 0) + 1
-            wifi["home_bssid_fail"] = n
-            if n >= 2:
-                wifi["home_bssid"] = None
-                wifi["home_bssid_fail"] = 0
-        else:
+        # Hidden home: keep 5 min. A neighbour's empty-SSID AP can trigger
+        # a try; growing backoff would delay a real visible-home switch.
+        if not _net_hidden(ssid):
             b = wifi.get("roam_backoff") or ROAM_CHECK
             wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
         wifi["roaming"] = False
 
 def _scan_known(w):
     """Visible known nets, strongest BSSID per SSID, or None if scan fails.
-    Hidden APs are listed with an empty SSID. If home_bssid is known, only
-    that blank AP is kept; otherwise the strongest blank RSSI is a hint that
-    *some* hidden AP is nearby (not necessarily ours)."""
+    Hidden APs are listed with an empty SSID; the strongest blank RSSI is
+    a hint that *some* hidden AP is nearby (not necessarily ours)."""
     by = {}
     for n in wifi["nets"]:
         by[n["ssid"]] = n
@@ -453,29 +443,17 @@ def _scan_known(w):
     except OSError:
         wifi["blank_rssi"] = None
         wifi["blank_bssid"] = None
-        wifi["blank_channel"] = None
-        wifi["blank_n"] = 0
         return None
     best = {}
-    blank_rssi, blank_bssid, blank_ch = None, None, None
-    blank_n = 0
-    learned = wifi.get("home_bssid")
+    blank_rssi, blank_bssid = None, None
     for rec in aps:
         raw = rec[0]
         ssid = raw.decode() if isinstance(raw, bytes) else raw
         rssi = rec[3]
         bssid = rec[1] if len(rec) > 1 else None
-        ch = rec[2] if len(rec) > 2 else None
         if not ssid:
-            if learned:
-                if bssid == learned:
-                    blank_rssi, blank_bssid, blank_ch = rssi, bssid, ch
-                    blank_n = 1
-            else:
-                if rssi >= ROAM_MIN_RSSI:
-                    blank_n += 1
-                if blank_rssi is None or rssi > blank_rssi:
-                    blank_rssi, blank_bssid, blank_ch = rssi, bssid, ch
+            if blank_rssi is None or rssi > blank_rssi:
+                blank_rssi, blank_bssid = rssi, bssid
             continue
         if ssid not in by:
             continue
@@ -484,8 +462,6 @@ def _scan_known(w):
             best[ssid] = (rssi, bssid, by[ssid])
     wifi["blank_rssi"] = blank_rssi
     wifi["blank_bssid"] = blank_bssid
-    wifi["blank_channel"] = blank_ch
-    wifi["blank_n"] = blank_n
     found = []
     items = list(best.values())
     items.sort(key=lambda x: -x[0])
@@ -497,13 +473,9 @@ def _scan_known(w):
     return found
 
 def _blank_home_ok():
-    """True if a hidden home is configured and a matching empty-SSID AP was seen.
-    After home_bssid is learned, only that BSSID counts (not a neighbour)."""
+    """True if a hidden home is configured and a strong empty-SSID AP was seen."""
     r = wifi.get("blank_rssi")
     if r is None or r < ROAM_MIN_RSSI:
-        return False
-    learned = wifi.get("home_bssid")
-    if learned and wifi.get("blank_bssid") != learned:
         return False
     for n in wifi.get("nets") or []:
         if n.get("home") and n.get("hidden"):
@@ -512,10 +484,10 @@ def _blank_home_ok():
 
 def _hidden_home_target(now, arrival=False):
     """Hidden home when a strong empty-SSID AP was seen.
-    Do not pin to the strongest blank BSSID (that may be a neighbour):
-    pass the learned home BSSID, or None so the IDF probes by SSID.
-    A stop after driving must not treat an unverified blank AP as home."""
-    if arrival and not wifi.get("home_bssid"):
+    Always bssid=None so the IDF probes by SSID (never pin to the
+    strongest blank AP — that may be a neighbour). A stop after driving
+    must not treat an unverified blank AP as home."""
+    if arrival:
         return None
     if not _blank_home_ok():
         return None
@@ -524,7 +496,7 @@ def _hidden_home_target(now, arrival=False):
                 and n["ssid"] != wifi.get("ssid")
                 and not _recently_failed(n["ssid"], now)):
             target = dict(n)
-            target["bssid"] = wifi.get("home_bssid")
+            target["bssid"] = None
             return target
     return None
 
@@ -586,7 +558,6 @@ def _wifi_connect(w, net):
     wifi["ssid"] = net["ssid"]
     wifi["pw"] = net["pw"]
     wifi["home"] = bool(net.get("home"))
-    wifi["try_bssid"] = net.get("bssid")
     wifi["state"] = "connecting"
     wifi["try_at"] = time.ticks_ms()
     wifi["saw_connecting"] = False
@@ -623,31 +594,6 @@ def _net_hidden(ssid):
             return bool(n.get("hidden"))
     return False
 
-def _learn_hidden_home(w):
-    """Remember a hidden home BSSID in RAM after a successful connect.
-
-    v1.29 has no WLAN.config('bssid'). Learn from the pre-connect scan
-    only when exactly one strong empty-SSID AP was seen, and its channel
-    matches w.config('channel') (supported on v1.29). A visible home's
-    BSSID is never stored here. Single AP only (mesh / router swap):
-    forgotten after repeated connect failures, and on reboot."""
-    if not _net_hidden(wifi.get("ssid")):
-        return
-    if wifi.get("blank_n") != 1:
-        return
-    cand = wifi.get("blank_bssid")
-    if not cand:
-        return
-    try:
-        ch = w.config("channel")
-    except (OSError, ValueError, TypeError):
-        ch = None
-    pre = wifi.get("blank_channel")
-    if ch is not None and pre is not None and ch != pre:
-        return
-    wifi["home_bssid"] = cand
-    wifi["home_bssid_fail"] = 0
-
 def _wifi_got_ip(w):
     wifi["state"] = "connected"
     try:
@@ -665,11 +611,6 @@ def _wifi_got_ip(w):
     wifi["roaming"] = False
     if wifi["home"]:
         wifi["roam_backoff"] = ROAM_CHECK
-        wifi["home_bssid_fail"] = 0
-        _learn_hidden_home(w)
-        print("wifi ok", wifi.get("ssid") or "")
-        print("wifi home_bssid", wifi.get("home_bssid"))
-        return True
     print("wifi ok", wifi.get("ssid") or "")
     return True
 
@@ -728,8 +669,8 @@ def _wifi_poll(w):
 def _try_roam_home(w, arrival=False):
     """If a home AP is visible and strong enough, switch; else stay put.
     Runs between upload batches (wifi_tick never runs during POST).
-    arrival=True is a stop after driving: only a concrete home (visible
-    SSID or learned BSSID) may reset backoff and trigger a switch."""
+    arrival=True is a stop after driving: only a visible home SSID may
+    reset backoff and trigger a switch (not an unverified blank AP)."""
     feed()
     read_uart()
     found = _scan_known(w)
