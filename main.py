@@ -49,7 +49,7 @@ def _boot_fail_delay(n):
     return d
 
 def _boot_handle_error():
-    """Record a boot/import failure. True → sleep + caller should reset."""
+    """Record a boot/import/run failure. True → sleep + caller should reset."""
     n = _boot_fail_get() + 1
     _boot_fail_set(n)
     if n >= BOOT_FAIL_MAX:
@@ -58,14 +58,26 @@ def _boot_handle_error():
     time.sleep(_boot_fail_delay(n))
     return True
 
+def _boot_note_wdt():
+    """A WDT reset never hits the Python except path; count it here."""
+    try:
+        if machine.reset_cause() == machine.WDT_RESET:
+            n = _boot_fail_get() + 1
+            _boot_fail_set(n)
+    except Exception:
+        pass
+
 def _boot_start():
+    _boot_note_wdt()
     n = _boot_fail_get()
     if n >= BOOT_FAIL_MAX:
         print("boot fail", n, "- REPL")
         return
     try:
         import gps_logger
-        _boot_fail_set(0)
+        # Do not clear the counter here: wifi_start / run() can still crash
+        # (e.g. a missing str method). gps_logger clears it after BOOT_OK_MS
+        # of a healthy _loop.
         gps_logger.run()
     except KeyboardInterrupt:
         raise

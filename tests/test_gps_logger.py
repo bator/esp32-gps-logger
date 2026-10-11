@@ -27,6 +27,7 @@ _wdt = []
 _timers = []
 _hostnames = []
 _oled_inits = []
+_reset_cause = [1]
 
 
 class Pin(object):
@@ -135,6 +136,8 @@ class WLAN(object):
     stale_fail = 0
     leftover = 4
     flaky = False
+    connect_error = None
+    recover_after = 0
 
     def __init__(self, iface):
         self._status = 0
@@ -160,6 +163,8 @@ class WLAN(object):
     def connect(self, s, p, bssid=None):
         WLAN.last_ssid = s
         WLAN.connects.append((s, p, bssid))
+        if WLAN.connect_error is True or s == WLAN.connect_error:
+            raise OSError("connect")
         self._want_ok = s in WLAN.ok
         if self._want_ok:
             if WLAN.stale_fail:
@@ -185,7 +190,16 @@ class WLAN(object):
 
     def status(self, arg=None):
         if arg == "rssi":
+            for item in WLAN.scan_aps:
+                if item[0] == WLAN.last_ssid:
+                    return item[1]
             return -50
+        if getattr(self, "_recover", 0) > 0 and self._status == 1:
+            self._recover -= 1
+            if self._recover <= 0:
+                self._status = 3
+                return 3
+            return 1
         if self._stale > 0:
             self._stale -= 1
             leftover = self._status
@@ -261,6 +275,11 @@ def _install_mocks():
     machine.Timer = Timer
     machine.RTC = RTC
     machine.reset = _reset
+    machine.WDT_RESET = 3
+    machine.PWRON_RESET = 1
+    machine.SOFT_RESET = 4
+    machine.HARD_RESET = 2
+    machine.reset_cause = lambda: _reset_cause[0]
     sys.modules["machine"] = machine
 
     ssd = types.ModuleType("ssd1306")
@@ -306,6 +325,11 @@ def _reload_logger():
 
 
 _install_mocks()
+sys.modules["machine"].WDT_RESET = 3
+sys.modules["machine"].PWRON_RESET = 1
+sys.modules["machine"].SOFT_RESET = 4
+sys.modules["machine"].HARD_RESET = 2
+sys.modules["machine"].reset_cause = lambda: _reset_cause[0]
 gl = _reload_logger()
 
 passed = 0
@@ -362,6 +386,8 @@ def reset_wlan():
     WLAN.stale_fail = 0
     WLAN.leftover = 4
     WLAN.flaky = False
+    WLAN.connect_error = None
+    WLAN.recover_after = 0
     WLAN.instances = []
 
 
@@ -1590,8 +1616,258 @@ try:
     check("HOME1=0: network #1 is not home",
           w["home"] is False, "home=%s" % w["home"])
 
+    # --- REG1: no str.isalnum (MicroPython 1.29) ---------------------------
+    src = open(os.path.join(ROOT, "gps_logger.py")).read()
+    check("REG1: gps_logger.py does not call str.isalnum()",
+          ".isalnum(" not in src)
+    check("REG1: _ok_char accepts the README default id",
+          gl._safe_name("Dawarich-GPS-tracker", "x")
+          == "Dawarich-GPS-tracker")
+    check("REG1: _ok_char rejects a quote without isalnum",
+          gl._safe_name('bad"id', "Dawarich-GPS-tracker")
+          == "Dawarich-GPS-tracker")
+
+    # --- roam home from hotspot --------------------------------------------
+    env_hot = ("SSID=home\nWPA2=h\nSSID2=PhoneHotspot\nWPA2_2=p\n"
+               "GEO_URL=https://d.example\nAPI_KEY=k\n")
+    w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
+    check("roam setup: on hotspot",
+          w["ssid"] == "PhoneHotspot" and w["home"] is False)
+    WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
+    WLAN.ok = set(["home", "PhoneHotspot"])
+    WLAN.connects = []
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    drain_wifi()
+    check("roam: switches to visible home >= -75 dBm",
+          gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "home"
+          and gl.at_home() is True,
+          "state=%s ssid=%s" % (gl.wifi["state"], gl.wifi.get("ssid")))
+
+    w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
+    WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
+    WLAN.ok = set(["PhoneHotspot"])  # home connect fails
+    WLAN.connects = []
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    drain_wifi()
+    check("roam: failed home switch returns to the hotspot",
+          gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot",
+          "state=%s ssid=%s connects=%s" % (
+              gl.wifi["state"], gl.wifi.get("ssid"), WLAN.connects))
+
+    w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
+    WLAN.scan_aps = [("home", -80), ("PhoneHotspot", -40)]
+    WLAN.ok = set(["home", "PhoneHotspot"])
+    WLAN.connects = []
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    check("roam: weak home (< -75 dBm) is ignored",
+          gl.wifi["ssid"] == "PhoneHotspot" and WLAN.connects == [],
+          "ssid=%s connects=%s" % (gl.wifi.get("ssid"), WLAN.connects))
+
+    # --- K-LL: v1.29 beacon timeout is CONNECTING --------------------------
+    w = start_wifi(env_hot, [("home", -30), ("PhoneHotspot", -70)],
+                   ["home", "PhoneHotspot"])
+    check("LL setup: on home", w["ssid"] == "home")
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 1  # STAT_CONNECTING, as real v1.29
+        WLAN.instances[-1]._recover = 3
+    WLAN.connects = []
+    gl.wifi_tick()
+    check("LL1: first drop is 'lost', not a stale connecting fail",
+          gl.wifi["state"] == "lost" and "home" not in gl.wifi["failed"])
+    gl.mode_tick()
+    for _ in range(3):
+        gl.wifi_tick()
+    check("LL1: IDF auto-reconnect restores home within grace",
+          gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "home"
+          and gl.at_home() is True,
+          "state=%s ssid=%s failed=%s" % (
+              gl.wifi["state"], gl.wifi.get("ssid"), gl.wifi["failed"]))
+
+    w = start_wifi(env_hot, [("home", -30), ("PhoneHotspot", -70)],
+                   ["home", "PhoneHotspot"])
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 1
+        WLAN.instances[-1]._recover = 0  # stays CONNECTING
+    WLAN.ok = set(["PhoneHotspot"])
+    WLAN.connects = []
+    gl.wifi_tick()
+    _clock[0] += gl.LOST_GRACE
+    gl.IGNORE_STALE_MS = 0
+    drain_wifi()
+    check("LL1 long drop: after grace, failover does not use stale try_at",
+          gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot",
+          "state=%s ssid=%s" % (gl.wifi["state"], gl.wifi.get("ssid")))
+
+    # --- K7 leftover: do not fail a good net / double backoff --------------
+    reset_wlan()
+    WLAN.scan_aps = [("home", -40)]
+    WLAN.ok = set(["home"])
+    WLAN.stale_fail = 4
+    WLAN.leftover = 4
+    write_env(tmpdir, "SSID=home\nWPA2=h\nGEO_URL=https://d.example\nAPI_KEY=k\n")
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.wifi_start()
+    b0 = gl.wifi["backoff"]
+    for _ in range(6):
+        _clock[0] += 200
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            break
+    check("K7: leftover AUTH_FAIL does not mark a good net failed",
+          gl.wifi["state"] == "connected" and "home" not in gl.wifi["failed"],
+          "state=%s failed=%s" % (gl.wifi["state"], gl.wifi["failed"]))
+    check("K7: leftover does not double the reconnect backoff",
+          gl.wifi["backoff"] == gl.WIFI_RETRY,
+          "backoff=%s start=%s" % (gl.wifi["backoff"], b0))
+
+    # --- connect() OSError moves to the next candidate ---------------------
+    reset_wlan()
+    WLAN.scan_aps = [("home", -20), ("PhoneHotspot", -40)]
+    WLAN.ok = set(["PhoneHotspot"])
+    WLAN.connect_error = "home"
+    write_env(tmpdir, env_hot)
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.IGNORE_STALE_MS = 0
+    gl.wifi_start()
+    drain_wifi()
+    check("K3-1: connect() OSError fails over to the next SSID",
+          gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot",
+          "state=%s ssid=%s" % (gl.wifi["state"], gl.wifi.get("ssid")))
+    WLAN.connect_error = None
+
+    # --- per-file backoff: one stuck file does not block the others --------
+    online(tmpdir)
+    stuck = os.path.join(tmpdir, "20261001_000000.gpx")
+    later = os.path.join(tmpdir, "20261005_000000.gpx")
+    make_gpx(stuck, 200)
+    _post_code[0] = 400
+    pumps = 0
+    while stuck not in (gl.up.get("hold") or {}) and pumps < 8:
+        pump()
+        gl.up["next_at"] = _clock[0]
+        pumps += 1
+    check("HOL: oldest file is held after global payload errors",
+          stuck in (gl.up.get("hold") or {}),
+          "hold=%s pumps=%s" % (gl.up.get("hold"), pumps))
+    make_gpx(later, 8)
+    _posts[:] = []
+    _post_code[0] = 201
+    gl.up["next_at"] = _clock[0]
+    gl.up["sent"] = 0
+    pump()
+    check("HOL: newer file uploads while the oldest is held",
+          (not os.path.exists(later) or gl.up["sent"] > 0)
+          and os.path.exists(stuck),
+          "later=%s sent=%s stuck=%s posts=%s" % (
+              os.path.exists(later), gl.up["sent"], os.path.exists(stuck),
+              len(_posts)))
+
+    # --- hotspot file rotates after NEW_FILE_GAP even with a fix -----------
+    gl.log_reset()
+    gl.log["online"] = False
+    gl.log["file"] = os.path.join(tmpdir, "open.gpx")
+    gl.log["created"] = True
+    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    gl.log["batch"] = []
+    gl.st.update(valid=True, date="2026-10-05", time="18:00:00",
+                 lat=52.5, lon=13.4, alt=10.0, pos_at=_clock[0],
+                 hdop=1.0, hdop_at=_clock[0], status="A", quality=1,
+                 fixtype=3)
+    gl.log["fix"] = True
+    gl.log["last_sample"] = None
+    gl.log_tick()
+    check("rotate: 5 min open file is closed so it can upload",
+          gl.log["file"] != os.path.join(tmpdir, "open.gpx"),
+          "file=%s" % gl.log.get("file"))
+
+    # --- boot-fail is not cleared on import; WDT counts; _boot_ok clears --
+    RTC.mem = b"2"
+    check("K2: _boot_ok is not run at import",
+          gl._boot_ok_done is False)
+    gl._boot_ok()
+    check("K2: _boot_ok clears RTC memory",
+          RTC.mem.startswith(b"0"))
+    RTC.mem = b"3"
+    gl._boot_ok_done = False
+    n = gl._boot_fail_bump()
+    check("K2: run-crash bump increments the counter",
+          n == 4, "n=%s" % n)
+
+    _reset_cause[0] = 3  # WDT_RESET
+    RTC.mem = b"4"
+    boot_path = os.path.join(ROOT, "main.py")
+    boot_src = open(boot_path).read()
+    boot_ns = {
+        "Pin": Pin, "RTC": RTC, "machine": sys.modules["machine"],
+        "time": time, "__name__": "boot_helpers",
+    }
+    exec(compile(boot_src, boot_path, "exec"), boot_ns)
+    boot_ns["_boot_note_wdt"]()
+    check("K2: WDT reset_cause increments boot_fail",
+          boot_ns["_boot_fail_get"]() >= 5)
+
+    _reset_cause[0] = 1
+    RTC.mem = b"2"
+    seen = []
+    fake = types.ModuleType("gps_logger")
+
+    def fake_run():
+        seen.append(boot_ns["_boot_fail_get"]())
+        raise RuntimeError("init crash")
+
+    fake.run = fake_run
+    prev = sys.modules.get("gps_logger")
+    sys.modules["gps_logger"] = fake
+    try:
+        boot_ns["_boot_start"]()
+    except SystemExit:
+        pass
+    finally:
+        if prev is not None:
+            sys.modules["gps_logger"] = prev
+        else:
+            sys.modules.pop("gps_logger", None)
+    check("K2: import does not reset the boot-fail counter",
+          seen and seen[0] == 2,
+          "seen=%s rtc=%s" % (seen, RTC.mem))
+    _reset_cause[0] = 1
+
+    # restore logger after fake import swap
+    gl = _reload_logger() if "gps_logger" in sys.modules else __import__("gps_logger")
+
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
+
+# Optional: real MicroPython 1.29 unix port (API-gap catch).
+mpy_bin = os.environ.get("MICROPYTHON")
+if not mpy_bin:
+    for cand in (
+            "/tmp/micropython/ports/unix/build-standard/micropython",
+            os.path.join(ROOT, "micropython")):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            mpy_bin = cand
+            break
+if mpy_bin:
+    import subprocess
+    script = os.path.join(ROOT, "tests", "mpy_unix_check.py")
+    try:
+        out = subprocess.check_output([mpy_bin, script],
+                                      stderr=subprocess.STDOUT, timeout=20)
+        text = out.decode() if isinstance(out, bytes) else out
+        print(text.rstrip())
+        check("mpy-unix: v1.29 has no str.isalnum",
+              "isalnum False" in text or "isalnum False" in text.replace("=", " "))
+        check("mpy-unix: safe_name helpers passed",
+              "mpy unix check passed" in text)
+    except Exception as e:
+        check("mpy-unix: ran MicroPython unix port", False, repr(e))
+else:
+    print("SKIP  mpy-unix (no micropython binary)")
 
 print()
 print("%d passed, %d failed" % (passed, failed))

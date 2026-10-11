@@ -44,12 +44,18 @@ WIFI_RETRY = 15000                       # ms between reconnects while down
 WIFI_BACKOFF_MAX = 600000                # ms cap on wifi reconnect backoff
 CONNECT_TIMEOUT = 12000                  # ms to wait for GOT_IP per network
 FAIL_HOLD = 120000                       # ms to demote a network that failed
-IGNORE_STALE_MS = 1500                   # ignore leftover status after connect()
+IGNORE_STALE_MS = 1500                   # leftover fail reason after connect()
+CLEAR_WAIT = 500                         # ms to wait for STAT_IDLE after clear
+LOST_GRACE = 5000                        # ms to let IDF auto-reconnect after drop
+ROAM_CHECK = 300000                      # ms between home-roam scans on hotspot
+ROAM_MIN_RSSI = -75                      # do not jump to a weak home AP
 LINE_MAX = 512                           # bounded GPX readline
+BOOT_OK_MS = 60000                       # clear boot-fail after this of _loop
 
 UPLOAD_BATCH = 50                        # points per POST to Dawarich
 BODY_CAP = UPLOAD_BATCH * 256 + 32       # JSON buffer; sized for long device_id
 UPLOAD_GAP = 5000                        # ms between successful batches
+UPLOAD_GAP_AWAY = 30000                  # ms between batches on a non-home net
 BACKOFF_START = 15000                    # ms first retry after net/5xx/4xx
 BACKOFF_MAX = 1800000                    # ms cap (30 min) on upload backoff
 AUTH_BACKOFF = 1800000                   # ms retry after 401 (plan/key/limit)
@@ -200,6 +206,53 @@ _wdt = None
 _keep = None
 _keep_from = 0
 _running = False
+_boot_ok_done = False
+
+def _boot_ok():
+    """Clear the boot-fail counter after a stretch of healthy looping."""
+    global _boot_ok_done
+    if _boot_ok_done:
+        return
+    _boot_ok_done = True
+    try:
+        machine.RTC().memory(b"0")
+    except Exception:
+        pass
+    try:
+        os.remove("/boot_fail")
+    except OSError:
+        pass
+
+def _boot_fail_bump():
+    n = 0
+    try:
+        m = machine.RTC().memory()
+        if m:
+            if isinstance(m, bytes):
+                m = m.split(b"\x00", 1)[0].split(b"\n", 1)[0].decode()
+            s = str(m).strip()
+            for c in s:
+                if c < "0" or c > "9":
+                    break
+                n = n * 10 + (ord(c) - 48)
+    except Exception:
+        try:
+            with open("/boot_fail") as f:
+                n = int(f.read().strip() or "0")
+        except Exception:
+            n = 0
+    n += 1
+    raw = ("%d" % n).encode()
+    try:
+        machine.RTC().memory(raw)
+    except Exception:
+        try:
+            f = open("/boot_fail", "w")
+            f.write("%d" % n)
+            f.close()
+        except Exception:
+            pass
+    return n
 
 def feed():
     if _wdt is not None:
@@ -282,6 +335,11 @@ def _truthy(v):
         return False
     return None
 
+def _ok_char(c, extra):
+    """ASCII letter/digit (MicroPython 1.29 has no str.isalnum)."""
+    return (("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9")
+            or c in extra)
+
 def _safe_name(s, default, host=False):
     """DEVICE_ID: [A-Za-z0-9._-]{1,32}. HOSTNAME: [A-Za-z0-9-]{1,32}."""
     if not s:
@@ -291,7 +349,7 @@ def _safe_name(s, default, host=False):
         return default
     extra = "-" if host else "._-"
     for c in s:
-        if c.isalnum() or c in extra:
+        if _ok_char(c, extra):
             continue
         print("bad name, using default")
         return default
@@ -336,7 +394,8 @@ def wifi_reset():
     wifi.update(wlan=None, ssid=None, pw=None, nets=[], failed={},
                 state="off", ip=None, rssi=None, tries=0, home=False,
                 backoff=WIFI_RETRY, last_check=time.ticks_ms(),
-                cand=[], cand_i=0, try_at=None, saw_connecting=False)
+                cand=[], cand_i=0, try_at=None, saw_connecting=False,
+                roam_at=time.ticks_ms(), prev_status=None)
 
 def _set_hostname(name):
     if not name:
@@ -421,6 +480,16 @@ def _wifi_clear(w):
         _set_hostname(HOSTNAME)
     except OSError:
         pass
+    t0 = time.ticks_ms()
+    while time.ticks_diff(time.ticks_ms(), t0) < CLEAR_WAIT:
+        feed()
+        try:
+            s = w.status()
+        except OSError:
+            break
+        if s == network.STAT_IDLE or s == network.STAT_CONNECTING:
+            break
+        time.sleep_ms(50)
 
 def _wifi_connect(w, net):
     wifi["ssid"] = net["ssid"]
@@ -430,6 +499,10 @@ def _wifi_connect(w, net):
     wifi["try_at"] = time.ticks_ms()
     wifi["saw_connecting"] = False
     print("wifi try", net["ssid"])
+    try:
+        wifi["prev_status"] = w.status()
+    except OSError:
+        wifi["prev_status"] = None
     _wifi_clear(w)
     try:
         bssid = net.get("bssid")
@@ -442,10 +515,15 @@ def _wifi_connect(w, net):
             w.connect(net["ssid"], net["pw"])
     except OSError:
         _mark_failed(net["ssid"])
-        wifi["state"] = "error"
-        return False
+        return _wifi_next(w)
     wifi["tries"] += 1
     return True
+
+def _net_home(ssid):
+    for n in wifi.get("nets") or []:
+        if n["ssid"] == ssid:
+            return bool(n.get("home"))
+    return False
 
 def _wifi_got_ip(w):
     wifi["state"] = "connected"
@@ -457,8 +535,10 @@ def _wifi_got_ip(w):
         wifi["rssi"] = w.status("rssi")
     except (OSError, ValueError):
         wifi["rssi"] = None
+    wifi["home"] = _net_home(wifi.get("ssid"))
     wifi["failed"].pop(wifi.get("ssid"), None)
     wifi["backoff"] = WIFI_RETRY
+    wifi["roam_at"] = time.ticks_ms()
     print("wifi ok", wifi.get("ssid") or "")
     return True
 
@@ -486,8 +566,13 @@ def _wifi_begin_round(w):
     return _wifi_connect(w, wifi["cand"][0])
 
 def _wifi_poll(w):
-    """Advance a connecting attempt. Never sleeps."""
+    """Advance a connecting attempt. Never sleeps. try_at is this attempt."""
     now = time.ticks_ms()
+    started = wifi.get("try_at")
+    if started is None:
+        wifi["try_at"] = now
+        started = now
+    elapsed = time.ticks_diff(now, started)
     try:
         s = w.status()
     except OSError:
@@ -496,16 +581,45 @@ def _wifi_poll(w):
         return _wifi_got_ip(w)
     if s == network.STAT_CONNECTING or s == network.STAT_IDLE:
         wifi["saw_connecting"] = wifi["saw_connecting"] or (s == network.STAT_CONNECTING)
-        if time.ticks_diff(now, wifi["try_at"] or now) >= CONNECT_TIMEOUT:
+        if elapsed >= CONNECT_TIMEOUT:
             _mark_failed(wifi.get("ssid"))
             return _wifi_next(w)
         return False
-    # v1.29 may report the previous SSID's fail reason before CONNECTING.
-    if (not wifi["saw_connecting"]
-            and time.ticks_diff(now, wifi["try_at"] or now) < IGNORE_STALE_MS):
+    # v1.29 connect() may leave the previous SSID's fail reason. Do not
+    # attribute it to this attempt until CONNECTING was seen, or the
+    # whole CONNECT_TIMEOUT elapses with no GOT_IP.
+    leftover = (s == wifi.get("prev_status") or not wifi["saw_connecting"])
+    if leftover and elapsed < CONNECT_TIMEOUT:
         return False
     _mark_failed(wifi.get("ssid"))
     return _wifi_next(w)
+
+def _try_roam_home(w):
+    """If a home AP is visible and strong enough, switch; else stay put.
+    Runs between upload batches (wifi_tick never runs during POST)."""
+    feed()
+    read_uart()
+    found = _scan_known(w)
+    feed()
+    now = time.ticks_ms()
+    target = None
+    for n in found or ():
+        if (n.get("home") and n.get("rssi", -100) >= ROAM_MIN_RSSI
+                and n["ssid"] != wifi.get("ssid")
+                and not _recently_failed(n["ssid"], now)):
+            target = n
+            break
+    if target is None:
+        return
+    cur = None
+    for x in wifi.get("nets") or []:
+        if x["ssid"] == wifi.get("ssid"):
+            cur = dict(x)
+            break
+    wifi["cand"] = [target] + ([cur] if cur else [])
+    wifi["cand_i"] = 0
+    print("wifi roam", target["ssid"])
+    _wifi_connect(w, target)
 
 def wifi_start():
     global DEVICE_ID, HOSTNAME
@@ -551,22 +665,40 @@ def wifi_tick():
     if s == network.STAT_GOT_IP:
         if wifi["state"] != "connected":
             _wifi_got_ip(w)
-        elif time.ticks_diff(now, wifi["last_check"]) >= WIFI_CHECK:
-            try:
-                wifi["rssi"] = w.status("rssi")
-            except (OSError, ValueError):
-                wifi["rssi"] = None
-            wifi["last_check"] = now
+        else:
+            if time.ticks_diff(now, wifi["last_check"]) >= WIFI_CHECK:
+                try:
+                    wifi["rssi"] = w.status("rssi")
+                except (OSError, ValueError):
+                    wifi["rssi"] = None
+                wifi["last_check"] = now
+            if (not wifi.get("home")
+                    and any(n.get("home") for n in wifi.get("nets") or [])
+                    and time.ticks_diff(now, wifi.get("roam_at") or now)
+                    >= ROAM_CHECK):
+                wifi["roam_at"] = now
+                _try_roam_home(w)
         return
     if wifi["state"] == "connected":
-        # Lose the link first so mode_tick can resume logging this iteration.
-        wifi["state"] = WIFI_STATES.get(s, "lost")
+        # v1.29 reports STAT_CONNECTING on beacon timeout while the IDF
+        # auto-reconnects. Do not map that to "connecting" with a stale
+        # try_at (that would immediately fail the current SSID).
+        wifi["state"] = "lost"
         wifi["home"] = False
         wifi["ip"] = wifi["rssi"] = None
+        wifi["try_at"] = now
+        wifi["cand"] = []
+        wifi["cand_i"] = 0
         print("wifi lost", wifi.get("ssid") or "")
-        # Next wifi_tick starts failover; mode_tick in this iteration goes LOG.
-        wifi["last_check"] = now - wifi["backoff"]
         return
+    if wifi["state"] == "lost":
+        if (s == network.STAT_CONNECTING or s == network.STAT_IDLE
+                or s is None):
+            if time.ticks_diff(now, wifi["try_at"] or now) < LOST_GRACE:
+                return
+        wifi["state"] = "offline"
+        wifi["last_check"] = now - wifi["backoff"]
+        # fall through to a fresh round
     if wifi["state"] == "connecting":
         _wifi_poll(w)
         return
@@ -613,7 +745,7 @@ def log_reset():
     log.update(file=None, created=False, batch=[], points=0, err=0,
                fix=False, lost_at=None, new_seg=False, full=False, online=False,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
-               prev=None, full_check=0)
+               prev=None, full_check=0, file_at=None)
 
 def free():
     try:
@@ -634,7 +766,7 @@ def start_file():
         pass                             # already exists
     name = st["date"].replace("-", "") + "_" + st["time"].replace(":", "")
     log.update(file=LOG_DIR + "/" + name + ".gpx", created=False, points=0,
-               new_seg=False, prev=None)
+               new_seg=False, prev=None, file_at=time.ticks_ms())
     flush()                              # create it right away
 
 def flush():
@@ -695,6 +827,13 @@ def log_tick():
     if log["online"]:
         return
     now = time.ticks_ms()
+    # Close a long-open file (parked on a hotspot) so it can upload.
+    if (log["file"] is not None and log.get("file_at") is not None
+            and time.ticks_diff(now, log["file_at"]) >= NEW_FILE_GAP * 1000):
+        flush()
+        del log["batch"][:]
+        log.update(file=None, created=False, fix=False, last_t=None,
+                   prev=None, file_at=None)
     if log["full"]:
         if time.ticks_diff(now, log.get("full_check") or 0) < FULL_CHECK:
             return
@@ -754,7 +893,7 @@ def mode_tick():
         flush()
         del log["batch"][:]
         log.update(file=None, fix=False, new_seg=False, last_t=None,
-                   prev=None)
+                   prev=None, file_at=None)
         up["next_at"] = time.ticks_ms()
     else:
         log.update(fix=False, lost_at=None, full=False)
@@ -800,7 +939,7 @@ def up_reset():
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
-              bad_try={}, skip=None, next_at=time.ticks_ms())
+              bad_try={}, skip=None, hold={}, next_at=time.ticks_ms())
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -1119,6 +1258,12 @@ def _schedule(now, ms=None):
         up["backoff"] = min(max(b * 2, BACKOFF_START), BACKOFF_MAX)
     up["next_at"] = time.ticks_add(now, ms)
 
+def _hold_file(path, now, ms):
+    """Backoff one file so a stuck oldest GPX does not block the rest."""
+    h = up.get("hold") or {}
+    h[path] = time.ticks_add(now, ms)
+    up["hold"] = h
+
 def _http_post(size):
     """POST _body[:size]. Returns (status_code or None, retry_after_ms or None).
     Always closes the response so a non-OSError does not leak the TLS socket
@@ -1163,12 +1308,25 @@ def upload_tick():
     skip = up.get("skip")
     if skip and skip in files and len(files) > 1:
         files = [p for p in files if p != skip]
+    held = up.get("hold") or {}
+    due = []
+    for p in files:
+        t = held.get(p)
+        if t is None or time.ticks_diff(now, t) >= 0:
+            due.append(p)
+    files = due
     from_bad = False
     if not files and up.get("allow_bad"):
         files = pending_bad()
         from_bad = bool(files)
         files = [p for p in files
                  if (up.get("bad_try") or {}).get(p, 0) < MAX_BAD_RETRY]
+        due = []
+        for p in files:
+            t = held.get(p)
+            if t is None or time.ticks_diff(now, t) >= 0:
+                due.append(p)
+        files = due
     if not files:
         if up["state"] != "bad full":
             up["state"] = "idle"
@@ -1210,8 +1368,10 @@ def upload_tick():
         up["skip"] = path
         _low_mem(time.ticks_ms())
         return
+    read_uart()                          # catch up after a multi-second POST
     now = time.ticks_ms()
     print("upload", path, n, n_ok, code, gc.mem_free())
+    gap = UPLOAD_GAP_AWAY if not at_home() else UPLOAD_GAP
     if code is not None and 200 <= code < 300:
         try:
             commit_offset(path, n, new_off, eof)
@@ -1225,23 +1385,28 @@ def upload_tick():
         up["backoff"] = BACKOFF_START
         up["allow_bad"] = True
         up["skip"] = None
+        held = up.get("hold") or {}
+        held.pop(path, None)
+        up["hold"] = held
         if from_bad:
             bt = up.get("bad_try") or {}
             bt[path] = bt.get(path, 0) + 1
             up["bad_try"] = bt
         up["state"] = "ok"
-        up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
+        up["next_at"] = time.ticks_add(now, gap)
     elif code in PAYLOAD_ERR:
         up["err"] += 1
         up["fail4"] = up.get("fail4", 0) + 1
         if path.endswith(".bad") or up["fail4"] >= MAX_GLOBAL_PAYLOAD:
             up["state"] = "err payload"
-            _schedule(now, retry if retry else BACKOFF_MAX)
+            _hold_file(path, now, retry if retry else BACKOFF_MAX)
+            _schedule(now, gap)
             return
         if not _quarantine_batch(path, off, n, new_off, eof):
-            _schedule(now, BACKOFF_MAX)
+            _hold_file(path, now, BACKOFF_MAX)
+            _schedule(now, gap)
             return
-        up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
+        up["next_at"] = time.ticks_add(now, gap)
     elif code == 401:
         up["err"] += 1
         up["state"] = "err 401"
@@ -1333,9 +1498,10 @@ def draw():
 
 def run():
     """Show the logger state on the OLED, log GPX offline, upload online."""
-    global _wdt, _running
+    global _wdt, _running, _boot_ok_done
     _keep_stop()
     _running = False
+    _boot_ok_done = False
     try:
         # Arm the dog before any blocking init (count_points, WiFi scan).
         # GPIO25 boot-bypass never calls run(), so the REPL stays free.
@@ -1369,6 +1535,7 @@ def run():
             flush()
         except Exception:
             pass
+        _boot_fail_bump()
         time.sleep(1)
         machine.reset()
     finally:
@@ -1394,6 +1561,9 @@ def _loop():
         feed()
         upload_tick()
         now = time.ticks_ms()
+        if (not _boot_ok_done
+                and time.ticks_diff(now, st.get("start") or now) >= BOOT_OK_MS):
+            _boot_ok()
         if last is None or time.ticks_diff(now, last) >= REFRESH:
             draw()
             last = now

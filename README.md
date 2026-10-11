@@ -12,9 +12,9 @@ uploads already-finished files in the background.
 - Reads NMEA (`RMC`, `GGA`, `GSA`, `GSV`) from a u-blox NEO-6M/7M/8M over UART, with checksum validation.
 - Samples the position every second and records a point only after moving more than 10 m from the last recorded one, to GPX 1.1 files named `/gpx/YYYYMMDD_HHMMSS.gpx`. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
 - Power-loss safe: each file is always a complete GPX document, written in batches every 60 s (LittleFS commits on close).
-- Short fix losses start a new track segment; a gap over 5 minutes starts a new file.
+- Short fix losses start a new track segment; a gap over 5 minutes starts a new file. A file that has been open for 5 minutes is also closed (so a parked hotspot trip can upload).
 - Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds) or after leaving a home network.
-- Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, visible known APs are tried strongest-RSSI first (one SSID, strongest BSSID). Hidden SSIDs (`SSID2_HIDDEN=1`) are tried after visible ones. If the scan sees none of ours, only hidden nets are tried (no blind 1→2→3). If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked.
+- Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, visible known APs are tried strongest-RSSI first (one SSID, strongest BSSID). Hidden SSIDs (`SSID2_HIDDEN=1`) are tried after visible ones. If the scan sees none of ours, only hidden nets are tried (no blind 1→2→3). If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net the logger scans every ~5 min; if a home AP is visible at ≥ −75 dBm it switches between upload batches (and falls back to the hotspot if that connect fails).
 - Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.gpx.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.gpx.bad`. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
 - 128×64 OLED: connected SSID (never the password), GPS fix, mode (`LOG` / `LOG+UP` / `UPLOAD` / `BAD FULL`), free flash and points left. Missing or dropping display → headless.
 - Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush, wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. GPIO25 at reset skips the logger entirely.
@@ -102,15 +102,20 @@ HOSTNAME=Dawarich-GPS-tracker
 3. Try visible known APs, strongest RSSI first. Each try is polled from
    the main loop with a ~12 s deadline (WDT fed; GPS keeps sampling).
    Wrong password / no DHCP → mark that SSID “recently failed” and move on.
-   The first ~1.5 s of a try ignore a leftover fail reason from the
-   previous SSID (MicroPython 1.29 `connect()` does not always clear it;
-   confirm on device with a bad password on #1 and a good #2).
+   A leftover fail reason from the previous SSID (MicroPython 1.29
+   `connect()` does not always clear it) is **not** treated as this
+   attempt failing until CONNECTING is seen or the 12 s deadline elapses.
+   Confirm on device with a bad password on #1 and a good #2.
 4. Then try nets marked `SSIDn_HIDDEN=1` that were not in the scan.
 5. If the scan succeeded and listed none of our SSIDs, **do not** blindly
    try 1→2→3; only hidden nets are attempted. If the scan itself failed,
    fall back to config order, still under backoff.
 6. If every attempt fails, stay in LOG mode and retry later with capped
    exponential backoff (up to 10 minutes).
+7. While connected to a **non-home** net, rescan every ~5 minutes. A home
+   AP at ≥ −75 dBm is preferred; if that switch fails, the hotspot is
+   tried again. Offset only advances after HTTP 2xx, so a mid-upload
+   drop is retried (Dawarich dedups).
 
 OLED / log show the connected SSID, never the password. Mode is `UPLOAD`
 on a home net, `LOG+UP` on a hotspot, `LOG` when offline.
@@ -163,9 +168,14 @@ HTTPS uploads fail with `ENOMEM`.
   **10 minutes**, then the chip resets (so a stray 0x03 on USB-UART in the
   field does not leave the device in REPL forever). The next `run()` deinit's
   that timer. GPIO25 bypass is still the reliable way to pull a large `/gpx`.
-- Repeated import/crash at boot: increasing delay (5 s, 10 s, … cap 30 s),
-  then the board stays in the REPL after 5 failures (RTC memory counter,
-  `/boot_fail` fallback).
+- Repeated import/crash/WDT at boot: increasing delay (5 s, 10 s, … cap
+  30 s), then the board stays in the REPL after 5 failures (RTC memory
+  counter, `/boot_fail` fallback). The counter is **not** cleared on
+  import — only after ~60 s of a healthy main loop, or by `deploy.sh`,
+  or by a power cycle. A WDT reset counts. If the device is stuck in
+  REPL after a failed flash, power-cycle it or
+  `mpremote exec "from machine import RTC; RTC().memory(b'0')"` then
+  reset. `./deploy.sh` clears the counter before rebooting.
 - Logs live in `/gpx/`; pull them with the GPIO25 bypass:
 
   ```bash
@@ -192,7 +202,11 @@ Constants at the top of `gps_logger.py`:
 | `SAMPLE` | 1000 ms | Interval between position samples |
 | `MIN_MOVE` | 10 m | Distance from the last recorded point before a new one is recorded |
 | `FLUSH` | 60000 ms | Interval between flash writes |
-| `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file |
+| `NEW_FILE_GAP` | 300 s | Fix loss *or* open-file age that starts a new file |
+| `ROAM_CHECK` | 5 min | How often a non-home connection scans for home |
+| `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI to switch away from a hotspot |
+| `UPLOAD_GAP_AWAY` | 30 s | Pause between POSTs on a non-home net (UART drain) |
+| `BOOT_OK_MS` | 60 s | Healthy `_loop` before the boot-fail counter is cleared |
 | `MIN_FREE` | 32 kB | Flash reserve |
 | `MAX_HDOP` | 5 | Skip samples with a fresh GGA dilution worse than this |
 | `UPLOAD_BATCH` | 50 | Points per POST |
