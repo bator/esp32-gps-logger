@@ -1743,13 +1743,22 @@ try:
           WLAN.connects == [],
           "connects=%s backoff=%s" % (WLAN.connects, gl.wifi.get("roam_backoff")))
     WLAN.connects = []
+    _clock[0] += gl.FAIL_HOLD
+    gl.wifi["failed"].pop("home", None)
     gl.wifi["roam_at"] = _clock[0] - gl.wifi["roam_backoff"]
     gl.wifi_tick()
     check("roam backoff: retries after the doubled interval",
           WLAN.connects and WLAN.connects[0][0] == "home",
           "connects=%s" % (WLAN.connects,))
+    WLAN.ok = set(["PhoneHotspot"])
+    drain_wifi()
     WLAN.scan_aps = [("PhoneHotspot", -40)]
     WLAN.connects = []
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "PhoneHotspot"
     b_unseen = gl.wifi.get("roam_backoff")
     gl.wifi["roam_at"] = _clock[0] - (b_unseen or gl.ROAM_CHECK)
     gl.wifi_tick()

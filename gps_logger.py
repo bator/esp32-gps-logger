@@ -1390,7 +1390,8 @@ def upload_tick():
         up["skip"] = path
         _low_mem(now)
         return
-    up["state"] = "sending"
+    if up.get("state") != "bad full":
+        up["state"] = "sending"
     read_uart()                          # drain NMEA before blocking
     gc.collect()
     try:

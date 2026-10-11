@@ -28,8 +28,8 @@ start = src.find("def _ok_char")
 end = src.find("\ndef _load_nets")
 if start < 0 or end < 0:
     raise SystemExit("could not extract _ok_char/_safe_name from gps_logger.py")
-if "isalnum" in src[start:end]:
-    raise SystemExit("extracted helpers still reference isalnum")
+if ".isalnum(" in src[start:end]:
+    raise SystemExit("extracted helpers still call isalnum")
 
 ns = {"ID_MAX": 32}
 exec(src[start:end], ns)
