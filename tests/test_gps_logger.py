@@ -127,6 +127,13 @@ class RTC(object):
 
 
 class WLAN(object):
+    """v1.29 esp32 STA mock (network_wlan.c status() / connect()).
+
+    Numbers match harness STAT_* (IDLE=0 CONNECTING=1 GOT_IP=3
+    WRONG_PASSWORD=4 BEACON_TIMEOUT=5). Beacon timeout while
+    connect_requested reports CONNECTING; disconnect is ASSOC_LEAVE →
+    IDLE; connect() does not clear the previous fail reason.
+    """
     scan_aps = []
     scan_error = False
     ok = set()
@@ -144,11 +151,19 @@ class WLAN(object):
         self._left = 0
         self._stale = 0
         self._want_ok = False
+        self._requested = False
+        self._active = False
         self.iface = iface
         WLAN.instances.append(self)
 
     def active(self, x=None):
-        pass
+        if x is None:
+            return self._active
+        self._active = bool(x)
+        if not x:
+            self._requested = False
+            self._status = 0
+        return None
 
     def scan(self):
         if WLAN.scan_error:
@@ -166,6 +181,7 @@ class WLAN(object):
         if WLAN.connect_error is True or s == WLAN.connect_error:
             raise OSError("connect")
         self._want_ok = s in WLAN.ok
+        self._requested = True
         if self._want_ok:
             if WLAN.stale_fail:
                 self._status = WLAN.leftover
@@ -185,8 +201,9 @@ class WLAN(object):
                 self._status = 4
 
     def disconnect(self):
-        if self._status == 3:
-            self._status = 0
+        # WIFI_REASON_ASSOC_LEAVE → STAT_IDLE
+        self._requested = False
+        self._status = 0
 
     def status(self, arg=None):
         if arg == "rssi":
@@ -194,10 +211,11 @@ class WLAN(object):
                 if item[0] == WLAN.last_ssid:
                     return item[1]
             return -50
-        if getattr(self, "_recover", 0) > 0 and self._status == 1:
+        if getattr(self, "_recover", 0) > 0 and self._status in (1, 5):
             self._recover -= 1
             if self._recover <= 0:
                 self._status = 3
+                self._requested = True
                 return 3
             return 1
         if self._stale > 0:
@@ -222,6 +240,8 @@ class WLAN(object):
             WLAN.flaky = False
             self._status = 1
             self._left = 1
+            return 1
+        if self._status == 5 and self._requested:
             return 1
         return self._status
 
@@ -463,6 +483,18 @@ check("default DEVICE_ID is Dawarich-GPS-tracker",
       gl.DEVICE_ID == "Dawarich-GPS-tracker")
 check("default HOSTNAME is Dawarich-GPS-tracker",
       gl.HOSTNAME == "Dawarich-GPS-tracker")
+
+# Firmware-faithful WLAN (v1.29 network_wlan.c status / disconnect)
+fw = WLAN(0)
+fw.active(True)
+fw.connect("x", "y")
+fw._status = 5
+fw._requested = True
+check("FwWLAN: beacon timeout while connect_requested is CONNECTING",
+      fw.status() == 1)
+fw.disconnect()
+check("FwWLAN: disconnect ASSOC_LEAVE is IDLE",
+      fw.status() == 0 and fw._requested is False)
 
 
 # --- GPX parse helpers ------------------------------------------------------
@@ -1022,6 +1054,16 @@ try:
           "state=%s ssid=%s connects=%s" % (w["state"], w["ssid"], WLAN.connects))
     check("wifi tried strongest first",
           WLAN.connects and WLAN.connects[0][0] == "home")
+    # pocket hotspot stronger than home: still try home first at boot
+    w = start_wifi(triple, [("phone", -45), ("home", -70)], ["home", "phone"])
+    check("home-first: home >= -75 dBm is tried before a stronger hotspot",
+          WLAN.connects and WLAN.connects[0][0] == "home"
+          and w["ssid"] == "home",
+          "connects=%s ssid=%s" % (WLAN.connects, w.get("ssid")))
+    w = start_wifi(triple, [("phone", -45), ("home", -80)], ["home", "phone"])
+    check("home-first: home below -75 dBm is not preferred",
+          WLAN.connects and WLAN.connects[0][0] == "phone",
+          "connects=%s" % (WLAN.connects,))
     # duplicate BSSIDs must not produce two tries of the same SSID first
     reset_wlan()
     WLAN.scan_aps = [("home", -20, b"\x01" * 6), ("home", -40, b"\x02" * 6),
@@ -1167,6 +1209,17 @@ try:
     check("B1 bad-full: state is bad full",
           gl.up["state"] == "bad full")
     check("B1 bad-full: OLED mode BAD FULL",
+          gl._mode_line() == "Mode BAD FULL")
+    later = os.path.join(tmpdir, "20261005_19later.gpx")
+    make_gpx(later, 8)
+    _posts[:] = []
+    _post_code[0] = 201
+    gl.up["next_at"] = _clock[0]
+    pump()
+    check("B1: another file's 201 does not clear BAD FULL",
+          gl.up["state"] == "bad full",
+          "state=%s sent=%s" % (gl.up["state"], gl.up["sent"]))
+    check("B1: OLED stays BAD FULL after another file succeeds",
           gl._mode_line() == "Mode BAD FULL")
     with open(path, "rb") as f:
         kept = sum(1 for line in f if line.startswith(b"<trkpt"))
@@ -1666,6 +1719,56 @@ try:
           gl.wifi["ssid"] == "PhoneHotspot" and WLAN.connects == [],
           "ssid=%s connects=%s" % (gl.wifi.get("ssid"), WLAN.connects))
 
+    # exponential roam backoff (wrong home PSK / unseen home)
+    w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
+    WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
+    WLAN.ok = set(["PhoneHotspot"])
+    WLAN.connects = []
+    gl.st["speed"] = None
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    drain_wifi()
+    check("roam backoff: failed home switch doubles the interval",
+          (gl.wifi.get("roam_backoff") or 0) >= gl.ROAM_CHECK * 2,
+          "roam_backoff=%s" % gl.wifi.get("roam_backoff"))
+    WLAN.connects = []
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "PhoneHotspot"
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    check("roam backoff: 5 min later does not retry a failed roam",
+          WLAN.connects == [],
+          "connects=%s backoff=%s" % (WLAN.connects, gl.wifi.get("roam_backoff")))
+    WLAN.connects = []
+    gl.wifi["roam_at"] = _clock[0] - gl.wifi["roam_backoff"]
+    gl.wifi_tick()
+    check("roam backoff: retries after the doubled interval",
+          WLAN.connects and WLAN.connects[0][0] == "home",
+          "connects=%s" % (WLAN.connects,))
+    WLAN.scan_aps = [("PhoneHotspot", -40)]
+    WLAN.connects = []
+    b_unseen = gl.wifi.get("roam_backoff")
+    gl.wifi["roam_at"] = _clock[0] - (b_unseen or gl.ROAM_CHECK)
+    gl.wifi_tick()
+    check("roam backoff: unseen home also backs off (fewer scans)",
+          (gl.wifi.get("roam_backoff") or 0) > b_unseen
+          and WLAN.connects == [],
+          "before=%s after=%s" % (b_unseen, gl.wifi.get("roam_backoff")))
+    gl.st["speed"] = 50
+    WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
+    WLAN.ok = set(["home", "PhoneHotspot"])
+    WLAN.connects = []
+    gl.wifi["roam_backoff"] = gl.ROAM_CHECK
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    check("roam: skip scan while moving >= 5 km/h",
+          WLAN.connects == [],
+          "connects=%s" % (WLAN.connects,))
+    gl.st["speed"] = None
+
     # --- K-LL: v1.29 beacon timeout is CONNECTING --------------------------
     w = start_wifi(env_hot, [("home", -30), ("PhoneHotspot", -70)],
                    ["home", "PhoneHotspot"])
@@ -1767,23 +1870,159 @@ try:
               os.path.exists(later), gl.up["sent"], os.path.exists(stuck),
               len(_posts)))
 
-    # --- hotspot file rotates after NEW_FILE_GAP even with a fix -----------
+    # --- hotspot-only rotate; keep fix; never drop a failed write ----------
+    rot_dir = os.path.join(tmpdir, "rot")
+    os.mkdir(rot_dir)
+    gl.LOG_DIR = rot_dir
+    open_path = os.path.join(rot_dir, "open.gpx")
+    make_gpx(open_path, 3)
     gl.log_reset()
     gl.log["online"] = False
-    gl.log["file"] = os.path.join(tmpdir, "open.gpx")
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.log["file"] = open_path
     gl.log["created"] = True
+    gl.log["points"] = 3
     gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
     gl.log["batch"] = []
+    gl.log["prev"] = (52.5, 13.4)
+    gl.log["last_t"] = "2026-10-05T18:00:00Z"
     gl.st.update(valid=True, date="2026-10-05", time="18:00:00",
                  lat=52.5, lon=13.4, alt=10.0, pos_at=_clock[0],
                  hdop=1.0, hdop_at=_clock[0], status="A", quality=1,
                  fixtype=3)
     gl.log["fix"] = True
-    gl.log["last_sample"] = None
+    gl.log["last_sample"] = _clock[0]
     gl.log_tick()
-    check("rotate: 5 min open file is closed so it can upload",
-          gl.log["file"] != os.path.join(tmpdir, "open.gpx"),
+    check("rotate: hotspot file older than 5 min is closed so it can upload",
+          gl.log["file"] is None,
           "file=%s" % gl.log.get("file"))
+    check("rotate: fix/prev kept (parking does not reopen a file)",
+          gl.log["fix"] is True and gl.log["prev"] == (52.5, 13.4))
+
+    gl.log["file"] = open_path
+    gl.log["created"] = True
+    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    gl.log["points"] = 3
+    gl.wifi["state"] = "offline"
+    gl.wifi["home"] = False
+    gl.log_tick()
+    check("rotate: offline does not close an open file",
+          gl.log["file"] == open_path)
+
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = True
+    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    gl.log_tick()
+    check("rotate: home net does not age-rotate (mode_tick closes instead)",
+          gl.log["file"] == open_path)
+
+    # failed flush must keep the batch (no drop of up to 60 s of points)
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.log["file"] = open_path
+    gl.log["created"] = True
+    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
+    keep_pt = '<trkpt lat="52.5" lon="13.4"><time>t</time></trkpt>\n'
+    gl.log["batch"] = [keep_pt]
+    gl.log["err"] = 0
+    import builtins
+    orig_open = builtins.open
+
+    def _fail_open(*a, **k):
+        raise OSError("flash")
+
+    builtins.open = _fail_open
+    try:
+        gl.log_tick()
+    finally:
+        builtins.open = orig_open
+    check("rotate: failed write keeps the batch and the file",
+          gl.log["batch"] == [keep_pt] and gl.log["file"] == open_path
+          and gl.log["err"] >= 1,
+          "batch=%s file=%s err=%s" % (
+              gl.log["batch"], gl.log.get("file"), gl.log.get("err")))
+
+    # ROT-1: 1 h offline driving → one file
+    drive_dir = os.path.join(tmpdir, "drive")
+    os.mkdir(drive_dir)
+    gl.LOG_DIR = drive_dir
+    gl.log_reset()
+    gl.log["online"] = False
+    gl.wifi["state"] = "offline"
+    gl.wifi["home"] = False
+    gl.log["file"] = None
+    seen = set()
+    for i in range(3600):
+        _clock[0] += 1000
+        gl.st.update(valid=True, date="2026-10-05",
+                     time="%02d:%02d:%02d" % (i // 3600, (i // 60) % 60, i % 60),
+                     lat=52.5 + i * 0.0001, lon=13.4, alt=10.0,
+                     pos_at=_clock[0], hdop=1.0, hdop_at=_clock[0],
+                     status="A", quality=1, fixtype=3)
+        gl.log_tick()
+        if gl.log["file"]:
+            seen.add(gl.log["file"])
+    gl.flush()
+    disk = [n for n in os.listdir(drive_dir) if n.endswith(".gpx")]
+    check("ROT-1: 1 h offline driving is one file",
+          len(seen) == 1 and len(disk) == 1,
+          "seen=%s disk=%s points=%s" % (seen, disk, gl.log.get("points")))
+
+    # ROT-2: parking (MIN_MOVE) produces no new files
+    park_dir = os.path.join(tmpdir, "park")
+    os.mkdir(park_dir)
+    gl.LOG_DIR = park_dir
+    gl.log_reset()
+    gl.log["online"] = False
+    gl.wifi["state"] = "offline"
+    gl.wifi["home"] = False
+    gl.log["prev"] = (52.5, 13.4)
+    gl.log["last_t"] = "2026-10-05T00:00:00Z"
+    gl.log["file"] = None
+    gl.log["fix"] = True
+    for i in range(3600):
+        _clock[0] += 1000
+        gl.st.update(valid=True, date="2026-10-05",
+                     time="%02d:%02d:%02d" % (i // 3600, (i // 60) % 60, i % 60),
+                     lat=52.5, lon=13.4, alt=10.0, pos_at=_clock[0],
+                     hdop=1.0, hdop_at=_clock[0], status="A", quality=1,
+                     fixtype=3)
+        gl.log_tick()
+    gl.flush()
+    park_disk = [n for n in os.listdir(park_dir) if n.endswith(".gpx")]
+    check("ROT-2: 1 h parked offline opens no file",
+          gl.log["file"] is None and park_disk == [],
+          "file=%s disk=%s" % (gl.log.get("file"), park_disk))
+
+    # hotspot parking: first recorded point may open one file; age-rotate
+    # closes it; MIN_MOVE must not open another
+    hot_dir = os.path.join(tmpdir, "hotpark")
+    os.mkdir(hot_dir)
+    gl.LOG_DIR = hot_dir
+    gl.log_reset()
+    gl.log["online"] = False
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.log["file"] = None
+    gl.log["fix"] = False
+    gl.log["prev"] = None
+    opened = set()
+    for i in range(3600):
+        _clock[0] += 1000
+        gl.st.update(valid=True, date="2026-10-05",
+                     time="%02d:%02d:%02d" % (i // 3600, (i // 60) % 60, i % 60),
+                     lat=52.5, lon=13.4, alt=10.0, pos_at=_clock[0],
+                     hdop=1.0, hdop_at=_clock[0], status="A", quality=1,
+                     fixtype=3)
+        gl.log_tick()
+        if gl.log["file"]:
+            opened.add(gl.log["file"])
+    gl.flush()
+    hot_disk = [n for n in os.listdir(hot_dir) if n.endswith(".gpx")]
+    check("ROT-2: hotspot parking does not keep opening files",
+          len(opened) <= 1 and len(hot_disk) <= 1,
+          "opened=%s disk=%s file=%s" % (opened, hot_disk, gl.log.get("file")))
 
     # --- boot-fail is not cleared on import; WDT counts; _boot_ok clears --
     RTC.mem = b"2"
@@ -1836,6 +2075,61 @@ try:
           seen and seen[0] == 2,
           "seen=%s rtc=%s" % (seen, RTC.mem))
     _reset_cause[0] = 1
+
+    # K2-6: BOOT_OK_MS is counted from the first _loop iteration, not run()
+    src = open(os.path.join(ROOT, "gps_logger.py")).read()
+    check("K2-6: _loop measures BOOT_OK from loop_start",
+          "loop_start = time.ticks_ms()" in src
+          and "ticks_diff(now, loop_start)" in src)
+    check("ticks: wifi lost last_check uses ticks_add",
+          'ticks_add(now, -wifi["backoff"])' in src)
+    gl.reset()
+    gl.log_reset()
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.wifi["wlan"] = None
+    gl.st["start"] = _clock[0] - gl.BOOT_OK_MS - 5000
+    RTC.mem = b"3"
+    gl._boot_ok_done = False
+    orig_sleep = time.sleep_ms
+    loops = [0]
+
+    def _one_short(ms):
+        _clock[0] += 20
+        loops[0] += 1
+        raise KeyboardInterrupt()
+
+    time.sleep_ms = _one_short
+    try:
+        gl._loop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        time.sleep_ms = orig_sleep
+    check("K2-6: first _loop iter does not clear even if run() started long ago",
+          RTC.mem.startswith(b"3") and gl._boot_ok_done is False,
+          "rtc=%s done=%s" % (RTC.mem, gl._boot_ok_done))
+
+    RTC.mem = b"3"
+    gl._boot_ok_done = False
+    loops[0] = 0
+
+    def _advance_ok(ms):
+        _clock[0] += gl.BOOT_OK_MS
+        loops[0] += 1
+        if loops[0] >= 2:
+            raise KeyboardInterrupt()
+
+    time.sleep_ms = _advance_ok
+    try:
+        gl._loop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        time.sleep_ms = orig_sleep
+    check("K2-6: BOOT_OK_MS of _loop clears the boot-fail counter",
+          RTC.mem.startswith(b"0") and gl._boot_ok_done is True,
+          "rtc=%s done=%s loops=%s" % (RTC.mem, gl._boot_ok_done, loops[0]))
 
     # restore logger after fake import swap
     gl = _reload_logger() if "gps_logger" in sys.modules else __import__("gps_logger")

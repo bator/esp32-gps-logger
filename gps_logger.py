@@ -29,7 +29,7 @@ NO_DATA = 3000                           # ms of silence = "No data!"
 SAMPLE = 1000                            # ms between sampled positions
 MIN_MOVE = 10                            # m from the last recorded point
 FLUSH = 60000                            # ms between batch writes to flash
-NEW_FILE_GAP = 300                       # s without fix before a new file
+NEW_FILE_GAP = 300                       # s without fix → new file; also hotspot max age
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
@@ -48,6 +48,7 @@ IGNORE_STALE_MS = 1500                   # leftover fail reason after connect()
 CLEAR_WAIT = 500                         # ms to wait for STAT_IDLE after clear
 LOST_GRACE = 5000                        # ms to let IDF auto-reconnect after drop
 ROAM_CHECK = 300000                      # ms between home-roam scans on hotspot
+ROAM_BACKOFF_MAX = 3600000               # ms cap on roam retry (60 min)
 ROAM_MIN_RSSI = -75                      # do not jump to a weak home AP
 LINE_MAX = 512                           # bounded GPX readline
 BOOT_OK_MS = 60000                       # clear boot-fail after this of _loop
@@ -395,7 +396,8 @@ def wifi_reset():
                 state="off", ip=None, rssi=None, tries=0, home=False,
                 backoff=WIFI_RETRY, last_check=time.ticks_ms(),
                 cand=[], cand_i=0, try_at=None, saw_connecting=False,
-                roam_at=time.ticks_ms(), prev_status=None)
+                roam_at=time.ticks_ms(), prev_status=None,
+                roam_backoff=ROAM_CHECK)
 
 def _set_hostname(name):
     if not name:
@@ -466,7 +468,18 @@ def _candidate_order(w):
     good, bad = [], []
     for n in cands:
         (bad if _recently_failed(n["ssid"], now) else good).append(n)
-    return good + bad
+
+    def _home_first(rows):
+        homes, rest = [], []
+        for n in rows:
+            rssi = n.get("rssi")
+            if n.get("home") and (rssi is None or rssi >= ROAM_MIN_RSSI):
+                homes.append(n)
+            else:
+                rest.append(n)
+        return homes + rest
+
+    return _home_first(good) + _home_first(bad)
 
 def _wifi_clear(w):
     """Drop the last association so the next status() is not a stale reason."""
@@ -539,6 +552,8 @@ def _wifi_got_ip(w):
     wifi["failed"].pop(wifi.get("ssid"), None)
     wifi["backoff"] = WIFI_RETRY
     wifi["roam_at"] = time.ticks_ms()
+    if wifi["home"]:
+        wifi["roam_backoff"] = ROAM_CHECK
     print("wifi ok", wifi.get("ssid") or "")
     return True
 
@@ -610,6 +625,8 @@ def _try_roam_home(w):
             target = n
             break
     if target is None:
+        b = wifi.get("roam_backoff") or ROAM_CHECK
+        wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
         return
     cur = None
     for x in wifi.get("nets") or []:
@@ -618,6 +635,8 @@ def _try_roam_home(w):
             break
     wifi["cand"] = [target] + ([cur] if cur else [])
     wifi["cand_i"] = 0
+    b = wifi.get("roam_backoff") or ROAM_CHECK
+    wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
     print("wifi roam", target["ssid"])
     _wifi_connect(w, target)
 
@@ -672,12 +691,15 @@ def wifi_tick():
                 except (OSError, ValueError):
                     wifi["rssi"] = None
                 wifi["last_check"] = now
+            interval = wifi.get("roam_backoff") or ROAM_CHECK
             if (not wifi.get("home")
                     and any(n.get("home") for n in wifi.get("nets") or [])
                     and time.ticks_diff(now, wifi.get("roam_at") or now)
-                    >= ROAM_CHECK):
-                wifi["roam_at"] = now
-                _try_roam_home(w)
+                    >= interval):
+                spd = st.get("speed")
+                if spd is None or spd < 5:
+                    wifi["roam_at"] = now
+                    _try_roam_home(w)
         return
     if wifi["state"] == "connected":
         # v1.29 reports STAT_CONNECTING on beacon timeout while the IDF
@@ -697,7 +719,7 @@ def wifi_tick():
             if time.ticks_diff(now, wifi["try_at"] or now) < LOST_GRACE:
                 return
         wifi["state"] = "offline"
-        wifi["last_check"] = now - wifi["backoff"]
+        wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
         # fall through to a fresh round
     if wifi["state"] == "connecting":
         _wifi_poll(w)
@@ -766,8 +788,9 @@ def start_file():
         pass                             # already exists
     name = st["date"].replace("-", "") + "_" + st["time"].replace(":", "")
     log.update(file=LOG_DIR + "/" + name + ".gpx", created=False, points=0,
-               new_seg=False, prev=None, file_at=time.ticks_ms())
-    flush()                              # create it right away
+               new_seg=False, file_at=time.ticks_ms())
+    # First write happens when there are points (parking must not create
+    # an empty / one-point file just because a fix came back).
 
 def flush():
     """Write pending points to the current file, opened only for the write."""
@@ -827,13 +850,16 @@ def log_tick():
     if log["online"]:
         return
     now = time.ticks_ms()
-    # Close a long-open file (parked on a hotspot) so it can upload.
+    # Close a long-open file only on a non-home net so it can upload.
+    # Offline driving keeps one file; parking (MIN_MOVE) does not open another.
     if (log["file"] is not None and log.get("file_at") is not None
+            and wifi["state"] == "connected" and not wifi.get("home")
+            and log["points"] + len(log["batch"]) > 0
             and time.ticks_diff(now, log["file_at"]) >= NEW_FILE_GAP * 1000):
         flush()
-        del log["batch"][:]
-        log.update(file=None, created=False, fix=False, last_t=None,
-                   prev=None, file_at=None)
+        if log["batch"]:
+            return                       # write failed: keep points, retry
+        log.update(file=None, created=False, file_at=None)
     if log["full"]:
         if time.ticks_diff(now, log.get("full_check") or 0) < FULL_CHECK:
             return
@@ -849,12 +875,15 @@ def log_tick():
         return
     if not log["fix"]:
         log["fix"] = True
-        if (log["file"] is None or time.ticks_diff(now, log["lost_at"])
-                > NEW_FILE_GAP * 1000):
-            flush()                      # leftovers of a failed write
-            del log["batch"][:]
-            start_file()
-        else:
+        if (log["file"] is not None and log.get("lost_at") is not None
+                and time.ticks_diff(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
+            flush()
+            if log["batch"]:
+                return                   # write failed: keep points, retry
+            log.update(file=None, created=False, file_at=None)
+            log["prev"] = None           # first point of the new trip is kept
+            log["new_seg"] = False
+        elif log["file"] is not None:
             log["new_seg"] = True
             log["prev"] = None           # start the segment with this fix
     if (log["last_sample"] is None
@@ -869,6 +898,8 @@ def log_tick():
             if t != log["last_t"] and (
                     prev is None
                     or _dist(prev[0], prev[1], st["lat"], st["lon"]) > MIN_MOVE):
+                if log["file"] is None:
+                    start_file()
                 log["last_t"] = t
                 log["prev"] = (st["lat"], st["lon"])
                 ele = ""
@@ -1392,7 +1423,8 @@ def upload_tick():
             bt = up.get("bad_try") or {}
             bt[path] = bt.get(path, 0) + 1
             up["bad_try"] = bt
-        up["state"] = "ok"
+        if up.get("state") != "bad full":
+            up["state"] = "ok"
         up["next_at"] = time.ticks_add(now, gap)
     elif code in PAYLOAD_ERR:
         up["err"] += 1
@@ -1550,6 +1582,7 @@ def _loop():
     global _wdt
     if _wdt is None:
         _wdt = WDT(timeout=WDT_TIMEOUT)
+    loop_start = time.ticks_ms()
     last = None
     while True:
         feed()
@@ -1562,7 +1595,7 @@ def _loop():
         upload_tick()
         now = time.ticks_ms()
         if (not _boot_ok_done
-                and time.ticks_diff(now, st.get("start") or now) >= BOOT_OK_MS):
+                and time.ticks_diff(now, loop_start) >= BOOT_OK_MS):
             _boot_ok()
         if last is None or time.ticks_diff(now, last) >= REFRESH:
             draw()
