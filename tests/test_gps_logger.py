@@ -140,6 +140,7 @@ class WLAN(object):
     last_ssid = None
     connects = []
     assoc_bssid = None
+    assoc_channel = 1
     delay = 0
     stale_fail = 0
     leftover = 4
@@ -173,7 +174,8 @@ class WLAN(object):
         for item in WLAN.scan_aps:
             ssid, rssi = item[0], item[1]
             bssid = item[2] if len(item) > 2 else (b"\x00" * 6)
-            out.append((ssid.encode(), bssid, 1, rssi, 4, False))
+            ch = item[3] if len(item) > 3 else 1
+            out.append((ssid.encode(), bssid, ch, rssi, 4, False))
         return out
 
     def connect(self, s, p, bssid=None):
@@ -250,10 +252,12 @@ class WLAN(object):
         return ("192.168.1.8", "255.255.255.0", "192.168.1.1", "1.1.1.1")
 
     def config(self, *a, **k):
+        # v1.29 network_wlan.c: unknown keys raise ValueError. There is
+        # no 'bssid' getter; 'channel' is supported.
         if a and a[0] == "bssid":
-            if WLAN.assoc_bssid is not None:
-                return WLAN.assoc_bssid
-            raise ValueError("bssid")
+            raise ValueError("unknown config param")
+        if a and a[0] == "channel":
+            return WLAN.assoc_channel
         return None
 
 
@@ -1832,14 +1836,98 @@ try:
           and (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
           "connects=%s backoff=%s" % (
               WLAN.connects, gl.wifi.get("roam_backoff")))
-    WLAN.ok = set(["home", "phone"])
-    WLAN.assoc_bssid = home_b
+    WLAN.ok = set(["phone"])
     drain_wifi()
-    check("HID: home BSSID is learned after a successful connect",
-          gl.wifi.get("home") is True and gl.wifi.get("home_bssid") == home_b,
-          "home=%s bssid=%s" % (gl.wifi.get("home"), gl.wifi.get("home_bssid")))
-    WLAN.assoc_bssid = None
     gl.st["speed"] = None
+
+    raised = False
+    try:
+        WLAN(0).config("bssid")
+    except ValueError:
+        raised = True
+    check("HID: mock config('bssid') raises ValueError (v1.29)",
+          raised)
+
+    w = start_wifi(env_hid_home, [("", -55, home_b), ("phone", -70)],
+                   ["home", "phone"])
+    check("HID: unique strong blank AP is learned after home connect",
+          w["ssid"] == "home" and w.get("home_bssid") == home_b,
+          "ssid=%s bssid=%s" % (w.get("ssid"), w.get("home_bssid")))
+
+    w = start_wifi(env_hid_home,
+                   [("", -40, neighbour), ("", -65, home_b), ("phone", -70)],
+                   ["home", "phone"])
+    check("HID: two strong blank APs are not learned as home_bssid",
+          w["ssid"] == "home" and w.get("home_bssid") is None,
+          "ssid=%s bssid=%s" % (w.get("ssid"), w.get("home_bssid")))
+
+    WLAN.assoc_channel = 6
+    w = start_wifi(env_hid_home, [("", -55, home_b, 1), ("phone", -70)],
+                   ["home", "phone"])
+    check("HID: blank AP on a different channel is not learned",
+          w.get("home_bssid") is None,
+          "bssid=%s ch=%s" % (w.get("home_bssid"), WLAN.assoc_channel))
+    WLAN.assoc_channel = 1
+
+    env_mixed = (triple + "SSID2_HOME=1\nSSID2_HIDDEN=1\n")
+    w = start_wifi(env_mixed, [("home", -40, b"\x02" * 6)], ["home"])
+    check("HID: visible home BSSID is not stored as hidden home_bssid",
+          w["ssid"] == "home" and w.get("home_bssid") is None,
+          "ssid=%s bssid=%s" % (w.get("ssid"), w.get("home_bssid")))
+
+    w = start_wifi(env_hid_home, [("phone", -40)], ["phone"])
+    WLAN.scan_aps = [("", -55, neighbour), ("phone", -40)]
+    WLAN.ok = set(["phone"])
+    WLAN.connects = []
+    gl.st["speed"] = None
+    gl.wifi["failed"].pop("home", None)
+    gl.wifi["home_bssid"] = None
+    gl.wifi["roam_backoff"] = gl.ROAM_CHECK
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    drain_wifi()
+    check("HID: failed hidden-home roam keeps the 5 min interval",
+          (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
+          "backoff=%s" % gl.wifi.get("roam_backoff"))
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "phone"
+    for _ in range(5):
+        _clock[0] += gl.FAIL_HOLD
+        gl.wifi["failed"].pop("home", None)
+        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        if WLAN.instances:
+            WLAN.instances[-1]._status = 3
+        gl.wifi["state"] = "connected"
+        gl.wifi["home"] = False
+        gl.wifi["ssid"] = "phone"
+        gl.wifi_tick()
+        drain_wifi()
+    check("HID: repeated hidden-home fails do not grow backoff",
+          (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
+          "backoff=%s" % gl.wifi.get("roam_backoff"))
+
+    gl.wifi["home_bssid"] = home_b
+    gl.wifi["home_bssid_fail"] = 0
+    WLAN.scan_aps = [("", -55, home_b), ("phone", -40)]
+    WLAN.ok = set(["phone"])
+    for _ in range(2):
+        _clock[0] += gl.FAIL_HOLD
+        gl.wifi["failed"].pop("home", None)
+        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        if WLAN.instances:
+            WLAN.instances[-1]._status = 3
+        gl.wifi["state"] = "connected"
+        gl.wifi["home"] = False
+        gl.wifi["ssid"] = "phone"
+        gl.wifi_tick()
+        drain_wifi()
+    check("HID: repeated learned-BSSID fails forget the BSSID",
+          gl.wifi.get("home_bssid") is None,
+          "bssid=%s fails=%s" % (
+              gl.wifi.get("home_bssid"), gl.wifi.get("home_bssid_fail")))
 
     # exponential roam backoff (wrong home PSK / unseen home)
     w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
@@ -2289,6 +2377,12 @@ try:
                 def seek(self, *x, **y):
                     return inner.seek(*x, **y)
 
+                def tell(self):
+                    return inner.tell()
+
+                def read(self, *x, **y):
+                    return inner.read(*x, **y)
+
                 def write(self, *x, **y):
                     return inner.write(*x, **y)
 
@@ -2376,6 +2470,12 @@ try:
                 def seek(self, *x, **y):
                     return inner.seek(*x, **y)
 
+                def tell(self):
+                    return inner.tell()
+
+                def read(self, *x, **y):
+                    return inner.read(*x, **y)
+
                 def write(self, data):
                     writes[0] += 1
                     if writes[0] == fail_on:
@@ -2439,6 +2539,70 @@ try:
           and create_body.endswith(gl.FOOTER.encode()),
           "created=%s n_pts=%s head=%r" % (
               gl.log.get("created"), _gpx_pts(create_part), create_body[:80]))
+
+    # M7: transient stat/open EIO must not flip created=False (wb would wipe)
+    eio_path = os.path.join(close_dir, "eio.gpx")
+    make_gpx(eio_path, 112)
+    eio_pts = _gpx_pts(eio_path)
+    gl.log.update(file=eio_path, created=True, points=112, batch=[extra_pt],
+                  err=0, new_seg=False, good_size=os.path.getsize(eio_path))
+    orig_stat = os.stat
+
+    def _eio_open(path, *a, **k):
+        raise OSError(5, "EIO")
+
+    def _eio_stat(path):
+        if path == eio_path:
+            raise OSError(5, "EIO")
+        return orig_stat(path)
+
+    os.stat = _eio_stat
+    builtins.open = _eio_open
+    try:
+        gl.flush()
+    finally:
+        builtins.open = orig_open
+        os.stat = orig_stat
+    check("WF-9: transient EIO keeps created=True and the trip on flash",
+          gl.log["created"] is True and extra_pt in gl.log["batch"]
+          and _gpx_pts(eio_path) == eio_pts,
+          "created=%s n_pts=%s batch=%s" % (
+              gl.log.get("created"), _gpx_pts(eio_path), gl.log["batch"]))
+    gl.flush()
+    check("WF-9: later flush appends without wiping the trip",
+          _gpx_pts(eio_path) == eio_pts + 1 and gl.log["batch"] == [],
+          "n_pts=%s" % _gpx_pts(eio_path))
+
+    gone_path = os.path.join(close_dir, "gone.gpx")
+    make_gpx(gone_path, 2)
+    gl.log.update(file=gone_path, created=True, points=2, batch=[extra_pt],
+                  err=0, new_seg=False, good_size=os.path.getsize(gone_path))
+    os.remove(gone_path)
+    gl.flush()
+    check("WF-9: ENOENT on append sets created=False",
+          gl.log["created"] is False and extra_pt in gl.log["batch"],
+          "created=%s batch=%s" % (gl.log.get("created"), gl.log["batch"]))
+    gl.flush()
+    check("WF-9: ENOENT retry recreates the file",
+          gl.log["created"] is True and _gpx_pts(gone_path) == 1,
+          "created=%s n_pts=%s" % (gl.log.get("created"), _gpx_pts(gone_path)))
+
+    trunc_path = os.path.join(close_dir, "trunc.gpx")
+    make_gpx(trunc_path, 2)
+    with orig_open(trunc_path, "rb") as f:
+        trunc_raw = f.read()
+    with orig_open(trunc_path, "wb") as f:
+        f.write(trunc_raw[:-10])
+    gl.log.update(file=trunc_path, created=True, points=2, batch=[extra_pt],
+                  err=0, new_seg=False, good_size=len(trunc_raw))
+    gl.flush()
+    with orig_open(trunc_path, "rb") as f:
+        trunc_body = f.read()
+    check("WF-10: truncated footer is repaired before append",
+          _gpx_pts(trunc_path) == 3 and gl.log["batch"] == []
+          and trunc_body.endswith(gl.FOOTER.encode())
+          and extra_pt.encode() in trunc_body,
+          "n_pts=%s tail=%r" % (_gpx_pts(trunc_path), trunc_body[-80:]))
 
     # new trip during a write error starts a new track segment
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
