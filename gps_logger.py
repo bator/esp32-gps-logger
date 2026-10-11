@@ -33,7 +33,7 @@ NEW_FILE_GAP = 300                       # s without fix → new file; also hots
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
-MAX_BATCH = 600                          # points kept in RAM if writes fail
+MAX_BATCH = 180                          # RAM cap while flash writes fail
 MAX_HDOP = 5                             # skip samples with worse dilution
 HDOP_M = 5                               # metres of UERE per HDOP unit
 FULL_CHECK = 5000                        # ms between statvfs polls when full
@@ -397,7 +397,8 @@ def wifi_reset():
                 backoff=WIFI_RETRY, last_check=time.ticks_ms(),
                 cand=[], cand_i=0, try_at=None, saw_connecting=False,
                 roam_at=time.ticks_ms(), prev_status=None,
-                roam_backoff=ROAM_CHECK, moved_at=None, roaming=False)
+                roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
+                blank_rssi=None, blank_bssid=None)
 
 def _set_hostname(name):
     if not name:
@@ -428,25 +429,36 @@ def _mark_failed(ssid):
         wifi["roaming"] = False
 
 def _scan_known(w):
-    """Visible known nets, strongest BSSID per SSID, or None if scan fails."""
+    """Visible known nets, strongest BSSID per SSID, or None if scan fails.
+    Hidden APs are listed with an empty SSID; their strongest RSSI is kept
+    so a configured hidden home can be tried when that AP is ≥ ROAM_MIN_RSSI."""
     by = {}
     for n in wifi["nets"]:
         by[n["ssid"]] = n
     try:
         aps = w.scan()
     except OSError:
+        wifi["blank_rssi"] = None
+        wifi["blank_bssid"] = None
         return None
     best = {}
+    blank_rssi, blank_bssid = None, None
     for rec in aps:
         raw = rec[0]
         ssid = raw.decode() if isinstance(raw, bytes) else raw
-        if ssid not in by:
-            continue
         rssi = rec[3]
         bssid = rec[1] if len(rec) > 1 else None
+        if not ssid:
+            if blank_rssi is None or rssi > blank_rssi:
+                blank_rssi, blank_bssid = rssi, bssid
+            continue
+        if ssid not in by:
+            continue
         prev = best.get(ssid)
         if prev is None or rssi > prev[0]:
             best[ssid] = (rssi, bssid, by[ssid])
+    wifi["blank_rssi"] = blank_rssi
+    wifi["blank_bssid"] = blank_bssid
     found = []
     items = list(best.values())
     items.sort(key=lambda x: -x[0])
@@ -456,6 +468,16 @@ def _scan_known(w):
         n["rssi"] = rssi
         found.append(n)
     return found
+
+def _blank_home_ok():
+    """True if a hidden home is configured and a strong empty-SSID AP was seen."""
+    r = wifi.get("blank_rssi")
+    if r is None or r < ROAM_MIN_RSSI:
+        return False
+    for n in wifi.get("nets") or []:
+        if n.get("home") and n.get("hidden"):
+            return True
+    return False
 
 def _candidate_order(w):
     """Visible strongest first (deduped), then hidden; empty scan ≠ scan fail."""
@@ -475,9 +497,12 @@ def _candidate_order(w):
 
     def _home_first(rows):
         homes, rest = [], []
+        blank = _blank_home_ok()
         for n in rows:
             rssi = n.get("rssi")
             if n.get("home") and rssi is not None and rssi >= ROAM_MIN_RSSI:
+                homes.append(n)
+            elif n.get("home") and n.get("hidden") and rssi is None and blank:
                 homes.append(n)
             else:
                 rest.append(n)
@@ -629,6 +654,15 @@ def _try_roam_home(w):
                 and not _recently_failed(n["ssid"], now)):
             target = n
             break
+    if target is None and _blank_home_ok():
+        for n in wifi.get("nets") or []:
+            if (n.get("home") and n.get("hidden")
+                    and n["ssid"] != wifi.get("ssid")
+                    and not _recently_failed(n["ssid"], now)):
+                target = dict(n)
+                if wifi.get("blank_bssid"):
+                    target["bssid"] = wifi["blank_bssid"]
+                break
     if target is None:
         wifi["roam_backoff"] = ROAM_CHECK
         return
@@ -805,7 +839,9 @@ def start_file():
     # an empty / one-point file just because a fix came back).
 
 def flush():
-    """Write pending points to the current file, opened only for the write."""
+    """Write pending points to the current file, opened only for the write.
+    LittleFS commits on close: drop the RAM batch only after a successful
+    close, or if the file size shows the new bytes actually landed."""
     log["last_flush"] = time.ticks_ms()
     path, batch = log["file"], log["batch"]
     if path is None or (log["created"] and not batch):
@@ -815,38 +851,55 @@ def flush():
         log["full"] = True
         del batch[:]
         return
-    pts = "".join(batch)
+    creating = not log["created"]
+    old = _file_size(path)
+    extra = 0 if creating else (len(NEW_SEG) if log["new_seg"] else 0)
+    pts = 0
+    i = 0
+    while i < len(batch):
+        pts += len(batch[i])
+        i += 1
+    if creating:
+        name = path[len(LOG_DIR) + 1:-4]
+        expected = len(HEADER % name) + pts + len(FOOTER)
+    else:
+        expected = (old or 0) - len(FOOTER) + extra + pts + len(FOOTER)
     f = None
     wrote = False
+    close_ok = False
     try:
-        if log["created"]:
-            f = open(path, "r+b")
-            f.seek(-len(FOOTER), 2)
-            f.write(((NEW_SEG if log["new_seg"] else "") + pts
-                     + FOOTER).encode())
-            wrote = True
-        else:
+        if creating:
             name = path[len(LOG_DIR) + 1:-4]
             f = open(path, "wb")
-            f.write((HEADER % name + pts + FOOTER).encode())
-            wrote = True
-            log["created"] = True
-    except OSError:
-        log["err"] += 1                  # keep the batch unless write landed
-        if wrote:
-            # Bytes are on flash; dropping the RAM copy avoids ROT-11
-            # duplicates if only close() failed.
-            log["points"] += len(batch)
-            up["left"] += len(batch)
-            del batch[:]
-            log["new_seg"] = False
-        return
-    finally:
-        if f is not None:
-            try:
-                f.close()
-            except OSError:
-                pass
+            f.write((HEADER % name).encode())
+        else:
+            f = open(path, "r+b")
+            f.seek(-len(FOOTER), 2)
+            if log["new_seg"]:
+                f.write(NEW_SEG.encode())
+        i = 0
+        while i < len(batch):
+            f.write(batch[i].encode())
+            i += 1
+        f.write(FOOTER.encode())
+        wrote = True
+    except (OSError, MemoryError):
+        log["err"] += 1
+    if f is not None:
+        try:
+            f.close()
+            close_ok = True
+        except OSError:
+            log["err"] += 1
+    landed = wrote and close_ok
+    if not landed:
+        sz = _file_size(path)
+        if sz == expected:
+            landed = True
+        else:
+            log["created"] = sz is not None and sz > 0
+            return
+    log["created"] = True
     log["points"] += len(batch)
     up["left"] += len(batch)
     del batch[:]
@@ -906,6 +959,9 @@ def log_tick():
                 log.update(file=None, created=False, file_at=None)
                 log["prev"] = None       # first point of the new trip is kept
                 log["new_seg"] = False
+            else:
+                log["new_seg"] = True    # write failed: new trip in same file
+                log["prev"] = None
         elif log["file"] is not None:
             log["new_seg"] = True
             log["prev"] = None           # start the segment with this fix

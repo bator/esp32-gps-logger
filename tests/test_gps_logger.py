@@ -1070,6 +1070,15 @@ try:
           WLAN.connects and WLAN.connects[0][0] == "phone"
           and w["ssid"] == "phone",
           "connects=%s ssid=%s" % (WLAN.connects, w.get("ssid")))
+    w = start_wifi(env_hid_home, [("", -55), ("phone", -40)], ["home", "phone"])
+    check("HID: strong empty-SSID AP prefers hidden home at boot",
+          WLAN.connects and WLAN.connects[0][0] == "home"
+          and w["ssid"] == "home",
+          "connects=%s ssid=%s" % (WLAN.connects, w.get("ssid")))
+    w = start_wifi(env_hid_home, [("", -80), ("phone", -40)], ["home", "phone"])
+    check("HID: weak empty-SSID AP does not prefer hidden home",
+          WLAN.connects and WLAN.connects[0][0] == "phone",
+          "connects=%s" % (WLAN.connects,))
     # duplicate BSSIDs must not produce two tries of the same SSID first
     reset_wlan()
     WLAN.scan_aps = [("home", -20, b"\x01" * 6), ("home", -40, b"\x02" * 6),
@@ -1736,6 +1745,34 @@ try:
           gl.wifi["ssid"] == "PhoneHotspot" and WLAN.connects == [],
           "ssid=%s connects=%s" % (gl.wifi.get("ssid"), WLAN.connects))
 
+    w = start_wifi(env_hid_home, [("phone", -40)], ["phone"])
+    check("HID roam setup: on hotspot",
+          w["ssid"] == "phone" and w["home"] is False)
+    WLAN.scan_aps = [("", -55), ("phone", -40)]
+    WLAN.ok = set(["home", "phone"])
+    WLAN.connects = []
+    gl.st["speed"] = None
+    gl.wifi["failed"].pop("home", None)
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    check("HID: roam tries hidden home when empty-SSID AP is strong",
+          WLAN.connects and WLAN.connects[0][0] == "home",
+          "connects=%s" % (WLAN.connects,))
+    WLAN.ok = set(["phone"])
+    drain_wifi()
+    WLAN.scan_aps = [("phone", -40)]
+    WLAN.connects = []
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "phone"
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    check("HID: no empty-SSID AP does not roam to hidden home",
+          WLAN.connects == [],
+          "connects=%s" % (WLAN.connects,))
+
     # exponential roam backoff (wrong home PSK / unseen home)
     w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
     WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
@@ -2153,57 +2190,127 @@ try:
           len(opened) <= 1 and len(hot_disk) <= 1,
           "opened=%s disk=%s file=%s" % (opened, hot_disk, gl.log.get("file")))
 
-    # --- close() error after a successful write must not duplicate points --
+    # --- close() error: drop batch only if the new size actually landed ----
     close_dir = os.path.join(tmpdir, "close")
     os.mkdir(close_dir)
     gl.LOG_DIR = close_dir
+    extra_pt = ('<trkpt lat="52.510000" lon="13.410000">'
+                '<time>2026-10-05T00:00:02Z</time></trkpt>\n')
+
+    def _gpx_pts(path):
+        if not os.path.exists(path):
+            return 0
+        with orig_open(path, "rb") as f:
+            return sum(1 for line in f if line.startswith(b"<trkpt"))
+
+    orig_open = builtins.open
+
+    def _close_wrap(rollback):
+        def _open(path, *a, **k):
+            existed = os.path.exists(path)
+            backup = None
+            if rollback and existed:
+                bf = orig_open(path, "rb")
+                try:
+                    backup = bf.read()
+                finally:
+                    bf.close()
+            inner = orig_open(path, *a, **k)
+
+            class _W(object):
+                def seek(self, *x, **y):
+                    return inner.seek(*x, **y)
+
+                def write(self, *x, **y):
+                    return inner.write(*x, **y)
+
+                def close(self):
+                    inner.close()
+                    if rollback:
+                        if not existed:
+                            try:
+                                os.remove(path)
+                            except OSError:
+                                pass
+                        elif backup is not None:
+                            rf = orig_open(path, "wb")
+                            try:
+                                rf.write(backup)
+                            finally:
+                                rf.close()
+                    raise OSError("close")
+
+            return _W()
+        return _open
+
     gl.log_reset()
     gl.log["online"] = False
     close_path = os.path.join(close_dir, "c.gpx")
     make_gpx(close_path, 2)
-    gl.log.update(file=close_path, created=True, points=2, batch=[
-        '<trkpt lat="52.510000" lon="13.410000"><time>2026-10-05T00:00:02Z</time></trkpt>\n'
-    ])
-    orig_open = builtins.open
-
-    class _CloseBoom(object):
-        def __init__(self, inner):
-            self._inner = inner
-
-        def seek(self, *a, **k):
-            return self._inner.seek(*a, **k)
-
-        def write(self, *a, **k):
-            return self._inner.write(*a, **k)
-
-        def close(self):
-            self._inner.close()
-            raise OSError("close")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            try:
-                self.close()
-            except OSError:
-                pass
-            return False
-
-    def _open_close_boom(*a, **k):
-        return _CloseBoom(orig_open(*a, **k))
-
-    builtins.open = _open_close_boom
+    gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt])
+    builtins.open = _close_wrap(False)
     try:
         gl.flush()
         gl.flush()
     finally:
         builtins.open = orig_open
-    with orig_open(close_path, "rb") as f:
-        n_pts = sum(1 for line in f if line.startswith(b"<trkpt"))
-    check("ROT-11: close() error does not rewrite the batch",
-          n_pts == 3 and gl.log["batch"] == [],
-          "n_pts=%s batch=%s" % (n_pts, gl.log["batch"]))
+    check("ROT-11: close() with data on flash does not rewrite the batch",
+          _gpx_pts(close_path) == 3 and gl.log["batch"] == [],
+          "n_pts=%s batch=%s" % (_gpx_pts(close_path), gl.log["batch"]))
+
+    # WF-5: LittleFS rollback on append — keep the batch, no lost points
+    make_gpx(close_path, 2)
+    gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
+                  err=0, new_seg=False)
+    builtins.open = _close_wrap(True)
+    try:
+        gl.flush()
+    finally:
+        builtins.open = orig_open
+    check("WF-5: append close rollback keeps the batch",
+          extra_pt in gl.log["batch"] and _gpx_pts(close_path) == 2,
+          "batch=%s n_pts=%s created=%s" % (
+              gl.log["batch"], _gpx_pts(close_path), gl.log.get("created")))
+    gl.flush()
+    check("WF-5: later flush writes the kept points",
+          _gpx_pts(close_path) == 3 and gl.log["batch"] == [],
+          "n_pts=%s" % _gpx_pts(close_path))
+
+    # WF-6: create close rollback — file missing, created=False, batch kept
+    new_path = os.path.join(close_dir, "new.gpx")
+    gl.log.update(file=new_path, created=False, points=0, batch=[extra_pt],
+                  err=0, new_seg=False)
+    builtins.open = _close_wrap(True)
+    try:
+        gl.flush()
+    finally:
+        builtins.open = orig_open
+    check("WF-6: create close rollback does not claim the file exists",
+          gl.log["created"] is False and extra_pt in gl.log["batch"]
+          and not os.path.exists(new_path),
+          "created=%s exists=%s batch=%s" % (
+              gl.log.get("created"), os.path.exists(new_path), gl.log["batch"]))
+    gl.flush()
+    check("WF-6: later flush creates the file with the kept points",
+          gl.log["created"] is True and os.path.exists(new_path)
+          and _gpx_pts(new_path) == 1 and gl.log["batch"] == [],
+          "created=%s n_pts=%s" % (gl.log.get("created"), _gpx_pts(new_path)))
+
+    # new trip during a write error starts a new track segment
+    gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
+                  fix=False, lost_at=_clock[0] - gl.NEW_FILE_GAP * 1000 - 1,
+                  last_flush=_clock[0], prev=(52.5, 13.4), new_seg=False,
+                  online=False)
+    gl.st.update(valid=True, date="2026-10-05", time="19:00:00",
+                 lat=52.6, lon=13.5, alt=10.0, pos_at=_clock[0],
+                 hdop=1.0, hdop_at=_clock[0], status="A", quality=1, fixtype=3)
+    gl.log_tick()
+    check("APRÓ-2: new trip while flush failed sets new_seg",
+          gl.log.get("new_seg") is True and gl.log.get("file") == close_path
+          and any("52.600000" in p for p in gl.log["batch"]),
+          "new_seg=%s prev=%s file=%s batch=%s" % (
+              gl.log.get("new_seg"), gl.log.get("prev"), gl.log.get("file"),
+              gl.log.get("batch")))
 
     # --- empty / EOF .bad must be deleted, not spun (~50 read_batch/s) -----
     online(tmpdir)

@@ -14,7 +14,7 @@ uploads already-finished files in the background.
 - Power-loss safe: each file is always a complete GPX document, written in batches every 60 s (LittleFS commits on close).
 - Short fix losses start a new track segment; a gap over 5 minutes starts a new file. On a **non-home** network a file that has been open for 5 minutes is closed so it can upload (offline driving stays one file; parking does not open empty files).
 - Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds) or after leaving a home network.
-- Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, a home AP at ≥ −75 dBm is tried first, then other visible known APs strongest-RSSI first (one SSID, strongest BSSID). Hidden SSIDs (`SSID2_HIDDEN=1`) are tried after visible ones. If the scan sees none of ours, only hidden nets are tried (no blind 1→2→3). If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net, when nearly stopped, the logger scans for home (starting every ~5 min, backing off to 60 min if home is missing or the switch fails); if a home AP is visible at ≥ −75 dBm it switches between upload batches (and falls back to the hotspot if that connect fails).
+- Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, a home AP at ≥ −75 dBm is tried first, then other visible known APs strongest-RSSI first (one SSID, strongest BSSID). Hidden SSIDs (`SSID2_HIDDEN=1`) are tried after visible ones, except a **hidden home** is tried first when the scan shows a strong empty-SSID AP (≥ −75 dBm) — that is how a hidden AP appears. If the scan sees none of ours, only hidden nets are tried (no blind 1→2→3). If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net, when nearly stopped, the logger scans for home every ~5 min (backoff to 60 min only after a failed home switch); if a home AP is visible at ≥ −75 dBm, or a hidden home plus a strong empty-SSID AP, it switches between upload batches (and falls back to the hotspot if that connect fails).
 - Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.gpx.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.gpx.bad`. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
 - 128×64 OLED: connected SSID (never the password), GPS fix, mode (`LOG` / `LOG+UP` / `UPLOAD` / `BAD FULL`), free flash and points left. Missing or dropping display → headless.
 - Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush, wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. GPIO25 at reset skips the logger entirely.
@@ -119,9 +119,10 @@ HOSTNAME=Dawarich-GPS-tracker
    **failed switch** (home was visible but connect failed). Unseen home
    and a stop after driving keep the 5 min interval. A home AP at ≥
    −75 dBm is preferred; if that switch fails, the hotspot is tried
-   again. Offset only advances after HTTP 2xx, so a mid-upload drop is
-   retried (Dawarich dedups). Hidden home (`SSIDn_HIDDEN=1`) is not
-   tried before a visible hotspot at boot.
+   again. A hidden home is tried when the scan lists a strong empty-SSID
+   AP (the ESP32 reports hidden APs that way). Offset only advances
+   after HTTP 2xx, so a mid-upload drop is retried (Dawarich dedups).
+   Far from home, a hidden home is not tried before a visible hotspot.
 
 OLED / log show the connected SSID, never the password. Mode is `UPLOAD`
 on a home net, `LOG+UP` on a hotspot, `LOG` when offline.
@@ -215,6 +216,7 @@ Constants at the top of `gps_logger.py`:
 | `UPLOAD_GAP_AWAY` | 30 s | Pause between POSTs on a non-home net (UART drain) |
 | `BOOT_OK_MS` | 60 s | Healthy `_loop` before the boot-fail counter is cleared |
 | `MIN_FREE` | 32 kB | Flash reserve |
+| `MAX_BATCH` | 180 | RAM points kept if flash writes fail |
 | `MAX_HDOP` | 5 | Skip samples with a fresh GGA dilution worse than this |
 | `UPLOAD_BATCH` | 50 | Points per POST |
 | `CONNECT_TIMEOUT` | 12 s | Per-network wait for DHCP (polled, not a blocking sleep) |
