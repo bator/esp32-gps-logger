@@ -139,6 +139,7 @@ class WLAN(object):
     ok = set()
     last_ssid = None
     connects = []
+    assoc_bssid = None
     delay = 0
     stale_fail = 0
     leftover = 4
@@ -248,8 +249,12 @@ class WLAN(object):
     def ifconfig(self):
         return ("192.168.1.8", "255.255.255.0", "192.168.1.1", "1.1.1.1")
 
-    def config(self, **k):
-        pass
+    def config(self, *a, **k):
+        if a and a[0] == "bssid":
+            if WLAN.assoc_bssid is not None:
+                return WLAN.assoc_bssid
+            raise ValueError("bssid")
+        return None
 
 
 WLAN.instances = []
@@ -402,6 +407,7 @@ def reset_wlan():
     WLAN.ok = set()
     WLAN.last_ssid = None
     WLAN.connects = []
+    WLAN.assoc_bssid = None
     WLAN.delay = 0
     WLAN.stale_fail = 0
     WLAN.leftover = 4
@@ -1773,6 +1779,68 @@ try:
           WLAN.connects == [],
           "connects=%s" % (WLAN.connects,))
 
+    # stronger neighbouring hidden AP must not steal the roam BSSID
+    w = start_wifi(env_hid_home, [("phone", -40)], ["phone"])
+    check("HID neighbour setup: on hotspot",
+          w["ssid"] == "phone" and w["home"] is False)
+    neighbour = b"\x0a" * 6
+    home_b = b"\x01" * 6
+    WLAN.scan_aps = [("", -40, neighbour), ("", -65, home_b), ("phone", -40)]
+    WLAN.ok = set(["home", "phone"])
+    WLAN.connects = []
+    gl.st["speed"] = None
+    gl.wifi["failed"].pop("home", None)
+    gl.wifi["home_bssid"] = None
+    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi_tick()
+    check("HID: roam does not pin to a stronger neighbour hidden AP",
+          WLAN.connects and WLAN.connects[0][0] == "home"
+          and WLAN.connects[0][2] is None,
+          "connects=%s" % (WLAN.connects,))
+    WLAN.ok = set(["phone"])
+    drain_wifi()
+    if WLAN.instances:
+        WLAN.instances[-1]._status = 3
+    gl.wifi["state"] = "connected"
+    gl.wifi["home"] = False
+    gl.wifi["ssid"] = "phone"
+    gl.wifi["roam_backoff"] = gl.ROAM_BACKOFF_MAX
+    gl.wifi["moved_at"] = _clock[0] - 60000
+    gl.wifi["roam_at"] = _clock[0]
+    gl.wifi["home_bssid"] = None
+    gl.wifi["failed"].pop("home", None)
+    gl.st.update(valid=True, date="2026-10-05", time="18:00:00",
+                 lat=52.5, lon=13.4, pos_at=_clock[0], speed=0,
+                 status="A", quality=1, fixtype=3)
+    WLAN.connects = []
+    gl.wifi_tick()
+    check("HID: stop after driving does not reset backoff on empty-SSID-only",
+          (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_BACKOFF_MAX
+          and WLAN.connects == [],
+          "backoff=%s connects=%s" % (
+              gl.wifi.get("roam_backoff"), WLAN.connects))
+    gl.wifi["home_bssid"] = home_b
+    gl.wifi["moved_at"] = _clock[0] - 60000
+    gl.wifi["roam_at"] = _clock[0]
+    gl.wifi["roam_backoff"] = gl.ROAM_BACKOFF_MAX
+    WLAN.ok = set(["home", "phone"])
+    WLAN.connects = []
+    gl.wifi_tick()
+    check("HID: learned home BSSID is used even if a neighbour is stronger",
+          WLAN.connects and WLAN.connects[0][0] == "home"
+          and WLAN.connects[0][2] == home_b
+          and (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
+          "connects=%s backoff=%s" % (
+              WLAN.connects, gl.wifi.get("roam_backoff")))
+    WLAN.ok = set(["home", "phone"])
+    WLAN.assoc_bssid = home_b
+    drain_wifi()
+    check("HID: home BSSID is learned after a successful connect",
+          gl.wifi.get("home") is True and gl.wifi.get("home_bssid") == home_b,
+          "home=%s bssid=%s" % (gl.wifi.get("home"), gl.wifi.get("home_bssid")))
+    WLAN.assoc_bssid = None
+    gl.st["speed"] = None
+
     # exponential roam backoff (wrong home PSK / unseen home)
     w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
     WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
@@ -2261,7 +2329,7 @@ try:
     # WF-5: LittleFS rollback on append — keep the batch, no lost points
     make_gpx(close_path, 2)
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
-                  err=0, new_seg=False)
+                  err=0, new_seg=False, good_size=os.path.getsize(close_path))
     builtins.open = _close_wrap(True)
     try:
         gl.flush()
@@ -2295,6 +2363,82 @@ try:
           gl.log["created"] is True and os.path.exists(new_path)
           and _gpx_pts(new_path) == 1 and gl.log["batch"] == [],
           "created=%s n_pts=%s" % (gl.log.get("created"), _gpx_pts(new_path)))
+
+    # M3-3: MemoryError mid-write commits a partial file; retry must
+    # overwrite from the last good footer (append) or rewrite (create).
+    def _partial_open(fail_on, cut):
+        writes = [0]
+
+        def _open(path, *a, **k):
+            inner = orig_open(path, *a, **k)
+
+            class _W(object):
+                def seek(self, *x, **y):
+                    return inner.seek(*x, **y)
+
+                def write(self, data):
+                    writes[0] += 1
+                    if writes[0] == fail_on:
+                        inner.write(data[:cut])
+                        raise MemoryError("heap")
+                    return inner.write(data)
+
+                def close(self):
+                    inner.close()
+
+            return _W()
+
+        return _open
+
+    part_path = os.path.join(close_dir, "part.gpx")
+    make_gpx(part_path, 2)
+    good = os.path.getsize(part_path)
+    gl.log.update(file=part_path, created=True, points=2, batch=[extra_pt],
+                  err=0, new_seg=False, good_size=good)
+    builtins.open = _partial_open(2, 5)  # point ok, 5 bytes of FOOTER
+    try:
+        gl.flush()
+    finally:
+        builtins.open = orig_open
+    check("WF-7: append MemoryError keeps the batch and created",
+          extra_pt in gl.log["batch"] and gl.log["created"] is True
+          and gl.log.get("good_size") == good,
+          "batch=%s created=%s good=%s" % (
+              gl.log["batch"], gl.log.get("created"), gl.log.get("good_size")))
+    gl.flush()
+    with orig_open(part_path, "rb") as f:
+        part_body = f.read()
+    merged = extra_pt.encode()[:20] + extra_pt.encode()
+    check("WF-7: append retry from good_size does not merge lines",
+          _gpx_pts(part_path) == 3 and gl.log["batch"] == []
+          and extra_pt.encode() in part_body and merged not in part_body
+          and part_body.endswith(gl.FOOTER.encode()),
+          "n_pts=%s tail=%r" % (_gpx_pts(part_path), part_body[-80:]))
+
+    create_part = os.path.join(close_dir, "create_part.gpx")
+    gl.log.update(file=create_part, created=False, points=0, batch=[extra_pt],
+                  err=0, new_seg=False, good_size=None)
+    builtins.open = _partial_open(2, 10)  # header ok, 10 bytes of point
+    try:
+        gl.flush()
+    finally:
+        builtins.open = orig_open
+    check("WF-8: create MemoryError leaves created=False",
+          gl.log["created"] is False and extra_pt in gl.log["batch"]
+          and gl.log.get("good_size") is None,
+          "created=%s batch=%s good=%s" % (
+              gl.log.get("created"), gl.log["batch"], gl.log.get("good_size")))
+    gl.flush()
+    with orig_open(create_part, "rb") as f:
+        create_body = f.read()
+    check("WF-8: create retry rewrites from scratch with a valid header",
+          gl.log["created"] is True and gl.log["batch"] == []
+          and _gpx_pts(create_part) == 1
+          and create_body.startswith(b"<?xml")
+          and b"<trkseg>" in create_body
+          and create_body.endswith(gl.FOOTER.encode()),
+          "created=%s n_pts=%s head=%r" % (
+              gl.log.get("created"), _gpx_pts(create_part), create_body[:80]))
 
     # new trip during a write error starts a new track segment
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],

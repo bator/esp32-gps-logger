@@ -398,7 +398,8 @@ def wifi_reset():
                 cand=[], cand_i=0, try_at=None, saw_connecting=False,
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
-                blank_rssi=None, blank_bssid=None)
+                blank_rssi=None, blank_bssid=None, home_bssid=None,
+                try_bssid=None)
 
 def _set_hostname(name):
     if not name:
@@ -430,8 +431,9 @@ def _mark_failed(ssid):
 
 def _scan_known(w):
     """Visible known nets, strongest BSSID per SSID, or None if scan fails.
-    Hidden APs are listed with an empty SSID; their strongest RSSI is kept
-    so a configured hidden home can be tried when that AP is ≥ ROAM_MIN_RSSI."""
+    Hidden APs are listed with an empty SSID. If home_bssid is known, only
+    that blank AP is kept; otherwise the strongest blank RSSI is a hint that
+    *some* hidden AP is nearby (not necessarily ours)."""
     by = {}
     for n in wifi["nets"]:
         by[n["ssid"]] = n
@@ -443,13 +445,17 @@ def _scan_known(w):
         return None
     best = {}
     blank_rssi, blank_bssid = None, None
+    learned = wifi.get("home_bssid")
     for rec in aps:
         raw = rec[0]
         ssid = raw.decode() if isinstance(raw, bytes) else raw
         rssi = rec[3]
         bssid = rec[1] if len(rec) > 1 else None
         if not ssid:
-            if blank_rssi is None or rssi > blank_rssi:
+            if learned:
+                if bssid == learned:
+                    blank_rssi, blank_bssid = rssi, bssid
+            elif blank_rssi is None or rssi > blank_rssi:
                 blank_rssi, blank_bssid = rssi, bssid
             continue
         if ssid not in by:
@@ -470,14 +476,36 @@ def _scan_known(w):
     return found
 
 def _blank_home_ok():
-    """True if a hidden home is configured and a strong empty-SSID AP was seen."""
+    """True if a hidden home is configured and a matching empty-SSID AP was seen.
+    After home_bssid is learned, only that BSSID counts (not a neighbour)."""
     r = wifi.get("blank_rssi")
     if r is None or r < ROAM_MIN_RSSI:
+        return False
+    learned = wifi.get("home_bssid")
+    if learned and wifi.get("blank_bssid") != learned:
         return False
     for n in wifi.get("nets") or []:
         if n.get("home") and n.get("hidden"):
             return True
     return False
+
+def _hidden_home_target(now, arrival=False):
+    """Hidden home when a strong empty-SSID AP was seen.
+    Do not pin to the strongest blank BSSID (that may be a neighbour):
+    pass the learned home BSSID, or None so the IDF probes by SSID.
+    A stop after driving must not treat an unverified blank AP as home."""
+    if arrival and not wifi.get("home_bssid"):
+        return None
+    if not _blank_home_ok():
+        return None
+    for n in wifi.get("nets") or []:
+        if (n.get("home") and n.get("hidden")
+                and n["ssid"] != wifi.get("ssid")
+                and not _recently_failed(n["ssid"], now)):
+            target = dict(n)
+            target["bssid"] = wifi.get("home_bssid")
+            return target
+    return None
 
 def _candidate_order(w):
     """Visible strongest first (deduped), then hidden; empty scan ≠ scan fail."""
@@ -537,6 +565,7 @@ def _wifi_connect(w, net):
     wifi["ssid"] = net["ssid"]
     wifi["pw"] = net["pw"]
     wifi["home"] = bool(net.get("home"))
+    wifi["try_bssid"] = net.get("bssid")
     wifi["state"] = "connecting"
     wifi["try_at"] = time.ticks_ms()
     wifi["saw_connecting"] = False
@@ -584,6 +613,14 @@ def _wifi_got_ip(w):
     wifi["roaming"] = False
     if wifi["home"]:
         wifi["roam_backoff"] = ROAM_CHECK
+        bssid = wifi.get("try_bssid")
+        if not bssid:
+            try:
+                bssid = w.config("bssid")
+            except (OSError, ValueError, TypeError):
+                bssid = None
+        if bssid:
+            wifi["home_bssid"] = bssid
     print("wifi ok", wifi.get("ssid") or "")
     return True
 
@@ -639,9 +676,11 @@ def _wifi_poll(w):
     _mark_failed(wifi.get("ssid"))
     return _wifi_next(w)
 
-def _try_roam_home(w):
+def _try_roam_home(w, arrival=False):
     """If a home AP is visible and strong enough, switch; else stay put.
-    Runs between upload batches (wifi_tick never runs during POST)."""
+    Runs between upload batches (wifi_tick never runs during POST).
+    arrival=True is a stop after driving: only a concrete home (visible
+    SSID or learned BSSID) may reset backoff and trigger a switch."""
     feed()
     read_uart()
     found = _scan_known(w)
@@ -654,18 +693,15 @@ def _try_roam_home(w):
                 and not _recently_failed(n["ssid"], now)):
             target = n
             break
-    if target is None and _blank_home_ok():
-        for n in wifi.get("nets") or []:
-            if (n.get("home") and n.get("hidden")
-                    and n["ssid"] != wifi.get("ssid")
-                    and not _recently_failed(n["ssid"], now)):
-                target = dict(n)
-                if wifi.get("blank_bssid"):
-                    target["bssid"] = wifi["blank_bssid"]
-                break
     if target is None:
-        wifi["roam_backoff"] = ROAM_CHECK
+        target = _hidden_home_target(now, arrival)
+    if target is None:
+        if not arrival:
+            wifi["roam_backoff"] = ROAM_CHECK
         return
+    if arrival:
+        wifi["roam_backoff"] = ROAM_CHECK
+        wifi["roam_at"] = now
     cur = None
     for x in wifi.get("nets") or []:
         if x["ssid"] == wifi.get("ssid"):
@@ -735,17 +771,20 @@ def wifi_tick():
                 moving = has_fix(now) and spd is not None and spd >= 5
                 if moving:
                     wifi["moved_at"] = now
+                    arrival = False
                 elif (wifi.get("moved_at") is not None
                       and time.ticks_diff(now, wifi["moved_at"]) >= 60000):
                     wifi["moved_at"] = None
-                    wifi["roam_backoff"] = ROAM_CHECK
-                    wifi["roam_at"] = time.ticks_add(now, -ROAM_CHECK)
-                    interval = ROAM_CHECK
-                if (not moving
-                        and time.ticks_diff(now, wifi.get("roam_at") or now)
-                        >= interval):
-                    wifi["roam_at"] = now
-                    _try_roam_home(w)
+                    arrival = True
+                else:
+                    arrival = False
+                due = (not moving
+                       and time.ticks_diff(now, wifi.get("roam_at") or now)
+                       >= interval)
+                if due or arrival:
+                    if due:
+                        wifi["roam_at"] = now
+                    _try_roam_home(w, arrival=arrival and not due)
         return
     if wifi["state"] == "connected":
         # v1.29 reports STAT_CONNECTING on beacon timeout while the IDF
@@ -813,7 +852,7 @@ def log_reset():
     log.update(file=None, created=False, batch=[], points=0, err=0,
                fix=False, lost_at=None, new_seg=False, full=False, online=False,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
-               prev=None, full_check=0, file_at=None)
+               prev=None, full_check=0, file_at=None, good_size=None)
 
 def free():
     try:
@@ -834,7 +873,7 @@ def start_file():
         pass                             # already exists
     name = st["date"].replace("-", "") + "_" + st["time"].replace(":", "")
     log.update(file=LOG_DIR + "/" + name + ".gpx", created=False, points=0,
-               new_seg=False, file_at=time.ticks_ms())
+               new_seg=False, file_at=time.ticks_ms(), good_size=None)
     # First write happens when there are points (parking must not create
     # an empty / one-point file just because a fix came back).
 
@@ -852,29 +891,35 @@ def flush():
         del batch[:]
         return
     creating = not log["created"]
-    old = _file_size(path)
-    extra = 0 if creating else (len(NEW_SEG) if log["new_seg"] else 0)
-    pts = 0
-    i = 0
-    while i < len(batch):
-        pts += len(batch[i])
-        i += 1
-    if creating:
-        name = path[len(LOG_DIR) + 1:-4]
-        expected = len(HEADER % name) + pts + len(FOOTER)
-    else:
-        expected = (old or 0) - len(FOOTER) + extra + pts + len(FOOTER)
+    old = log.get("good_size")
+    if not creating:
+        sz0 = _file_size(path)
+        if old is None or (sz0 is not None and old > sz0):
+            old = sz0
     f = None
     wrote = False
     close_ok = False
+    expected = None
     try:
+        extra = 0 if creating else (len(NEW_SEG) if log["new_seg"] else 0)
+        pts = 0
+        i = 0
+        while i < len(batch):
+            pts += len(batch[i])
+            i += 1
         if creating:
             name = path[len(LOG_DIR) + 1:-4]
+            hdr = HEADER % name
+            expected = len(hdr) + pts + len(FOOTER)
             f = open(path, "wb")
-            f.write((HEADER % name).encode())
+            f.write(hdr.encode())
         else:
+            expected = (old or 0) - len(FOOTER) + extra + pts + len(FOOTER)
             f = open(path, "r+b")
-            f.seek(-len(FOOTER), 2)
+            if old is not None and old >= len(FOOTER):
+                f.seek(old - len(FOOTER), 0)
+            else:
+                f.seek(-len(FOOTER), 2)
             if log["new_seg"]:
                 f.write(NEW_SEG.encode())
         i = 0
@@ -894,12 +939,18 @@ def flush():
     landed = wrote and close_ok
     if not landed:
         sz = _file_size(path)
-        if sz == expected:
+        if expected is not None and sz == expected:
             landed = True
         else:
-            log["created"] = sz is not None and sz > 0
+            if creating:
+                log["created"] = False
+                log["good_size"] = None
+            elif sz is None or sz == 0:
+                log["created"] = False
+                log["good_size"] = None
             return
     log["created"] = True
+    log["good_size"] = expected
     log["points"] += len(batch)
     up["left"] += len(batch)
     del batch[:]
