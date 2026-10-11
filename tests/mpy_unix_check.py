@@ -11,12 +11,12 @@ print("isspace", hasattr("a", "isspace"))
 if hasattr("a", "isalnum"):
     raise SystemExit("unexpected isalnum on this build")
 
-import sys
 here = __file__
 i = here.rfind("/")
-root = here[:i] if i >= 0 else "."
-i = root.rfind("/")
-root = root[:i] if i >= 0 else root
+script_dir = here[:i] if i >= 0 else "."
+i = script_dir.rfind("/")
+# Relative `tests/mpy_unix_check.py` has no slash in the parent; repo root is "."
+root = script_dir[:i] if i >= 0 else "."
 src_path = root + "/gps_logger.py"
 f = open(src_path)
 try:

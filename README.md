@@ -113,12 +113,15 @@ HOSTNAME=Dawarich-GPS-tracker
    fall back to config order, still under backoff.
 6. If every attempt fails, stay in LOG mode and retry later with capped
    exponential backoff (up to 10 minutes).
-7. While connected to a **non-home** net and nearly stopped (< 5 km/h),
-   rescan for home (first interval ~5 min, then 10, 20, … up to 60 min
-   if home is missing or the switch fails). A home AP at ≥ −75 dBm is
-   preferred; if that switch fails, the hotspot is tried again. Offset
-   only advances after HTTP 2xx, so a mid-upload drop is retried
-   (Dawarich dedups).
+7. While connected to a **non-home** net and nearly stopped (fresh fix
+   and speed ≥ 5 km/h is skipped; a stale speed does not block), rescan
+   for home every ~5 min. Back off (10, 20, … 60 min) only after a
+   **failed switch** (home was visible but connect failed). Unseen home
+   and a stop after driving keep the 5 min interval. A home AP at ≥
+   −75 dBm is preferred; if that switch fails, the hotspot is tried
+   again. Offset only advances after HTTP 2xx, so a mid-upload drop is
+   retried (Dawarich dedups). Hidden home (`SSIDn_HIDDEN=1`) is not
+   tried before a visible hotspot at boot.
 
 OLED / log show the connected SSID, never the password. Mode is `UPLOAD`
 on a home net, `LOG+UP` on a hotspot, `LOG` when offline.
@@ -206,8 +209,8 @@ Constants at the top of `gps_logger.py`:
 | `MIN_MOVE` | 10 m | Distance from the last recorded point before a new one is recorded |
 | `FLUSH` | 60000 ms | Interval between flash writes |
 | `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file; also max age of an open file on a hotspot |
-| `ROAM_CHECK` | 5 min | First home-roam scan interval on a hotspot |
-| `ROAM_BACKOFF_MAX` | 60 min | Cap on roam retry after failed / unseen home |
+| `ROAM_CHECK` | 5 min | Home-roam scan interval on a hotspot (and after arriving) |
+| `ROAM_BACKOFF_MAX` | 60 min | Cap on roam retry after a failed home switch |
 | `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI to switch away from a hotspot (also boot preference) |
 | `UPLOAD_GAP_AWAY` | 30 s | Pause between POSTs on a non-home net (UART drain) |
 | `BOOT_OK_MS` | 60 s | Healthy `_loop` before the boot-fail counter is cleared |
