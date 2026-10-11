@@ -1,5 +1,5 @@
-from machine import Pin, I2C, UART
-import ssd1306, time, os, network, gc, math
+from machine import Pin, I2C, UART, WDT
+import machine, sys, time, os, network, gc, math
 
 # Collect garbage early and often. When an allocation doesn't fit, the ESP32
 # port grows the Python heap with the largest free IDF block (~60 kB) instead,
@@ -8,8 +8,15 @@ gc.threshold(8192)
 
 BAUD = 9600                              # NEO-6M/7M/8M default
 
-i2c = I2C(0, scl=Pin(22), sda=Pin(21))
-oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+# OLED is optional: boards without a display (or a failed I²C probe) run
+# headless. draw() and the boot banners become no-ops.
+oled = None
+try:
+    import ssd1306
+    _i2c = I2C(0, scl=Pin(22), sda=Pin(21))
+    oled = ssd1306.SSD1306_I2C(128, 64, _i2c)
+except Exception as e:
+    print("oled", repr(e))
 
 uart = UART(2, baudrate=BAUD, tx=17, rx=16, rxbuf=4096)   # rides out HTTP calls
 
@@ -24,6 +31,7 @@ STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
 MAX_BATCH = 600                          # points kept in RAM if writes fail
+MAX_HDOP = 5                             # skip samples with worse dilution
 
 ENV_FILE = "/.env"                       # SSID, WPA2, GEO_URL, API_KEY lines
 WIFI_CHECK = FLUSH                       # ms between checks while connected
@@ -35,6 +43,8 @@ UPLOAD_GAP = 5000                        # ms between successful batches
 UPLOAD_RETRY = 60000                     # ms to wait after a failed batch
 HTTP_TIMEOUT = 15                        # s
 DEVICE_ID = "esp32"
+MAX_4XX = 3                              # consecutive payload rejections -> quarantine
+WDT_TIMEOUT = 60000                      # ms; must exceed HTTP_TIMEOUT and count_points
 
 # --- NMEA parsing -----------------------------------------------------------
 
@@ -218,17 +228,24 @@ def _connect():
         wifi["state"] = "error"
     wifi["tries"] += 1
 
+def _oled_banner(msg):
+    if oled is None:
+        return
+    oled.fill(0)
+    oled.text(msg, 0, 28)
+    oled.show()
+
 def wifi_start():
     env = load_env(ENV_FILE)
     wifi["ssid"], wifi["pw"] = env.get("SSID"), env.get("WPA2")
     up["url"] = env.get("GEO_URL", "").rstrip("/") or None
     up["key"] = env.get("API_KEY") or None
+    if up["url"] and up["url"].startswith("http://"):
+        print("WARNING: GEO_URL is http:// — API key and GPS data are unencrypted")
     if not wifi["ssid"] or wifi["pw"] is None:
         wifi["state"] = "no .env"
         return
-    oled.fill(0)
-    oled.text("WiFi scanning...", 0, 28)
-    oled.show()
+    _oled_banner("WiFi scanning...")
     try:
         w = wifi["wlan"] = network.WLAN(network.STA_IF)
         w.active(True)
@@ -393,20 +410,22 @@ def log_tick():
     if (log["last_sample"] is None
             or time.ticks_diff(now, log["last_sample"]) >= SAMPLE):
         log["last_sample"] = now
-        t = st["date"] + "T" + st["time"] + "Z"
-        prev = log["prev"]
-        if t != log["last_t"] and (
-                prev is None
-                or _dist(prev[0], prev[1], st["lat"], st["lon"]) > MIN_MOVE):
-            log["last_t"] = t
-            log["prev"] = (st["lat"], st["lon"])
-            ele = ("<ele>%.1f</ele>" % st["alt"]
-                   if st["alt"] is not None else "")
-            log["batch"].append(
-                '<trkpt lat="%.6f" lon="%.6f">%s<time>%s</time></trkpt>\n'
-                % (st["lat"], st["lon"], ele, t))
-            if len(log["batch"]) > MAX_BATCH:
-                log["batch"].pop(0)
+        hdop = st["hdop"]
+        if hdop is None or hdop <= MAX_HDOP:
+            t = st["date"] + "T" + st["time"] + "Z"
+            prev = log["prev"]
+            if t != log["last_t"] and (
+                    prev is None
+                    or _dist(prev[0], prev[1], st["lat"], st["lon"]) > MIN_MOVE):
+                log["last_t"] = t
+                log["prev"] = (st["lat"], st["lon"])
+                ele = ("<ele>%.1f</ele>" % st["alt"]
+                       if st["alt"] is not None else "")
+                log["batch"].append(
+                    '<trkpt lat="%.6f" lon="%.6f">%s<time>%s</time></trkpt>\n'
+                    % (st["lat"], st["lon"], ele, t))
+                if len(log["batch"]) > MAX_BATCH:
+                    log["batch"].pop(0)
     if time.ticks_diff(now, log["last_flush"]) >= FLUSH:
         flush()
 
@@ -424,14 +443,15 @@ def mode_tick():
         up["left"] = count_points()
         up["next_at"] = time.ticks_ms()
     else:                                # next fix starts a new file
-        log.update(fix=False, lost_at=None)
+        log.update(fix=False, lost_at=None, full=False)
 
 # --- Upload ---------------------------------------------------------------
 # Finished GPX files (never the one being recorded) are sent to Dawarich's
-# Overland endpoint, oldest first, UPLOAD_BATCH points per POST. Accepted
-# points are cut from the file by rewriting it to a .tmp and renaming it over
-# the original; the empty file is then removed. A power cut between the POST
-# and the rewrite only resends points, which Dawarich deduplicates.
+# Overland endpoint, oldest first, UPLOAD_BATCH points per POST. Progress is
+# a <file>.gpx.pos sidecar (byte offset, written atomically via .tmp+rename).
+# A power cut between the POST and the offset commit only resends points,
+# which Dawarich deduplicates. The file and sidecar are removed when the
+# offset passes the last <trkpt>.
 #
 # TLS (mbedTLS) needs ~40 kB contiguous from the ESP-IDF heap, outside the
 # Python heap. If the Python heap ever grows (see gc.threshold at the top) it
@@ -444,42 +464,69 @@ _body = bytearray(UPLOAD_BATCH * POINT_MAX + 32)
 
 up = {}
 
+def _rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
 def up_reset():
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
-              left=0, next_at=time.ticks_ms())
+              left=0, fail4=0, next_at=time.ticks_ms())
     try:
-        for n in os.listdir(LOG_DIR):
-            if n.endswith(".tmp"):
-                os.remove(LOG_DIR + "/" + n)   # rewrite cut by power loss
+        names = os.listdir(LOG_DIR)
     except OSError:
-        pass
-    oled.fill(0)
-    oled.text("Counting points", 0, 28)
-    oled.show()
+        names = []
+    gpx = set(n for n in names if n.endswith(".gpx"))
+    for n in names:
+        if n.endswith(".tmp"):
+            _rm(LOG_DIR + "/" + n)       # offset write or old rewrite cut off
+        elif n.endswith(".gpx.pos") and n[:-4] not in gpx:
+            _rm(LOG_DIR + "/" + n)       # leftover sidecar, GPX already gone
+    _oled_banner("Counting points")
     up["left"] = count_points()
 
+def read_offset(path):
+    try:
+        with open(path + ".pos") as f:
+            return int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+def write_offset(path, off):
+    """Atomic sidecar update: write <file>.gpx.pos.tmp, then rename over .pos."""
+    tmp = path + ".pos.tmp"
+    with open(tmp, "w") as f:
+        f.write("%d\n" % off)
+    os.rename(tmp, path + ".pos")
+
 def count_points():
-    """Points in all GPX files, the one being recorded included. Reads every
-    file, so it runs only at boot and when going online; flush() and
-    drop_points() keep up["left"] current in between."""
+    """Points still to upload in all GPX files, the one being recorded
+    included. Counts <trkpt> lines from each file's sidecar offset. Runs at
+    boot and when going online; flush() and commit_offset() keep up["left"]
+    current in between."""
     try:
         names = [n for n in os.listdir(LOG_DIR) if n.endswith(".gpx")]
     except OSError:
         return 0
     total = 0
     for n in names:
+        path = LOG_DIR + "/" + n
         try:
-            with open(LOG_DIR + "/" + n) as f:
+            off = read_offset(path)
+            with open(path, "rb") as f:
+                f.seek(off)
                 for line in f:
-                    if line.startswith("<trkpt"):
+                    if line.startswith(b"<trkpt"):
                         total += 1
         except OSError:
             pass                         # unreadable: upload reports fs err
     return total
 
 def pending():
-    """Finished GPX files, oldest first (names are YYYYMMDD_HHMMSS)."""
+    """Finished GPX files, oldest first (names are YYYYMMDD_HHMMSS).
+    Sidecars (.pos) and quarantined (.bad) files are not listed."""
     try:
         names = sorted(n for n in os.listdir(LOG_DIR) if n.endswith(".gpx"))
     except OSError:
@@ -491,64 +538,101 @@ def _attr(line, name):
     if i < 0:
         return None
     i += len(name) + 2
-    return line[i:line.find('"', i)]
+    j = line.find('"', i)
+    if j < 0:
+        return None
+    return line[i:j]
 
 def _tag(line, name):
     i = line.find("<" + name + ">")
     if i < 0:
         return None
     i += len(name) + 2
-    return line[i:line.find("</" + name + ">", i)]
+    j = line.find("</" + name + ">", i)
+    if j < 0:
+        return None
+    return line[i:j]
+
+def _float(s):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
 
 def _put(pos, b):
     _body[pos:pos + len(b)] = b
     return pos + len(b)
 
-def read_batch(path):
-    """Fill _body with the first UPLOAD_BATCH points of path as Overland
-    JSON -> (points read, body length or 0 if all of them were malformed)."""
-    n, pos, sep = 0, _put(0, b'{"locations":['), b""
-    with open(path) as f:
+def read_batch(path, off=0):
+    """Fill _body with up to UPLOAD_BATCH <trkpt> lines from byte offset off
+    as Overland JSON -> (lines consumed, valid points, body length, new offset).
+    Truncated or non-numeric points are skipped (consumed, not encoded).
+    Body length is 0 if every consumed point was malformed."""
+    n, n_ok, pos, sep = 0, 0, _put(0, b'{"locations":['), b""
+    with open(path, "rb") as f:
+        f.seek(off)
         for line in f:
-            if not line.startswith("<trkpt"):
+            if not line.startswith(b"<trkpt"):
                 continue
             n += 1
-            lat, lon, t = _attr(line, "lat"), _attr(line, "lon"), _tag(line, "time")
-            if lat is not None and lon is not None and t is not None:
-                ele = _tag(line, "ele")
+            try:
+                s = line.decode()
+            except UnicodeError:
+                s = ""
+            lat, lon, t = _attr(s, "lat"), _attr(s, "lon"), _tag(s, "time")
+            lat_f, lon_f = _float(lat), _float(lon)
+            if (lat_f is not None and lon_f is not None and t
+                    and abs(lat_f) <= 90 and abs(lon_f) <= 180):
+                ele = _tag(s, "ele")
+                ele_f = _float(ele) if ele else None
                 loc = ('{"type":"Feature","geometry":{"type":"Point",'
                        '"coordinates":[%s,%s]},"properties":{"timestamp":"%s",'
                        '%s"device_id":"%s"}}'
-                       % (lon, lat, t, '"altitude":%s,' % ele if ele else "",
+                       % (lon, lat, t,
+                          '"altitude":%s,' % ele if ele_f is not None else "",
                           DEVICE_ID)).encode()
                 if len(loc) < POINT_MAX:     # longer = garbage, skipped
                     pos = _put(_put(pos, sep), loc)
                     sep = b","
+                    n_ok += 1
             if n >= UPLOAD_BATCH:
                 break
+        new_off = f.tell()
     if not sep:
-        return n, 0
-    return n, _put(pos, b"]}")
+        return n, 0, 0, new_off
+    return n, n_ok, _put(pos, b"]}"), new_off
 
-def drop_points(path, n):
-    """Remove the first n points from path; delete it if none are left."""
-    tmp, left, cut = path + ".tmp", 0, n
-    with open(path) as src, open(tmp, "w") as dst:
-        for line in src:
-            if line.startswith("<trkpt"):
-                if n:
-                    n -= 1
-                    continue
-                left += 1
-            elif line == NEW_SEG and n:
-                continue                 # segment break inside the cut part
-            dst.write(line)
-    if left:
-        os.rename(tmp, path)
-    else:
-        os.remove(tmp)
-        os.remove(path)
-    up["left"] = max(up["left"] - (cut - n), 0)
+def commit_offset(path, n, new_off):
+    """Record that n <trkpt> lines are done. Delete the file once none remain
+    after new_off. Crash between POST and this call resends (at-least-once)."""
+    write_offset(path, new_off)
+    up["left"] = max(up["left"] - n, 0)
+    if n < UPLOAD_BATCH:
+        _rm(path)
+        _rm(path + ".pos")
+
+def _quarantine(path):
+    """Park a file that Dawarich keeps rejecting so upload can move on."""
+    left = 0
+    try:
+        off = read_offset(path)
+        with open(path, "rb") as f:
+            f.seek(off)
+            for line in f:
+                if line.startswith(b"<trkpt"):
+                    left += 1
+    except OSError:
+        pass
+    try:
+        os.rename(path, path + ".bad")
+    except OSError as e:
+        print("quarantine", repr(e))
+        return False
+    _rm(path + ".pos")
+    up["left"] = max(up["left"] - left, 0)
+    up["fail4"] = 0
+    up["state"] = "quarantine"
+    return True
 
 def upload_tick():
     """Send one batch when online and due."""
@@ -568,12 +652,13 @@ def upload_tick():
         return
     path = files[0]
     try:
-        n, size = read_batch(path)
-        if not n:                        # header/footer only
-            os.remove(path)
+        n, n_ok, size, new_off = read_batch(path, read_offset(path))
+        if not n:                        # header/footer only past the offset
+            _rm(path)
+            _rm(path + ".pos")
             return
-        if not size:                     # only malformed points: cut them
-            drop_points(path, n)
+        if not size:                     # only malformed points: skip them
+            commit_offset(path, n, new_off)
             return
     except OSError:
         up["err"] += 1
@@ -589,36 +674,44 @@ def upload_tick():
     code = None
     try:
         import requests
-        r = requests.post("%s/api/v1/overland/batches?api_key=%s"
-                          % (up["url"], up["key"]),
+        r = requests.post("%s/api/v1/overland/batches" % up["url"],
                           data=memoryview(_body)[:size],
-                          headers={"Content-Type": "application/json"},
+                          headers={"Content-Type": "application/json",
+                                   "Authorization": "Bearer %s" % up["key"]},
                           timeout=HTTP_TIMEOUT)
         code = r.status_code
         r.close()
-    except (OSError, ImportError) as e:
-        print("upload", repr(e))
     except MemoryError:
         r = None
         _low_mem(time.ticks_ms())
         return
+    except Exception as e:
+        print("upload", repr(e))
     r = None
     gc.collect()
     now = time.ticks_ms()
-    print("upload", path, n, code, gc.mem_free())
+    print("upload", path, n, n_ok, code, gc.mem_free())
     if code is not None and 200 <= code < 300:
         try:
-            drop_points(path, n)
+            commit_offset(path, n, new_off)
         except OSError:
             up["err"] += 1
             up["state"] = "fs err"
             up["next_at"] = time.ticks_add(now, UPLOAD_RETRY)
             return
-        up["sent"] += n
+        up["sent"] += n_ok
+        up["fail4"] = 0
         up["state"] = "ok"
         up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
     elif code == 401:
         up["state"] = "auth fail"        # wrong API_KEY: stop for this run
+    elif code is not None and 400 <= code < 500:
+        up["err"] += 1
+        up["fail4"] += 1
+        up["state"] = "err " + str(code)
+        if up["fail4"] >= MAX_4XX:
+            _quarantine(path)
+        up["next_at"] = time.ticks_add(now, UPLOAD_RETRY)
     else:
         up["err"] += 1
         up["state"] = "err " + ("net" if code is None else str(code))
@@ -649,6 +742,8 @@ def _short(n):
     return str(n) if n < 10000 else "%dk" % (n // 1000)
 
 def draw():
+    if oled is None:
+        return
     oled.fill(0)
     oled.fill_rect(0, 0, 128, 8, 1)
     oled.text("GPS Logger", 0, 0, 0)
@@ -674,13 +769,31 @@ def run():
     wifi_start()
     try:
         _loop()
+    except Exception as e:
+        if hasattr(sys, "print_exception"):
+            sys.print_exception(e)
+        else:
+            print("crash", e)
+        try:
+            flush()
+        except Exception:
+            pass
+        time.sleep(1)
+        machine.reset()
     finally:
-        flush()                          # don't lose the pending batch
+        try:
+            flush()
+        except Exception:
+            pass
         wifi_stop()
 
 def _loop():
+    # WDT starts only once the logger is actually running. Holding GPIO25 at
+    # boot skips importing this module, so the REPL is not reset by the dog.
+    wdt = WDT(timeout=WDT_TIMEOUT)
     last = None
     while True:
+        wdt.feed()
         read_uart()
         log_tick()
         wifi_tick()
@@ -691,5 +804,3 @@ def _loop():
             draw()
             last = now
         time.sleep_ms(20)
-
-run()

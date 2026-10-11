@@ -8,20 +8,21 @@ stops logging and uploads the finished tracks to a
 ## Features
 
 - Reads NMEA (`RMC`, `GGA`, `GSA`, `GSV`) from a u-blox NEO-6M/7M/8M over UART, with checksum validation.
-- Samples the position every second and records a point only after moving more than 10 m from the last recorded one, to GPX 1.1 files named `/gpx/YYYYMMDD_HHMMSS.gpx`.
+- Samples the position every second and records a point only after moving more than 10 m from the last recorded one, to GPX 1.1 files named `/gpx/YYYYMMDD_HHMMSS.gpx`. Samples with HDOP worse than 5 are skipped.
 - Power-loss safe: each file is always a complete GPX document, written in batches every 60 s (LittleFS commits on close).
 - Short fix losses start a new track segment; a gap over 5 minutes starts a new file.
-- Keeps 32 kB of flash free; stops logging when full.
-- On WiFi: uploads finished files oldest-first, 50 points per POST, trimming accepted points from the file and deleting it when empty. Resends after a crash are deduplicated by Dawarich.
-- 128×64 OLED status screen: WiFi state, GPS fix (2D/3D/DGPS), mode (LOG/UPLOAD), free flash and points left to upload.
+- Keeps 32 kB of flash free; stops logging when full. Going back offline clears the full flag so logging can resume if space has been freed.
+- On WiFi: uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.gpx.pos` sidecar (byte offset, atomic `.tmp` + rename) so flash is not rewritten after every batch. A crash between POST and the offset commit resends the same points; Dawarich deduplicates. Truncated or non-numeric `<trkpt>` lines are skipped. After 3 consecutive HTTP 4xx payload rejections the file is renamed `*.gpx.bad` (quarantine) so upload can continue.
+- 128×64 OLED status screen: WiFi state, GPS fix (2D/3D/DGPS), mode (LOG/UPLOAD), free flash and points left to upload. If the display is missing, the logger runs headless.
+- Hardware watchdog (~60 s) fed every main-loop iteration; an uncaught exception prints the traceback, flushes, waits ~1 s and `machine.reset()`. The watchdog is created only after the logger starts, so the GPIO25 boot-bypass REPL is not reset.
 
 ## Hardware
 
 | Part | Notes |
 |------|-------|
-| ESP32 dev board | Original ESP32 (Xtensa, `-march=xtensawin`) |
+| ESP32 dev board | Original ESP32 (Xtensa, `-march=xtensawin`). Use a **WROOM** module, not WROVER: on WROVER boards GPIO16/17 are wired to PSRAM and cannot be used for UART2. |
 | GPS module | u-blox NEO-6M / 7M / 8M, UART at 9600 baud |
-| OLED display | SSD1306, 128×64, I²C (address 0x3C) |
+| OLED display | SSD1306, 128×64, I²C (address 0x3C); optional (headless if absent) |
 | Push button | E.g. the centre (M) press of a 5-way joystick module; optional |
 
 ### Wiring
@@ -40,6 +41,10 @@ stops logging and uploads the finished tracks to a
 
 Most GPS and OLED breakout boards already have I²C pull-ups and a regulator;
 check yours if powering the GPS from 5 V instead.
+
+**ESP32-WROVER:** GPIO16 and GPIO17 are used by the PSRAM. This firmware's
+UART2 default will not work on those modules; pick a WROOM board or change
+`tx`/`rx` in `gps_logger.py` to free pins.
 
 ## Software setup
 
@@ -64,6 +69,11 @@ GEO_URL=https://dawarich.example.com
 API_KEY=your-dawarich-api-key
 ```
 
+The API key is sent as `Authorization: Bearer <key>` (Dawarich accepts that
+header as well as `?api_key=`). Prefer `https://` for `GEO_URL`: an `http://`
+URL is still used (typical for a LAN self-host) but the logger prints a
+warning, because the key and GPS data then go in the clear.
+
 ```bash
 .venv/bin/mpremote cp .env :.env
 ```
@@ -79,6 +89,7 @@ PORT=/dev/ttyUSB1 ./deploy.sh
 
 The script compiles `gps_logger.py` to `gps_logger.mpy`, copies it with
 `main.py`, removes any stray `gps_logger.py` on the device, and resets it.
+`tests/` is not copied to the device.
 
 The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, so
@@ -86,13 +97,17 @@ HTTPS uploads fail with `ENOMEM`.
 
 ## Usage
 
-- Power on: the logger starts automatically, scans once for the home network, then shows the status screen.
-- **Skip the logger**: hold the button (GPIO25) while resetting — `main.py` exits to the REPL so you can use `mpremote`.
+- Power on: the logger starts automatically, scans once for the home network, then shows the status screen (or runs headless).
+- **Skip the logger**: hold the button (GPIO25) while resetting — `main.py` exits to the REPL so you can use `mpremote`. The watchdog is not started in that case.
+- An uncaught exception (for example a bad `GEO_URL` that used to kill the loop) is printed, the pending GPX batch is flushed, and the board resets after about a second. If a blocking call hangs beyond ~60 s, the watchdog resets the chip.
 - Logs live in `/gpx/` on the device; pull them manually with:
 
   ```bash
   .venv/bin/mpremote cp :/gpx/20261005_101500.gpx .
   ```
+
+  Upload progress for a file is `/gpx/20261005_101500.gpx.pos`. Files Dawarich
+  rejected are renamed with a `.bad` suffix and left on flash.
 
 ## Configuration
 
@@ -105,6 +120,10 @@ Constants at the top of `gps_logger.py`:
 | `FLUSH` | 60000 ms | Interval between flash writes |
 | `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file |
 | `MIN_FREE` | 32 kB | Flash reserve |
+| `MAX_HDOP` | 5 | Skip samples with GPS dilution worse than this |
 | `UPLOAD_BATCH` | 50 | Points per POST |
 | `UPLOAD_RETRY` | 60000 ms | Back-off after a failed upload |
+| `HTTP_TIMEOUT` | 15 s | HTTP POST timeout (the watchdog is longer than this) |
+| `WDT_TIMEOUT` | 60000 ms | Hardware watchdog; longer than `HTTP_TIMEOUT` and `count_points` |
+| `MAX_4XX` | 3 | Consecutive HTTP 4xx responses before quarantining a file |
 | `DEVICE_ID` | `esp32` | Device ID sent to Dawarich |
