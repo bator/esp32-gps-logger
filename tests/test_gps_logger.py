@@ -1386,6 +1386,45 @@ try:
     check("B3: HOME2=1 treats hotspot as home",
           w["home"] is True, "home=%s" % w["home"])
 
+    # --- MT: home arrival must not drop points a failed flush left in RAM ---
+    gl.log_reset()
+    w = start_wifi(env_hot, [("home", -30)], ["home"])
+    check("MT setup: connected to home net",
+          w["state"] == "connected" and w["home"] is True)
+    mt_path = os.path.join(tmpdir, "mode_tick_trip.gpx")
+    make_gpx(mt_path, 2)
+    mt_pt = ('<trkpt lat="52.5" lon="13.4"><time>2026-10-05T12:00:05Z'
+             '</time></trkpt>\n')
+    gl.log.update(file=mt_path, created=True, points=2, batch=[mt_pt],
+                  good_size=os.path.getsize(mt_path), new_seg=False, err=0,
+                  online=False)
+    import builtins
+    orig_open = builtins.open
+
+    def _no_flash(*a, **k):
+        raise OSError("flash")
+
+    builtins.open = _no_flash
+    try:
+        gl.mode_tick()
+    finally:
+        builtins.open = orig_open
+    check("MT-1: failed flush on home arrival keeps the batch and the file",
+          mt_pt in gl.log["batch"] and gl.log["file"] == mt_path,
+          "batch=%s file=%s" % (gl.log["batch"], gl.log.get("file")))
+    check("MT-1: home arrival still stops logging after a failed flush",
+          gl.log["online"] is True and gl.at_home() is True)
+
+    _clock[0] += gl.FLUSH
+    gl.mode_tick()
+    with open(mt_path) as f:
+        mt_text = f.read()
+    check("MT-2: retry on home lands the kept points and closes the file",
+          mt_text.count("<trkpt") == 3 and gl.log["batch"] == []
+          and gl.log["file"] is None,
+          "n_pts=%s batch=%s file=%s" % (
+              mt_text.count("<trkpt"), gl.log["batch"], gl.log.get("file")))
+
     # --- K1: keepalive deinit + deadline -----------------------------------
     _resets[:] = []
     _timers[:] = []
