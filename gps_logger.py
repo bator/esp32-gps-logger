@@ -50,7 +50,7 @@ LOST_GRACE = 5000                        # ms to let IDF auto-reconnect after dr
 ROAM_CHECK = 300000                      # ms between home-roam scans on hotspot
 ROAM_BACKOFF_MAX = 3600000               # ms cap on roam retry (60 min)
 ROAM_MIN_RSSI = -75                      # do not jump to a weak home AP
-LINE_MAX = 512                           # bounded GPX readline
+LINE_MAX = 512                           # bounded track-line readline
 BOOT_OK_MS = 60000                       # clear boot-fail after this of _loop
 
 UPLOAD_BATCH = 50                        # points per POST to Dawarich
@@ -66,7 +66,7 @@ DEFAULT_HOSTNAME = "Dawarich-GPS-tracker"
 DEVICE_ID = DEFAULT_DEVICE_ID            # Overland tracker id (overridable)
 HOSTNAME = DEFAULT_HOSTNAME              # DHCP hostname (overridable)
 ID_MAX = 32                              # DEVICE_ID / HOSTNAME length cap
-MAX_BAD_BYTES = 65536                    # cap on appended <file>.gpx.bad
+MAX_BAD_BYTES = 65536                    # cap on appended <file>.bad
 MAX_BAD_RETRY = 8                        # successful .bad batches per file per boot
 MAX_GLOBAL_PAYLOAD = 3                   # consecutive 400/422 -> global backoff
 WDT_TIMEOUT = 120000                     # ms; ESP32 WDT cannot be disarmed
@@ -823,16 +823,17 @@ def at_home():
     return wifi["state"] == "connected" and wifi.get("home")
 
 # --- GPX logger -------------------------------------------------------------
-# The file is always a complete GPX document: each batch overwrites the
-# closing tags with new points plus the closing tags again. LittleFS commits
-# on close, so a power cut leaves either the previous or the new version.
+# Format (.trk): one point per line, "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ"
+# (~46 bytes; the old GPX XML was ~112). ele/hdop are empty when unknown.
+# "-" starts a new segment. The file is always complete: each batch
+# overwrites the footer with new points plus the footer again. LittleFS
+# commits on close, so a power cut leaves either the previous or the new
+# version. A line cut short has no newline and is skipped on read.
+# Older .gpx files (XML) are still read and uploaded.
 
-HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-          '<gpx version="1.1" creator="esp32 gps_logger" '
-          'xmlns="http://www.topografix.com/GPX/1/1">\n'
-          '<trk><name>%s</name><trkseg>\n')
-FOOTER = "</trkseg></trk></gpx>\n"
-NEW_SEG = "</trkseg><trkseg>\n"
+HEADER = "#TRK1\n"
+FOOTER = "#END\n"
+NEW_SEG = "-\n"
 
 log = {}
 
@@ -861,7 +862,7 @@ def start_file():
     except OSError:
         pass                             # already exists
     name = st["date"].replace("-", "") + "_" + st["time"].replace(":", "")
-    log.update(file=LOG_DIR + "/" + name + ".gpx", created=False, points=0,
+    log.update(file=LOG_DIR + "/" + name + ".trk", created=False, points=0,
                new_seg=False, file_at=time.ticks_ms(), good_size=None)
     # First write happens when there are points (parking must not create
     # an empty / one-point file just because a fix came back).
@@ -897,11 +898,9 @@ def flush():
             pts += len(batch[i])
             i += 1
         if creating:
-            name = path[len(LOG_DIR) + 1:-4]
-            hdr = HEADER % name
-            expected = len(hdr) + pts + len(FOOTER)
+            expected = len(HEADER) + pts + len(FOOTER)
             f = open(path, "wb")
-            f.write(hdr.encode())
+            f.write(HEADER.encode())
         else:
             f = open(path, "r+b")
             _seek_footer(f, old)
@@ -1029,11 +1028,12 @@ def log_tick():
                 log["prev"] = (st["lat"], st["lon"])
                 ele = ""
                 if st["alt"] is not None and st.get("fixtype") != 2:
-                    ele = "<ele>%.1f</ele>" % st["alt"]
-                hd = ("<hdop>%.1f</hdop>" % hdop) if hdop is not None else ""
-                log["batch"].append(
-                    '<trkpt lat="%.6f" lon="%.6f">%s%s<time>%s</time></trkpt>\n'
-                    % (st["lat"], st["lon"], ele, hd, t))
+                    ele = "%.1f" % st["alt"]
+                hd = ("%.1f" % hdop) if hdop is not None else ""
+                tc = st["date"].replace("-", "") + "T" + st["time"].replace(
+                    ":", "") + "Z"
+                log["batch"].append("%.6f,%.6f,%s,%s,%s\n" % (
+                    st["lat"], st["lon"], ele, hd, tc))
                 if len(log["batch"]) > MAX_BATCH:
                     log["batch"].pop(0)
     if time.ticks_diff(now, log["last_flush"]) >= FLUSH:
@@ -1067,14 +1067,14 @@ def _home_close():
     up["next_at"] = time.ticks_ms()
 
 # --- Upload ---------------------------------------------------------------
-# Finished GPX files (never the one being recorded) are sent to Dawarich's
+# Finished track files (never the one being recorded) are sent to Dawarich's
 # Overland endpoint, oldest first, UPLOAD_BATCH points per POST. Progress is
-# a <file>.gpx.pos sidecar (byte offset). LittleFS lfs_rename replaces the
+# a <file>.pos sidecar (byte offset). LittleFS lfs_rename replaces the
 # destination atomically; FAT vfs_fat does remove+rename (not atomic: a crash
 # leaves no .pos, so the next boot resends from 0; Dawarich deduplicates via
 # index_points_on_user_id_timestamp_lonlat / archival_safe_upsert_all).
 #
-# Offset advances only after a 2xx or a durable write to <file>.gpx.bad.
+# Offset advances only after a 2xx or a durable write to <file>.bad.
 # If .bad is full, uploads of that file pause (state "bad full"). Three
 # consecutive payload errors without a 2xx are treated as a server/config
 # problem: backoff, no further quarantine. .bad retries that still 4xx
@@ -1173,7 +1173,7 @@ def up_reset():
         if n.endswith(".tmp"):
             _rm(LOG_DIR + "/" + n)
         elif n.endswith(".pos") and n[:-4] not in have:
-            _rm(LOG_DIR + "/" + n)       # orphan .gpx.pos or .gpx.bad.pos
+            _rm(LOG_DIR + "/" + n)       # orphan .pos or .bad.pos
     _oled_banner("Counting points")
     try:
         up["left"] = count_points()
@@ -1210,7 +1210,7 @@ def read_offset(path):
     return off
 
 def write_offset(path, off):
-    """Sidecar update: write <file>.gpx.pos.tmp, then rename over .pos.
+    """Sidecar update: write <file>.pos.tmp, then rename over .pos.
     Atomic on LittleFS; on FAT a crash may drop the .pos (resend from 0)."""
     tmp = path + ".pos.tmp"
     with open(tmp, "w") as f:
@@ -1218,7 +1218,7 @@ def write_offset(path, off):
     os.rename(tmp, path + ".pos")
 
 def _readline(f):
-    """One GPX line, at most LINE_MAX bytes. Over-long lines are drained to
+    """One track line, at most LINE_MAX bytes. Over-long lines are drained to
     the next newline and returned as b'' (skip). None means true EOF."""
     try:
         line = f.readline(LINE_MAX)
@@ -1240,18 +1240,20 @@ def _readline(f):
     return line
 
 def count_points():
-    """Points still to upload in all GPX files, the one being recorded
-    included. Counts <trkpt> lines from each file's sidecar offset. Runs at
+    """Points still to upload in all track files, the one being recorded
+    included. Counts point lines from each file's sidecar offset. Runs at
     boot; flush() and commit_offset() keep up["left"] current in between.
     Feeds the WDT every 64 lines so a full flash cannot starve it."""
     try:
-        names = [n for n in os.listdir(LOG_DIR) if n.endswith(".gpx")]
+        names = [n for n in os.listdir(LOG_DIR)
+                 if n.endswith((".gpx", ".trk"))]
     except OSError:
         return 0
     total = 0
     nlines = 0
     for n in names:
         path = LOG_DIR + "/" + n
+        gpx = not _is_trk(path)
         try:
             off = read_offset(path)
             with open(path, "rb") as f:
@@ -1264,7 +1266,7 @@ def count_points():
                     nlines += 1
                     if nlines & 63 == 0:
                         feed()
-                    if line.startswith(b"<trkpt"):
+                    if _is_point(line, gpx):
                         total += 1
         except (OSError, MemoryError) as e:
             print("count", path, repr(e))
@@ -1272,10 +1274,11 @@ def count_points():
     return total
 
 def pending():
-    """Finished GPX files, oldest first (names are YYYYMMDD_HHMMSS).
+    """Finished track files, oldest first (names are YYYYMMDD_HHMMSS).
     Sidecars (.pos) and quarantined (.bad) files are not listed."""
     try:
-        names = sorted(n for n in os.listdir(LOG_DIR) if n.endswith(".gpx"))
+        names = sorted(n for n in os.listdir(LOG_DIR)
+                       if n.endswith((".gpx", ".trk")))
     except OSError:
         return []
     return [p for p in (LOG_DIR + "/" + n for n in names) if p != log["file"]]
@@ -1283,7 +1286,8 @@ def pending():
 def pending_bad():
     """Rejected-batch files left for later recovery."""
     try:
-        names = sorted(n for n in os.listdir(LOG_DIR) if n.endswith(".gpx.bad"))
+        names = sorted(n for n in os.listdir(LOG_DIR)
+                       if n.endswith((".gpx.bad", ".trk.bad")))
     except OSError:
         return []
     return [LOG_DIR + "/" + n for n in names]
@@ -1337,11 +1341,37 @@ def _put(pos, b):
     _body[pos:pos + len(b)] = b
     return pos + len(b)
 
+def _is_trk(path):
+    return path.endswith(".trk") or path.endswith(".trk.bad")
+
+def _is_point(line, gpx):
+    """One point line: <trkpt> in old .gpx, "lat,lon,ele,hdop,time" in .trk.
+    A line without its newline (power cut mid-write) is not a point."""
+    if gpx:
+        return line.startswith(b"<trkpt")
+    return (line[-1:] == b"\n" and line.count(b",") == 4
+            and line[:1] != b"#")
+
+def _point(line, gpx):
+    """(lat, lon, time, ele, hdop) as strings, time as ISO UTC, or None."""
+    if gpx:
+        s = line.decode()
+        return (_attr(s, "lat"), _attr(s, "lon"), _tag(s, "time"),
+                _tag(s, "ele"), _tag(s, "hdop"))
+    f = line[:-1].decode().split(",")
+    tc = f[4]
+    if len(tc) != 16 or tc[8] != "T" or tc[15] != "Z":
+        return None
+    t = "%s-%s-%sT%s:%s:%sZ" % (tc[0:4], tc[4:6], tc[6:8],
+                                tc[9:11], tc[11:13], tc[13:15])
+    return (f[0], f[1], t, f[2], f[3])
+
 def read_batch(path, off=0):
-    """Fill _body with up to UPLOAD_BATCH valid <trkpt> lines from byte offset
-    off as Overland JSON -> (n, n_ok, body_len, new_off, eof).
+    """Fill _body with up to UPLOAD_BATCH valid points from byte offset off
+    as Overland JSON -> (n, n_ok, body_len, new_off, eof).
     Truncated / non-numeric / inf / over-long points are skipped.
     A valid point that does not fit is left unread (seek back, eof=False)."""
+    gpx = not _is_trk(path)
     n, n_ok, pos, sep = 0, 0, _put(0, b'{"locations":['), b""
     nlines, eof = 0, False
     with open(path, "rb") as f:
@@ -1356,26 +1386,26 @@ def read_batch(path, off=0):
             nlines += 1
             if nlines & 63 == 0:
                 feed()
-            if not line or not line.startswith(b"<trkpt"):
+            if not line or not _is_point(line, gpx):
                 continue
             n += 1
             try:
-                s = line.decode()
+                p = _point(line, gpx)
             except UnicodeError:
-                s = ""
-            lat, lon, t = _attr(s, "lat"), _attr(s, "lon"), _tag(s, "time")
-            lat_f, lon_f = _float(lat), _float(lon)
-            ok = (lat_f is not None and lon_f is not None and _finite(lat_f)
-                  and _finite(lon_f) and abs(lat_f) <= 90 and abs(lon_f) <= 180
-                  and _valid_time(t))
+                p = None
+            lat_f = lon_f = None
+            if p is not None:
+                lat_f, lon_f = _float(p[0]), _float(p[1])
+            ok = (p is not None and lat_f is not None and lon_f is not None
+                  and _finite(lat_f) and _finite(lon_f)
+                  and abs(lat_f) <= 90 and abs(lon_f) <= 180
+                  and _valid_time(p[2]))
             loc = None
             if ok:
-                ele = _tag(s, "ele")
-                ele_f = _float(ele) if ele else None
+                ele_f = _float(p[3]) if p[3] else None
                 if ele_f is not None and not _finite(ele_f):
                     ele_f = None
-                hdop = _tag(s, "hdop")
-                hdop_f = _float(hdop) if hdop else None
+                hdop_f = _float(p[4]) if p[4] else None
                 extra = ""
                 if ele_f is not None:
                     extra += '"altitude":%.1f,' % ele_f
@@ -1384,7 +1414,7 @@ def read_batch(path, off=0):
                 loc = ('{"type":"Feature","geometry":{"type":"Point",'
                        '"coordinates":[%.6f,%.6f]},"properties":{'
                        '"timestamp":"%s",%s"device_id":"%s"}}'
-                       % (lon_f, lat_f, t, extra, DEVICE_ID)).encode()
+                       % (lon_f, lat_f, p[2], extra, DEVICE_ID)).encode()
                 need = len(sep) + len(loc)
                 if pos + need + 2 > len(_body):
                     if n_ok == 0:
@@ -1407,7 +1437,7 @@ def read_batch(path, off=0):
     return n, n_ok, _put(pos, b"]}"), new_off, eof
 
 def commit_offset(path, n, new_off, eof=False):
-    """Record that n <trkpt> lines are done. Delete only at true EOF.
+    """Record that n points are done. Delete only at true EOF.
     Crash between POST and this call resends (at-least-once)."""
     write_offset(path, new_off)
     up["left"] = max(up["left"] - n, 0)
@@ -1418,7 +1448,7 @@ def commit_offset(path, n, new_off, eof=False):
     _clear_bad_full(path)
 
 def _append_bad(path, off, new_off):
-    """Copy consumed <trkpt> lines to <path>.bad. False if not durable."""
+    """Copy consumed point lines to <path>.bad. False if not durable."""
     if path.endswith(".bad"):
         return False
     bad = path + ".bad"
@@ -1427,6 +1457,7 @@ def _append_bad(path, off, new_off):
     if sz >= MAX_BAD_BYTES or sz + need > MAX_BAD_BYTES:
         print("bad file full", bad)
         return False
+    gpx = not _is_trk(path)
     try:
         with open(path, "rb") as src, open(bad, "ab") as dst:
             if off:
@@ -1435,7 +1466,7 @@ def _append_bad(path, off, new_off):
                 line = _readline(src)
                 if line is None:
                     break
-                if line.startswith(b"<trkpt"):
+                if _is_point(line, gpx):
                     dst.write(line)
     except (OSError, MemoryError) as e:
         print("quarantine", repr(e))
@@ -1483,7 +1514,7 @@ def _schedule(now, ms=None):
     up["next_at"] = time.ticks_add(now, ms)
 
 def _hold_file(path, now, ms):
-    """Backoff one file so a stuck oldest GPX does not block the rest."""
+    """Backoff one file so a stuck oldest track does not block the rest."""
     h = up.get("hold") or {}
     h[path] = time.ticks_add(now, ms)
     up["hold"] = h
@@ -1584,7 +1615,7 @@ def upload_tick():
         fsize = _file_size(path) or 0
         if not n:
             if eof or fsize == 0:
-                _rm(path)                # empty / EOF .gpx and .bad
+                _rm(path)                # empty / EOF track and .bad
                 _rm(path + ".pos")
                 _clear_bad_full(path)
             else:
@@ -1746,7 +1777,7 @@ def draw():
 # --- Main loop --------------------------------------------------------------
 
 def run():
-    """Show the logger state on the OLED, log GPX offline, upload online."""
+    """Show the logger state on the OLED, log tracks offline, upload online."""
     global _wdt, _running, _boot_ok_done
     _keep_stop()
     _running = False
