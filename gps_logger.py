@@ -1043,16 +1043,28 @@ def mode_tick():
     """Home SSID: close the file and upload only. Elsewhere: keep logging."""
     home = at_home()
     if home == log["online"]:
+        # Still at home, but a flash write failed: retry the kept batch
+        # every FLUSH. Nothing new is sampled while online.
+        if (home and log["batch"] and time.ticks_diff(
+                time.ticks_ms(), log["last_flush"]) >= FLUSH):
+            _home_close()
         return
     log["online"] = home
     if home:
-        flush()
-        del log["batch"][:]
-        log.update(file=None, fix=False, new_seg=False, last_t=None,
-                   prev=None, file_at=None)
-        up["next_at"] = time.ticks_ms()
+        _home_close()
     else:
         log.update(fix=False, lost_at=None, full=False)
+
+def _home_close():
+    """Write the batch, then close the file. The file and its points are
+    kept if the write fails: dropping them would lose data, and file=None
+    would stop any later flush from writing them."""
+    flush()
+    if log["batch"]:
+        return
+    log.update(file=None, fix=False, new_seg=False, last_t=None,
+               prev=None, file_at=None)
+    up["next_at"] = time.ticks_ms()
 
 # --- Upload ---------------------------------------------------------------
 # Finished GPX files (never the one being recorded) are sent to Dawarich's
