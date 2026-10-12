@@ -377,9 +377,22 @@ def check(name, cond, detail=""):
         failures.append(msg)
 
 
+GPX_HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+              '<gpx version="1.1" creator="esp32 gps_logger" '
+              'xmlns="http://www.topografix.com/GPX/1/1">\n'
+              '<trk><name>%s</name><trkseg>\n')
+GPX_FOOTER = "</trkseg></trk></gpx>\n"
+
+
 def make_gpx(path, n, extra=b"", times=None, extras=None):
+    """Write n points to path. A .trk path gets the compact format, anything
+    else the legacy GPX XML (old .gpx files, still uploaded).
+    extra is appended raw before the footer; extras holds per-point XML tags
+    for GPX only."""
+    if path.endswith(".trk"):
+        return make_trk(path, n, extra=extra, times=times)
     name = os.path.basename(path)[:-4]
-    parts = [(gl.HEADER % name).encode()]
+    parts = [(GPX_HEADER % name).encode()]
     for i in range(n):
         lat = 52.5 + i * 0.0001
         lon = 13.4 + i * 0.0001
@@ -389,6 +402,32 @@ def make_gpx(path, n, extra=b"", times=None, extras=None):
         parts.append(
             ('<trkpt lat="%.6f" lon="%.6f">%s'
              '<time>%s</time></trkpt>\n' % (lat, lon, extra_tags, t)).encode())
+    if extra:
+        parts.append(extra)
+    parts.append(GPX_FOOTER.encode())
+    with open(path, "wb") as f:
+        f.write(b"".join(parts))
+
+
+def trk_line(lat, lon, t, ele="10.0", hdop=""):
+    """One .trk point line; t is the ISO form, stored compact."""
+    tc = t.replace("-", "").replace(":", "")
+    return "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hdop, tc)
+
+
+def pts_in(path):
+    """Point lines in a track file (.trk) or a legacy .gpx file."""
+    gpx = not gl._is_trk(path)
+    with open(path, "rb") as f:
+        return sum(1 for line in f if gl._is_point(line, gpx))
+
+
+def make_trk(path, n, extra=b"", times=None):
+    parts = [gl.HEADER.encode()]
+    for i in range(n):
+        t = (times[i] if times else
+             "2026-10-05T%02d:%02d:%02dZ" % (i // 3600, (i // 60) % 60, i % 60))
+        parts.append(trk_line(52.5 + i * 0.0001, 13.4 + i * 0.0001, t).encode())
     if extra:
         parts.append(extra)
     parts.append(gl.FOOTER.encode())
@@ -423,7 +462,7 @@ def online(tmpdir):
     gl.LOG_DIR = tmpdir
     try:
         for n in os.listdir(tmpdir):
-            if n.endswith((".gpx", ".pos", ".tmp", ".bad")):
+            if n.endswith((".gpx", ".trk", ".pos", ".tmp", ".bad")):
                 try:
                     os.remove(os.path.join(tmpdir, n))
                 except OSError:
@@ -971,7 +1010,7 @@ try:
     gl.log_reset()
     gl.log["full"] = False
     gl.log["online"] = False
-    gl.log["file"] = os.path.join(tmpdir, "now.gpx")
+    gl.log["file"] = os.path.join(tmpdir, "now.trk")
     gl.log["created"] = True
     gl.st.update(valid=True, date="2026-10-05", time="12:00:00",
                  lat=52.5, lon=13.4, alt=10.0, pos_at=_clock[0],
@@ -989,8 +1028,9 @@ try:
     gl.log_tick()
     check("HDOP: point with hdop<=5 is recorded",
           len(gl.log["batch"]) == 1)
-    check("HDOP: recorded line stores <hdop>",
-          "<hdop>" in gl.log["batch"][0])
+    check("HDOP: recorded line stores hdop",
+          gl.log["batch"][0].split(",")[3] == "1.2",
+          "line=%r" % gl.log["batch"][0])
     # stale hdop from a previous epoch is ignored (point still logged)
     gl.st["hdop"] = 9.0
     gl.st["hdop_at"] = _clock[0] - 10000
@@ -1264,13 +1304,13 @@ try:
     online(tmpdir)
     path = os.path.join(tmpdir, "20261005_20long.gpx")
     with open(path, "wb") as f:
-        f.write((gl.HEADER % "20261005_20long").encode())
+        f.write((GPX_HEADER % "20261005_20long").encode())
         f.write(b'<trkpt lat="52.500000" lon="13.400000">'
                 b'<time>2026-10-05T00:00:00Z</time></trkpt>\n')
         f.write(b"A" * 200000 + b"\n")
         f.write(b'<trkpt lat="52.500100" lon="13.400100">'
                 b'<time>2026-10-05T00:00:01Z</time></trkpt>\n')
-        f.write(gl.FOOTER.encode())
+        f.write(GPX_FOOTER.encode())
     n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
     check("B2: 200 kB over-long line skipped, both points encoded",
           n_ok == 2 and eof,
@@ -1345,7 +1385,7 @@ try:
         p = os.path.join(tmpdir, n)
         if p == current:
             continue
-        if n.endswith((".gpx", ".pos", ".tmp", ".bad")):
+        if n.endswith((".gpx", ".trk", ".pos", ".tmp", ".bad")):
             try:
                 os.remove(p)
             except OSError:
@@ -1391,10 +1431,9 @@ try:
     w = start_wifi(env_hot, [("home", -30)], ["home"])
     check("MT setup: connected to home net",
           w["state"] == "connected" and w["home"] is True)
-    mt_path = os.path.join(tmpdir, "mode_tick_trip.gpx")
+    mt_path = os.path.join(tmpdir, "mode_tick_trip.trk")
     make_gpx(mt_path, 2)
-    mt_pt = ('<trkpt lat="52.5" lon="13.4"><time>2026-10-05T12:00:05Z'
-             '</time></trkpt>\n')
+    mt_pt = trk_line(52.5, 13.4, "2026-10-05T12:00:05Z")
     gl.log.update(file=mt_path, created=True, points=2, batch=[mt_pt],
                   good_size=os.path.getsize(mt_path), new_seg=False, err=0,
                   online=False)
@@ -1420,10 +1459,101 @@ try:
     with open(mt_path) as f:
         mt_text = f.read()
     check("MT-2: retry on home lands the kept points and closes the file",
-          mt_text.count("<trkpt") == 3 and gl.log["batch"] == []
+          pts_in(mt_path) == 3 and gl.log["batch"] == []
           and gl.log["file"] is None,
           "n_pts=%s batch=%s file=%s" % (
-              mt_text.count("<trkpt"), gl.log["batch"], gl.log.get("file")))
+              pts_in(mt_path), gl.log["batch"], gl.log.get("file")))
+
+    # --- TRK: compact track format (.trk) ----------------------------------
+    saved_dir = gl.LOG_DIR
+    trk_dir = os.path.join(tmpdir, "trkfmt")
+    os.makedirs(trk_dir)
+    gl.LOG_DIR = trk_dir
+    gl.log_reset()
+    gl.up.setdefault("left", 0)
+    gl.st.update(valid=True, date="2026-10-05", time="12:00:05", lat=52.5,
+                 lon=13.4, alt=10.0, pos_at=_clock[0], hdop=1.2,
+                 hdop_at=_clock[0], status="A", quality=1, fixtype=3)
+    gl.log_tick()
+    rec = gl.log["batch"][0] if gl.log["batch"] else ""
+    check("TRK-1: recorded point is lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ",
+          rec == "52.500000,13.400000,10.0,1.2,20261005T120005Z\n", repr(rec))
+    check("TRK-1: new file is a .trk under LOG_DIR",
+          gl.log["file"] is not None and gl.log["file"].endswith(".trk")
+          and os.path.dirname(gl.log["file"]) == trk_dir,
+          "file=%s" % gl.log.get("file"))
+
+    gl.log_reset()
+    gl.st.update(fixtype=2, time="12:00:06")
+    gl.log_tick()
+    check("TRK-2: 2D fix leaves ele empty",
+          gl.log["batch"][0:1] == ["52.500000,13.400000,,1.2,20261005T120006Z\n"],
+          repr(gl.log["batch"]))
+
+    gl.log_reset()
+    f1 = os.path.join(trk_dir, "flush.trk")
+    p1 = trk_line(52.5, 13.4, "2026-10-05T12:00:05Z")
+    p2 = trk_line(52.6, 13.5, "2026-10-05T12:00:06Z")
+    p3 = trk_line(52.7, 13.6, "2026-10-05T12:00:07Z")
+    gl.log.update(file=f1, batch=[p1, p2])
+    gl.flush()
+    gl.log["batch"] = [p3]
+    gl.flush()
+    with open(f1, "rb") as f:
+        raw = f.read()
+    check("TRK-3: flush writes HEADER, point lines, FOOTER; appends keep the footer last",
+          raw == (gl.HEADER + p1 + p2 + p3 + gl.FOOTER).encode(), repr(raw))
+
+    rb = os.path.join(trk_dir, "read.trk")
+    with open(rb, "wb") as f:
+        f.write((gl.HEADER
+                 + "52.500000,13.400000,10.0,1.2,20261005T120005Z\n"
+                 + "-\n"
+                 + "-33.800000,-70.600000,,,20261005T120010Z\n"
+                 + "52.500000,13.400000,10.0,1.0,20261005X120005Z\n"
+                 + "52.500000,13.400000,10.0,1.0,2026100").encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(rb, 0)
+    check("TRK-4: read_batch counts point lines, skips bad time and the cut-off tail",
+          n == 3 and n_ok == 2 and eof is True,
+          "n=%s n_ok=%s eof=%s" % (n, n_ok, eof))
+    locs = json.loads(bytes(gl._body[:size]).decode())["locations"]
+    check("TRK-4: Overland JSON from .trk has ISO time, altitude, accuracy, negative coords",
+          len(locs) == 2
+          and locs[0]["properties"]["timestamp"] == "2026-10-05T12:00:05Z"
+          and locs[0]["properties"]["altitude"] == 10.0
+          and abs(locs[0]["properties"]["horizontal_accuracy"] - 6.0) < 1e-6
+          and locs[1]["geometry"]["coordinates"] == [-70.6, -33.8]
+          and "altitude" not in locs[1]["properties"],
+          json.dumps(locs)[:200])
+
+    cnt_dir = os.path.join(tmpdir, "trkcount")
+    os.makedirs(cnt_dir)
+    gl.LOG_DIR = cnt_dir
+    shutil.copy(rb, os.path.join(cnt_dir, "mix.trk"))
+    old_gpx = os.path.join(cnt_dir, "old.gpx")
+    make_gpx(old_gpx, 3)
+    total = gl.count_points()
+    check("TRK-5: count_points counts .trk and legacy .gpx points only",
+          total == 3 + 3, "total=%s" % total)
+    n_g, n_ok_g, _, _, _ = gl.read_batch(old_gpx, 0)
+    check("TRK-5: legacy .gpx is still read for upload",
+          n_g == 3 and n_ok_g == 3, "n=%s n_ok=%s" % (n_g, n_ok_g))
+
+    check("TRK-6: a compact point line is under 50 bytes (old GPX point was 112)",
+          len(trk_line(52.5, 13.4, "2026-10-05T12:00:05Z", hdop="1.2")
+              .encode()) <= 50)
+
+    qsrc = os.path.join(trk_dir, "q.trk")
+    make_trk(qsrc, 3)
+    _, _, _, qnew, _ = gl.read_batch(qsrc, 0)
+    ok_bad = gl._append_bad(qsrc, 0, qnew)
+    with open(qsrc + ".bad", "rb") as f:
+        bad = f.read()
+    check("TRK-7: quarantine copies only the point lines of a .trk",
+          ok_bad and bad.count(b"\n") == 3 and b"#" not in bad,
+          "ok=%s bad=%r" % (ok_bad, bad[:80]))
+
+    gl.LOG_DIR = saved_dir
 
     # --- K1: keepalive deinit + deadline -----------------------------------
     _resets[:] = []
@@ -2143,7 +2273,7 @@ try:
     rot_dir = os.path.join(tmpdir, "rot")
     os.mkdir(rot_dir)
     gl.LOG_DIR = rot_dir
-    open_path = os.path.join(rot_dir, "open.gpx")
+    open_path = os.path.join(rot_dir, "open.trk")
     make_gpx(open_path, 3)
     gl.log_reset()
     gl.log["online"] = False
@@ -2196,7 +2326,7 @@ try:
     gl.log["created"] = True
     gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
     gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
-    keep_pt = '<trkpt lat="52.5" lon="13.4"><time>t</time></trkpt>\n'
+    keep_pt = trk_line(52.5, 13.4, "2026-10-05T00:00:00Z")
     gl.log["batch"] = [keep_pt]
     gl.log["err"] = 0
     import builtins
@@ -2258,7 +2388,7 @@ try:
         if gl.log["file"]:
             seen.add(gl.log["file"])
     gl.flush()
-    disk = [n for n in os.listdir(drive_dir) if n.endswith(".gpx")]
+    disk = [n for n in os.listdir(drive_dir) if n.endswith(".trk")]
     check("ROT-1: 1 h offline driving is one file",
           len(seen) == 1 and len(disk) == 1,
           "seen=%s disk=%s points=%s" % (seen, disk, gl.log.get("points")))
@@ -2284,7 +2414,7 @@ try:
                      fixtype=3)
         gl.log_tick()
     gl.flush()
-    park_disk = [n for n in os.listdir(park_dir) if n.endswith(".gpx")]
+    park_disk = [n for n in os.listdir(park_dir) if n.endswith(".trk")]
     check("ROT-2: 1 h parked offline opens no file",
           gl.log["file"] is None and park_disk == [],
           "file=%s disk=%s" % (gl.log.get("file"), park_disk))
@@ -2313,7 +2443,7 @@ try:
         if gl.log["file"]:
             opened.add(gl.log["file"])
     gl.flush()
-    hot_disk = [n for n in os.listdir(hot_dir) if n.endswith(".gpx")]
+    hot_disk = [n for n in os.listdir(hot_dir) if n.endswith(".trk")]
     check("ROT-2: hotspot parking does not keep opening files",
           len(opened) <= 1 and len(hot_disk) <= 1,
           "opened=%s disk=%s file=%s" % (opened, hot_disk, gl.log.get("file")))
@@ -2322,14 +2452,14 @@ try:
     close_dir = os.path.join(tmpdir, "close")
     os.mkdir(close_dir)
     gl.LOG_DIR = close_dir
-    extra_pt = ('<trkpt lat="52.510000" lon="13.410000">'
-                '<time>2026-10-05T00:00:02Z</time></trkpt>\n')
+    extra_pt = trk_line(52.51, 13.41, "2026-10-05T00:00:02Z")
 
     def _gpx_pts(path):
         if not os.path.exists(path):
             return 0
+        gpx = not gl._is_trk(path)
         with orig_open(path, "rb") as f:
-            return sum(1 for line in f if line.startswith(b"<trkpt"))
+            return sum(1 for line in f if gl._is_point(line, gpx))
 
     orig_open = builtins.open
 
@@ -2379,7 +2509,7 @@ try:
 
     gl.log_reset()
     gl.log["online"] = False
-    close_path = os.path.join(close_dir, "c.gpx")
+    close_path = os.path.join(close_dir, "c.trk")
     make_gpx(close_path, 2)
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt])
     builtins.open = _close_wrap(False)
@@ -2411,7 +2541,7 @@ try:
           "n_pts=%s" % _gpx_pts(close_path))
 
     # WF-6: create close rollback — file missing, created=False, batch kept
-    new_path = os.path.join(close_dir, "new.gpx")
+    new_path = os.path.join(close_dir, "new.trk")
     gl.log.update(file=new_path, created=False, points=0, batch=[extra_pt],
                   err=0, new_seg=False)
     builtins.open = _close_wrap(True)
@@ -2462,12 +2592,12 @@ try:
 
         return _open
 
-    part_path = os.path.join(close_dir, "part.gpx")
+    part_path = os.path.join(close_dir, "part.trk")
     make_gpx(part_path, 2)
     good = os.path.getsize(part_path)
     gl.log.update(file=part_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=good)
-    builtins.open = _partial_open(2, 5)  # point ok, 5 bytes of FOOTER
+    builtins.open = _partial_open(2, 3)  # point ok, 3 bytes of FOOTER
     try:
         gl.flush()
     finally:
@@ -2487,7 +2617,7 @@ try:
           and part_body.endswith(gl.FOOTER.encode()),
           "n_pts=%s tail=%r" % (_gpx_pts(part_path), part_body[-80:]))
 
-    create_part = os.path.join(close_dir, "create_part.gpx")
+    create_part = os.path.join(close_dir, "create_part.trk")
     gl.log.update(file=create_part, created=False, points=0, batch=[extra_pt],
                   err=0, new_seg=False, good_size=None)
     builtins.open = _partial_open(2, 10)  # header ok, 10 bytes of point
@@ -2506,14 +2636,13 @@ try:
     check("WF-8: create retry rewrites from scratch with a valid header",
           gl.log["created"] is True and gl.log["batch"] == []
           and _gpx_pts(create_part) == 1
-          and create_body.startswith(b"<?xml")
-          and b"<trkseg>" in create_body
+          and create_body.startswith(gl.HEADER.encode())
           and create_body.endswith(gl.FOOTER.encode()),
           "created=%s n_pts=%s head=%r" % (
               gl.log.get("created"), _gpx_pts(create_part), create_body[:80]))
 
     # M7: transient stat/open EIO must not flip created=False (wb would wipe)
-    eio_path = os.path.join(close_dir, "eio.gpx")
+    eio_path = os.path.join(close_dir, "eio.trk")
     make_gpx(eio_path, 112)
     eio_pts = _gpx_pts(eio_path)
     gl.log.update(file=eio_path, created=True, points=112, batch=[extra_pt],
@@ -2545,7 +2674,7 @@ try:
           _gpx_pts(eio_path) == eio_pts + 1 and gl.log["batch"] == [],
           "n_pts=%s" % _gpx_pts(eio_path))
 
-    gone_path = os.path.join(close_dir, "gone.gpx")
+    gone_path = os.path.join(close_dir, "gone.trk")
     make_gpx(gone_path, 2)
     gl.log.update(file=gone_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=os.path.getsize(gone_path))
@@ -2559,12 +2688,12 @@ try:
           gl.log["created"] is True and _gpx_pts(gone_path) == 1,
           "created=%s n_pts=%s" % (gl.log.get("created"), _gpx_pts(gone_path)))
 
-    trunc_path = os.path.join(close_dir, "trunc.gpx")
+    trunc_path = os.path.join(close_dir, "trunc.trk")
     make_gpx(trunc_path, 2)
     with orig_open(trunc_path, "rb") as f:
         trunc_raw = f.read()
     with orig_open(trunc_path, "wb") as f:
-        f.write(trunc_raw[:-10])
+        f.write(trunc_raw[:-3])
     gl.log.update(file=trunc_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=len(trunc_raw))
     gl.flush()
@@ -2777,6 +2906,45 @@ if mpy_bin:
         check("mpy-unix: ran MicroPython unix port", False, repr(e))
 else:
     print("SKIP  mpy-unix (no micropython binary)")
+
+# --- tools/trk2gpx.py: .trk -> GPX 1.1 ------------------------------------
+import xml.etree.ElementTree as ET
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import trk2gpx  # noqa: E402
+
+conv_lines = [
+    "#TRK1\n",
+    "52.500000,13.400000,10.0,1.2,20261005T120005Z\n",
+    "52.500000,13.400000,,,20261005T120006Z\n",
+    "-\n",
+    "-33.800000,-70.600000,5.5,,20261005T120010Z\n",
+    "52.500000,13.400000,10.0,1.0,2026100",   # cut off by a power loss
+]
+conv_gpx = trk2gpx.convert(conv_lines, "20261005_120005")
+try:
+    conv_root = ET.fromstring(conv_gpx)
+    conv_ok = True
+except ET.ParseError as e:
+    conv_root, conv_ok = None, False
+    conv_gpx += " parse error %s" % e
+check("trk2gpx: output is well-formed GPX", conv_ok, conv_gpx[:200])
+if conv_root is not None:
+    ns = "{http://www.topografix.com/GPX/1/1}"
+    segs = conv_root.findall(".//%strkseg" % ns)
+    pts = conv_root.findall(".//%strkpt" % ns)
+    check("trk2gpx: '-' starts a second trkseg, cut-off tail is dropped",
+          len(segs) == 2 and len(pts) == 3,
+          "segs=%s pts=%s" % (len(segs), len(pts)))
+    first = pts[0]
+    check("trk2gpx: ele, hdop and ISO time are carried over",
+          first.find(ns + "ele").text == "10.0"
+          and first.find(ns + "hdop").text == "1.2"
+          and first.find(ns + "time").text == "2026-10-05T12:00:05Z")
+    check("trk2gpx: empty ele/hdop produce no tags",
+          pts[1].find(ns + "ele") is None and pts[1].find(ns + "hdop") is None)
+    check("trk2gpx: negative coordinates kept",
+          abs(float(pts[2].get("lat")) + 33.8) < 1e-9
+          and abs(float(pts[2].get("lon")) + 70.6) < 1e-9)
 
 print()
 print("%d passed, %d failed" % (passed, failed))
