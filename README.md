@@ -1,7 +1,7 @@
 # ESP32 GPS Logger
 
 MicroPython GPS track logger for the ESP32. Away from home it records your
-position to GPX files on the internal flash. On a **home** WiFi network it
+position to track files on the internal flash (`.trk`, see below). On a **home** WiFi network it
 stops logging and uploads finished tracks to a
 [Dawarich](https://dawarich.app) server via its Overland API. On a
 **non-home** network (a phone hotspot in the car) it keeps logging and
@@ -10,12 +10,12 @@ uploads already-finished files in the background.
 ## Features
 
 - Reads NMEA (`RMC`, `GGA`, `GSA`, `GSV`) from a u-blox NEO-6M/7M/8M over UART, with checksum validation.
-- Samples the position every second and records a point only after moving more than 10 m from the last recorded one, to GPX 1.1 files named `/gpx/YYYYMMDD_HHMMSS.gpx`. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
-- Power-loss safe: each file is always a complete GPX document, written in batches every 60 s (LittleFS commits on close).
+- Samples the position every second and records a point only after moving more than 10 m from the last recorded one, to track files named `/gpx/YYYYMMDD_HHMMSS.trk`. A point is ~46 bytes (the old GPX XML was ~112), so a full flash holds about 2.4× more track; the pull script turns them back into GPX. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
+- Power-loss safe: each file is always complete (header, points, footer), written in batches every 60 s (LittleFS commits on close). A line cut off by a power loss is skipped.
 - Short fix losses start a new track segment; a gap over 5 minutes starts a new file. On a **non-home** network a file that has been open for 5 minutes is closed so it can upload (offline driving stays one file; parking does not open empty files).
 - Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds) or after leaving a home network.
 - Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, a home AP at ≥ −75 dBm is tried first, then other visible known APs strongest-RSSI first (one SSID, strongest BSSID). Hidden SSIDs (`SSID2_HIDDEN=1`) are tried after visible ones, except a **hidden home** is tried first when the scan shows a strong empty-SSID AP (≥ −75 dBm) — that is how a hidden AP appears. If the scan sees none of ours, only hidden nets are tried (no blind 1→2→3). If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net, when nearly stopped, the logger scans for home every ~5 min (backoff to 60 min only after a **visible** home switch fails; a failed hidden-home attempt stays at 5 min). A stop after driving resets that interval only if a visible home is in view, not an unverified empty-SSID AP. A visible home at ≥ −75 dBm, or a hidden home plus a strong empty-SSID AP, is tried between upload batches; hidden roam uses `bssid=None` (firmware matches by SSID) and never pins to the strongest blank AP. **Limitation:** with a hidden home SSID, switching home can be slower (no BSSID pin; arrival after driving does not try an unverified blank AP) and a neighbouring hidden AP can trigger a false attempt. Falls back to the hotspot if that connect fails.
-- Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.gpx.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.gpx.bad`. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
+- Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.bad`. Older `.gpx` files from earlier firmware are still uploaded. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
 - 128×64 OLED: connected SSID (never the password), GPS fix, mode (`LOG` / `LOG+UP` / `UPLOAD` / `BAD FULL`), free flash and points left. Missing or dropping display → headless.
 - Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush, wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. GPIO25 at reset skips the logger entirely.
 
@@ -153,7 +153,7 @@ Put the https origin in `GEO_URL` directly.
 .venv/bin/mpremote cp .env :.env
 ```
 
-Without `.env` the logger still records GPX; it just never goes online.
+Without `.env` the logger still records tracks; it just never goes online.
 
 ## Deploy
 
@@ -188,18 +188,19 @@ HTTPS uploads fail with `ENOMEM`.
   REPL after a failed flash, power-cycle it or
   `mpremote exec "from machine import RTC; RTC().memory(b'0')"` then
   reset. `./deploy.sh` clears the counter before rebooting.
-- Logs live in `/gpx/`; pull them with the GPIO25 bypass:
+- Logs live in `/gpx/`; pull them with the GPIO25 bypass, then convert to GPX:
 
   ```bash
-  .venv/bin/mpremote cp :/gpx/20261005_101500.gpx .
+  .venv/bin/mpremote cp :/gpx/20261005_101500.trk .
+  python3 tools/trk2gpx.py 20261005_101500.trk > 20261005_101500.gpx
   ```
 
-  Progress is `/gpx/20261005_101500.gpx.pos`. Payload-rejected batches are
-  appended to `/gpx/20261005_101500.gpx.bad`. After a successful upload the
+  Progress is `/gpx/20261005_101500.trk.pos`. Payload-rejected batches are
+  appended to `/gpx/20261005_101500.trk.bad`. After a successful upload the
   logger retries a `.bad` file a few times per boot. To re-queue by hand:
 
   ```bash
-  .venv/bin/mpremote exec "import os; os.rename('/gpx/20261005_101500.gpx.bad', '/gpx/20261005_101500.gpx')"
+  .venv/bin/mpremote exec "import os; os.rename('/gpx/20261005_101500.trk.bad', '/gpx/20261005_101500.trk')"
   ```
 
   If `.bad` reaches 64 kB the OLED shows `BAD FULL` and **no more points
@@ -231,7 +232,7 @@ Constants at the top of `gps_logger.py`:
 | `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (WDT 120 s is the wall-clock cap) |
 | `WDT_TIMEOUT` | 120 s | Hardware watchdog |
 | `KEEPALIVE_MAX` | 10 min | Ctrl-C timer may feed the WDT this long |
-| `MAX_BAD_BYTES` | 64 kB | Cap on `<file>.gpx.bad`; uploads pause when full |
+| `MAX_BAD_BYTES` | 64 kB | Cap on `<file>.bad`; uploads pause when full |
 | `MAX_GLOBAL_PAYLOAD` | 3 | Consecutive 400/422 without 2xx → backoff, no quarantine |
 | `DEVICE_ID` | `Dawarich-GPS-tracker` | Overland tracker id (`.env`, `[A-Za-z0-9._-]{1,32}`) |
 | `HOSTNAME` | `Dawarich-GPS-tracker` | DHCP hostname (`.env`, `[A-Za-z0-9-]{1,32}`) |
