@@ -247,7 +247,13 @@ class WLAN(object):
             return 1
         return self._status
 
-    def ifconfig(self):
+    ifconfig_calls = []
+
+    def ifconfig(self, cfg=None):
+        # v1.29 esp32: a 4-tuple sets a static address, "dhcp" restores DHCP
+        if cfg is not None:
+            WLAN.ifconfig_calls.append(cfg)
+            return None
         return ("192.168.1.8", "255.255.255.0", "192.168.1.1", "1.1.1.1")
 
     def config(self, *a, **k):
@@ -1090,6 +1096,43 @@ try:
           "Dawarich-GPS-tracker" in _hostnames)
     check("wifi OLED line shows SSID not password",
           gl._wifi_line() == "WiFi home")
+
+    # static IP is per network; DHCP networks are not touched
+    static_env = (triple + "IP=192.168.1.60\nGW=192.168.1.1\n"
+                  "DNS=192.168.1.111\n")
+    nets = gl._load_nets(dict(l.split("=", 1) for l in static_env.splitlines()))
+    check("static ip: #1 parsed with mask default and given DNS",
+          nets[0]["ip"] == ("192.168.1.60", "255.255.255.0", "192.168.1.1",
+                            "192.168.1.111"), str(nets[0]["ip"]))
+    check("static ip: #2 and #3 stay DHCP",
+          nets[1]["ip"] is None and nets[2]["ip"] is None)
+    nets = gl._load_nets({"SSID": "a", "IP": "192.168.1.60"})
+    check("static ip: missing gateway falls back to DHCP", nets[0]["ip"] is None)
+    nets = gl._load_nets({"SSID": "a", "IP": "192.168.1.300", "GW": "192.168.1.1"})
+    check("static ip: invalid address falls back to DHCP", nets[0]["ip"] is None)
+    nets = gl._load_nets({"SSID": "a", "IP": "192.168.1.60", "GW": "192.168.1.1",
+                          "MASK": "255.255.0.0"})
+    check("static ip: MASK given, DNS defaults to the gateway",
+          nets[0]["ip"] == ("192.168.1.60", "255.255.0.0", "192.168.1.1",
+                            "192.168.1.1"), str(nets[0]["ip"]))
+
+    WLAN.ifconfig_calls = []
+    w = start_wifi(static_env, [("home", -40)], ["home"])
+    check("static ip: #1 connects with the static address applied",
+          w["state"] == "connected"
+          and WLAN.ifconfig_calls == [("192.168.1.60", "255.255.255.0",
+                                       "192.168.1.1", "192.168.1.111")],
+          str(WLAN.ifconfig_calls))
+    WLAN.ifconfig_calls = []
+    w = start_wifi(single, [("home", -40)], ["home"])
+    check("static ip: a DHCP-only config never calls ifconfig",
+          WLAN.ifconfig_calls == [], str(WLAN.ifconfig_calls))
+    gl.wifi["static"] = True
+    WLAN.ifconfig_calls = []
+    gl._wifi_ip(WLAN(0), {"ssid": "phone", "ip": None})
+    check("static ip: leaving the static net hands the interface back to DHCP",
+          WLAN.ifconfig_calls == ["dhcp"] and not gl.wifi["static"],
+          str(WLAN.ifconfig_calls))
 
     w = start_wifi(triple, [("phone", -55)], ["phone"])
     check("wifi #1 absent -> #2 used",

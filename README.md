@@ -112,6 +112,23 @@ HOSTNAME=Dawarich-GPS-tracker
 `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` accept
 `1`/`0` (also `true`/`false`). Network #1 defaults to home; #2 and #3 do not.
 
+**Static IP (optional, per network).** Networks use DHCP unless they set
+`IP` (#1), `IP2` (#2) or `IP3` (#3). A static IP also needs a gateway; the mask
+defaults to `255.255.255.0` and DNS to the gateway:
+
+```ini
+IP=192.168.1.60
+GW=192.168.1.1
+MASK=255.255.255.0   # optional
+DNS=192.168.1.111    # optional, defaults to GW
+# network #2/#3: IP2 / GW2 / MASK2 / DNS2, IP3 / GW3 / MASK3 / DNS3
+```
+
+A network without `IP` stays on DHCP; moving from a static network to a DHCP
+one hands the interface back to DHCP. An invalid or incomplete entry (for
+example `IP` without `GW`) is ignored with a console message, so the board
+falls back to DHCP rather than becoming unreachable.
+
 **How a network is chosen**
 
 1. Scan once (this is the only blocking radio step).

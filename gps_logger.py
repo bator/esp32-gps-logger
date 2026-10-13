@@ -364,14 +364,50 @@ def _safe_name(s, default, host=False):
         return default
     return s
 
+def _ipv4(s):
+    """Dotted quad as given, or None when it is not a valid IPv4 address."""
+    parts = (s or "").strip().split(".")
+    if len(parts) != 4:
+        return None
+    for p in parts:
+        if not p or len(p) > 3:
+            return None
+        for c in p:
+            if c < "0" or c > "9":
+                return None
+        if int(p) > 255:
+            return None
+    return ".".join(parts)
+
+def _static_ip(env, keys):
+    """(ip, mask, gateway, dns) from IP/MASK/GW/DNS keys, or None for DHCP.
+
+    A static IP needs a gateway; MASK defaults to 255.255.255.0 and DNS to the
+    gateway. An invalid entry falls back to DHCP instead of leaving the board
+    unreachable."""
+    ipk, mk, gk, dk = keys
+    raw = env.get(ipk)
+    if not raw:
+        return None
+    ip = _ipv4(raw)
+    gw = _ipv4(env.get(gk))
+    if not ip or not gw:
+        print("static ip", ipk, "needs a valid", ipk, "and", gk, "- using DHCP")
+        return None
+    return (ip, _ipv4(env.get(mk)) or "255.255.255.0", gw,
+            _ipv4(env.get(dk)) or gw)
+
 def _load_nets(env):
     nets = []
     rows = (
-        ("SSID", "WPA2", "HOME1", "SSID_HOME", "SSID_HIDDEN", True),
-        ("SSID2", "WPA2_2", "HOME2", "SSID2_HOME", "SSID2_HIDDEN", False),
-        ("SSID3", "WPA2_3", "HOME3", "SSID3_HOME", "SSID3_HIDDEN", False),
+        ("SSID", "WPA2", "HOME1", "SSID_HOME", "SSID_HIDDEN", True,
+         ("IP", "MASK", "GW", "DNS")),
+        ("SSID2", "WPA2_2", "HOME2", "SSID2_HOME", "SSID2_HIDDEN", False,
+         ("IP2", "MASK2", "GW2", "DNS2")),
+        ("SSID3", "WPA2_3", "HOME3", "SSID3_HOME", "SSID3_HIDDEN", False,
+         ("IP3", "MASK3", "GW3", "DNS3")),
     )
-    for sk, pk, hk, hk2, hidk, default_home in rows:
+    for sk, pk, hk, hk2, hidk, default_home, ipkeys in rows:
         s = env.get(sk)
         if not s:
             continue
@@ -384,7 +420,8 @@ def _load_nets(env):
             home = t
         hidden = bool(_truthy(env.get(hidk)))
         nets.append({"ssid": s, "pw": "" if p is None else p,
-                     "home": home, "hidden": hidden, "bssid": None})
+                     "home": home, "hidden": hidden, "bssid": None,
+                     "ip": _static_ip(env, ipkeys)})
     return nets
 
 WIFI_STATES = {}
@@ -562,6 +599,22 @@ def _wifi_clear(w):
             break
         time.sleep_ms(50)
 
+def _wifi_ip(w, net):
+    """Apply this network's static IP, or give a previous one back to DHCP.
+
+    Only a network that configured a static IP changes the interface, so the
+    DHCP networks behave exactly as before."""
+    cfg = net.get("ip")
+    try:
+        if cfg:
+            w.ifconfig(cfg)
+            wifi["static"] = True
+        elif wifi.get("static"):
+            w.ifconfig("dhcp")
+            wifi["static"] = False
+    except (OSError, ValueError, TypeError) as e:
+        print("wifi ip", repr(e))
+
 def _wifi_connect(w, net):
     wifi["ssid"] = net["ssid"]
     wifi["pw"] = net["pw"]
@@ -575,6 +628,7 @@ def _wifi_connect(w, net):
     except OSError:
         wifi["prev_status"] = None
     _wifi_clear(w)
+    _wifi_ip(w, net)
     try:
         bssid = net.get("bssid")
         if bssid:
