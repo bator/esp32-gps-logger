@@ -1,7 +1,9 @@
 from machine import Pin, RTC
-import machine, time
+import machine, sys, time
 
-# Hold GPIO25 at reset to skip the logger (REPL + mpremote, no WDT).
+# Hold GPIO25 (GPIO10 on the ESP32-C6, which has no GPIO25) at reset to skip
+# the logger (REPL + mpremote, no WDT).
+SKIP_PIN = 10 if "ESP32C6" in getattr(sys.implementation, "_machine", "") else 25
 BOOT_FAIL_MAX = 5
 BOOT_FAIL_FILE = "/boot_fail"
 
@@ -88,5 +90,5 @@ def _boot_start():
 # MicroPython runs this file as __main__. Tests import it under another name
 # so the auto-start (and a possible reset loop) does not run in the harness.
 if __name__ == "__main__":
-    if Pin(25, Pin.IN, Pin.PULL_UP).value():
+    if Pin(SKIP_PIN, Pin.IN, Pin.PULL_UP).value():
         _boot_start()

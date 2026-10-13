@@ -45,6 +45,23 @@ uploads already-finished files in the background.
 Most GPS and OLED breakout boards already have I²C pull-ups and a regulator;
 check yours if powering the GPS from 5 V instead.
 
+**ESP32-C6** (MicroPython `ESP32_GENERIC_C6` 1.29, RISC-V): the firmware
+detects the board and uses UART1 instead, because the C6 has no UART2 and
+GPIO16/17 are its console UART. `deploy.sh` also detects it and compiles for
+`rv32imc`. The C6 has far more free internal RAM than the original ESP32 (about
+190 kB largest free IDF block with the logger loaded, versus 17 kB), so
+`https://` uploads work there.
+
+| ESP32-C6 pin | Connects to | Function |
+|--------------|-------------|----------|
+| GPIO5 | GPS TX | UART1 RX (NMEA in) |
+| GPIO4 | GPS RX | UART1 TX |
+| GPIO6 / GPIO7 | OLED SDA / SCL | I²C0 |
+| GPIO10 | Button → GND | Boot bypass (the C6 has no GPIO25) |
+
+Power (3V3, GND) is wired as in the table above. The C6 board used here shows
+up as `/dev/ttyACM0`: `PORT=/dev/ttyACM0 ./deploy.sh`.
+
 **ESP32-WROVER:** GPIO16 and GPIO17 are used by the PSRAM. This firmware's
 UART2 default will not work on those modules; pick a WROOM board or change
 `tx`/`rx` in `gps_logger.py` to free pins.

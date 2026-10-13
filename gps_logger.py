@@ -8,6 +8,14 @@ gc.threshold(8192)
 
 BAUD = 9600                              # NEO-6M/7M/8M default
 
+# Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
+# GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
+# main.py keeps the matching boot-bypass pin.
+if "ESP32C6" in getattr(sys.implementation, "_machine", ""):
+    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 4, 5, 7, 6
+else:
+    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 2, 17, 16, 22, 21
+
 # OLED is optional: boards without a display (or a failed I²C probe) run
 # headless. draw() and the boot banners become no-ops. Runtime I²C errors
 # disable the display instead of resetting the chip.
@@ -16,12 +24,12 @@ oled_err = 0
 OLED_MAX_ERR = 3
 try:
     import ssd1306
-    _i2c = I2C(0, scl=Pin(22), sda=Pin(21))
+    _i2c = I2C(0, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA))
     oled = ssd1306.SSD1306_I2C(128, 64, _i2c)
 except Exception as e:
     print("oled", repr(e))
 
-uart = UART(2, baudrate=BAUD, tx=17, rx=16, rxbuf=4096)   # rides out HTTP calls
+uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX, rxbuf=4096)   # rides out HTTP calls
 
 REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"
@@ -1797,7 +1805,7 @@ def run():
         _loop()
     except KeyboardInterrupt:
         _running = False
-        print("WDT armed - fed by timer; hold GPIO25 and reset for mpremote")
+        print("WDT armed - fed by timer; hold the boot-bypass pin and reset for mpremote")
         try:
             flush()
         except Exception:
