@@ -85,8 +85,22 @@ def _boot_start():
         if _boot_handle_error():
             machine.reset()
 
+# Boot bypass: hold this pin low at reset to skip the logger (REPL).
+# GPIO25 is the classic ESP32 button. None, or a pin the chip does not have
+# (GPIO25 on the ESP32-C6, which MicroPython enables only up to GPIO23), means
+# no bypass: the logger starts.
+BYPASS_PIN = 25
+
+def _bypass_level():
+    if BYPASS_PIN is None:
+        return 1
+    try:
+        return Pin(BYPASS_PIN, Pin.IN, Pin.PULL_UP).value()
+    except ValueError:
+        return 1
+
 # MicroPython runs this file as __main__. Tests import it under another name
 # so the auto-start (and a possible reset loop) does not run in the harness.
 if __name__ == "__main__":
-    if Pin(25, Pin.IN, Pin.PULL_UP).value():
+    if _bypass_level():
         _boot_start()

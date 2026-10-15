@@ -21,7 +21,12 @@ try:
 except Exception as e:
     print("oled", repr(e))
 
-uart = UART(2, baudrate=BAUD, tx=17, rx=16, rxbuf=4096)   # rides out HTTP calls
+# Classic ESP32 has UART2; the ESP32-C6 has UART0 (USB console here) and
+# UART1 only, so UART2 raises there and UART1 is used instead.
+try:
+    uart = UART(2, baudrate=BAUD, tx=17, rx=16, rxbuf=4096)   # rides out HTTP calls
+except (OSError, ValueError):
+    uart = UART(1, baudrate=BAUD, tx=17, rx=16, rxbuf=4096)
 
 REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"

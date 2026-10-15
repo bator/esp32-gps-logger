@@ -46,9 +46,16 @@ class I2C(object):
         pass
 
 
+_uart_ids = []
+_uart_c6 = [False]
+
+
 class UART(object):
     def __init__(self, *a, **k):
-        pass
+        uid = a[0] if a else k.get("id")
+        _uart_ids.append(uid)
+        if _uart_c6[0] and uid == 2:
+            raise OSError(1, "ESP_FAIL")   # ESP32-C6: no UART2
 
     def any(self):
         return 0
@@ -2906,6 +2913,31 @@ if mpy_bin:
         check("mpy-unix: ran MicroPython unix port", False, repr(e))
 else:
     print("SKIP  mpy-unix (no micropython binary)")
+
+# --- C6: no UART2 (UART1 instead); invalid bypass pin is not "held" ---------
+_uart_ids[:] = []
+_uart_c6[0] = True
+gl = _reload_logger()
+_uart_c6[0] = False
+check("C6: UART(2) failure falls back to UART(1)",
+      _uart_ids[-2:] == [2, 1] and gl.uart is not None, repr(_uart_ids))
+_uart_ids[:] = []
+gl = _reload_logger()
+check("ESP32: UART(2) is used when it exists", _uart_ids[-1:] == [2],
+      repr(_uart_ids))
+
+
+class _NoPin(object):
+    def __init__(self, *a, **k):
+        raise ValueError("invalid pin")
+
+
+boot_src = open(os.path.join(ROOT, "main.py")).read()
+boot_c6 = {"Pin": _NoPin, "RTC": RTC, "machine": sys.modules["machine"],
+           "time": time, "__name__": "boot_helpers"}
+exec(compile(boot_src, "main.py", "exec"), boot_c6)
+check("C6: invalid bypass pin counts as not held (logger starts)",
+      boot_c6["_bypass_level"]() == 1)
 
 # --- tools/trk2gpx.py: .trk -> GPX 1.1 ------------------------------------
 import xml.etree.ElementTree as ET

@@ -1,6 +1,6 @@
 # ESP32 GPS Logger
 
-MicroPython GPS track logger for the ESP32. Away from home it records your
+MicroPython GPS track logger for the ESP32-C6 (also classic ESP32). Away from home it records your
 position to track files on the internal flash (`.trk`, see below). On a **home** WiFi network it
 stops logging and uploads finished tracks to a
 [Dawarich](https://dawarich.app) server via its Overland API. On a
@@ -17,16 +17,17 @@ uploads already-finished files in the background.
 - Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, a home AP at ≥ −75 dBm is tried first, then other visible known APs strongest-RSSI first (one SSID, strongest BSSID). Hidden SSIDs (`SSID2_HIDDEN=1`) are tried after visible ones, except a **hidden home** is tried first when the scan shows a strong empty-SSID AP (≥ −75 dBm) — that is how a hidden AP appears. If the scan sees none of ours, only hidden nets are tried (no blind 1→2→3). If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net, when nearly stopped, the logger scans for home every ~5 min (backoff to 60 min only after a **visible** home switch fails; a failed hidden-home attempt stays at 5 min). A stop after driving resets that interval only if a visible home is in view, not an unverified empty-SSID AP. A visible home at ≥ −75 dBm, or a hidden home plus a strong empty-SSID AP, is tried between upload batches; hidden roam uses `bssid=None` (firmware matches by SSID) and never pins to the strongest blank AP. **Limitation:** with a hidden home SSID, switching home can be slower (no BSSID pin; arrival after driving does not try an unverified blank AP) and a neighbouring hidden AP can trigger a false attempt. Falls back to the hotspot if that connect fails.
 - Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.bad`. Older `.gpx` files from earlier firmware are still uploaded. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
 - 128×64 OLED: connected SSID (never the password), GPS fix, mode (`LOG` / `LOG+UP` / `UPLOAD` / `BAD FULL`), free flash and points left. Missing or dropping display → headless.
-- Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush, wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. GPIO25 at reset skips the logger entirely.
+- Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush, wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. On classic ESP32, GPIO25 at reset skips the logger entirely (see `BYPASS_PIN` in `main.py`).
 
 ## Hardware
 
 | Part | Notes |
 |------|-------|
-| ESP32 dev board | Original ESP32 (Xtensa, `-march=xtensawin`). Use a **WROOM** module, not WROVER: on WROVER boards GPIO16/17 are wired to PSRAM and cannot be used for UART2. Flash firmware with **LittleFS** (the default ESP32_GENERIC image). Offset sidecars are not crash-atomic on FAT. |
+| ESP32-C6 dev board | **Tested target** (RISC-V, `MARCH=rv32imc`, the default in `deploy.sh`). MicroPython 1.29 `ESP32_GENERIC_C6`, flash ~14 MB, LittleFS. The C6 has UART0 (used by the USB console here) and UART1 only; the logger uses UART1 on the C6. |
+| Classic ESP32 dev board | Xtensa, `MARCH=xtensawin ./deploy.sh`. Use a **WROOM** module, not WROVER: on WROVER boards GPIO16/17 are wired to PSRAM and cannot be used for UART2. Offset sidecars are not crash-atomic on FAT. |
 | GPS module | u-blox NEO-6M / 7M / 8M, UART at 9600 baud |
 | OLED display | SSD1306, 128×64, I²C (address 0x3C); optional (headless if absent) |
-| Push button | E.g. the centre (M) press of a 5-way joystick module; optional |
+| Push button | Optional boot bypass. The C6 build in use has none; on classic ESP32 it sits on GPIO25 |
 
 ### Wiring
 
@@ -36,14 +37,16 @@ uploads already-finished files in the background.
 |-----------|-------------|----------|
 | 3V3 | GPS VCC, OLED VCC | Power |
 | GND | GPS GND, OLED GND, button | Common ground |
-| GPIO16 | GPS TX | UART2 RX (NMEA in) |
-| GPIO17 | GPS RX | UART2 TX |
+| GPIO16 | GPS TX | UART RX (NMEA in): UART1 on the C6, UART2 on classic ESP32 |
+| GPIO17 | GPS RX | UART TX: UART1 on the C6, UART2 on classic ESP32 |
 | GPIO21 | OLED SDA | I²C0 data |
 | GPIO22 | OLED SCL | I²C0 clock |
-| GPIO25 | Button → GND | Boot bypass (internal pull-up, active low) |
+| GPIO25 | Button → GND (classic ESP32 only) | Boot bypass (internal pull-up, active low). GPIO25 does not exist on the C6 |
 
 Most GPS and OLED breakout boards already have I²C pull-ups and a regulator;
 check yours if powering the GPS from 5 V instead.
+
+**ESP32-C6:** GPIO25 is not a valid pin (MicroPython enables GPIO0–23), so there is no boot bypass unless you wire a button to another GPIO in that range and set `BYPASS_PIN` in `main.py`.
 
 **ESP32-WROVER:** GPIO16 and GPIO17 are used by the PSRAM. This firmware's
 UART2 default will not work on those modules; pick a WROOM board or change
@@ -174,12 +177,14 @@ HTTPS uploads fail with `ENOMEM`.
 
 - Power on: the logger starts automatically, scans once for configured
   networks, then shows the status screen (or runs headless).
-- **Skip the logger** (REPL / `mpremote`, **no watchdog**): hold GPIO25
-  while resetting. Use this for copying files off the device.
+- **Skip the logger** (REPL / `mpremote`, **no watchdog**): hold the bypass pin
+  (GPIO25 on classic ESP32) while resetting. Without a bypass button (the C6
+  build in use), interrupt the logger with Ctrl-C instead; see below.
 - Ctrl-C from a running logger leaves the WDT armed; a timer feeds it for
   **10 minutes**, then the chip resets (so a stray 0x03 on USB-UART in the
   field does not leave the device in REPL forever). The next `run()` deinit's
-  that timer. GPIO25 bypass is still the reliable way to pull a large `/gpx`.
+  that timer. With a bypass pin, that is still the most reliable way to pull a
+  large `/gpx`; without one, pull within the 10-minute window after Ctrl-C.
 - Repeated import/crash/WDT at boot: increasing delay (5 s, 10 s, … cap
   30 s), then the board stays in the REPL after 5 failures (RTC memory
   counter, `/boot_fail` fallback). The counter is **not** cleared on
@@ -188,7 +193,7 @@ HTTPS uploads fail with `ENOMEM`.
   REPL after a failed flash, power-cycle it or
   `mpremote exec "from machine import RTC; RTC().memory(b'0')"` then
   reset. `./deploy.sh` clears the counter before rebooting.
-- Logs live in `/gpx/`; pull them with the GPIO25 bypass, then convert to GPX:
+- Logs live in `/gpx/`; pull them with `mpremote` (Ctrl-C, or the bypass on classic ESP32), then convert to GPX:
 
   ```bash
   .venv/bin/mpremote cp :/gpx/20261005_101500.trk .
