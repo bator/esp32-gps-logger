@@ -35,7 +35,7 @@ REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"
 
 SAMPLE = 1000                            # ms between sampled positions
-MIN_MOVE = 10                            # m from the last recorded point
+MIN_MOVE = 3                             # m from the last recorded point
 FLUSH = 60000                            # ms between batch writes to flash
 NEW_FILE_GAP = 300                       # s without fix → new file; also hotspot max age
 STALE = 2000                             # ms: older position = no fix

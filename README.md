@@ -10,7 +10,7 @@ uploads already-finished files in the background.
 ## Features
 
 - Reads NMEA (`RMC`, `GGA`, `GSA`, `GSV`) from a u-blox NEO-6M/7M/8M over UART, with checksum validation.
-- Samples the position every second and records a point only after moving more than 10 m from the last recorded one, to track files named `/gpx/YYYYMMDD_HHMMSS.trk`. A point is ~46 bytes (the old GPX XML was ~112), so a full flash holds about 2.4× more track; the pull script turns them back into GPX. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
+- Samples the position every second and records a point only after moving more than 3 m from the last recorded one (`MIN_MOVE`), to track files named `/gpx/YYYYMMDD_HHMMSS.trk`. A point is ~46 bytes (the old GPX XML was ~112), so a full flash holds about 2.4× more track; the pull script turns them back into GPX. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
 - Power-loss safe: each file is always complete (header, points, footer), written in batches every 60 s (LittleFS commits on close). A line cut off by a power loss is skipped.
 - Short fix losses start a new track segment; a gap over 5 minutes starts a new file. On a **non-home** network a file that has been open for 5 minutes is closed so it can upload (offline driving stays one file; parking does not open empty files).
 - Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds) or after leaving a home network.
@@ -247,7 +247,7 @@ Constants at the top of `gps_logger.py`:
 | Constant | Default | Meaning |
 |----------|---------|---------|
 | `SAMPLE` | 1000 ms | Interval between position samples |
-| `MIN_MOVE` | 10 m | Distance from the last recorded point before a new one is recorded |
+| `MIN_MOVE` | 3 m | Distance from the last recorded point before a new one is recorded |
 | `FLUSH` | 60000 ms | Interval between flash writes |
 | `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file; also max age of an open file on a hotspot |
 | `ROAM_CHECK` | 5 min | Home-roam scan interval on a hotspot (and after arriving) |
