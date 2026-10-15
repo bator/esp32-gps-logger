@@ -46,16 +46,9 @@ class I2C(object):
         pass
 
 
-_uart_ids = []
-_uart_c6 = [False]
-
-
 class UART(object):
     def __init__(self, *a, **k):
-        uid = a[0] if a else k.get("id")
-        _uart_ids.append(uid)
-        if _uart_c6[0] and uid == 2:
-            raise OSError(1, "ESP_FAIL")   # ESP32-C6: no UART2
+        pass
 
     def any(self):
         return 0
@@ -254,7 +247,13 @@ class WLAN(object):
             return 1
         return self._status
 
-    def ifconfig(self):
+    ifconfig_calls = []
+
+    def ifconfig(self, cfg=None):
+        # v1.29 esp32: a 4-tuple sets a static address, "dhcp" restores DHCP
+        if cfg is not None:
+            WLAN.ifconfig_calls.append(cfg)
+            return None
         return ("192.168.1.8", "255.255.255.0", "192.168.1.1", "1.1.1.1")
 
     def config(self, *a, **k):
@@ -1098,6 +1097,43 @@ try:
     check("wifi OLED line shows SSID not password",
           gl._wifi_line() == "WiFi home")
 
+    # static IP is per network; DHCP networks are not touched
+    static_env = (triple + "IP=192.168.1.60\nGW=192.168.1.1\n"
+                  "DNS=192.168.1.111\n")
+    nets = gl._load_nets(dict(l.split("=", 1) for l in static_env.splitlines()))
+    check("static ip: #1 parsed with mask default and given DNS",
+          nets[0]["ip"] == ("192.168.1.60", "255.255.255.0", "192.168.1.1",
+                            "192.168.1.111"), str(nets[0]["ip"]))
+    check("static ip: #2 and #3 stay DHCP",
+          nets[1]["ip"] is None and nets[2]["ip"] is None)
+    nets = gl._load_nets({"SSID": "a", "IP": "192.168.1.60"})
+    check("static ip: missing gateway falls back to DHCP", nets[0]["ip"] is None)
+    nets = gl._load_nets({"SSID": "a", "IP": "192.168.1.300", "GW": "192.168.1.1"})
+    check("static ip: invalid address falls back to DHCP", nets[0]["ip"] is None)
+    nets = gl._load_nets({"SSID": "a", "IP": "192.168.1.60", "GW": "192.168.1.1",
+                          "MASK": "255.255.0.0"})
+    check("static ip: MASK given, DNS defaults to the gateway",
+          nets[0]["ip"] == ("192.168.1.60", "255.255.0.0", "192.168.1.1",
+                            "192.168.1.1"), str(nets[0]["ip"]))
+
+    WLAN.ifconfig_calls = []
+    w = start_wifi(static_env, [("home", -40)], ["home"])
+    check("static ip: #1 connects with the static address applied",
+          w["state"] == "connected"
+          and WLAN.ifconfig_calls == [("192.168.1.60", "255.255.255.0",
+                                       "192.168.1.1", "192.168.1.111")],
+          str(WLAN.ifconfig_calls))
+    WLAN.ifconfig_calls = []
+    w = start_wifi(single, [("home", -40)], ["home"])
+    check("static ip: a DHCP-only config never calls ifconfig",
+          WLAN.ifconfig_calls == [], str(WLAN.ifconfig_calls))
+    gl.wifi["static"] = True
+    WLAN.ifconfig_calls = []
+    gl._wifi_ip(WLAN(0), {"ssid": "phone", "ip": None})
+    check("static ip: leaving the static net hands the interface back to DHCP",
+          WLAN.ifconfig_calls == ["dhcp"] and not gl.wifi["static"],
+          str(WLAN.ifconfig_calls))
+
     w = start_wifi(triple, [("phone", -55)], ["phone"])
     check("wifi #1 absent -> #2 used",
           w["state"] == "connected" and w["ssid"] == "phone",
@@ -1149,11 +1185,17 @@ try:
     check("wifi duplicate BSSID: home tried once (strongest)",
           len(home_tries) == 1, "connects=%s" % (WLAN.connects,))
 
-    w = start_wifi(triple, [], [])
+    w = start_wifi(triple, [("unrelated", -40)], [])
     check("wifi all absent -> offline (not connected)",
           w["state"] != "connected")
-    check("wifi all absent: no blind 1-2-3 tries (none hidden)",
-          WLAN.connects == [], "connects=%s" % (WLAN.connects,))
+    check("wifi scan missing known SSIDs: configured nets are fallback candidates",
+          [c[0] for c in WLAN.connects] == ["home", "phone", "cabin"],
+          "connects=%s" % (WLAN.connects,))
+    w = start_wifi(triple, [("unrelated", -40)], ["phone"])
+    check("wifi scan misses saved SSIDs: #2 still connects",
+          w["state"] == "connected" and w["ssid"] == "phone",
+          "state=%s ssid=%s connects=%s" % (
+              w["state"], w["ssid"], WLAN.connects))
     # logging continues
     gl.log_reset()
     gl.log["online"] = False
@@ -1808,8 +1850,8 @@ try:
     gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
     drain_wifi()
-    check("K6: empty scan tries only the hidden net",
-          WLAN.connects and all(c[0] == "PhoneHotspot" for c in WLAN.connects),
+    check("K6: empty scan falls back through configured networks",
+          [c[0] for c in WLAN.connects] == ["home", "PhoneHotspot"],
           "connects=%s" % (WLAN.connects,))
     check("K6: hidden net connects when not in the scan",
           gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot")
@@ -2913,31 +2955,6 @@ if mpy_bin:
         check("mpy-unix: ran MicroPython unix port", False, repr(e))
 else:
     print("SKIP  mpy-unix (no micropython binary)")
-
-# --- C6: no UART2 (UART1 instead); invalid bypass pin is not "held" ---------
-_uart_ids[:] = []
-_uart_c6[0] = True
-gl = _reload_logger()
-_uart_c6[0] = False
-check("C6: UART(2) failure falls back to UART(1)",
-      _uart_ids[-2:] == [2, 1] and gl.uart is not None, repr(_uart_ids))
-_uart_ids[:] = []
-gl = _reload_logger()
-check("ESP32: UART(2) is used when it exists", _uart_ids[-1:] == [2],
-      repr(_uart_ids))
-
-
-class _NoPin(object):
-    def __init__(self, *a, **k):
-        raise ValueError("invalid pin")
-
-
-boot_src = open(os.path.join(ROOT, "main.py")).read()
-boot_c6 = {"Pin": _NoPin, "RTC": RTC, "machine": sys.modules["machine"],
-           "time": time, "__name__": "boot_helpers"}
-exec(compile(boot_src, "main.py", "exec"), boot_c6)
-check("C6: invalid bypass pin counts as not held (logger starts)",
-      boot_c6["_bypass_level"]() == 1)
 
 # --- tools/trk2gpx.py: .trk -> GPX 1.1 ------------------------------------
 import xml.etree.ElementTree as ET

@@ -2,13 +2,9 @@
 # Compile gps_logger.py to .mpy and install it on the ESP32, then reboot.
 # It must run precompiled: compiling on the device grows the Python heap,
 # which leaves too little IDF heap for TLS uploads. main.py imports
-# gps_logger at boot (hold the bypass pin, BYPASS_PIN in main.py, during reset
-# to skip).
+# gps_logger at boot (hold GPIO25 during reset to skip).
 #
-# Usage: ./deploy.sh                    (PORT=/dev/ttyUSB1 ./deploy.sh to override)
-#        MARCH=xtensawin ./deploy.sh     (classic ESP32, Xtensa)
-# MARCH defaults to rv32imc (ESP32-C6, RISC-V). It must match the chip,
-# or the .mpy will not load.
+# Usage: ./deploy.sh            (PORT=/dev/ttyUSB1 ./deploy.sh to override)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -21,8 +17,16 @@ if ! $PY -c "import mpy_cross" 2>/dev/null; then
     .venv/bin/pip install -q "mpy-cross==1.29.*"
 fi
 
-MARCH=${MARCH:-rv32imc}
-$PY -m mpy_cross -march="$MARCH" -o gps_logger.mpy gps_logger.py
+# ESP32 is Xtensa, ESP32-C6 is RISC-V: ask the board which one it is
+MACHINE=$($MPREMOTE connect "$PORT" exec "import sys; print(sys.implementation._machine)" | tail -n 1)
+case "$MACHINE" in
+    *ESP32C6*) ARCH=rv32imc ;;
+    *ESP32*)   ARCH=xtensawin ;;
+    *) echo "Unsupported board: $MACHINE" >&2; exit 1 ;;
+esac
+echo "Board: $MACHINE ($ARCH)"
+
+$PY -m mpy_cross -march=$ARCH -o gps_logger.mpy gps_logger.py
 
 # A leftover gps_logger.py would be imported instead of the .mpy
 # Clear the RTC boot-fail counter so a previous crash lock (REPL after 5

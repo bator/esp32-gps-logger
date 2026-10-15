@@ -8,6 +8,14 @@ gc.threshold(8192)
 
 BAUD = 9600                              # NEO-6M/7M/8M default
 
+# Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
+# GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
+# main.py keeps the matching boot-bypass pin.
+if "ESP32C6" in getattr(sys.implementation, "_machine", ""):
+    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 4, 5, 7, 6
+else:
+    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 2, 17, 16, 22, 21
+
 # OLED is optional: boards without a display (or a failed I²C probe) run
 # headless. draw() and the boot banners become no-ops. Runtime I²C errors
 # disable the display instead of resetting the chip.
@@ -16,23 +24,18 @@ oled_err = 0
 OLED_MAX_ERR = 3
 try:
     import ssd1306
-    _i2c = I2C(0, scl=Pin(22), sda=Pin(21))
+    _i2c = I2C(0, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA))
     oled = ssd1306.SSD1306_I2C(128, 64, _i2c)
 except Exception as e:
     print("oled", repr(e))
 
-# Classic ESP32 has UART2; the ESP32-C6 has UART0 (USB console here) and
-# UART1 only, so UART2 raises there and UART1 is used instead.
-try:
-    uart = UART(2, baudrate=BAUD, tx=17, rx=16, rxbuf=4096)   # rides out HTTP calls
-except (OSError, ValueError):
-    uart = UART(1, baudrate=BAUD, tx=17, rx=16, rxbuf=4096)
+uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX, rxbuf=4096)   # rides out HTTP calls
 
 REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"
 
 SAMPLE = 1000                            # ms between sampled positions
-MIN_MOVE = 10                            # m from the last recorded point
+MIN_MOVE = 3                             # m from the last recorded point
 FLUSH = 60000                            # ms between batch writes to flash
 NEW_FILE_GAP = 300                       # s without fix → new file; also hotspot max age
 STALE = 2000                             # ms: older position = no fix
@@ -307,11 +310,10 @@ def _wdt_keepalive():
 #
 # Connect is a state machine in wifi_tick (one status poll per loop), so
 # GPS sampling is not blocked. Scan once per round; try strongest visible
-# known SSID (deduped by SSID). Hidden nets (SSIDn_HIDDEN=1) are tried
-# after visible ones. If the scan sees none of ours, only hidden nets are
-# tried. If the scan itself fails, config order 1→2→3 is used (under
-# backoff). v1.29 connect() may leave a stale status reason: the first
-# IGNORE_STALE_MS of a try are not treated as final.
+# known SSID (deduped by SSID). Remaining configured nets are tried in config
+# order after visible ones, so a missed scan does not block fallback.
+# v1.29 connect() may leave a stale status reason: the first IGNORE_STALE_MS
+# of a try are not treated as final.
 
 def load_env(path):
     """KEY=VALUE lines -> dict. Surrounding quotes are stripped."""
@@ -361,14 +363,50 @@ def _safe_name(s, default, host=False):
         return default
     return s
 
+def _ipv4(s):
+    """Dotted quad as given, or None when it is not a valid IPv4 address."""
+    parts = (s or "").strip().split(".")
+    if len(parts) != 4:
+        return None
+    for p in parts:
+        if not p or len(p) > 3:
+            return None
+        for c in p:
+            if c < "0" or c > "9":
+                return None
+        if int(p) > 255:
+            return None
+    return ".".join(parts)
+
+def _static_ip(env, keys):
+    """(ip, mask, gateway, dns) from IP/MASK/GW/DNS keys, or None for DHCP.
+
+    A static IP needs a gateway; MASK defaults to 255.255.255.0 and DNS to the
+    gateway. An invalid entry falls back to DHCP instead of leaving the board
+    unreachable."""
+    ipk, mk, gk, dk = keys
+    raw = env.get(ipk)
+    if not raw:
+        return None
+    ip = _ipv4(raw)
+    gw = _ipv4(env.get(gk))
+    if not ip or not gw:
+        print("static ip", ipk, "needs a valid", ipk, "and", gk, "- using DHCP")
+        return None
+    return (ip, _ipv4(env.get(mk)) or "255.255.255.0", gw,
+            _ipv4(env.get(dk)) or gw)
+
 def _load_nets(env):
     nets = []
     rows = (
-        ("SSID", "WPA2", "HOME1", "SSID_HOME", "SSID_HIDDEN", True),
-        ("SSID2", "WPA2_2", "HOME2", "SSID2_HOME", "SSID2_HIDDEN", False),
-        ("SSID3", "WPA2_3", "HOME3", "SSID3_HOME", "SSID3_HIDDEN", False),
+        ("SSID", "WPA2", "HOME1", "SSID_HOME", "SSID_HIDDEN", True,
+         ("IP", "MASK", "GW", "DNS")),
+        ("SSID2", "WPA2_2", "HOME2", "SSID2_HOME", "SSID2_HIDDEN", False,
+         ("IP2", "MASK2", "GW2", "DNS2")),
+        ("SSID3", "WPA2_3", "HOME3", "SSID3_HOME", "SSID3_HIDDEN", False,
+         ("IP3", "MASK3", "GW3", "DNS3")),
     )
-    for sk, pk, hk, hk2, hidk, default_home in rows:
+    for sk, pk, hk, hk2, hidk, default_home, ipkeys in rows:
         s = env.get(sk)
         if not s:
             continue
@@ -381,7 +419,8 @@ def _load_nets(env):
             home = t
         hidden = bool(_truthy(env.get(hidk)))
         nets.append({"ssid": s, "pw": "" if p is None else p,
-                     "home": home, "hidden": hidden, "bssid": None})
+                     "home": home, "hidden": hidden, "bssid": None,
+                     "ip": _static_ip(env, ipkeys)})
     return nets
 
 WIFI_STATES = {}
@@ -506,17 +545,15 @@ def _hidden_home_target(now, arrival=False):
     return None
 
 def _candidate_order(w):
-    """Visible strongest first (deduped), then hidden; empty scan ≠ scan fail."""
+    """Visible strongest first (deduped), then unscanned nets in config order."""
     now = time.ticks_ms()
     scanned = _scan_known(w)
-    hidden = [dict(n) for n in wifi["nets"] if n.get("hidden")]
     if scanned is None:
         cands = [dict(n) for n in wifi["nets"]]
-    elif not scanned:
-        cands = hidden
     else:
         seen = set(n["ssid"] for n in scanned)
-        cands = scanned + [n for n in hidden if n["ssid"] not in seen]
+        cands = scanned + [dict(n) for n in wifi["nets"]
+                           if n["ssid"] not in seen]
     good, bad = [], []
     for n in cands:
         (bad if _recently_failed(n["ssid"], now) else good).append(n)
@@ -559,6 +596,22 @@ def _wifi_clear(w):
             break
         time.sleep_ms(50)
 
+def _wifi_ip(w, net):
+    """Apply this network's static IP, or give a previous one back to DHCP.
+
+    Only a network that configured a static IP changes the interface, so the
+    DHCP networks behave exactly as before."""
+    cfg = net.get("ip")
+    try:
+        if cfg:
+            w.ifconfig(cfg)
+            wifi["static"] = True
+        elif wifi.get("static"):
+            w.ifconfig("dhcp")
+            wifi["static"] = False
+    except (OSError, ValueError, TypeError) as e:
+        print("wifi ip", repr(e))
+
 def _wifi_connect(w, net):
     wifi["ssid"] = net["ssid"]
     wifi["pw"] = net["pw"]
@@ -572,6 +625,7 @@ def _wifi_connect(w, net):
     except OSError:
         wifi["prev_status"] = None
     _wifi_clear(w)
+    _wifi_ip(w, net)
     try:
         bssid = net.get("bssid")
         if bssid:
@@ -1802,7 +1856,7 @@ def run():
         _loop()
     except KeyboardInterrupt:
         _running = False
-        print("WDT armed - fed by timer; hold GPIO25 and reset for mpremote")
+        print("WDT armed - fed by timer; hold the boot-bypass pin and reset for mpremote")
         try:
             flush()
         except Exception:
