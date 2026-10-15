@@ -310,11 +310,10 @@ def _wdt_keepalive():
 #
 # Connect is a state machine in wifi_tick (one status poll per loop), so
 # GPS sampling is not blocked. Scan once per round; try strongest visible
-# known SSID (deduped by SSID). Hidden nets (SSIDn_HIDDEN=1) are tried
-# after visible ones. If the scan sees none of ours, only hidden nets are
-# tried. If the scan itself fails, config order 1→2→3 is used (under
-# backoff). v1.29 connect() may leave a stale status reason: the first
-# IGNORE_STALE_MS of a try are not treated as final.
+# known SSID (deduped by SSID). Remaining configured nets are tried in config
+# order after visible ones, so a missed scan does not block fallback.
+# v1.29 connect() may leave a stale status reason: the first IGNORE_STALE_MS
+# of a try are not treated as final.
 
 def load_env(path):
     """KEY=VALUE lines -> dict. Surrounding quotes are stripped."""
@@ -546,17 +545,15 @@ def _hidden_home_target(now, arrival=False):
     return None
 
 def _candidate_order(w):
-    """Visible strongest first (deduped), then hidden; empty scan ≠ scan fail."""
+    """Visible strongest first (deduped), then unscanned nets in config order."""
     now = time.ticks_ms()
     scanned = _scan_known(w)
-    hidden = [dict(n) for n in wifi["nets"] if n.get("hidden")]
     if scanned is None:
         cands = [dict(n) for n in wifi["nets"]]
-    elif not scanned:
-        cands = hidden
     else:
         seen = set(n["ssid"] for n in scanned)
-        cands = scanned + [n for n in hidden if n["ssid"] not in seen]
+        cands = scanned + [dict(n) for n in wifi["nets"]
+                           if n["ssid"] not in seen]
     good, bad = [], []
     for n in cands:
         (bad if _recently_failed(n["ssid"], now) else good).append(n)
