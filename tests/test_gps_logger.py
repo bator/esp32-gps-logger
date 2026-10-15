@@ -488,7 +488,6 @@ def online(tmpdir):
     gl.up["allow_bad"] = True
     gl.up["bad_tries"] = 0
     gl.log["file"] = None
-    gl.log["online"] = True
     _posts[:] = []
     _post_code[0] = 201
     _post_raise[0] = None
@@ -817,12 +816,10 @@ try:
 
     # --- full-flash path ---------------------------------------------------
     online(tmpdir)
-    gl.log["online"] = True
     gl.log["full"] = True
     gl.wifi["state"] = "lost"
-    gl.mode_tick()
-    check("full: going offline clears log['full']",
-          gl.log["full"] is False and gl.log["online"] is False)
+    check("full: losing WiFi does not clear the full-flash state",
+          gl.log["full"] is True)
     gl.log["file"] = os.path.join(tmpdir, "20261005_160000.gpx")
     gl.log["created"] = False
     gl.log["batch"] = ['<trkpt lat="1" lon="2"><time>t</time></trkpt>\n']
@@ -832,7 +829,6 @@ try:
     check("full: flush() with MIN_FREE not met sets full and drops batch",
           gl.log["full"] is True and gl.log["batch"] == [])
     gl.free = lambda: gl.MIN_FREE + 10
-    gl.log["online"] = False
     gl.log_tick()
     check("full: log_tick clears full when space returns",
           gl.log["full"] is False)
@@ -1015,7 +1011,6 @@ try:
     # --- HDOP filter (fresh GGA only) --------------------------------------
     gl.log_reset()
     gl.log["full"] = False
-    gl.log["online"] = False
     gl.log["file"] = os.path.join(tmpdir, "now.trk")
     gl.log["created"] = True
     gl.st.update(valid=True, date="2026-10-05", time="12:00:00",
@@ -1198,7 +1193,6 @@ try:
               w["state"], w["ssid"], WLAN.connects))
     # logging continues
     gl.log_reset()
-    gl.log["online"] = False
     gl.log["full"] = False
     gl.st.update(valid=True, date="2026-10-05", time="18:00:00",
                  lat=52.5, lon=13.4, alt=10.0, pos_at=_clock[0],
@@ -1223,7 +1217,6 @@ try:
     gl.wifi_tick()
     check("wifi loss first leaves LOG (not blocking connect)",
           gl.wifi["state"] != "connected" and gl.at_home() is False)
-    gl.mode_tick()
     gl.IGNORE_STALE_MS = 0
     drain_wifi()
     check("wifi failover after disconnect uses the other known net",
@@ -1413,10 +1406,6 @@ try:
           and w["home"] is False)
     check("B3: at_home() is False on hotspot", gl.at_home() is False)
     gl.log_reset()
-    gl.log["online"] = True
-    gl.mode_tick()
-    check("B3: mode_tick does not enter upload-only on hotspot",
-          gl.log["online"] is False)
     gps_fix(52.50)
     gl.log["fix"] = False
     gl.log["lost_at"] = None
@@ -1457,61 +1446,30 @@ try:
     check("B3: home network is marked home",
           w["state"] == "connected" and w["home"] is True)
     gl.log_reset()
-    gl.log["online"] = False
-    gl.mode_tick()
-    check("B3: home SSID stops logging (upload-only)",
-          gl.log["online"] is True)
     gps_fix(52.51)
     gl.log["last_sample"] = None
     gl.log_tick()
-    check("B3: log_tick is a no-op on home",
-          gl.log["batch"] == [] and gl.log["file"] is None)
-    check("B3: OLED mode UPLOAD on home",
-          gl._mode_line() == "Mode UPLOAD")
+    home_path = gl.log["file"]
+    check("B3: home WiFi records GPS points",
+          bool(gl.log["batch"]) and home_path is not None)
+    check("B3: OLED mode LOG+UP on home",
+          gl._mode_line() == "Mode LOG+UP")
+
+    _clock[0] += gl.NEW_FILE_GAP * 1000
+    gl.st["time"] = "12:05:01"
+    gl.st["pos_at"] = _clock[0]
+    gl.st["hdop_at"] = _clock[0]
+    gl.log["last_sample"] = None
+    gl.log_tick()
+    check("B3: home WiFi closes old tracks for background upload",
+          home_path in gl.pending() and gl.log["file"] != home_path,
+          "pending=%s current=%s" % (gl.pending(), gl.log.get("file")))
 
     # HOME2 override
     env_h2 = env_hot + "HOME2=1\n"
     w = start_wifi(env_h2, [("PhoneHotspot", -40)], ["PhoneHotspot"])
     check("B3: HOME2=1 treats hotspot as home",
           w["home"] is True, "home=%s" % w["home"])
-
-    # --- MT: home arrival must not drop points a failed flush left in RAM ---
-    gl.log_reset()
-    w = start_wifi(env_hot, [("home", -30)], ["home"])
-    check("MT setup: connected to home net",
-          w["state"] == "connected" and w["home"] is True)
-    mt_path = os.path.join(tmpdir, "mode_tick_trip.trk")
-    make_gpx(mt_path, 2)
-    mt_pt = trk_line(52.5, 13.4, "2026-10-05T12:00:05Z")
-    gl.log.update(file=mt_path, created=True, points=2, batch=[mt_pt],
-                  good_size=os.path.getsize(mt_path), new_seg=False, err=0,
-                  online=False)
-    import builtins
-    orig_open = builtins.open
-
-    def _no_flash(*a, **k):
-        raise OSError("flash")
-
-    builtins.open = _no_flash
-    try:
-        gl.mode_tick()
-    finally:
-        builtins.open = orig_open
-    check("MT-1: failed flush on home arrival keeps the batch and the file",
-          mt_pt in gl.log["batch"] and gl.log["file"] == mt_path,
-          "batch=%s file=%s" % (gl.log["batch"], gl.log.get("file")))
-    check("MT-1: home arrival still stops logging after a failed flush",
-          gl.log["online"] is True and gl.at_home() is True)
-
-    _clock[0] += gl.FLUSH
-    gl.mode_tick()
-    with open(mt_path) as f:
-        mt_text = f.read()
-    check("MT-2: retry on home lands the kept points and closes the file",
-          pts_in(mt_path) == 3 and gl.log["batch"] == []
-          and gl.log["file"] is None,
-          "n_pts=%s batch=%s file=%s" % (
-              pts_in(mt_path), gl.log["batch"], gl.log.get("file")))
 
     # --- TRK: compact track format (.trk) ----------------------------------
     saved_dir = gl.LOG_DIR
@@ -1732,7 +1690,6 @@ try:
     check("K3: still connecting after one tick",
           gl.wifi["state"] == "connecting")
     gl.log_reset()
-    gl.log["online"] = False
     gps_fix(52.52)
     gl.log["fix"] = False
     gl.log["lost_at"] = None
@@ -2228,7 +2185,6 @@ try:
     gl.wifi_tick()
     check("LL1: first drop is 'lost', not a stale connecting fail",
           gl.wifi["state"] == "lost" and "home" not in gl.wifi["failed"])
-    gl.mode_tick()
     for _ in range(3):
         gl.wifi_tick()
     check("LL1: IDF auto-reconnect restores home within grace",
@@ -2325,7 +2281,6 @@ try:
     open_path = os.path.join(rot_dir, "open.trk")
     make_gpx(open_path, 3)
     gl.log_reset()
-    gl.log["online"] = False
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.log["file"] = open_path
@@ -2365,8 +2320,8 @@ try:
     gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
     gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
     gl.log_tick()
-    check("rotate: home net does not age-rotate (mode_tick closes instead)",
-          gl.log["file"] == open_path)
+    check("rotate: home net closes an old file so it can upload",
+          gl.log["file"] is None)
 
     # failed flush must keep the batch (no drop of up to 60 s of points)
     gl.wifi["state"] = "connected"
@@ -2421,7 +2376,6 @@ try:
     os.mkdir(drive_dir)
     gl.LOG_DIR = drive_dir
     gl.log_reset()
-    gl.log["online"] = False
     gl.wifi["state"] = "offline"
     gl.wifi["home"] = False
     gl.log["file"] = None
@@ -2447,7 +2401,6 @@ try:
     os.mkdir(park_dir)
     gl.LOG_DIR = park_dir
     gl.log_reset()
-    gl.log["online"] = False
     gl.wifi["state"] = "offline"
     gl.wifi["home"] = False
     gl.log["prev"] = (52.5, 13.4)
@@ -2474,7 +2427,6 @@ try:
     os.mkdir(hot_dir)
     gl.LOG_DIR = hot_dir
     gl.log_reset()
-    gl.log["online"] = False
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.log["file"] = None
@@ -2557,7 +2509,6 @@ try:
         return _open
 
     gl.log_reset()
-    gl.log["online"] = False
     close_path = os.path.join(close_dir, "c.trk")
     make_gpx(close_path, 2)
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt])

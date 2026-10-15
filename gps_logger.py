@@ -304,9 +304,8 @@ def _wdt_keepalive():
         print("wdt timer", repr(e))
 
 # --- WiFi -------------------------------------------------------------------
-# Up to three networks. Network #1 is "home" by default (connected → upload
-# only, no logging). #2/#3 are not home: logging continues and finished
-# files upload in the background (phone hotspot on a car trip).
+# Up to three networks. Network #1 is "home" by default and preferred
+# for connections. Logging continues and finished files upload on all networks.
 #
 # Connect is a state machine in wifi_tick (one status poll per loop), so
 # GPS sampling is not blocked. Scan once per round; try strongest visible
@@ -878,7 +877,7 @@ def online():
     return wifi["state"] == "connected"
 
 def at_home():
-    """Home SSID: upload-only (no logging). Hotspot / other: log + upload."""
+    """Whether the connected network is configured as a home network."""
     return wifi["state"] == "connected" and wifi.get("home")
 
 # --- GPX logger -------------------------------------------------------------
@@ -899,7 +898,7 @@ log = {}
 def log_reset():
     log.clear()
     log.update(file=None, created=False, batch=[], points=0, err=0,
-               fix=False, lost_at=None, new_seg=False, full=False, online=False,
+               fix=False, lost_at=None, new_seg=False, full=False,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=0, file_at=None, good_size=None)
 
@@ -1027,13 +1026,11 @@ def _fresh_hdop(now):
 def log_tick():
     """Sample a position every SAMPLE ms and record it if it is more than
     MIN_MOVE m from the last recorded point; write a batch every FLUSH ms."""
-    if log["online"]:
-        return
     now = time.ticks_ms()
-    # Close a long-open file only on a non-home net so it can upload.
-    # Offline driving keeps one file; parking (MIN_MOVE) does not open another.
+    # Close a long-open file on any WiFi network so it can upload while
+    # logging continues. Offline driving keeps one file.
     if (log["file"] is not None and log.get("file_at") is not None
-            and wifi["state"] == "connected" and not wifi.get("home")
+            and wifi["state"] == "connected"
             and log["points"] + len(log["batch"]) > 0
             and time.ticks_diff(now, log["file_at"]) >= NEW_FILE_GAP * 1000
             and time.ticks_diff(now, log["last_flush"]) >= FLUSH):
@@ -1097,33 +1094,6 @@ def log_tick():
                     log["batch"].pop(0)
     if time.ticks_diff(now, log["last_flush"]) >= FLUSH:
         flush()
-
-def mode_tick():
-    """Home SSID: close the file and upload only. Elsewhere: keep logging."""
-    home = at_home()
-    if home == log["online"]:
-        # Still at home, but a flash write failed: retry the kept batch
-        # every FLUSH. Nothing new is sampled while online.
-        if (home and log["batch"] and time.ticks_diff(
-                time.ticks_ms(), log["last_flush"]) >= FLUSH):
-            _home_close()
-        return
-    log["online"] = home
-    if home:
-        _home_close()
-    else:
-        log.update(fix=False, lost_at=None, full=False)
-
-def _home_close():
-    """Write the batch, then close the file. The file and its points are
-    kept if the write fails: dropping them would lose data, and file=None
-    would stop any later flush from writing them."""
-    flush()
-    if log["batch"]:
-        return
-    log.update(file=None, fix=False, new_seg=False, last_t=None,
-               prev=None, file_at=None)
-    up["next_at"] = time.ticks_ms()
 
 # --- Upload ---------------------------------------------------------------
 # Finished track files (never the one being recorded) are sent to Dawarich's
@@ -1790,8 +1760,6 @@ def _wifi_line():
 def _mode_line():
     if _bad_full_left() or up.get("state") == "bad full":
         return "Mode BAD FULL"
-    if log["online"]:
-        return "Mode UPLOAD"
     if wifi["state"] == "connected":
         return "Mode LOG+UP"
     return "Mode LOG"
@@ -1836,7 +1804,7 @@ def draw():
 # --- Main loop --------------------------------------------------------------
 
 def run():
-    """Show the logger state on the OLED, log tracks offline, upload online."""
+    """Show the logger state on the OLED, logging and uploading when possible."""
     global _wdt, _running, _boot_ok_done
     _keep_stop()
     _running = False
@@ -1896,8 +1864,6 @@ def _loop():
         read_uart()
         log_tick()
         wifi_tick()
-        feed()
-        mode_tick()
         feed()
         upload_tick()
         now = time.ticks_ms()

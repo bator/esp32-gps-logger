@@ -1,10 +1,10 @@
 # ESP32 GPS Logger
 
-MicroPython GPS track logger for the ESP32. Away from home it records your
-position to track files on the internal flash (`.trk`, see below). On a **home** WiFi network it
-stops logging and uploads finished tracks to a
+MicroPython GPS track logger for the ESP32. It records your position to track
+files on the internal flash (`.trk`, see below) both offline and while on
+WiFi. When connected, it uploads finished tracks to a
 [Dawarich](https://dawarich.app) server via its Overland API. On a
-**non-home** network (a phone hotspot in the car) it keeps logging and
+WiFi network (including a phone hotspot in the car) it keeps logging and
 uploads already-finished files in the background.
 
 ## Features
@@ -12,9 +12,9 @@ uploads already-finished files in the background.
 - Reads NMEA (`RMC`, `GGA`, `GSA`, `GSV`) from a u-blox NEO-6M/7M/8M over UART, with checksum validation.
 - Samples the position every second and records a point only after moving more than 3 m from the last recorded one (`MIN_MOVE`), to track files named `/gpx/YYYYMMDD_HHMMSS.trk`. A point is ~46 bytes (the old GPX XML was ~112), so a full flash holds about 2.4× more track; the pull script turns them back into GPX. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
 - Power-loss safe: each file is always complete (header, points, footer), written in batches every 60 s (LittleFS commits on close). A line cut off by a power loss is skipped.
-- Short fix losses start a new track segment; a gap over 5 minutes starts a new file. On a **non-home** network a file that has been open for 5 minutes is closed so it can upload (offline driving stays one file; parking does not open empty files).
-- Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds) or after leaving a home network.
-- Up to three WiFi networks. Network **#1 is home** by default (connected → upload only). **#2 and #3 are not home** (log + opportunistic upload). Override with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, a home AP at ≥ −75 dBm is tried first, then other visible known APs strongest-RSSI first (one SSID, strongest BSSID). Remaining configured networks are then tried in config order, so an SSID missed by the scan does not prevent fallback. A **hidden home** is tried first when the scan shows a strong empty-SSID AP (≥ −75 dBm) — that is how a hidden AP appears. If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net, when nearly stopped, the logger scans for home every ~5 min (backoff to 60 min only after a **visible** home switch fails; a failed hidden-home attempt stays at 5 min). A stop after driving resets that interval only if a visible home is in view, not an unverified empty-SSID AP. A visible home at ≥ −75 dBm, or a hidden home plus a strong empty-SSID AP, is tried between upload batches; hidden roam uses `bssid=None` (firmware matches by SSID) and never pins to the strongest blank AP. **Limitation:** with a hidden home SSID, switching home can be slower (no BSSID pin; arrival after driving does not try an unverified blank AP) and a neighbouring hidden AP can trigger a false attempt. Falls back to the hotspot if that connect fails.
+- Short fix losses start a new track segment; a gap over 5 minutes starts a new file. On any WiFi network, a file that has been open for 5 minutes is closed so it can upload while logging continues (offline driving stays one file; parking does not open empty files).
+- Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds).
+- Up to three WiFi networks. Network **#1 is home** by default and is preferred for connections and faster upload pacing; **#2 and #3** are additional networks (for example a phone hotspot). Logging and uploading work on all configured networks. Override home-network preference with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, a home AP at ≥ −75 dBm is tried first, then other visible known APs strongest-RSSI first (one SSID, strongest BSSID). Remaining configured networks are then tried in config order, so an SSID missed by the scan does not prevent fallback. A **hidden home** is tried first when the scan shows a strong empty-SSID AP (≥ −75 dBm) — that is how a hidden AP appears. If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net, when nearly stopped, the logger scans for home every ~5 min (backoff to 60 min only after a **visible** home switch fails; a failed hidden-home attempt stays at 5 min). A stop after driving resets that interval only if a visible home is in view, not an unverified empty-SSID AP. A visible home at ≥ −75 dBm, or a hidden home plus a strong empty-SSID AP, is tried between upload batches; hidden roam uses `bssid=None` (firmware matches by SSID) and never pins to the strongest blank AP. **Limitation:** with a hidden home SSID, switching home can be slower (no BSSID pin; arrival after driving does not try an unverified blank AP) and a neighbouring hidden AP can trigger a false attempt. Falls back to another configured network if that connect fails.
 - Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.bad`. Older `.gpx` files from earlier firmware are still uploaded. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
 - 128×64 OLED: connected SSID (never the password), GPS fix, mode (`LOG` / `LOG+UP` / `UPLOAD` / `BAD FULL`), free flash and points left. Missing or dropping display → headless.
 - Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush, wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. GPIO25 at reset skips the logger entirely.
@@ -83,8 +83,8 @@ python3 -m venv .venv
 Create `.env` and copy it to the device root:
 
 ```ini
-# Network #1 is HOME by default: at this SSID the logger stops recording
-# and uploads. A single-network .env is unchanged from earlier versions.
+# Network #1 is HOME by default and is preferred for connections.
+# Logging and uploading happen on all configured WiFi networks.
 SSID=MyHomeWifi
 WPA2=wifi-password
 
@@ -163,8 +163,8 @@ falls back to DHCP rather than becoming unreachable.
    after HTTP 2xx, so a mid-upload drop is retried (Dawarich dedups).
    Far from home, a hidden home is not tried before a visible hotspot.
 
-OLED / log show the connected SSID, never the password. Mode is `UPLOAD`
-on a home net, `LOG+UP` on a hotspot, `LOG` when offline.
+OLED / log show the connected SSID, never the password. Mode is `LOG+UP`
+on any connected WiFi network and `LOG` when offline.
 
 The API key is sent as `Authorization: Bearer <key>` (Dawarich accepts that
 header as well as `?api_key=`). Prefer `https://` for `GEO_URL`: an `http://`
