@@ -1185,11 +1185,17 @@ try:
     check("wifi duplicate BSSID: home tried once (strongest)",
           len(home_tries) == 1, "connects=%s" % (WLAN.connects,))
 
-    w = start_wifi(triple, [], [])
+    w = start_wifi(triple, [("unrelated", -40)], [])
     check("wifi all absent -> offline (not connected)",
           w["state"] != "connected")
-    check("wifi all absent: no blind 1-2-3 tries (none hidden)",
-          WLAN.connects == [], "connects=%s" % (WLAN.connects,))
+    check("wifi scan missing known SSIDs: configured nets are fallback candidates",
+          [c[0] for c in WLAN.connects] == ["home", "phone", "cabin"],
+          "connects=%s" % (WLAN.connects,))
+    w = start_wifi(triple, [("unrelated", -40)], ["phone"])
+    check("wifi scan misses saved SSIDs: #2 still connects",
+          w["state"] == "connected" and w["ssid"] == "phone",
+          "state=%s ssid=%s connects=%s" % (
+              w["state"], w["ssid"], WLAN.connects))
     # logging continues
     gl.log_reset()
     gl.log["online"] = False
@@ -1844,8 +1850,8 @@ try:
     gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
     drain_wifi()
-    check("K6: empty scan tries only the hidden net",
-          WLAN.connects and all(c[0] == "PhoneHotspot" for c in WLAN.connects),
+    check("K6: empty scan falls back through configured networks",
+          [c[0] for c in WLAN.connects] == ["home", "PhoneHotspot"],
           "connects=%s" % (WLAN.connects,))
     check("K6: hidden net connects when not in the scan",
           gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot")
