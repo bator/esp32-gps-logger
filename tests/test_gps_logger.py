@@ -1392,11 +1392,11 @@ try:
         gl._readline = orig_rl
 
     # --- B3: hotspot (non-home) keeps logging + opportunistic upload ------
-    def gps_fix(lat=52.5):
+    def gps_fix(lat=52.5, speed=6.0):
         gl.st.update(valid=True, date="2026-10-05", time="12:00:00",
                      lat=lat, lon=13.4, alt=10.0, pos_at=_clock[0],
                      hdop=1.0, hdop_at=_clock[0], status="A", quality=1,
-                     fixtype=3)
+                     fixtype=3, speed=speed)
 
     env_hot = ("SSID=home\nWPA2=h\nSSID2=PhoneHotspot\nWPA2_2=p\n"
                "GEO_URL=https://d.example\nAPI_KEY=k\n")
@@ -1446,7 +1446,7 @@ try:
     check("B3: home network is marked home",
           w["state"] == "connected" and w["home"] is True)
     gl.log_reset()
-    gps_fix(52.51)
+    gps_fix(52.51, speed=0.0)
     gl.log["last_sample"] = None
     gl.log_tick()
     home_path = gl.log["file"]
@@ -1455,14 +1455,37 @@ try:
     check("B3: OLED mode LOG+UP on home",
           gl._mode_line() == "Mode LOG+UP")
 
+    _clock[0] += gl.HOME_STOP_DELAY - 1
+    gps_fix(52.5101, speed=0.0)
+    gl.log_tick()
+    check("HOME STOP: low speed must persist for the full delay",
+          gl.log["home_paused"] is False)
+    _clock[0] += 1
+    gps_fix(52.5101, speed=0.0)
+    gl.log_tick()
+    check("HOME STOP: pause and close the track after 2 minutes stopped",
+          gl.log["home_paused"] is True and gl.log["file"] is None
+          and gl.log["batch"] == [] and home_path in gl.pending())
+
+    _clock[0] += gl.SAMPLE
+    gps_fix(52.511, speed=6.0)
+    gl.st["time"] = "12:03:00"
+    gl.log_tick()
+    resumed_path = gl.log["file"]
+    check("HOME STOP: resume recording above 5 km/h",
+          gl.log["home_paused"] is False and resumed_path is not None
+          and bool(gl.log["batch"]))
+
     _clock[0] += gl.NEW_FILE_GAP * 1000
     gl.st["time"] = "12:05:01"
+    gl.st["speed"] = 6.0
     gl.st["pos_at"] = _clock[0]
     gl.st["hdop_at"] = _clock[0]
     gl.log["last_sample"] = None
     gl.log_tick()
     check("B3: home WiFi closes old tracks for background upload",
-          home_path in gl.pending() and gl.log["file"] != home_path,
+          home_path in gl.pending() and resumed_path in gl.pending()
+          and gl.log["file"] != resumed_path,
           "pending=%s current=%s" % (gl.pending(), gl.log.get("file")))
 
     # HOME2 override

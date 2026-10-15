@@ -38,6 +38,8 @@ SAMPLE = 1000                            # ms between sampled positions
 MIN_MOVE = 3                             # m from the last recorded point
 FLUSH = 60000                            # ms between batch writes to flash
 NEW_FILE_GAP = 300                       # s without fix → new file; also hotspot max age
+HOME_STOP_SPEED = 5                      # km/h below which home stop timer runs
+HOME_STOP_DELAY = 120000                 # ms below HOME_STOP_SPEED before pausing
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
@@ -899,6 +901,7 @@ def log_reset():
     log.clear()
     log.update(file=None, created=False, batch=[], points=0, err=0,
                fix=False, lost_at=None, new_seg=False, full=False,
+               home_still_since=None, home_paused=False,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=0, file_at=None, good_size=None)
 
@@ -1023,10 +1026,50 @@ def _fresh_hdop(now):
         return None
     return hdop
 
+def _home_stop_tick(now):
+    """Pause home logging after a sustained low-speed period; resume on motion."""
+    if not at_home():
+        if log["home_paused"]:
+            log.update(home_paused=False, fix=False, lost_at=None,
+                       prev=None, last_t=None, last_sample=None)
+        log["home_still_since"] = None
+        return False
+
+    if log["home_paused"]:
+        if (has_fix(now) and st.get("speed") is not None
+                and st["speed"] >= HOME_STOP_SPEED):
+            log.update(home_paused=False, fix=False, lost_at=None,
+                       prev=None, last_t=None, last_sample=None)
+            return False
+        return True
+
+    speed = st.get("speed")
+    if not has_fix(now) or speed is None:
+        log["home_still_since"] = None
+        return False
+    if speed >= HOME_STOP_SPEED:
+        log["home_still_since"] = None
+        return False
+
+    if log["home_still_since"] is None:
+        log["home_still_since"] = now
+    if time.ticks_diff(now, log["home_still_since"]) < HOME_STOP_DELAY:
+        return False
+
+    if log["batch"]:
+        flush()
+    if log["batch"]:
+        return True
+    log.update(file=None, created=False, file_at=None, fix=False,
+               new_seg=False, last_t=None, prev=None, home_paused=True)
+    return True
+
 def log_tick():
     """Sample a position every SAMPLE ms and record it if it is more than
     MIN_MOVE m from the last recorded point; write a batch every FLUSH ms."""
     now = time.ticks_ms()
+    if _home_stop_tick(now):
+        return
     # Close a long-open file on any WiFi network so it can upload while
     # logging continues. Offline driving keeps one file.
     if (log["file"] is not None and log.get("file_at") is not None
