@@ -16,6 +16,11 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+if not hasattr(os, "statvfs"):
+    os.statvfs = lambda path: (4096, 4096, 1024, 1024, 1024, 0, 0, 0, 0, 0)
+if os.name == "nt":
+    os.rename = os.replace
+
 _clock = [100000]
 _oled_fail = [False]
 _resets = []
@@ -381,6 +386,11 @@ def check(name, cond, detail=""):
         msg = "FAIL  %s%s" % (name, (" - " + detail) if detail else "")
         print(msg)
         failures.append(msg)
+
+def same_path(a, b):
+    return (a is None and b is None) or (
+        a is not None and b is not None
+        and os.path.normcase(a) == os.path.normcase(b))
 
 
 GPX_HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -1391,7 +1401,7 @@ try:
     try:
         pump()
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
-              gl.up["skip"] == path and gl.up["state"] == "low mem")
+              same_path(gl.up["skip"], path) and gl.up["state"] == "low mem")
     except MemoryError:
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
               False, "MemoryError escaped")
@@ -2298,12 +2308,13 @@ try:
     make_gpx(stuck, 200)
     _post_code[0] = 400
     pumps = 0
-    while stuck not in (gl.up.get("hold") or {}) and pumps < 8:
+    while not any(same_path(stuck, p)
+                  for p in (gl.up.get("hold") or {})) and pumps < 8:
         pump()
         gl.up["next_at"] = _clock[0]
         pumps += 1
     check("HOL: oldest file is held after global payload errors",
-          stuck in (gl.up.get("hold") or {}),
+          any(same_path(stuck, p) for p in (gl.up.get("hold") or {})),
           "hold=%s pumps=%s" % (gl.up.get("hold"), pumps))
     make_gpx(later, 8)
     _posts[:] = []
