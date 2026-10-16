@@ -1455,12 +1455,25 @@ try:
     check("B3: OLED mode LOG+UP on home",
           gl._mode_line() == "Mode LOG+UP")
 
-    _clock[0] += gl.HOME_STOP_DELAY - 1
+    still_since = gl.log["home_still_since"]
+    _clock[0] += 10000
+    gps_fix(52.5101, speed=6.0)
+    gl.log_tick()
+    check("HOME STOP: brief GPS speed spike does not reset stopped timer",
+          gl.log["home_still_since"] == still_since
+          and gl.log["home_paused"] is False)
+    _clock[0] += gl.HOME_STOP_DELAY - 10001
     gps_fix(52.5101, speed=0.0)
     gl.log_tick()
     check("HOME STOP: low speed must persist for the full delay",
           gl.log["home_paused"] is False)
     _clock[0] += 1
+    gl.st.update(speed=None, pos_at=_clock[0] - gl.STALE - 1)
+    gl.log_tick()
+    check("HOME STOP: temporary GPS fix loss does not restart stopped timer",
+          gl.log["home_still_since"] == still_since
+          and gl.log["home_paused"] is False)
+    _clock[0] += 100
     gps_fix(52.5101, speed=0.0)
     gl.log_tick()
     check("HOME STOP: pause and close the track after 2 minutes stopped",
@@ -1471,11 +1484,31 @@ try:
     gps_fix(52.511, speed=6.0)
     gl.st["time"] = "12:03:00"
     gl.log_tick()
+    check("HOME STOP: brief movement does not resume recording",
+          gl.log["home_paused"] is True)
+    _clock[0] += gl.HOME_MOVE_CONFIRM
+    gps_fix(52.511, speed=6.0)
+    gl.st["time"] = "12:03:30"
+    gl.log_tick()
+    check("HOME STOP: speed alone without 60 m displacement stays paused",
+          gl.log["home_paused"] is True and gl.log["file"] is None)
+    _clock[0] += 1
+    gps_fix(52.512, speed=6.0)
+    gl.st["time"] = "12:03:31"
+    gl.log_tick()
     resumed_path = gl.log["file"]
-    check("HOME STOP: resume recording above 5 km/h",
+    check("HOME STOP: resume after sustained speed and 60 m displacement",
           gl.log["home_paused"] is False and resumed_path is not None
-          and bool(gl.log["batch"]))
+          and bool(gl.log["batch"]),
+          "paused=%s moving_since=%s still_since=%s file=%s batch=%s" % (
+              gl.log["home_paused"], gl.log["home_moving_since"],
+              gl.log["home_still_since"], resumed_path, gl.log["batch"]))
 
+    gl.wifi["home"] = False
+    _clock[0] += gl.HOME_MOVE_CONFIRM
+    gl.st["pos_at"] = _clock[0]
+    gl.st["hdop_at"] = _clock[0]
+    gl.log_tick()
     _clock[0] += gl.NEW_FILE_GAP * 1000
     gl.st["time"] = "12:05:01"
     gl.st["speed"] = 6.0
@@ -1483,7 +1516,7 @@ try:
     gl.st["hdop_at"] = _clock[0]
     gl.log["last_sample"] = None
     gl.log_tick()
-    check("B3: home WiFi closes old tracks for background upload",
+    check("B3: connected WiFi closes old tracks for background upload",
           home_path in gl.pending() and resumed_path in gl.pending()
           and gl.log["file"] != resumed_path,
           "pending=%s current=%s" % (gl.pending(), gl.log.get("file")))
@@ -1499,6 +1532,7 @@ try:
     trk_dir = os.path.join(tmpdir, "trkfmt")
     os.makedirs(trk_dir)
     gl.LOG_DIR = trk_dir
+    gl.wifi["state"] = "offline"
     gl.log_reset()
     gl.up.setdefault("left", 0)
     gl.st.update(valid=True, date="2026-10-05", time="12:00:05", lat=52.5,

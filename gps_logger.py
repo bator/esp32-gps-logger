@@ -40,6 +40,9 @@ FLUSH = 60000                            # ms between batch writes to flash
 NEW_FILE_GAP = 300                       # s without fix → new file; also hotspot max age
 HOME_STOP_SPEED = 5                      # km/h below which home stop timer runs
 HOME_STOP_DELAY = 120000                 # ms below HOME_STOP_SPEED before pausing
+HOME_MOVE_CONFIRM = 30000                # ms above HOME_STOP_SPEED to resume
+HOME_MOVE_DISTANCE = 60                  # m of confirmed displacement to resume
+HOME_MOVE_MAX_WAIT = 120000              # ms before restarting a stalled move check
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
@@ -901,7 +904,9 @@ def log_reset():
     log.clear()
     log.update(file=None, created=False, batch=[], points=0, err=0,
                fix=False, lost_at=None, new_seg=False, full=False,
-               home_still_since=None, home_paused=False,
+               home_still_since=None, home_moving_since=None,
+               home_move_origin=None,
+               home_paused=False,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=0, file_at=None, good_size=None)
 
@@ -1027,30 +1032,44 @@ def _fresh_hdop(now):
     return hdop
 
 def _home_stop_tick(now):
-    """Pause home logging after a sustained low-speed period; resume on motion."""
+    """Pause after sustained low speed; require sustained motion to resume."""
     if not at_home():
         if log["home_paused"]:
             log.update(home_paused=False, fix=False, lost_at=None,
                        prev=None, last_t=None, last_sample=None)
-        log["home_still_since"] = None
+        log.update(home_still_since=None, home_moving_since=None,
+                   home_move_origin=None)
         return False
-
-    if log["home_paused"]:
-        if (has_fix(now) and st.get("speed") is not None
-                and st["speed"] >= HOME_STOP_SPEED):
-            log.update(home_paused=False, fix=False, lost_at=None,
-                       prev=None, last_t=None, last_sample=None)
-            return False
-        return True
 
     speed = st.get("speed")
     if not has_fix(now) or speed is None:
-        log["home_still_since"] = None
-        return False
-    if speed >= HOME_STOP_SPEED:
-        log["home_still_since"] = None
-        return False
+        log.update(home_moving_since=None, home_move_origin=None)
+        return True if log["home_paused"] else False
 
+    if speed >= HOME_STOP_SPEED:
+        if log["home_moving_since"] is None:
+            log["home_moving_since"] = now
+            log["home_move_origin"] = (st["lat"], st["lon"])
+        origin = log["home_move_origin"]
+        displaced = (origin is not None
+                     and _dist(origin[0], origin[1], st["lat"], st["lon"])
+                     >= HOME_MOVE_DISTANCE)
+        elapsed = time.ticks_diff(now, log["home_moving_since"])
+        if displaced and elapsed >= HOME_MOVE_CONFIRM:
+            log["home_still_since"] = None
+            if log["home_paused"]:
+                log.update(home_paused=False, fix=False, lost_at=None,
+                           prev=None, last_t=None, last_sample=None)
+            log.update(home_moving_since=None, home_move_origin=None)
+            return False
+        if elapsed >= HOME_MOVE_MAX_WAIT:
+            log.update(home_moving_since=now,
+                       home_move_origin=(st["lat"], st["lon"]))
+        return True
+
+    log.update(home_moving_since=None, home_move_origin=None)
+    if log["home_paused"]:
+        return True
     if log["home_still_since"] is None:
         log["home_still_since"] = now
     if time.ticks_diff(now, log["home_still_since"]) < HOME_STOP_DELAY:
