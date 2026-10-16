@@ -1503,6 +1503,16 @@ try:
           "paused=%s moving_since=%s still_since=%s file=%s batch=%s" % (
               gl.log["home_paused"], gl.log["home_moving_since"],
               gl.log["home_still_since"], resumed_path, gl.log["batch"]))
+    points_after_resume = gl.log["points"] + len(gl.log["batch"])
+    _clock[0] += gl.HOME_MOVE_MAX_WAIT + 1000
+    gps_fix(52.5112, speed=8.0)
+    gl.st["time"] = "12:05:31"
+    gl.log_tick()
+    check("HOME STOP: confirmed movement keeps recording on home WiFi",
+          gl.log["home_motion_active"] is True
+          and gl.log["points"] + len(gl.log["batch"]) > points_after_resume,
+          "active=%s batch=%s" % (
+              gl.log["home_motion_active"], gl.log["batch"]))
 
     gl.wifi["home"] = False
     _clock[0] += gl.HOME_MOVE_CONFIRM
