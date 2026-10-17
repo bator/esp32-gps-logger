@@ -1,5 +1,7 @@
 # ESP32 GPS Logger
 
+[![CI](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml/badge.svg)](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml)
+
 MicroPython GPS track logger for the ESP32. It records your position to track
 files on the internal flash (`.trk`, see below) both offline and while on
 WiFi. When connected, it uploads finished tracks to a
@@ -212,6 +214,26 @@ The script compiles `gps_logger.py` to `gps_logger.mpy`, copies it with
 The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, so
 HTTPS uploads fail with `ENOMEM`.
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request:
+
+- `python3 tests/test_gps_logger.py` (CPython harness, exits 1 on any FAIL),
+  with `MICROPYTHON` pointing at a MicroPython 1.29 unix-port build, so
+  `tests/mpy_unix_check.py` also runs. The binary is built once and cached.
+- `mpy-cross` 1.29 compile of `gps_logger.py` for `xtensawin` (ESP32) and
+  `rv32imc` (ESP32-C3/C6).
+- `pyflakes` on `gps_logger.py`, `main.py` and `tools/trk2gpx.py`.
+
+Run the same locally:
+
+```bash
+.venv/bin/pip install pyflakes "mpy-cross==1.29.*"
+.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py
+.venv/bin/python -m mpy_cross -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
+MICROPYTHON=/path/to/micropython python3 tests/test_gps_logger.py
+```
 
 ## Usage
 

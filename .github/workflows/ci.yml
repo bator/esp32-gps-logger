@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  MICROPYTHON_VERSION: "1.29.0"
+
+jobs:
+  lint:
+    name: pyflakes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install pyflakes
+      - run: python -m pyflakes gps_logger.py main.py tools/trk2gpx.py
+
+  mpy-cross:
+    name: mpy-cross (${{ matrix.march }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        march: [xtensawin, rv32imc]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install "mpy-cross==1.29.*"
+      - run: python -m mpy_cross -march=${{ matrix.march }} -o "$RUNNER_TEMP/gps_logger.mpy" gps_logger.py
+      - run: ls -l "$RUNNER_TEMP/gps_logger.mpy"
+
+  test:
+    name: tests (CPython + MicroPython unix)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # MicroPython unix port: only built on a cache miss (~1-2 min), then
+      # restored in a few seconds. Lets the suite run tests/mpy_unix_check.py.
+      - name: Cache MicroPython unix port
+        id: mpy-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/micropython-bin
+          key: micropython-unix-${{ env.MICROPYTHON_VERSION }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+
+      - name: Build MicroPython unix port
+        if: steps.mpy-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential libffi-dev pkg-config
+          git clone --depth 1 --branch "v${MICROPYTHON_VERSION}" \
+            https://github.com/micropython/micropython.git "$RUNNER_TEMP/micropython"
+          make -C "$RUNNER_TEMP/micropython/mpy-cross" -j"$(nproc)"
+          make -C "$RUNNER_TEMP/micropython/ports/unix" submodules
+          make -C "$RUNNER_TEMP/micropython/ports/unix" -j"$(nproc)"
+          mkdir -p "$RUNNER_TEMP/micropython-bin"
+          cp "$RUNNER_TEMP/micropython/ports/unix/build-standard/micropython" \
+            "$RUNNER_TEMP/micropython-bin/"
+
+      - name: Run test suite
+        run: |
+          export MICROPYTHON="$RUNNER_TEMP/micropython-bin/micropython"
+          "$MICROPYTHON" -c "import sys; print(sys.version)"
+          python3 tests/test_gps_logger.py
