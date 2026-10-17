@@ -46,6 +46,8 @@ HOME_MOVE_MAX_WAIT = 120000              # ms before restarting a stalled move c
 HOME_STILL_RESET = 10000                 # ms of sustained speed that restarts
 HOME_STILL_RESET_DISTANCE = 15           # m  ... the stop timer (not paused)
 HOME_PENDING_MAX = 90                    # samples kept while confirming a resume
+HOME_DIP_MAX = 10000                     # ms below speed / without fix that a
+                                         # movement check survives (stop-and-go)
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
@@ -494,6 +496,7 @@ def wifi_reset():
                 cand=[], cand_i=0, try_at=None, saw_connecting=False,
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
+                retried=False,
                 blank_rssi=None, blank_bssid=None)
 
 def _set_hostname(name):
@@ -516,9 +519,9 @@ def _recently_failed(ssid, now):
     t = wifi["failed"].get(ssid)
     return t is not None and _age(now, t) < FAIL_HOLD
 
-def _mark_failed(ssid):
+def _mark_failed(ssid, why=""):
     wifi["failed"][ssid] = time.ticks_ms()
-    print("wifi fail", ssid)
+    print("wifi fail", ssid, why)
     if wifi.get("roaming") and _net_home(ssid):
         # Hidden home: keep 5 min. A neighbour's empty-SSID AP can trigger
         # a try; growing backoff would delay a real visible-home switch.
@@ -687,8 +690,8 @@ def _wifi_connect(w, net):
                 w.connect(net["ssid"], net["pw"])
         else:
             w.connect(net["ssid"], net["pw"])
-    except OSError:
-        _mark_failed(net["ssid"])
+    except OSError as e:
+        _mark_failed(net["ssid"], "connect %r" % (e,))
         return _wifi_next(w)
     wifi["tries"] += 1
     return True
@@ -725,9 +728,31 @@ def _wifi_got_ip(w):
     print("wifi ok", wifi.get("ssid") or "")
     return True
 
+def _wifi_failed(w, s, elapsed):
+    """This attempt failed with raw status s. A candidate the scan showed at
+    >= ROAM_MIN_RSSI gets one immediate retry in the same round: on the
+    ESP32-C6 (MicroPython 1.29) the first association after a cold boot
+    often fails after ~7.5 s with 202 (STAT_WRONG_PASSWORD) although the
+    password is right, and the retry connects within ~1 s. Anything else is
+    demoted for FAIL_HOLD and the round moves on."""
+    ssid = wifi.get("ssid")
+    why = "status %s after %d ms" % (s, elapsed)
+    cands = wifi.get("cand") or []
+    i = wifi.get("cand_i", 0)
+    net = cands[i] if i < len(cands) else None
+    rssi = net.get("rssi") if net else None
+    if (net is not None and net["ssid"] == ssid and not wifi.get("retried")
+            and rssi is not None and rssi >= ROAM_MIN_RSSI):
+        wifi["retried"] = True
+        print("wifi retry", ssid, why)
+        return _wifi_connect(w, net)
+    _mark_failed(ssid, why)
+    return _wifi_next(w)
+
 def _wifi_next(w):
     i = wifi.get("cand_i", 0) + 1
     wifi["cand_i"] = i
+    wifi["retried"] = False
     cands = wifi.get("cand") or []
     if i < len(cands):
         return _wifi_connect(w, cands[i])
@@ -740,6 +765,7 @@ def _wifi_next(w):
 def _wifi_begin_round(w):
     wifi["cand"] = _candidate_order(w)
     wifi["cand_i"] = 0
+    wifi["retried"] = False
     if not wifi["cand"]:
         wifi["state"] = "not found"
         wifi["home"] = False
@@ -765,8 +791,7 @@ def _wifi_poll(w):
     if s == network.STAT_CONNECTING or s == network.STAT_IDLE:
         wifi["saw_connecting"] = wifi["saw_connecting"] or (s == network.STAT_CONNECTING)
         if elapsed >= CONNECT_TIMEOUT:
-            _mark_failed(wifi.get("ssid"))
-            return _wifi_next(w)
+            return _wifi_failed(w, s, elapsed)
         return False
     # v1.29 connect() may leave the previous SSID's fail reason. Do not
     # attribute it to this attempt until CONNECTING was seen, or the
@@ -774,8 +799,7 @@ def _wifi_poll(w):
     leftover = (s == wifi.get("prev_status") or not wifi["saw_connecting"])
     if leftover and elapsed < CONNECT_TIMEOUT:
         return False
-    _mark_failed(wifi.get("ssid"))
-    return _wifi_next(w)
+    return _wifi_failed(w, s, elapsed)
 
 def _try_roam_home(w, arrival=False):
     """If a home AP is visible and strong enough, switch; else stay put.
@@ -810,6 +834,7 @@ def _try_roam_home(w, arrival=False):
             break
     wifi["cand"] = [target] + ([cur] if cur else [])
     wifi["cand_i"] = 0
+    wifi["retried"] = False
     wifi["roaming"] = True
     print("wifi roam", target["ssid"])
     _wifi_connect(w, target)
@@ -954,7 +979,7 @@ def log_reset():
                fix=False, lost_at=None, new_seg=False, full=False,
                home_still_since=None, home_moving_since=None,
                home_move_origin=None, home_motion_active=False,
-               home_paused=False, home_pending=None,
+               home_paused=False, home_pending=None, home_fast_at=None,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=None, file_at=None, good_size=None)
 
@@ -1126,16 +1151,13 @@ def _home_stop_tick(now):
             _home_resume(now)            # driving away: keep what was seen
         log.update(home_still_since=None, home_moving_since=None,
                    home_move_origin=None, home_motion_active=False,
-                   home_pending=None)
+                   home_pending=None, home_fast_at=None)
         return False
 
     speed = st.get("speed")
-    if not has_fix(now) or speed is None:
-        log.update(home_moving_since=None, home_move_origin=None,
-                   home_pending=None)
-        return True if log["home_paused"] else False
-
-    if speed >= HOME_STOP_SPEED:
+    fix = has_fix(now) and speed is not None
+    if fix and speed >= HOME_STOP_SPEED:
+        log["home_fast_at"] = now
         if log["home_motion_active"]:
             return False
         # Confirm real movement before the stop timer is cleared. Only a
@@ -1168,8 +1190,25 @@ def _home_stop_tick(now):
                        home_move_origin=(st["lat"], st["lon"]))
         return paused
 
+    # Below the speed threshold, or no usable fix. A short dip (stop-and-go
+    # traffic, a gate, one lost epoch) does not break a running movement
+    # check: it keeps its start, origin and buffered samples. Only a longer
+    # one ends it, and then the stop counts from the last fast sample.
+    if log["home_moving_since"] is not None:
+        fast_at = log["home_fast_at"]
+        if fast_at is not None and _age(now, fast_at) < HOME_DIP_MAX:
+            if log["home_paused"]:
+                if fix:
+                    _home_pending_add(now)
+                return True
+            return False
+        if log["home_still_since"] is None and fast_at is not None:
+            log["home_still_since"] = fast_at
     log.update(home_moving_since=None, home_move_origin=None,
-               home_motion_active=False, home_pending=None)
+               home_pending=None, home_fast_at=None)
+    if not fix:
+        return True if log["home_paused"] else False
+    log["home_motion_active"] = False
     if log["home_paused"]:
         return True
     if log["home_still_since"] is None:
