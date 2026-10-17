@@ -217,13 +217,13 @@ HTTPS uploads fail with `ENOMEM`.
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request:
+GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `master` and on every pull request:
 
 - `python3 tests/test_gps_logger.py` (CPython harness, exits 1 on any FAIL),
   with `MICROPYTHON` pointing at a MicroPython 1.29 unix-port build, so
   `tests/mpy_unix_check.py` also runs. The binary is built once and cached.
 - `mpy-cross` 1.29 compile of `gps_logger.py` for `xtensawin` (ESP32) and
-  `rv32imc` (ESP32-C3/C6).
+  `rv32imc` (ESP32-C6).
 - `pyflakes` on `gps_logger.py`, `main.py` and `tools/trk2gpx.py`.
 
 Run the same locally:
