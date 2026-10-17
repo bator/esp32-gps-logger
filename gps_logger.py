@@ -85,6 +85,25 @@ MAX_GLOBAL_PAYLOAD = 3                   # consecutive 400/422 -> global backoff
 WDT_TIMEOUT = 120000                     # ms; ESP32 WDT cannot be disarmed
 KEEPALIVE_MAX = 600000                   # ms Ctrl-C timer may feed the WDT
 PAYLOAD_ERR = (400, 413, 422)            # only these quarantine a batch
+UP_WAIT_MAX = max(BACKOFF_MAX, AUTH_BACKOFF)  # longest upload/hold deadline
+
+# --- Ticks ------------------------------------------------------------------
+# ticks_ms wraps every 2**30 ms and ticks_diff is signed, so a timestamp older
+# than ~6.2 days reads as being in the future. Ages and deadlines go through
+# these helpers: a wrapped past timestamp counts as very old, a deadline that
+# lies further ahead than it could ever have been scheduled counts as due.
+
+TICKS_OLD = 1 << 29                      # "very old" for a wrapped age
+
+def _age(now, t):
+    """ms since ticks t; a wrapped (negative) difference is TICKS_OLD."""
+    d = time.ticks_diff(now, t)
+    return d if d >= 0 else TICKS_OLD
+
+def _waiting(now, at, cap):
+    """True while deadline at (scheduled at most cap ms ahead) is ahead."""
+    d = time.ticks_diff(at, now)
+    return 0 < d <= cap
 
 # --- NMEA parsing -----------------------------------------------------------
 
@@ -111,17 +130,23 @@ def _deg(v, hemi):
     return -deg if hemi in "SW" else deg
 
 def _position(f, i):
+    """Store the sentence's position. False when its fields are empty."""
     lat, lon = _deg(f[i], f[i + 1]), _deg(f[i + 2], f[i + 3])
-    if lat is not None and lon is not None:
-        st["lat"], st["lon"] = lat, lon
+    if lat is None or lon is None:
+        return False
+    st["lat"], st["lon"] = lat, lon
+    return True
 
 def _time(s):
     if len(s) >= 6:
         st["time"] = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
 
-def _update_fix():
-    st["valid"] = st["status"] == "A" or (st["quality"] or 0) > 0
-    if st["valid"]:
+def _update_fix(ok, have_pos):
+    """ok is this sentence's own verdict (RMC status / GGA quality), so a
+    void RMC is not rescued by the previous epoch's GGA. pos_at only moves
+    when the sentence actually carried a position."""
+    st["valid"] = ok
+    if ok and have_pos:
         st["pos_at"] = time.ticks_ms()
         if st["ttff"] is None:
             st["ttff"] = time.ticks_diff(st["pos_at"], st["start"]) // 1000
@@ -129,24 +154,24 @@ def _update_fix():
 def rmc(talker, f):
     _time(f[1])
     st["status"] = f[2]
-    _position(f, 3)
+    have_pos = _position(f, 3)
     kn = _num(f[7])
     st["speed"] = None if kn is None else kn * 1.852
     st["course"] = _num(f[8])
     d = f[9]
     if len(d) == 6:
         st["date"] = "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
-    _update_fix()
+    _update_fix(st["status"] == "A", have_pos)
 
 def gga(talker, f):
     _time(f[1])
-    _position(f, 2)
+    have_pos = _position(f, 2)
     st["quality"] = _num(f[6], int)
     st["used"] = _num(f[7], int)
     st["hdop"] = _num(f[8])
     st["hdop_at"] = time.ticks_ms()
     st["alt"] = _num(f[9])
-    _update_fix()
+    _update_fix((st["quality"] or 0) > 0, have_pos)
 
 def gsa(talker, f):
     st["fixtype"] = _num(f[2], int)
@@ -337,10 +362,20 @@ def load_env(path):
         pass                             # no .env on the device
     return env
 
+def _plain(v):
+    """Value of a non-secret key without a trailing "# comment".
+
+    Only for keys whose values can never contain "#" (flags, IPv4
+    addresses, names). SSIDs, passwords, GEO_URL and API_KEY are verbatim."""
+    if v is None:
+        return None
+    i = v.find("#")
+    return (v if i < 0 else v[:i]).strip()
+
 def _truthy(v):
     if v is None:
         return None
-    s = str(v).strip().lower()
+    s = _plain(str(v)).lower()
     if s in ("1", "true", "yes", "on"):
         return True
     if s in ("0", "false", "no", "off"):
@@ -389,16 +424,21 @@ def _static_ip(env, keys):
     gateway. An invalid entry falls back to DHCP instead of leaving the board
     unreachable."""
     ipk, mk, gk, dk = keys
-    raw = env.get(ipk)
+    raw = _plain(env.get(ipk))
     if not raw:
         return None
     ip = _ipv4(raw)
-    gw = _ipv4(env.get(gk))
+    gw = _ipv4(_plain(env.get(gk)))
     if not ip or not gw:
         print("static ip", ipk, "needs a valid", ipk, "and", gk, "- using DHCP")
         return None
-    return (ip, _ipv4(env.get(mk)) or "255.255.255.0", gw,
-            _ipv4(env.get(dk)) or gw)
+    mask_raw, dns_raw = _plain(env.get(mk)), _plain(env.get(dk))
+    mask, dns = _ipv4(mask_raw), _ipv4(dns_raw)
+    if mask_raw and not mask:
+        print("static ip", mk, "invalid - using 255.255.255.0")
+    if dns_raw and not dns:
+        print("static ip", dk, "invalid - using", gk)
+    return (ip, mask or "255.255.255.0", gw, dns or gw)
 
 def _load_nets(env):
     nets = []
@@ -466,7 +506,7 @@ def _set_hostname(name):
 
 def _recently_failed(ssid, now):
     t = wifi["failed"].get(ssid)
-    return t is not None and time.ticks_diff(now, t) < FAIL_HOLD
+    return t is not None and _age(now, t) < FAIL_HOLD
 
 def _mark_failed(ssid):
     wifi["failed"][ssid] = time.ticks_ms()
@@ -776,8 +816,9 @@ def wifi_start():
         wifi["home"] = wifi["nets"][0]["home"]
     up["url"] = env.get("GEO_URL", "").rstrip("/") or None
     up["key"] = env.get("API_KEY") or None
-    DEVICE_ID = _safe_name(env.get("DEVICE_ID"), DEFAULT_DEVICE_ID)
-    HOSTNAME = _safe_name(env.get("HOSTNAME") or env.get("DEVICE_ID"),
+    DEVICE_ID = _safe_name(_plain(env.get("DEVICE_ID")), DEFAULT_DEVICE_ID)
+    HOSTNAME = _safe_name(_plain(env.get("HOSTNAME"))
+                          or _plain(env.get("DEVICE_ID")),
                           DEFAULT_HOSTNAME, host=True)
     if up["url"] and up["url"].startswith("http://"):
         print("WARNING: GEO_URL is http:// - API key and GPS data are unencrypted")
@@ -811,7 +852,7 @@ def wifi_tick():
         if wifi["state"] != "connected":
             _wifi_got_ip(w)
         else:
-            if time.ticks_diff(now, wifi["last_check"]) >= WIFI_CHECK:
+            if _age(now, wifi["last_check"]) >= WIFI_CHECK:
                 try:
                     wifi["rssi"] = w.status("rssi")
                 except (OSError, ValueError):
@@ -826,14 +867,13 @@ def wifi_tick():
                     wifi["moved_at"] = now
                     arrival = False
                 elif (wifi.get("moved_at") is not None
-                      and time.ticks_diff(now, wifi["moved_at"]) >= 60000):
+                      and _age(now, wifi["moved_at"]) >= 60000):
                     wifi["moved_at"] = None
                     arrival = True
                 else:
                     arrival = False
                 due = (not moving
-                       and time.ticks_diff(now, wifi.get("roam_at") or now)
-                       >= interval)
+                       and _age(now, wifi.get("roam_at") or now) >= interval)
                 if due or arrival:
                     wifi["roam_at"] = now
                     _try_roam_home(w, arrival=arrival and not due)
@@ -853,7 +893,7 @@ def wifi_tick():
     if wifi["state"] == "lost":
         if (s == network.STAT_CONNECTING or s == network.STAT_IDLE
                 or s is None):
-            if time.ticks_diff(now, wifi["try_at"] or now) < LOST_GRACE:
+            if _age(now, wifi["try_at"] or now) < LOST_GRACE:
                 return
         wifi["state"] = "offline"
         wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
@@ -861,7 +901,7 @@ def wifi_tick():
     if wifi["state"] == "connecting":
         _wifi_poll(w)
         return
-    if time.ticks_diff(now, wifi["last_check"]) < wifi["backoff"]:
+    if _age(now, wifi["last_check"]) < wifi["backoff"]:
         return
     wifi["last_check"] = now
     _wifi_begin_round(w)
@@ -908,7 +948,7 @@ def log_reset():
                home_move_origin=None, home_motion_active=False,
                home_paused=False,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
-               prev=None, full_check=0, file_at=None, good_size=None)
+               prev=None, full_check=None, file_at=None, good_size=None)
 
 def free():
     try:
@@ -920,7 +960,7 @@ def free():
 def has_fix(now):
     return (st["valid"] and st["date"] and st["time"] and st["lat"] is not None
             and st["pos_at"] is not None
-            and time.ticks_diff(now, st["pos_at"]) < STALE)
+            and _age(now, st["pos_at"]) < STALE)
 
 def start_file():
     try:
@@ -1027,7 +1067,7 @@ def _fresh_hdop(now):
     hdop, at = st.get("hdop"), st.get("hdop_at")
     if hdop is None or at is None:
         return None
-    if time.ticks_diff(now, at) >= STALE:
+    if _age(now, at) >= STALE:
         return None
     return hdop
 
@@ -1047,27 +1087,31 @@ def _home_stop_tick(now):
         return True if log["home_paused"] else False
 
     if speed >= HOME_STOP_SPEED:
-        if log["home_paused"] or not log["home_motion_active"]:
-            if log["home_moving_since"] is None:
-                log["home_moving_since"] = now
-                log["home_move_origin"] = (st["lat"], st["lon"])
-            origin = log["home_move_origin"]
-            displaced = (origin is not None
-                         and _dist(origin[0], origin[1], st["lat"], st["lon"])
-                         >= HOME_MOVE_DISTANCE)
-            elapsed = time.ticks_diff(now, log["home_moving_since"])
-            if displaced and elapsed >= HOME_MOVE_CONFIRM:
-                log.update(home_paused=False, home_motion_active=True,
-                           home_still_since=None, home_moving_since=None,
-                           home_move_origin=None, fix=False, lost_at=None,
+        if log["home_motion_active"]:
+            return False
+        # Confirm real movement before the stop timer is cleared. Only a
+        # paused track waits for it; an active one keeps recording, so the
+        # arrival and every slow-down near home are not lost.
+        paused = log["home_paused"]
+        if log["home_moving_since"] is None:
+            log["home_moving_since"] = now
+            log["home_move_origin"] = (st["lat"], st["lon"])
+        origin = log["home_move_origin"]
+        displaced = (origin is not None
+                     and _dist(origin[0], origin[1], st["lat"], st["lon"])
+                     >= HOME_MOVE_DISTANCE)
+        elapsed = _age(now, log["home_moving_since"])
+        if displaced and elapsed >= HOME_MOVE_CONFIRM:
+            log.update(home_motion_active=True, home_still_since=None,
+                       home_moving_since=None, home_move_origin=None)
+            if paused:
+                log.update(home_paused=False, fix=False, lost_at=None,
                            prev=None, last_t=None, last_sample=None)
-                return False
-            if elapsed >= HOME_MOVE_MAX_WAIT:
-                log.update(home_moving_since=now,
-                           home_move_origin=(st["lat"], st["lon"]))
-            return True
-
-        return False
+            return False
+        if elapsed >= HOME_MOVE_MAX_WAIT:
+            log.update(home_moving_since=now,
+                       home_move_origin=(st["lat"], st["lon"]))
+        return paused
 
     log.update(home_moving_since=None, home_move_origin=None,
                home_motion_active=False)
@@ -1075,7 +1119,7 @@ def _home_stop_tick(now):
         return True
     if log["home_still_since"] is None:
         log["home_still_since"] = now
-    if time.ticks_diff(now, log["home_still_since"]) < HOME_STOP_DELAY:
+    if _age(now, log["home_still_since"]) < HOME_STOP_DELAY:
         return False
 
     if log["batch"]:
@@ -1097,13 +1141,14 @@ def log_tick():
     if (log["file"] is not None and log.get("file_at") is not None
             and wifi["state"] == "connected"
             and log["points"] + len(log["batch"]) > 0
-            and time.ticks_diff(now, log["file_at"]) >= NEW_FILE_GAP * 1000
-            and time.ticks_diff(now, log["last_flush"]) >= FLUSH):
+            and _age(now, log["file_at"]) >= NEW_FILE_GAP * 1000
+            and _age(now, log["last_flush"]) >= FLUSH):
         flush()
         if not log["batch"]:
             log.update(file=None, created=False, file_at=None)
     if log["full"]:
-        if time.ticks_diff(now, log.get("full_check") or 0) < FULL_CHECK:
+        last = log.get("full_check")
+        if last is not None and _age(now, last) < FULL_CHECK:
             return
         log["full_check"] = now
         room = free()
@@ -1118,8 +1163,8 @@ def log_tick():
     if not log["fix"]:
         log["fix"] = True
         if (log["file"] is not None and log.get("lost_at") is not None
-                and time.ticks_diff(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
-            if time.ticks_diff(now, log["last_flush"]) >= FLUSH:
+                and _age(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
+            if _age(now, log["last_flush"]) >= FLUSH:
                 flush()
             if not log["batch"]:
                 log.update(file=None, created=False, file_at=None)
@@ -1132,7 +1177,7 @@ def log_tick():
             log["new_seg"] = True
             log["prev"] = None           # start the segment with this fix
     if (log["last_sample"] is None
-            or time.ticks_diff(now, log["last_sample"]) >= SAMPLE):
+            or _age(now, log["last_sample"]) >= SAMPLE):
         log["last_sample"] = now
         hdop = _fresh_hdop(now)
         if hdop is not None and hdop > MAX_HDOP:
@@ -1157,7 +1202,7 @@ def log_tick():
                     st["lat"], st["lon"], ele, hd, tc))
                 if len(log["batch"]) > MAX_BATCH:
                     log["batch"].pop(0)
-    if time.ticks_diff(now, log["last_flush"]) >= FLUSH:
+    if _age(now, log["last_flush"]) >= FLUSH:
         flush()
 
 # --- Upload ---------------------------------------------------------------
@@ -1665,7 +1710,7 @@ def upload_tick():
     """Send one batch when WiFi is up and due. Runs on home and hotspot."""
     now = time.ticks_ms()
     if (wifi["state"] != "connected" or up["state"] == "no .env"
-            or time.ticks_diff(now, up["next_at"]) < 0):
+            or _waiting(now, up["next_at"], UP_WAIT_MAX)):
         return
     if not up["url"] or not up["key"]:
         up["state"] = "no .env"
@@ -1679,7 +1724,7 @@ def upload_tick():
     due = []
     for p in files:
         t = held.get(p)
-        if t is None or time.ticks_diff(now, t) >= 0:
+        if t is None or not _waiting(now, t, UP_WAIT_MAX):
             due.append(p)
     files = due
     from_bad = False
@@ -1691,7 +1736,7 @@ def upload_tick():
         due = []
         for p in files:
             t = held.get(p)
-            if t is None or time.ticks_diff(now, t) >= 0:
+            if t is None or not _waiting(now, t, UP_WAIT_MAX):
                 due.append(p)
         files = due
     if not files:
@@ -1800,7 +1845,7 @@ def _low_mem(now):
 # --- Screen -----------------------------------------------------------------
 
 def status():
-    if st["rx"] is None or time.ticks_diff(time.ticks_ms(), st["rx"]) > NO_DATA:
+    if st["rx"] is None or _age(time.ticks_ms(), st["rx"]) > NO_DATA:
         return "No data!"
     if not st["valid"]:
         return "Waiting fix"

@@ -2948,6 +2948,198 @@ try:
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
+# --- Review fixes: home gate, .env comments, ticks wrap, NMEA validity ------
+gl = _reload_logger()
+rv_dir = tempfile.mkdtemp(prefix="gpxlog-rv-")
+try:
+    gl.LOG_DIR = rv_dir
+    gl.reset()
+    gl.log_reset()
+    gl.wifi_reset()
+    gl.up_reset()
+    rv_sec = [0]
+
+    def rv_fix(lat, speed):
+        s = rv_sec[0]
+        rv_sec[0] += 1
+        gl.st.update(valid=True, date="2026-10-17",
+                     time="%02d:%02d:%02d" % (12 + s // 3600, (s // 60) % 60,
+                                              s % 60),
+                     lat=lat, lon=19.0, alt=100.0, pos_at=_clock[0],
+                     hdop=1.0, hdop_at=_clock[0], status="A", quality=1,
+                     fixtype=3, speed=speed)
+
+    def rv_drive(seconds, lat, speed=20.0, step=5.5e-5):
+        """One sample per second; step ≈ 6 m at 47.5° N (20 km/h)."""
+        for _ in range(seconds):
+            _clock[0] += gl.SAMPLE
+            lat += step if speed >= gl.HOME_STOP_SPEED else 0.0
+            rv_fix(lat, speed)
+            gl.log_tick()
+        return lat
+
+    def rv_points():
+        return gl.log["points"] + len(gl.log["batch"])
+
+    # REVIEW-1: the 30 s / 60 m movement gate only applies to a paused track
+    gl.wifi.update(state="connected", home=True)
+    lat = rv_drive(25, 47.5)
+    check("REVIEW-1: home WiFi, not paused: driving is recorded at once",
+          rv_points() == 25 and gl.log["home_paused"] is False,
+          "points=%s paused=%s" % (rv_points(), gl.log["home_paused"]))
+    lat = rv_drive(10, lat)
+    check("REVIEW-1: sustained movement still marks home motion active",
+          gl.log["home_motion_active"] is True
+          and gl.log["home_still_since"] is None)
+    lat = rv_drive(60, lat, speed=0.0)
+    before = rv_points()
+    lat = rv_drive(40, lat)
+    check("REVIEW-1: after a slow-down near home every sample is recorded",
+          rv_points() - before == 40 and gl.log["home_paused"] is False,
+          "new=%s" % (rv_points() - before))
+    check("REVIEW-1: confirmed movement resets the stop timer",
+          gl.log["home_still_since"] is None
+          and gl.log["home_motion_active"] is True)
+    lat = rv_drive(100, lat, speed=0.0)
+    check("REVIEW-1: stop timer counts from the new stop, not the old one",
+          gl.log["home_paused"] is False)
+    lat = rv_drive(21, lat, speed=0.0)
+    check("REVIEW-1: a full HOME_STOP_DELAY still pauses the track",
+          gl.log["home_paused"] is True and gl.log["file"] is None)
+    paused_pts = rv_points()
+    lat = rv_drive(10, lat)
+    check("REVIEW-1: a paused track still waits for confirmed movement",
+          gl.log["home_paused"] is True and rv_points() == paused_pts)
+    lat = rv_drive(25, lat)
+    check("REVIEW-1: paused track resumes after 30 s and 60 m",
+          gl.log["home_paused"] is False and gl.log["file"] is not None)
+
+    # REVIEW-2: trailing comments on flag / IP / name keys
+    env_p = os.path.join(rv_dir, "env")
+    with open(env_p, "w") as f:
+        f.write("SSID=home\nWPA2=pa#ss word\n"
+                "IP=192.168.1.60  # car\nGW=192.168.1.1\n"
+                "MASK=255.255.255.0   # optional\n"
+                "DNS=192.168.1.111    # optional, defaults to GW\n"
+                "SSID2=Phone#1\nWPA2_2=x\nHOME2=1  # treat as home\n"
+                "IP2=10.0.0.5\nGW2=10.0.0.1\nDNS2=10.0.0.999\n"
+                "DEVICE_ID=car-1 # id\n")
+    rv_nets = gl._load_nets(gl.load_env(env_p))
+    check("REVIEW-2: trailing comment does not drop DNS to the gateway",
+          rv_nets[0]["ip"] == ("192.168.1.60", "255.255.255.0",
+                               "192.168.1.1", "192.168.1.111"),
+          repr(rv_nets[0]["ip"]))
+    check("REVIEW-2: password and SSID with '#' are kept verbatim",
+          rv_nets[0]["pw"] == "pa#ss word" and rv_nets[1]["ssid"] == "Phone#1")
+    check("REVIEW-2: HOME2 flag with a trailing comment is honoured",
+          rv_nets[1]["home"] is True)
+    check("REVIEW-2: invalid DNS2 falls back to GW2",
+          rv_nets[1]["ip"] == ("10.0.0.5", "255.255.255.0", "10.0.0.1",
+                               "10.0.0.1"), repr(rv_nets[1]["ip"]))
+    reset_wlan()
+    gl.ENV_FILE = env_p
+    gl.wifi_reset()
+    gl.wifi_start()
+    check("REVIEW-2: DEVICE_ID with a trailing comment is accepted",
+          gl.DEVICE_ID == "car-1" and gl.HOSTNAME == "car-1",
+          "%s %s" % (gl.DEVICE_ID, gl.HOSTNAME))
+    with open(os.path.join(ROOT, "README.md")) as f:
+        readme = f.read()
+    blk = readme[readme.index("IP=192.168.1.60"):]
+    blk = blk[:blk.index("```")]
+    with open(env_p, "w") as f:
+        f.write("SSID=home\n" + blk)
+    rv_nets = gl._load_nets(gl.load_env(env_p))
+    check("REVIEW-2: README static-IP example parses as documented",
+          rv_nets[0]["ip"] == ("192.168.1.60", "255.255.255.0",
+                               "192.168.1.1", "192.168.1.111"),
+          repr(rv_nets[0]["ip"]))
+    gl.wifi_reset()
+
+    # REVIEW-3: ticks_ms wraps at 2**30 and ticks_diff is signed
+    TP = 1 << 30
+    orig_ticks = (time.ticks_ms, time.ticks_diff, time.ticks_add)
+    time.ticks_ms = lambda: _clock[0] & (TP - 1)
+    time.ticks_diff = lambda a, b: ((a - b + TP // 2) & (TP - 1)) - TP // 2
+    time.ticks_add = lambda a, b: (a + b) & (TP - 1)
+    saved_clock = _clock[0]
+    try:
+        _clock[0] = (1 << 29) + 1000        # ~6.2 days after ticks 0
+        now = _clock[0]
+        check("REVIEW-3: a wrapped age counts as very old",
+              gl._age(now, 0) == gl.TICKS_OLD and gl._age(now, now - 5) == 5)
+        check("REVIEW-3: a wrapped deadline is due, a near one is pending",
+              not gl._waiting(now, 0, gl.UP_WAIT_MAX)
+              and gl._waiting(now, now + 1000, gl.UP_WAIT_MAX))
+        gl.reset()
+        gl.log_reset()
+        gl.wifi_reset()
+        gl.wifi["failed"]["home"] = 0
+        check("REVIEW-3: a failure 6 days ago is not 'recently failed'",
+              gl._recently_failed("home", now) is False)
+        gl.st.update(valid=True, date="2026-10-17", time="12:00:00",
+                     lat=47.5, lon=19.0, pos_at=0)
+        check("REVIEW-3: a 6-day-old position is not a fix",
+              not gl.has_fix(now))
+        for start in (None, 0):
+            gl.log_reset()
+            gl.log.update(full=True, full_check=start)
+            gl.log_tick()
+            check("REVIEW-3: full flash is re-polled (full_check=%r)" % start,
+                  gl.log["full"] is False and gl.log["full_check"] == now)
+        gl.log_reset()
+        gl.log.update(last_sample=0, last_flush=0)
+        rv_fix(47.5, 30.0)
+        gl.log_tick()
+        check("REVIEW-3: wrapped last_sample/last_flush still sample + flush",
+              gl.log["points"] == 1 and gl.log["last_flush"] == now,
+              "points=%s flush=%s" % (gl.log["points"], gl.log["last_flush"]))
+        done = gl.log["file"]
+        gl.log.update(file=None)
+        for n in os.listdir(rv_dir):         # leave only this track
+            if os.path.join(rv_dir, n) != done:
+                os.remove(os.path.join(rv_dir, n))
+        gl.up.update(url="https://d.example", key="k", state="idle",
+                     next_at=0, hold={done: 0})
+        gl.wifi.update(state="connected", home=True)
+        _post_code[0] = 201
+        _posts[:] = []
+        gl.upload_tick()
+        check("REVIEW-3: wrapped next_at / hold do not block uploads",
+              len(_posts) == 1 and not os.path.exists(done),
+              "posts=%s state=%s" % (len(_posts), gl.up["state"]))
+    finally:
+        time.ticks_ms, time.ticks_diff, time.ticks_add = orig_ticks
+        _clock[0] = saved_clock
+
+    # REVIEW-4: each sentence decides validity; pos_at needs a real position
+    def nmea(body):
+        c = 0
+        for ch in body.encode():
+            c ^= ch
+        return ("$%s*%02X" % (body, c)).encode()
+
+    gl.reset()
+    gl.handle(nmea("GPRMC,120000.00,A,4730.000,N,01900.000,E,10.0,90.0,"
+                   "171026,,,A"))
+    gl.handle(nmea("GPGGA,120000.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
+                   "M,40.0,M,,"))
+    check("REVIEW-4: valid RMC + GGA is a fix", bool(gl.has_fix(_clock[0])))
+    fix_at = gl.st["pos_at"]
+    _clock[0] += 1000
+    gl.handle(nmea("GPRMC,120001.00,V,,,,,,,171026,,,N"))
+    check("REVIEW-4: void RMC is not rescued by the previous GGA quality",
+          gl.st["valid"] is False and gl.st["pos_at"] == fix_at)
+    _clock[0] += 1000
+    gl.handle(nmea("GPRMC,120002.00,A,,,,,,,171026,,,A"))
+    check("REVIEW-4: RMC 'A' without a position does not refresh pos_at",
+          gl.st["pos_at"] == fix_at)
+    gl.handle(nmea("GPGGA,120002.00,,,,,0,00,99.9,,M,,M,,"))
+    check("REVIEW-4: GGA quality 0 clears validity",
+          gl.st["valid"] is False and gl.st["pos_at"] == fix_at)
+finally:
+    shutil.rmtree(rv_dir, ignore_errors=True)
+
 # Optional: real MicroPython 1.29 unix port (API-gap catch).
 mpy_bin = os.environ.get("MICROPYTHON")
 if not mpy_bin:
@@ -3012,6 +3204,29 @@ if conv_root is not None:
     check("trk2gpx: negative coordinates kept",
           abs(float(pts[2].get("lat")) + 33.8) < 1e-9
           and abs(float(pts[2].get("lon")) + 70.6) < 1e-9)
+
+# REVIEW-5: GPX 1.1 element order, number validation, escaped name
+order_gpx = trk2gpx.convert([
+    "52.500000,13.400000,10.0,1.2,20261005T120005Z\n",
+    "52.500100,13.400100,<b>,nan,20261005T120006Z\n",
+], "a&b")
+try:
+    order_root = ET.fromstring(order_gpx)
+except ET.ParseError as e:
+    order_root = None
+    order_gpx += " parse error %s" % e
+check("REVIEW-5: bad ele/hdop and '&' in the name still give valid XML",
+      order_root is not None, order_gpx[:300])
+if order_root is not None:
+    ns = "{http://www.topografix.com/GPX/1/1}"
+    opts = order_root.findall(".//%strkpt" % ns)
+    check("REVIEW-5: trkpt children follow GPX 1.1 order ele, time, hdop",
+          [c.tag[len(ns):] for c in opts[0]] == ["ele", "time", "hdop"],
+          repr([c.tag for c in opts[0]]))
+    check("REVIEW-5: non-numeric ele and nan hdop are dropped",
+          [c.tag[len(ns):] for c in opts[1]] == ["time"])
+    check("REVIEW-5: track name is escaped",
+          order_root.find(".//%sname" % ns).text == "a&b")
 
 print()
 print("%d passed, %d failed" % (passed, failed))
