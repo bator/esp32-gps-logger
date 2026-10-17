@@ -3175,7 +3175,7 @@ try:
     paused_pts = rv_points()
     first_t = rv_sec[0]
     lat = rv_drive(10, lat)
-    lat = rv_drive(1, lat, speed=0.0)
+    lat = rv_drive(gl.HOME_DIP_MAX // 1000 + 1, lat, speed=0.0)
     check("REVIEW2-1: short movement while paused records nothing",
           gl.log["home_paused"] is True and rv_points() == paused_pts
           and gl.log["home_pending"] is None and gl.log["file"] is None)
@@ -3221,6 +3221,127 @@ try:
           gl.log["home_paused"] is True and pend is not None
           and len(pend["lines"]) == gl.HOME_PENDING_MAX,
           "pending=%s" % (None if pend is None else len(pend["lines"])))
+
+    # REVIEW3-1: stop-and-go near home (dips below 5 km/h shorter than
+    # HOME_DIP_MAX) neither breaks a resume nor pauses an active track
+    def rv_stop_and_go(seconds, lat, dip_every=8):
+        for i in range(seconds):
+            lat = rv_drive(1, lat, speed=(4.0 if i % dip_every == dip_every - 1
+                                          else 15.0), step=3.75e-5)
+        return lat
+
+    rv_home()
+    lat = rv_drive(gl.HOME_STOP_DELAY // 1000 + 1, 47.5, speed=0.0)
+    check("REVIEW3-1: setup - paused at home", gl.log["home_paused"] is True)
+    lat = rv_stop_and_go(60, lat)
+    check("REVIEW3-1: stop-and-go resumes a paused track",
+          gl.log["home_paused"] is False and rv_points() >= 50,
+          "paused=%s points=%s" % (gl.log["home_paused"], rv_points()))
+
+    rv_home()
+    lat = rv_drive(100, 47.5, speed=0.0)
+    lat = rv_stop_and_go(60, lat)
+    check("REVIEW3-1: stop-and-go after parking does not pause mid-drive",
+          gl.log["home_paused"] is False
+          and rv_points() == 1 + 60 - 60 // 8,     # every moving sample
+          "paused=%s points=%s" % (gl.log["home_paused"], rv_points()))
+
+    rv_home()
+    lat = rv_drive(gl.HOME_STOP_DELAY // 1000 + 1, 47.5, speed=0.0)
+    lat = rv_drive(8, lat)
+    for _ in range(3):                     # short fix gap inside the check
+        _clock[0] += gl.SAMPLE
+        gl.st["pos_at"] = _clock[0] - gl.STALE - 1
+        gl.log_tick()
+    pend = gl.log["home_pending"]
+    check("REVIEW3-1: a 3 s fix gap keeps the movement check and samples",
+          gl.log["home_moving_since"] is not None and pend is not None
+          and len(pend["lines"]) == 8)
+
+    rv_home()
+    lat = rv_drive(30, 47.5, speed=0.0)
+    lat = rv_drive(1, lat, speed=6.0, step=0.0)      # one spike
+    lat = rv_drive(gl.HOME_DIP_MAX // 1000 + 2, lat, speed=0.0)
+    check("REVIEW3-1: a speed spike does not delay or reset the stop timer",
+          gl.log["home_moving_since"] is None
+          and _clock[0] - gl.log["home_still_since"] >= 40000)
+
+    rv_home()
+    lat = rv_drive(100, 47.5, speed=0.0)
+    lat = rv_drive(20, lat)                          # resets the timer
+    lat = rv_drive(gl.HOME_STOP_DELAY // 1000 + 1, lat, speed=0.0)
+    check("REVIEW3-1: a real stop counts from the last fast sample",
+          gl.log["home_paused"] is True)
+
+    # REVIEW3-2: a strong, visible candidate gets one immediate retry; the
+    # fail / retry lines carry the raw status
+    import contextlib
+    import io
+
+    def rv_start_wifi(env_text, aps, ok, fail_first=(), fail_always=()):
+        reset_wlan()
+        WLAN.scan_aps = aps
+        WLAN.ok = set(ok)
+        write_env(rv_dir, env_text)
+        gl.wifi_reset()
+        gl.up_reset()
+        calls = []
+        orig_connect = WLAN.connect
+
+        def connect(self, ssid, pw, bssid=None):
+            calls.append(ssid)
+            if ssid in fail_always or (ssid in fail_first
+                                       and calls.count(ssid) == 1):
+                WLAN.ok.discard(ssid)
+            elif ssid in ok:
+                WLAN.ok.add(ssid)
+            return orig_connect(self, ssid, pw, bssid)
+
+        WLAN.connect = connect
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                gl.wifi_start()
+                drain_wifi()
+        finally:
+            WLAN.connect = orig_connect
+        return gl.wifi, calls, out.getvalue()
+
+    rv_env = ("SSID=home\nWPA2=h\nSSID2=phone\nWPA2_2=p\n"
+              "GEO_URL=https://d.example\nAPI_KEY=k\n")
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40), ("phone", -50)],
+                                  ["home", "phone"], fail_first=("home",))
+    check("REVIEW3-2: first home attempt fails, the retry connects home",
+          w["state"] == "connected" and w["ssid"] == "home"
+          and calls == ["home", "home"], "calls=%s state=%s ssid=%s" % (
+              calls, w["state"], w["ssid"]))
+    check("REVIEW3-2: the retry line carries the raw status",
+          "wifi retry home status" in out and "wifi fail home" not in out,
+          out)
+    check("REVIEW3-2: a successful retry leaves the SSID not failed",
+          "home" not in w["failed"])
+
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40), ("phone", -50)],
+                                  ["home", "phone"], fail_always=("home",))
+    check("REVIEW3-2: a retry that fails too moves on to the next network",
+          w["ssid"] == "phone" and w["state"] == "connected"
+          and calls == ["home", "home", "phone"] and "home" in w["failed"],
+          "calls=%s" % calls)
+    check("REVIEW3-2: one 'wifi fail' line with the status per demotion",
+          out.count("wifi fail home status") == 1, out)
+
+    w, calls, out = rv_start_wifi(rv_env, [("home", -80), ("phone", -85)],
+                                  ["home", "phone"], fail_always=("home",))
+    check("REVIEW3-2: a weak candidate (< ROAM_MIN_RSSI) is not retried",
+          calls == ["home", "phone"] and w["ssid"] == "phone",
+          "calls=%s" % calls)
+
+    w, calls, out = rv_start_wifi(rv_env, [], ["home", "phone"],
+                                  fail_always=("home",))
+    check("REVIEW3-2: an SSID missing from the scan is not retried",
+          calls == ["home", "phone"] and w["ssid"] == "phone",
+          "calls=%s" % calls)
+    gl.wifi_reset()
 
     # REVIEW2-2: a timestamp taken just after now is age 0, not "very old"
     now = _clock[0]
