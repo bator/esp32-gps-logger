@@ -3541,7 +3541,9 @@ try:
     gl.wifi.update(state="offline", home=False)
     for _ in range(10):
         hb_fix(0, 0, nofix=True)
-    f, b = gl.log["file"], gl.log["batch"]
+    f = gl.log["file"]
+    b = ([l for l in open(f) if l.count(",") == 4]
+         if f and os.path.exists(f) else []) + list(gl.log["batch"])
     check("HBFILE: heartbeat file is named after the anchor point's time",
           f is not None and b and os.path.basename(f)[:15]
           == b[0].strip().split(",")[4].replace("T", "_")[:15],
@@ -3551,6 +3553,132 @@ try:
         hb_fix(0, 0, nofix=True)
     check("HBFILE: back on home WiFi the file closes without a fix",
           gl.log["file"] is None and gl.log["batch"] == [] and f in gl.pending())
+
+    # BAND: settled 50-150 m from the anchor (out of the car, into the
+    # building) moves the anchor there; the heartbeat goes on
+    def beats_of(lines):
+        return [l for l in lines if l.split(",")[2] == ""]
+
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    check("BAND: setup - away stay", sv_active() is True)
+    n0 = len(beats_of(sv_lines()))
+    for _ in range(30 * 60):
+        sv_fix(100 + rnd.uniform(-10, 10), rnd.uniform(-10, 10))
+    new = beats_of(sv_lines())[n0:]
+    a = gl.log["still"]["anchor"]
+    a_off = gl._dist(a[0], a[1], 47.5, 19.0 + 100 * M_LON)
+    check("BAND: 30 min settled 100 m away moves the anchor there",
+          sv_active() is True and a_off < 15.0, "anchor %.1f m off" % a_off)
+    check("BAND: ... and writes anchor points there every 5 min",
+          len(new) >= 5 and all(80 < sv_m(l) < 120 for l in new[1:]),
+          "beats=%d at %s m" % (len(new), [int(sv_m(l)) for l in new]))
+    n0 = len(sv_lines())
+    for i in range(1, 60):
+        sv_fix(100 + i * 6.0, 0, 22.0)
+    out = sv_lines()[n0:]
+    check("BAND: driving off later leaves from the new anchor",
+          sv_active() is False and bool(out) and 85 < sv_m(out[0]) < 130,
+          "active=%s first=%s" % (sv_active(), out[:1]))
+    # a visit to 100 m shorter than two windows does not move it
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    for _ in range(90):
+        sv_fix(100 + rnd.uniform(-10, 10), rnd.uniform(-10, 10))
+    sv_drift(60, box=10.0, step=3.0)
+    a = gl.log["still"]["anchor"]
+    check("BAND: 90 s at 100 m that comes back keeps the anchor",
+          sv_active() is True and gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
+          "%.1f m" % gl._dist(a[0], a[1], 47.5, 19.0))
+
+    # FLASH: anchor points written without a fix reach flash every FLUSH
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    for _ in range(2 * 3600):
+        hb_fix(0, 0, nofix=True)
+    on_flash = 0
+    for n in os.listdir(rv_dir):
+        if n.endswith(".trk"):
+            on_flash += len(beats_of(l for l in open(os.path.join(rv_dir, n))
+                                     if l.count(",") == 4))
+    check("FLASH: 2 h without a fix -> the anchor points are on flash",
+          on_flash >= 24 and len(gl.log["batch"]) <= 1,
+          "flash=%d ram=%d" % (on_flash, len(gl.log["batch"])))
+
+    # ONEFILE: a fix that comes back after a long gap keeps the stay's file
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    stay_file = gl.log["file"]
+    for _ in range(18):                             # 3 h, fix every 10 min
+        for _ in range(9 * 60):
+            hb_fix(0, 0, nofix=True)
+        sv_drift(60, box=10.0, step=3.0)
+    gl.flush()
+    trk = sorted(os.path.join(rv_dir, n) for n in os.listdir(rv_dir)
+                 if n.endswith(".trk"))
+    check("ONEFILE: 3 h offline stay with fix gaps stays in one file",
+          sv_active() and gl.log["file"] == stay_file
+          and [p for p in trk if p >= stay_file] == [stay_file],
+          "files=%s" % [os.path.basename(p) for p in trk])
+
+    # RETRY: a failing flush at home is retried every FLUSH, not every tick
+    sv_reset(home=True)
+    real_flush, calls = gl.flush, [0]
+
+    def failing_flush():
+        calls[0] += 1
+        gl.log["last_flush"] = _clock[0]
+    gl.flush = failing_flush
+    try:
+        for i in range(-180, 1):
+            sv_fix(i * 8.3, 0, 30.0)
+        sv_drift(150, box=10.0, step=3.0)
+        c0 = calls[0]
+        for _ in range(500):                        # 10 s of 20 ms loops
+            _clock[0] += 20
+            gl.log_tick()
+        tries = calls[0] - c0
+    finally:
+        gl.flush = real_flush
+    check("RETRY: a failing flush in a home stay is not retried every tick",
+          sv_active() and gl.log["file"] is not None and tries <= 1,
+          "flushes in 10 s=%d" % tries)
+    for _ in range(gl.FLUSH // 1000 + 2):
+        hb_fix(0, 0, nofix=True)
+    check("RETRY: ... and once flash works the home track closes",
+          gl.log["file"] is None and gl.log["batch"] == [])
+
+    # FROZEN: a jump frozen out past STILL_EXIT gains nothing, however long
+    sv_reset()
+    sv_drift(150, box=15.0, step=5.0)
+    n0 = len(sv_lines())
+    for _ in range(30):
+        sv_fix(200.0 + rnd.uniform(-0.5, 0.5), 0)
+    sv_drift(5, box=15.0, step=5.0)
+    check("FROZEN: a 30 s frozen jump to 200 m is not a departure",
+          sv_active() is True and len(sv_lines()) == n0,
+          "active=%s new=%d" % (sv_active(), len(sv_lines()) - n0))
+
+    # MIDNIGHT: a GGA past midnight whose RMC was lost is not dated a day back
+    gl.reset()
+    gl.handle(nmea("GPRMC,235959.00,A,4730.000,N,01900.000,E,0.5,0.0,"
+                   "181026,,,A"))
+    gl.handle(nmea("GPGGA,235959.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
+                   "M,40.0,M,,"))
+    check("MIDNIGHT: setup - fix at 23:59:59",
+          bool(gl.has_fix(_clock[0])) and gl.st["date"] == "2026-10-18")
+    _clock[0] += 1000
+    gl.handle(nmea("GPGGA,000000.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
+                   "M,40.0,M,,"))                   # its RMC was lost
+    check("MIDNIGHT: GGA alone past midnight is no fix (date unknown)",
+          not gl.has_fix(_clock[0]) and gl._fix_secs() is None)
+    _clock[0] += 1000
+    gl.handle(nmea("GPRMC,000001.00,A,4730.000,N,01900.000,E,0.5,0.0,"
+                   "191026,,,A"))
+    s = gl._sample_line(_clock[0], None, None)
+    check("MIDNIGHT: the next RMC brings the new date back",
+          bool(gl.has_fix(_clock[0])) and s is not None
+          and s[0] == "2026-10-19T00:00:01Z", repr(s))
 
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")
