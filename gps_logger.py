@@ -52,6 +52,8 @@ STILL_EXIT = 150                         # m from the anchor to start leaving
 STILL_EXIT_N = 3                         # receding samples needed to leave
 STILL_TOL = 5                            # m a receding sample may fall back
 STILL_HEARTBEAT = 300000                 # ms between anchor points (not home)
+STILL_GAP = 30000                        # ms without a usable fix that counts
+                                         # as a gap (the device may have moved)
 STILL_DEP_MAX = 90                       # recent samples kept for the departure
 STILL_MEAN_N = 1800                      # samples the anchor mean averages over
 STALE = 2000                             # ms: older position = no fix
@@ -984,7 +986,7 @@ def log_reset():
     log.clear()
     log.update(file=None, created=False, batch=[], points=0, err=0,
                fix=False, lost_at=None, new_seg=False, full=False,
-               still=_still_state(),
+               still=_still_state(), clock=None,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=None, file_at=None, good_size=None)
 
@@ -992,7 +994,8 @@ def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
-            "ring": [], "far_n": 0, "far_d": 0}
+            "ring": [], "far_n": 0, "far_d": 0, "last_at": None,
+            "last_d": 0}
 
 def _still_mean(sl, pos):
     """Fold pos into the anchor, a running mean over STILL_MEAN_N fixes.
@@ -1128,21 +1131,20 @@ def _fresh_hdop(now):
         return None
     return hdop
 
-def _sample_line(now, prev, last_t, at=None):
+def _sample_line(now, prev, last_t):
     """(time, track line) for the current fix, or None: HDOP too dilute
     (try again next SAMPLE), same second as last_t, or within MIN_MOVE of
-    prev. at=(lat, lon) writes that position instead (a stationary anchor,
-    a mean) and leaves the elevation out."""
+    prev."""
     hdop = _fresh_hdop(now)
     if hdop is not None and hdop > MAX_HDOP:
         return None
-    lat, lon = at if at is not None else (st["lat"], st["lon"])
+    lat, lon = st["lat"], st["lon"]
     t = st["date"] + "T" + st["time"] + "Z"
     if t == last_t or (prev is not None and _dist(
             prev[0], prev[1], lat, lon) <= MIN_MOVE):
         return None
     ele = ""
-    if at is None and st["alt"] is not None and st.get("fixtype") != 2:
+    if st["alt"] is not None and st.get("fixtype") != 2:
         ele = "%.1f" % st["alt"]
     hd = ("%.1f" % hdop) if hdop is not None else ""
     tc = st["date"].replace("-", "") + "T" + st["time"].replace(":", "") + "Z"
@@ -1161,6 +1163,44 @@ def _tc():
     """Compact UTC time of the current fix, as in a track line."""
     return st["date"].replace("-", "") + "T" + st["time"].replace(":", "") + "Z"
 
+# UTC seconds <-> date without time.mktime (its epoch and time zone differ
+# between ports); proleptic Gregorian, days since 1970-01-01.
+
+def _days(y, m, d):
+    if m <= 2:
+        y -= 1
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+    return era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
+
+def _civil(z):
+    z += 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    m = mp + 3 if mp < 10 else mp - 9
+    return yoe + era * 400 + (1 if m <= 2 else 0), m, doy - (153 * mp + 2) // 5 + 1
+
+def _fix_secs():
+    """UTC seconds of the current fix's date and time, or None."""
+    d, t = st["date"], st["time"]
+    try:
+        return (_days(int(d[0:4]), int(d[5:7]), int(d[8:10])) * 86400
+                + int(t[0:2]) * 3600 + int(t[3:5]) * 60 + int(t[6:8]))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+def _stamp_at(secs):
+    """(ISO time, compact track time) for UTC seconds."""
+    y, m, d = _civil(secs // 86400)
+    r = secs % 86400
+    v = (y, m, d, r // 3600, r // 60 % 60, r % 60)
+    return ("%04d-%02d-%02dT%02d:%02d:%02dZ" % v,
+            "%04d%02d%02dT%02d%02d%02dZ" % v)
+
 def _still_window(now, pos):
     """Fold a usable fix into the current centroid window. When the window
     is full and its centroid lies within STILL_RADIUS of the previous one,
@@ -1168,6 +1208,16 @@ def _still_window(now, pos):
     Sums are offsets from the window's first fix: single-precision floats
     cannot add up 60 latitudes to the metre."""
     sl = log["still"]
+    if sl["last_at"] is not None and _age(now, sl["last_at"]) > STILL_GAP:
+        # After a gap the device may be elsewhere: an open window (or the
+        # previous one) from before it must not prove a stay here.
+        c = sl["prev"][0] if sl["prev"] else None
+        if sl["win_at"] is not None and sl["sum"][2]:
+            r, sm = sl["ref"], sl["sum"]
+            c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
+        if c is not None and _dist(c[0], c[1], pos[0], pos[1]) > STILL_RADIUS:
+            sl.update(win_at=None, prev=None)
+    sl["last_at"] = now
     if sl["win_at"] is None:
         sl.update(win_at=now, win_tc=_tc(), ref=pos, sum=[0.0, 0.0, 0])
     r, sm = sl["ref"], sl["sum"]
@@ -1192,13 +1242,38 @@ def _still_window(now, pos):
     return a, prev[1], w
 
 def _still_heartbeat(now):
-    """Write the anchor as a point (retried next SAMPLE if the fix is too
-    dilute or this second was already written)."""
+    """Write the anchor as a point. It is stamped with the last fix's GPS
+    time plus the ticks since, so no fix is needed: the anchor is known, and
+    indoors there is rarely a usable fix. Skipped when that time would not
+    come after the last line written (retried on the next tick)."""
     sl = log["still"]
-    s = _sample_line(now, None, log["last_t"], at=sl["anchor"])
-    if s is not None:
-        sl["hb_at"] = now
-        _record(s, sl["anchor"])
+    c = log["clock"]
+    if c is None:
+        return
+    age = _age(now, c[1])
+    if age >= TICKS_OLD:
+        return
+    t, tc = _stamp_at(c[0] + age // 1000)
+    if log["last_t"] is not None and t <= log["last_t"]:
+        return
+    a = sl["anchor"]
+    sl["hb_at"] = now
+    _record((t, "%.6f,%.6f,,,%s\n" % (a[0], a[1], tc)), a)
+
+def _still_beat(now):
+    """Heartbeat of a stay away from home, run every tick, fix or not. Not
+    while the last usable sample was recently out past STILL_NEAR: that is
+    an excursion or a departure, and an anchor stamped then would land in
+    the middle of the way out."""
+    sl = log["still"]
+    if not sl["active"] or at_home():
+        return
+    if sl["hb_at"] is not None and _age(now, sl["hb_at"]) < STILL_HEARTBEAT:
+        return
+    if (sl["last_at"] is not None and _age(now, sl["last_at"]) < STILL_GAP
+            and sl["last_d"] > STILL_NEAR):
+        return
+    _still_heartbeat(now)
 
 def _still_close():
     """Home stay: finish the track so it uploads (retried while a flush
@@ -1235,7 +1310,9 @@ def _still_leave():
         i -= 1
     prev = None
     for s, p, d in ring[i:]:
-        if s is None or s[0] == log["last_t"] or (
+        # only what comes after the last line (an anchor point may have
+        # been written while the way out began), so the track stays in order
+        if s is None or (log["last_t"] is not None and s[0] <= log["last_t"]) or (
                 prev is not None
                 and _dist(prev[0], prev[1], p[0], p[1]) <= MIN_MOVE):
             continue
@@ -1250,10 +1327,11 @@ def _still_active(now, pos):
     """One usable fix while stationary: watch for a departure (STILL_EXIT_N
     consecutive samples beyond STILL_EXIT that keep receding; an excursion
     that turns back does not count), refine the anchor, keep the track
-    closed on the home network and the heartbeat going elsewhere."""
+    closed on the home network (the heartbeat is _still_beat)."""
     sl = log["still"]
     a = sl["anchor"]
     d = _dist(a[0], a[1], pos[0], pos[1])
+    sl["last_at"], sl["last_d"] = now, d
     ring = sl["ring"]
     ring.append((_sample_line(now, None, None), pos, d))
     if len(ring) > STILL_DEP_MAX:
@@ -1274,8 +1352,6 @@ def _still_active(now, pos):
         sl["hb_at"] = None
     if home:
         _still_close()
-    elif sl["hb_at"] is None or _age(now, sl["hb_at"]) >= STILL_HEARTBEAT:
-        _still_heartbeat(now)
 
 def log_tick():
     """Sample a position every SAMPLE ms and record it if it is more than
@@ -1300,6 +1376,7 @@ def log_tick():
         if room is None or room < MIN_FREE:
             return
         log["full"] = False
+    _still_beat(now)
     if not has_fix(now):
         if log["fix"]:
             log["fix"], log["lost_at"] = False, now
@@ -1324,6 +1401,9 @@ def log_tick():
     if (log["last_sample"] is None
             or _age(now, log["last_sample"]) >= SAMPLE):
         log["last_sample"] = now
+        secs = _fix_secs()
+        if secs is not None:
+            log["clock"] = (secs, now)       # GPS time for the heartbeat
         hdop = _fresh_hdop(now)
         if hdop is None or hdop <= MAX_HDOP:
             pos = (st["lat"], st["lon"])

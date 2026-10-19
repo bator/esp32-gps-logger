@@ -3349,6 +3349,136 @@ try:
           sv_active() and gl.log["still"]["home"] is False
           and 2 <= len(beats) <= 4, "beats=%d" % len(beats))
 
+    # HB: the stay's heartbeat needs no fix; GAP: windows across a fix gap;
+    # ORDER: the way out stays in time order
+    import calendar
+
+    def hb_fix(east, north, hdop=1.0, nofix=False, speed=NOISE):
+        """Like sv_fix; nofix leaves pos/time stale (no new GPS epoch)."""
+        if speed == NOISE:
+            speed = rnd.uniform(0, 22)
+        _clock[0] += gl.SAMPLE
+        if nofix:
+            gl.log_tick()
+            return
+        sec = rv_sec[0]
+        rv_sec[0] += 1
+        gl.st.update(valid=True, date="2026-10-18",
+                     time="%02d:%02d:%02d" % (8 + sec // 3600,
+                                              (sec // 60) % 60, sec % 60),
+                     lat=47.5 + north * M_LAT, lon=19.0 + east * M_LON,
+                     alt=100.0, pos_at=_clock[0], hdop=hdop,
+                     hdop_at=_clock[0], status="A", quality=1, fixtype=3,
+                     speed=speed)
+        gl.log_tick()
+
+    def hb_secs(line):
+        tc = line.strip().split(",")[4]
+        return calendar.timegm((int(tc[0:4]), int(tc[4:6]), int(tc[6:8]),
+                                int(tc[9:11]), int(tc[11:13]),
+                                int(tc[13:15]), 0, 0, 0))
+
+    # calendar arithmetic against the CPython calendar
+    ok = True
+    for y, m, d, hh, mi, ss in ((2026, 10, 18, 8, 0, 0), (2026, 12, 31, 23, 59, 59),
+                                (2028, 2, 29, 12, 0, 0), (2100, 3, 1, 0, 0, 0),
+                                (2000, 1, 1, 0, 0, 0), (2099, 12, 31, 23, 59, 59)):
+        secs = calendar.timegm((y, m, d, hh, mi, ss, 0, 0, 0))
+        gl.st.update(date="%04d-%02d-%02d" % (y, m, d),
+                     time="%02d:%02d:%02d" % (hh, mi, ss))
+        iso = "%04d-%02d-%02dT%02d:%02d:%02dZ" % (y, m, d, hh, mi, ss)
+        ok = ok and gl._fix_secs() == secs and gl._stamp_at(secs)[0] == iso
+    ok = ok and gl._stamp_at(calendar.timegm((2026, 12, 31, 23, 59, 59, 0, 0, 0))
+                             + 1)[0] == "2027-01-01T00:00:00Z"
+    check("HB: UTC date arithmetic matches the calendar (year end, leap, 2100)",
+          ok)
+
+    # HDOP too dilute for 30 min after entering: anchor points keep coming
+    sv_reset()
+    sv_drift(150)
+    check("HB: setup - away stay", sv_active() is True)
+    n0 = len([l for l in sv_lines() if l.split(",")[2] == ""])
+    for _ in range(30 * 60):
+        hb_fix(rnd.uniform(-15, 15), rnd.uniform(-15, 15), hdop=8.0)
+    beats = [l for l in sv_lines() if l.split(",")[2] == ""]
+    check("HB: HDOP > MAX_HDOP for 30 min still writes an anchor every 5 min",
+          len(beats) - n0 >= 6, "beats=%d" % (len(beats) - n0))
+
+    # no fix at all for 30 min: stamped from the last fix's time + ticks
+    sv_reset()
+    sv_drift(150)
+    last_fix_line = sv_lines()[-1]
+    t_last = rv_sec[0] - 1                      # seconds of the last fix
+    for _ in range(30 * 60):
+        hb_fix(0, 0, nofix=True)
+    beats = [l for l in sv_lines() if l.split(",")[2] == ""]
+    secs = [hb_secs(l) for l in beats]
+    gaps = [b - a for a, b in zip(secs, secs[1:])]
+    t0 = calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0))
+    check("HB: no fix for 30 min still writes an anchor every 5 min",
+          len(beats) >= 7 and all(gl.STILL_HEARTBEAT // 1000 <= g
+                                  <= gl.STILL_HEARTBEAT // 1000 + 2
+                                  for g in gaps[1:]),
+          "beats=%d gaps=%s" % (len(beats), gaps))
+    check("HB: the anchor time runs on from the last GPS time",
+          bool(secs) and abs(secs[-1] - (t0 + t_last + 30 * 60)) <= 300,
+          "last=%s expected~%s" % (secs[-1:], t0 + t_last + 30 * 60))
+
+    # at home there is no heartbeat, fix or not
+    sv_reset(home=True)
+    sv_drift(150)
+    n_before = len(sv_lines())
+    for _ in range(20 * 60):
+        hb_fix(0, 0, nofix=True)
+    check("HB: a home stay writes nothing without a fix either",
+          len(sv_lines()) == n_before and gl.log["file"] is None)
+
+    # GAP: a minute at A, fix lost for an hour, back 1.5 km away
+    sv_reset()
+    sv_drift(119, box=10.0, step=3.0)
+    for _ in range(3600):
+        hb_fix(0, 0, nofix=True)
+    hb_fix(1500, 0)
+    first_b = sv_lines()[-1]
+    for _ in range(5):
+        hb_fix(1500, 0)
+    beats = [l for l in sv_lines() if l.split(",")[2] == ""]
+    check("GAP: a fix gap does not prove a stay at the old place",
+          sv_active() is False and beats == [],
+          "active=%s beats=%s" % (sv_active(), beats))
+    check("GAP: the first fix after the gap is kept",
+          abs(float(first_b.split(",")[1]) - (19.0 + 1500 * M_LON)) < 1e-4,
+          repr(first_b))
+
+    # GAP: the same place after a gap keeps its windows
+    sv_reset()
+    sv_drift(70, box=10.0, step=3.0)
+    prev_before = gl.log["still"]["prev"]
+    for _ in range(45):
+        hb_fix(0, 0, nofix=True)
+    hb_fix(2, 2)
+    check("GAP: a gap at the same place keeps the previous window",
+          prev_before is not None and gl.log["still"]["prev"] is prev_before)
+    sv_drift(60, box=10.0, step=3.0)
+    check("GAP: ... and the stay is entered on time",
+          sv_active() is True)
+
+    # ORDER: an anchor point due while the car drives off
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 4000
+    for i in range(1, 41):
+        hb_fix(i * 6.0, 0, speed=22.0)
+    lines = sv_lines()
+    ts = [hb_secs(l) for l in lines]
+    check("ORDER: the track stays in time order through a departure",
+          all(b >= a for a, b in zip(ts, ts[1:])) and sv_active() is False,
+          "steps back=%d" % sum(1 for a, b in zip(ts, ts[1:]) if b < a))
+    out = [l for l in lines if sv_m(l) > 15]
+    check("ORDER: the way out is still written from near the anchor",
+          bool(out) and sv_m(out[0]) < 60.0,
+          repr(out[0] if out else None))
+
     # REVIEW2-2: a timestamp taken just after now is age 0, not "very old"
     now = _clock[0]
     check("REVIEW2-2: small negative difference is age 0",
