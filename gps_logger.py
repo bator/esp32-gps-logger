@@ -55,6 +55,8 @@ STILL_STEP = 2                           # m each receding sample must gain
                                          # (a frozen multipath jump gains 0)
 STILL_EXIT_SLOW = 10                     # samples beyond STILL_EXIT that leave
                                          # without gaining (a slow walk away)
+STILL_SLOW_GAIN = 5                      # m those samples must gain in all
+                                         # (a jump frozen for 10 s gains 0)
 STILL_FILE = 1800000                     # ms an away stay's file stays open
 STILL_HEARTBEAT = 300000                 # ms between anchor points (not home)
 STILL_GAP = 30000                        # ms without a usable fix that counts
@@ -161,8 +163,14 @@ def _position(f, i):
     return True
 
 def _time(s):
+    """Store the sentence's time. A time earlier than the last one has
+    passed midnight: the date is unknown until an RMC brings it, or a GGA
+    whose RMC was lost would date its fix a day back."""
     if len(s) >= 6:
-        st["time"] = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
+        t = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
+        if st["time"] is not None and t < st["time"]:
+            st["date"] = None
+        st["time"] = t
 
 def _update_fix(ok, have_pos):
     """ok is this sentence's own verdict (RMC status / GGA quality), so a
@@ -1001,7 +1009,7 @@ def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
-            "ring": [], "far_n": 0, "far_d": 0, "far_slow": 0,
+            "ring": [], "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
             "last_at": None, "last_d": 0, "file_at": None}
 
 def _still_mean(sl, pos):
@@ -1279,14 +1287,14 @@ def _still_beat(now):
     if not sl["active"]:
         return
     if at_home():
-        _still_close()                   # also after a WiFi drop, fix or not
+        _still_close(now)                # also after a WiFi drop, fix or not
         return
     # Rotate the anchor file so the stay uploads while it lasts (the usual
     # age-close is off during a stay: it would open a file per heartbeat).
     if (log["file"] is not None and sl["file_at"] is not None
             and wifi["state"] == "connected"
             and _age(now, sl["file_at"]) >= STILL_FILE):
-        _still_close()
+        _still_close(now)
     if sl["hb_at"] is not None and _age(now, sl["hb_at"]) < STILL_HEARTBEAT:
         return
     if (sl["last_at"] is not None and _age(now, sl["last_at"]) < STILL_GAP
@@ -1294,12 +1302,14 @@ def _still_beat(now):
         return
     _still_heartbeat(now)
 
-def _still_close():
-    """Home stay: finish the track so it uploads (retried while a flush
-    fails); nothing more is written until the stay ends."""
+def _still_close(now=None):
+    """Home stay: finish the track so it uploads; nothing more is written
+    until the stay ends. A retry from the tick (now given) flushes at most
+    every FLUSH while a flush keeps failing, as the main path does."""
     if log["file"] is None:
         return
-    if log["batch"]:
+    if log["batch"] and (now is None
+                         or _age(now, log["last_flush"]) >= FLUSH):
         flush()
     if not log["batch"]:
         log.update(file=None, created=False, file_at=None, new_seg=False)
@@ -1351,25 +1361,43 @@ def _still_active(now, pos):
     sl = log["still"]
     a = sl["anchor"]
     d = _dist(a[0], a[1], pos[0], pos[1])
-    sl["last_at"], sl["last_d"] = now, d
     ring = sl["ring"]
     ring.append((_sample_line(now, None, None), pos, d))
     if len(ring) > STILL_DEP_MAX:
         ring.pop(0)
     if d > STILL_EXIT and d + STILL_TOL >= sl["far_d"]:
         # Leaving: STILL_EXIT_N samples each gaining STILL_STEP (a vehicle),
-        # or STILL_EXIT_SLOW samples out there (a walk). A multipath jump
-        # that freezes 200 m away for a few seconds gains nothing.
+        # or STILL_EXIT_SLOW samples out there that gained STILL_SLOW_GAIN
+        # in all (a walk). A multipath jump that freezes 200 m away gains
+        # nothing, however long it lasts.
         sl["far_n"] = sl["far_n"] + 1 if d >= sl["far_d"] + STILL_STEP else 1
+        if not sl["far_slow"]:
+            sl["far_0"] = d
         sl["far_slow"] += 1
         sl["far_d"] = d
-        if sl["far_n"] >= STILL_EXIT_N or sl["far_slow"] >= STILL_EXIT_SLOW:
+        if sl["far_n"] >= STILL_EXIT_N or (
+                sl["far_slow"] >= STILL_EXIT_SLOW
+                and d - sl["far_0"] >= STILL_SLOW_GAIN):
             _still_leave()
             return
     else:
         sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
         if d <= STILL_NEAR:
             _still_mean(sl, pos)
+            sl["win_at"] = sl["prev"] = None
+        else:
+            # Settled between STILL_NEAR and STILL_EXIT (out of the car and
+            # into the building): the same two calm windows that start a
+            # stay move its anchor there. Otherwise the anchor would stay
+            # behind and no heartbeat would ever be written.
+            hit = _still_window(now, pos)
+            if hit and _dist(a[0], a[1], hit[0][0], hit[0][1]) > STILL_NEAR:
+                a = hit[0]
+                sl.update(anchor=a, aref=a, aoff=(0.0, 0.0),
+                          n=min(hit[2], STILL_MEAN_N), hb_at=None,
+                          win_at=None, prev=None)
+                d = _dist(a[0], a[1], pos[0], pos[1])
+    sl["last_at"], sl["last_d"] = now, d
     home = bool(at_home())
     if home != sl["home"]:
         sl["home"] = home
@@ -1403,10 +1431,14 @@ def log_tick():
         if log["fix"]:
             log["fix"], log["lost_at"] = False, now
             flush()
+        elif log["batch"] and _age(now, log["last_flush"]) >= FLUSH:
+            flush()                      # anchor points written without a fix
         return
     if not log["fix"]:
         log["fix"] = True
-        if (log["file"] is not None and log.get("lost_at") is not None
+        if log["still"]["active"]:
+            pass                         # same place: the stay keeps its file
+        elif (log["file"] is not None and log.get("lost_at") is not None
                 and _age(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
             if _age(now, log["last_flush"]) >= FLUSH:
                 flush()
