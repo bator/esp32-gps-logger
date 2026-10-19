@@ -1475,10 +1475,12 @@ try:
           gl.log["still"]["active"] is False and gl.log["file"] == home_path)
     for _ in range(gl.STILL_WINDOW // 1000 + 2):
         hs_fix(52.51 + hs_rnd.uniform(-1e-4, 1e-4), hs_rnd.uniform(0, 22))
+    # the drift that proves the stay is never uploaded (all of it was held
+    # in RAM), so the track it opened is never even created
     check("HOME STAY: two calm minutes close the track despite speed noise",
           gl.log["still"]["active"] is True and gl.log["still"]["home"] is True
           and gl.log["file"] is None and gl.log["batch"] == []
-          and home_path in gl.pending(),
+          and home_path not in gl.pending(),
           "still=%s file=%s" % (gl.log["still"]["active"], gl.log["file"]))
     n_files = len(gl.pending())
     for _ in range(20 * 60):
@@ -1509,7 +1511,7 @@ try:
     gl.log["last_sample"] = None
     gl.log_tick()
     check("B3: connected WiFi closes old tracks for background upload",
-          home_path in gl.pending() and resumed_path in gl.pending()
+          resumed_path in gl.pending()
           and gl.log["file"] != resumed_path,
           "pending=%s current=%s" % (gl.pending(), gl.log.get("file")))
 
@@ -3036,9 +3038,13 @@ try:
         gl.log.update(last_sample=0, last_flush=0)
         rv_fix(47.5, 30.0)
         gl.log_tick()
+        # the sample opens a stay window, so the flush holds it in RAM
         check("REVIEW-3: wrapped last_sample/last_flush still sample + flush",
-              gl.log["points"] == 1 and gl.log["last_flush"] == now,
-              "points=%s flush=%s" % (gl.log["points"], gl.log["last_flush"]))
+              gl.log["points"] + len(gl.log["batch"]) == 1
+              and gl.log["last_flush"] == now,
+              "points=%s batch=%s flush=%s" % (
+                  gl.log["points"], len(gl.log["batch"]), gl.log["last_flush"]))
+        gl.flush()
         done = gl.log["file"]
         gl.log.update(file=None)
         for n in os.listdir(rv_dir):         # leave only this track
@@ -3625,7 +3631,7 @@ try:
     sv_reset(home=True)
     real_flush, calls = gl.flush, [0]
 
-    def failing_flush():
+    def failing_flush(*a):
         calls[0] += 1
         gl.log["last_flush"] = _clock[0]
     gl.flush = failing_flush
@@ -3658,6 +3664,39 @@ try:
     check("FROZEN: a 30 s frozen jump to 200 m is not a departure",
           sv_active() is True and len(sv_lines()) == n0,
           "active=%s new=%d" % (sv_active(), len(sv_lines()) - n0))
+
+    # HOLD: the drift that proves a stay is held in RAM, so a boot (or a new
+    # fix) at home uploads nothing of it; a real arrival is still kept
+    import math
+    for home in (True, False):
+        sv_reset(home=home)
+        for _ in range(30 * 60):
+            e, n = rnd.gauss(0, 25), rnd.gauss(0, 25)
+            if rnd.random() < 0.05:                 # multipath jumps
+                ang = rnd.uniform(0, 2 * math.pi)
+                e, n = e + 110 * math.cos(ang), n + 110 * math.sin(ang)
+            sv_fix(e, n)
+        gl.flush()
+        drift = [l for l in sv_lines() if l.split(",")[2] != ""]
+        check("HOLD: 30 min of drift from boot leaves no drift point (home=%s)"
+              % home, sv_active() is True and drift == [],
+              "drift lines=%d" % len(drift))
+    sv_reset(home=True)
+    for i in range(-300, 1):                        # 30 km/h, stop at 0
+        sv_fix(i * 8.3, 0, 30.0)
+    sv_drift(200, box=10.0, step=3.0)
+    gl.flush()
+    way_in = [sv_m(l) for l in sv_lines()]
+    check("HOLD: the way in is kept up to the stay",
+          sv_active() is True and len(way_in) >= 240
+          and min(way_in) < gl.STILL_NEAR + 15,
+          "points=%d closest=%.0f m" % (len(way_in), min(way_in or [0])))
+    # a window that ends the drive and starts the stop, and does not pair
+    # with the next one, is no longer held: at most its tail reaches flash
+    at_stop = [m for m in way_in if m < 15]
+    check("HOLD: ... and at most one window of the drift at the stop",
+          len(at_stop) <= gl.STILL_WINDOW // 1000,
+          "drift lines at the stop=%d" % len(at_stop))
 
     # MIDNIGHT: a GGA past midnight whose RMC was lost is not dated a day back
     gl.reset()
