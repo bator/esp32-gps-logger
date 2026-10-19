@@ -51,6 +51,11 @@ STILL_NEAR = 50                          # m: fixes this close refine the anchor
 STILL_EXIT = 150                         # m from the anchor to start leaving
 STILL_EXIT_N = 3                         # receding samples needed to leave
 STILL_TOL = 5                            # m a receding sample may fall back
+STILL_STEP = 2                           # m each receding sample must gain
+                                         # (a frozen multipath jump gains 0)
+STILL_EXIT_SLOW = 10                     # samples beyond STILL_EXIT that leave
+                                         # without gaining (a slow walk away)
+STILL_FILE = 1800000                     # ms an away stay's file stays open
 STILL_HEARTBEAT = 300000                 # ms between anchor points (not home)
 STILL_GAP = 30000                        # ms without a usable fix that counts
                                          # as a gap (the device may have moved)
@@ -368,6 +373,8 @@ def load_env(path):
     try:
         with open(path) as f:
             for line in f:
+                if line[:1] == "\ufeff":
+                    line = line[1:]          # UTF-8 BOM (Windows Notepad)
                 line = line.strip()
                 if not line or line[0] == "#" or "=" not in line:
                     continue
@@ -994,8 +1001,8 @@ def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
-            "ring": [], "far_n": 0, "far_d": 0, "last_at": None,
-            "last_d": 0}
+            "ring": [], "far_n": 0, "far_d": 0, "far_slow": 0,
+            "last_at": None, "last_d": 0, "file_at": None}
 
 def _still_mean(sl, pos):
     """Fold pos into the anchor, a running mean over STILL_MEAN_N fixes.
@@ -1258,6 +1265,9 @@ def _still_heartbeat(now):
         return
     a = sl["anchor"]
     sl["hb_at"] = now
+    if log["file"] is None:
+        start_file(tc[:8] + "_" + tc[9:15])
+        sl["file_at"] = now
     _record((t, "%.6f,%.6f,,,%s\n" % (a[0], a[1], tc)), a)
 
 def _still_beat(now):
@@ -1266,8 +1276,17 @@ def _still_beat(now):
     an excursion or a departure, and an anchor stamped then would land in
     the middle of the way out."""
     sl = log["still"]
-    if not sl["active"] or at_home():
+    if not sl["active"]:
         return
+    if at_home():
+        _still_close()                   # also after a WiFi drop, fix or not
+        return
+    # Rotate the anchor file so the stay uploads while it lasts (the usual
+    # age-close is off during a stay: it would open a file per heartbeat).
+    if (log["file"] is not None and sl["file_at"] is not None
+            and wifi["state"] == "connected"
+            and _age(now, sl["file_at"]) >= STILL_FILE):
+        _still_close()
     if sl["hb_at"] is not None and _age(now, sl["hb_at"]) < STILL_HEARTBEAT:
         return
     if (sl["last_at"] is not None and _age(now, sl["last_at"]) < STILL_GAP
@@ -1287,16 +1306,17 @@ def _still_close():
 
 def _still_enter(now, anchor, since_tc, n):
     """Become stationary at anchor. The stay's drift still in RAM (lines
-    from since_tc on) is dropped. On the home network the track is closed,
-    elsewhere the anchor is written now and then every STILL_HEARTBEAT."""
+    from since_tc on) is dropped and the track is closed, so the arrival
+    uploads during the stay. Away from home the anchor opens a new file,
+    now and then every STILL_HEARTBEAT."""
     log["still"] = sl = _still_state()
     sl.update(active=True, anchor=anchor, aref=anchor,
               n=min(n, STILL_MEAN_N))
     b = log["batch"]
     b[:] = [l for l in b if l.rstrip()[-16:] < since_tc]
+    _still_close()                       # the arrival uploads during the stay
     if at_home():
         sl["home"] = True
-        _still_close()
     else:
         _still_heartbeat(now)
 
@@ -1324,10 +1344,10 @@ def _still_leave():
     log["still"] = _still_state()
 
 def _still_active(now, pos):
-    """One usable fix while stationary: watch for a departure (STILL_EXIT_N
-    consecutive samples beyond STILL_EXIT that keep receding; an excursion
-    that turns back does not count), refine the anchor, keep the track
-    closed on the home network (the heartbeat is _still_beat)."""
+    """One usable fix while stationary: watch for a departure (consecutive
+    samples beyond STILL_EXIT that keep receding; an excursion that turns
+    back does not count), refine the anchor (the heartbeat, the file
+    rotation and the home close are _still_beat)."""
     sl = log["still"]
     a = sl["anchor"]
     d = _dist(a[0], a[1], pos[0], pos[1])
@@ -1337,21 +1357,23 @@ def _still_active(now, pos):
     if len(ring) > STILL_DEP_MAX:
         ring.pop(0)
     if d > STILL_EXIT and d + STILL_TOL >= sl["far_d"]:
-        sl["far_n"] += 1
+        # Leaving: STILL_EXIT_N samples each gaining STILL_STEP (a vehicle),
+        # or STILL_EXIT_SLOW samples out there (a walk). A multipath jump
+        # that freezes 200 m away for a few seconds gains nothing.
+        sl["far_n"] = sl["far_n"] + 1 if d >= sl["far_d"] + STILL_STEP else 1
+        sl["far_slow"] += 1
         sl["far_d"] = d
-        if sl["far_n"] >= STILL_EXIT_N:
+        if sl["far_n"] >= STILL_EXIT_N or sl["far_slow"] >= STILL_EXIT_SLOW:
             _still_leave()
             return
     else:
-        sl["far_n"], sl["far_d"] = 0, 0
+        sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
         if d <= STILL_NEAR:
             _still_mean(sl, pos)
     home = bool(at_home())
     if home != sl["home"]:
         sl["home"] = home
         sl["hb_at"] = None
-    if home:
-        _still_close()
 
 def log_tick():
     """Sample a position every SAMPLE ms and record it if it is more than

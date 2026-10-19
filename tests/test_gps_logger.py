@@ -2477,8 +2477,8 @@ try:
           "file=%s disk=%s lines=%d" % (gl.log.get("file"), park_disk,
                                          len(park_lines)))
 
-    # hotspot parking: first recorded point may open one file; age-rotate
-    # closes it; MIN_MOVE must not open another
+    # hotspot parking: the first point opens a file, the stay closes it and
+    # rotates its anchor file every STILL_FILE; MIN_MOVE opens no others
     hot_dir = os.path.join(tmpdir, "hotpark")
     os.mkdir(hot_dir)
     gl.LOG_DIR = hot_dir
@@ -2502,7 +2502,8 @@ try:
     gl.flush()
     hot_disk = [n for n in os.listdir(hot_dir) if n.endswith(".trk")]
     check("ROT-2: hotspot parking does not keep opening files",
-          len(opened) <= 1 and len(hot_disk) <= 1,
+          len(opened) <= 1 + 3600000 // gl.STILL_FILE + 1
+          and len(hot_disk) <= 1 + 3600000 // gl.STILL_FILE + 1,
           "opened=%s disk=%s file=%s" % (opened, hot_disk, gl.log.get("file")))
 
     # --- close() error: drop batch only if the new size actually landed ----
@@ -3478,6 +3479,85 @@ try:
     check("ORDER: the way out is still written from near the anchor",
           bool(out) and sv_m(out[0]) < 60.0,
           repr(out[0] if out else None))
+
+    # EXIT: a frozen multipath jump is not a departure; a slow walk still is
+    sv_reset()
+    sv_drift(150, box=15.0, step=5.0)
+    check("EXIT: setup - away stay", sv_active() is True)
+    n0 = len(sv_lines())
+    for _ in range(3):
+        sv_fix(200.0, 0)                           # frozen 200 m jump, 3 s
+    sv_drift(5, box=15.0, step=5.0)
+    check("EXIT: a 3 s frozen jump to 200 m is not a departure",
+          sv_active() is True and len(sv_lines()) == n0,
+          "active=%s new=%d" % (sv_active(), len(sv_lines()) - n0))
+    for i in range(9):
+        sv_fix(200.0 + i * 1.5, 0)                 # jump that creeps 1.5 m/s
+    check("EXIT: a creeping jump below STILL_STEP needs STILL_EXIT_SLOW samples",
+          sv_active() is True)
+    sv_fix(220.0, 0)
+    check("EXIT: ... and leaves on the 10th sample out there",
+          sv_active() is False)
+    sv_reset()
+    sv_drift(150, box=15.0, step=5.0)
+    for i in range(1, 60):
+        sv_fix(i * 6.0, 0, 22.0)
+    check("EXIT: a car (6 m/s) leaves after STILL_EXIT_N gaining samples",
+          sv_active() is False and len([l for l in sv_lines()
+                                        if sv_m(l) > 150]) >= 25)
+
+    # ARRIVE: entering a stay closes the arrival track on any network; the
+    # anchor file rotates every STILL_FILE while connected
+    sv_reset()
+    gl.wifi.update(state="connected", home=False)
+    for i in range(300):                            # 5 min drive at 6 m/s
+        sv_fix(-6.0 * (300 - i), 0, 22.0)
+    arrival = gl.log["file"]
+    sv_drift(150, box=15.0, step=5.0)
+    check("ARRIVE: the arrival track is closed when the stay begins",
+          sv_active() and arrival in gl.pending() and gl.log["file"] != arrival,
+          "file=%s pending=%s" % (gl.log["file"], gl.pending()))
+    anchor_file = gl.log["file"]
+    sv_drift(3600, box=15.0, step=5.0)
+    check("ARRIVE: the anchor file rotates every STILL_FILE on WiFi",
+          anchor_file in gl.pending() and len(gl.pending()) >= 3,
+          "pending=%d" % len(gl.pending()))
+    check("ARRIVE: files opened during the stay hold anchor points only",
+          all(l.split(",")[2] == "" for p in gl.pending() if p >= anchor_file
+              for l in open(p) if l.count(",") == 4))
+    sv_reset()
+    sv_drift(150, box=15.0, step=5.0)               # offline
+    af, n_pend = gl.log["file"], len(gl.pending())
+    sv_drift(3600, box=15.0, step=5.0)
+    check("ARRIVE: offline the anchor file is kept open (nothing to upload to)",
+          gl.log["file"] == af and len(gl.pending()) == n_pend)
+
+    # HBFILE: a heartbeat that opens a file names it after its own time, and
+    # the file closes once the home network is back, fix or not
+    sv_reset(home=True)
+    sv_drift(150, box=15.0, step=5.0)
+    for _ in range(3600):
+        hb_fix(0, 0, nofix=True)                    # an hour without a fix
+    gl.wifi.update(state="offline", home=False)
+    for _ in range(10):
+        hb_fix(0, 0, nofix=True)
+    f, b = gl.log["file"], gl.log["batch"]
+    check("HBFILE: heartbeat file is named after the anchor point's time",
+          f is not None and b and os.path.basename(f)[:15]
+          == b[0].strip().split(",")[4].replace("T", "_")[:15],
+          "file=%s line=%r" % (f, b[:1]))
+    gl.wifi.update(state="connected", home=True)
+    for _ in range(5):
+        hb_fix(0, 0, nofix=True)
+    check("HBFILE: back on home WiFi the file closes without a fix",
+          gl.log["file"] is None and gl.log["batch"] == [] and f in gl.pending())
+
+    # BOM: a .env saved by Windows Notepad
+    bom = os.path.join(rv_dir, "env_bom")
+    with open(bom, "wb") as fh:
+        fh.write(b"\xef\xbb\xbfSSID=home\nWPA2=x\nGEO_URL=https://d\nAPI_KEY=k\n")
+    check("BOM: a UTF-8 BOM before the first key is ignored",
+          "SSID" in gl.load_env(bom) and len(gl._load_nets(gl.load_env(bom))) == 1)
 
     # REVIEW2-2: a timestamp taken just after now is age 0, not "very old"
     now = _clock[0]
