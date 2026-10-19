@@ -66,7 +66,10 @@ STILL_MEAN_N = 1800                      # samples the anchor mean averages over
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
-MAX_BATCH = 180                          # RAM cap while flash writes fail
+MAX_BATCH = 240                          # RAM cap while flash writes fail
+HOLD_MAX = 150                           # lines a stay being proven keeps in
+                                         # RAM (two windows and some; a FLUSH
+                                         # more still fits under MAX_BATCH)
 MAX_HDOP = 5                             # skip samples with worse dilution
 HDOP_M = 5                               # metres of UERE per HDOP unit
 FULL_CHECK = 5000                        # ms between statvfs polls when full
@@ -1012,6 +1015,21 @@ def _still_state():
             "ring": [], "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
             "last_at": None, "last_d": 0, "file_at": None}
 
+def _still_hold():
+    """Track time from which a stay still being proven would drop its
+    drift (the open window, or the previous one it may pair with), or None.
+    Periodic flushes keep those lines in RAM, so a stay that is entered
+    drops all of them: before, the minute already on flash was uploaded
+    after every boot or new fix."""
+    sl = log["still"]
+    if sl["active"]:
+        return None
+    if sl["prev"]:
+        return sl["prev"][1]
+    if sl["win_at"] is not None:
+        return sl["win_tc"]
+    return None
+
 def _still_mean(sl, pos):
     """Fold pos into the anchor, a running mean over STILL_MEAN_N fixes.
     Kept as an offset from a fixed reference: in single precision a
@@ -1048,13 +1066,25 @@ def start_file(stamp=None):
     # First write happens when there are points (parking must not create
     # an empty / one-point file just because a fix came back).
 
-def flush():
+def flush(hold=None):
     """Write pending points to the current file, opened only for the write.
     LittleFS commits on close: drop the RAM batch only after a successful
-    close, or if the file size shows the new bytes actually landed."""
+    close, or if the file size shows the new bytes actually landed. With
+    hold (a compact track time), only the lines before it are written: the
+    rest is the drift of a stay still being proven (see _still_hold)."""
     log["last_flush"] = time.ticks_ms()
     path, batch = log["file"], log["batch"]
-    if path is None or (log["created"] and not batch):
+    k = len(batch)
+    if hold is not None:
+        k = 0
+        while k < len(batch) and batch[k].rstrip()[-16:] < hold:
+            k += 1
+        # hold at most HOLD_MAX lines, so a drive never reaches the
+        # MAX_BATCH cap that drops the oldest ones
+        k = max(k, len(batch) - HOLD_MAX)
+        if not k:
+            return
+    if path is None or (log["created"] and not k):
         return
     room = free()
     if room is not None and room < MIN_FREE:
@@ -1075,7 +1105,7 @@ def flush():
         extra = 0 if creating else (len(NEW_SEG) if log["new_seg"] else 0)
         pts = 0
         i = 0
-        while i < len(batch):
+        while i < k:
             pts += len(batch[i])
             i += 1
         if creating:
@@ -1095,7 +1125,7 @@ def flush():
             if log["new_seg"]:
                 f.write(NEW_SEG.encode())
         i = 0
-        while i < len(batch):
+        while i < k:
             f.write(batch[i].encode())
             i += 1
         f.write(FOOTER.encode())
@@ -1126,9 +1156,9 @@ def flush():
             return
     log["created"] = True
     log["good_size"] = expected
-    log["points"] += len(batch)
-    up["left"] += len(batch)
-    del batch[:]
+    log["points"] += k
+    up["left"] += k
+    del batch[:k]
     log["new_seg"] = False
 
 def _dist(lat1, lon1, lat2, lon2):
@@ -1315,20 +1345,30 @@ def _still_close(now=None):
         log.update(file=None, created=False, file_at=None, new_seg=False)
 
 def _still_enter(now, anchor, since_tc, n):
-    """Become stationary at anchor. The stay's drift still in RAM (lines
-    from since_tc on) is dropped and the track is closed, so the arrival
-    uploads during the stay. Away from home the anchor opens a new file,
-    now and then every STILL_HEARTBEAT."""
+    """Become stationary at anchor. The stay's drift (lines from since_tc
+    on, all still in RAM: see _still_hold) is dropped, except the way in
+    up to where it first comes within STILL_NEAR of the anchor, and the
+    track is closed, so the arrival uploads during the stay. Away from
+    home the anchor opens a new file, now and then every STILL_HEARTBEAT."""
     log["still"] = sl = _still_state()
     sl.update(active=True, anchor=anchor, aref=anchor,
               n=min(n, STILL_MEAN_N))
     b = log["batch"]
-    b[:] = [l for l in b if l.rstrip()[-16:] < since_tc]
+    i = 0
+    while i < len(b) and b[i].rstrip()[-16:] < since_tc:
+        i += 1
+    while i < len(b):
+        f = b[i].split(",", 2)
+        if _dist(anchor[0], anchor[1], float(f[0]), float(f[1])) <= STILL_NEAR:
+            break
+        i += 1
+    del b[i:]
     _still_close()                       # the arrival uploads during the stay
     if at_home():
         sl["home"] = True
     else:
         _still_heartbeat(now)
+    print("stay", "home" if sl["home"] else "away", "kept", i)
 
 def _still_leave():
     """End the stay and write the way out: the trailing run of recent
@@ -1351,6 +1391,7 @@ def _still_leave():
             start_file(tc[:8] + "_" + tc[9:15])
         _record(s, p)
         prev = p
+    print("stay end", int(log["still"]["far_d"]))
     log["still"] = _still_state()
 
 def _still_active(now, pos):
@@ -1397,6 +1438,7 @@ def _still_active(now, pos):
                           n=min(hit[2], STILL_MEAN_N), hb_at=None,
                           win_at=None, prev=None)
                 d = _dist(a[0], a[1], pos[0], pos[1])
+                print("stay moved")
     sl["last_at"], sl["last_d"] = now, d
     home = bool(at_home())
     if home != sl["home"]:
@@ -1430,9 +1472,9 @@ def log_tick():
     if not has_fix(now):
         if log["fix"]:
             log["fix"], log["lost_at"] = False, now
-            flush()
+            flush(_still_hold())
         elif log["batch"] and _age(now, log["last_flush"]) >= FLUSH:
-            flush()                      # anchor points written without a fix
+            flush(_still_hold())         # anchor points written without a fix
         return
     if not log["fix"]:
         log["fix"] = True
@@ -1471,7 +1513,7 @@ def log_tick():
                 if hit:
                     _still_enter(now, hit[0], hit[1], hit[2])
     if _age(now, log["last_flush"]) >= FLUSH:
-        flush()
+        flush(_still_hold())
 
 # --- Upload ---------------------------------------------------------------
 # Finished track files (never the one being recorded) are sent to Dawarich's
