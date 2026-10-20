@@ -28,6 +28,7 @@ _timers = []
 _hostnames = []
 _oled_inits = []
 _reset_cause = [1]
+_uart_tx = []
 
 
 class Pin(object):
@@ -55,6 +56,10 @@ class UART(object):
 
     def readinto(self, buf):
         return 0
+
+    def write(self, data):
+        _uart_tx.append(bytes(data))
+        return len(data)
 
 
 class WDT(object):
@@ -3063,31 +3068,115 @@ try:
         time.ticks_ms, time.ticks_diff, time.ticks_add = orig_ticks
         _clock[0] = saved_clock
 
-    # REVIEW-4: each sentence decides validity; pos_at needs a real position
+    # REVIEW-4 / AVG: a second becomes the fix when the next one starts;
+    # its validity is that of its own sentences, its position their mean
     def nmea(body):
         c = 0
         for ch in body.encode():
             c ^= ch
         return ("$%s*%02X" % (body, c)).encode()
 
+    def epoch(hhmmss, lat="4730.000", lon="01900.000", status="A", q=1,
+              hdop="1.0", alt="100.0", date="171026"):
+        gl.handle(nmea("GPRMC,%s,%s,%s,N,%s,E,10.0,90.0,%s,,,A"
+                       % (hhmmss, status, lat, lon, date)))
+        gl.handle(nmea("GPGGA,%s,%s,N,%s,E,%d,08,%s,%s,M,40.0,M,,"
+                       % (hhmmss, lat, lon, q, hdop, alt)))
+
     gl.reset()
-    gl.handle(nmea("GPRMC,120000.00,A,4730.000,N,01900.000,E,10.0,90.0,"
-                   "171026,,,A"))
-    gl.handle(nmea("GPGGA,120000.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
-                   "M,40.0,M,,"))
-    check("REVIEW-4: valid RMC + GGA is a fix", bool(gl.has_fix(_clock[0])))
+    epoch("120000.00")
+    check("AVG: a second is not a fix while it is still being collected",
+          not gl.has_fix(_clock[0]) and gl.st["seq"] == 0)
+    epoch("120001.00")
+    check("REVIEW-4: valid RMC + GGA is a fix (once the next second starts)",
+          bool(gl.has_fix(_clock[0])) and gl.st["time"] == "12:00:00"
+          and gl.st["date"] == "2026-10-17" and gl.st["seq"] == 1)
+    _clock[0] += 1000
+    gl.handle(nmea("GPRMC,120002.00,V,,,,,,,171026,,,N"))  # 12:00:01 done
     fix_at = gl.st["pos_at"]
-    _clock[0] += 1000
-    gl.handle(nmea("GPRMC,120001.00,V,,,,,,,171026,,,N"))
-    check("REVIEW-4: void RMC is not rescued by the previous GGA quality",
-          gl.st["valid"] is False and gl.st["pos_at"] == fix_at)
-    _clock[0] += 1000
-    gl.handle(nmea("GPRMC,120002.00,A,,,,,,,171026,,,A"))
-    check("REVIEW-4: RMC 'A' without a position does not refresh pos_at",
-          gl.st["pos_at"] == fix_at)
     gl.handle(nmea("GPGGA,120002.00,,,,,0,00,99.9,,M,,M,,"))
-    check("REVIEW-4: GGA quality 0 clears validity",
+    gl.handle(nmea("GPRMC,120003.00,V,,,,,,,171026,,,N"))
+    check("REVIEW-4: a void second is no fix and does not refresh pos_at",
+          gl.st["valid"] is False and gl.st["pos_at"] == fix_at
+          and gl.st["time"] == "12:00:02")
+    _clock[0] += 1000
+    gl.handle(nmea("GPRMC,120004.00,A,,,,,,,171026,,,A"))
+    gl.handle(nmea("GPGGA,120004.00,,,,,1,08,1.0,,M,,M,,"))
+    gl.handle(nmea("GPRMC,120005.00,V,,,,,,,171026,,,N"))
+    check("REVIEW-4: a valid second without a position is no fix",
           gl.st["valid"] is False and gl.st["pos_at"] == fix_at)
+
+    # AVG: five fixes of one second publish their mean, once
+    gl.reset()
+    lats = ("4730.0000", "4730.0010", "4730.0020", "4730.0030", "4730.0040")
+    for k, la in enumerate(lats):
+        epoch("120010.%02d" % (k * 20), lat=la, hdop="%.1f" % (1.0 + k * 0.1))
+    epoch("120011.00", lat="4731.0000")
+    want = 47.5 + 0.0020 / 60
+    check("AVG: five fixes of a second publish their mean position",
+          gl.st["epochs"] == 5 and abs(gl.st["lat"] - want) < 1e-7
+          and gl.st["seq"] == 1 and abs(gl.st["hdop"] - 1.2) < 1e-6,
+          "lat=%r epochs=%s hdop=%s" % (gl.st["lat"], gl.st["epochs"],
+                                        gl.st["hdop"]))
+    gl.reset()
+    for k in range(5):
+        epoch("120020.%02d" % (k * 20), q=0 if k < 3 else 1,
+              lat="4730.%04d" % (k * 10))
+    epoch("120021.00")
+    check("AVG: only the second's valid fixes are averaged",
+          gl.st["epochs"] == 2
+          and abs(gl.st["lat"] - (47.5 + 0.0035 / 60)) < 1e-7,
+          "epochs=%s lat=%r" % (gl.st["epochs"], gl.st["lat"]))
+    gl.reset()
+    gl.handle(nmea("GPRMC,120030.00,A,4730.000,N,01900.000,E,1.0,0.0,"
+                   "171026,,,A"))
+    gl.handle(nmea("GPRMC,120031.00,A,4730.000,N,01900.000,E,1.0,0.0,"
+                   "171026,,,A"))
+    check("AVG: RMC positions are used when a second has no GGA",
+          bool(gl.has_fix(_clock[0])) and gl.st["epochs"] == 1)
+
+    # AVG: the logger records one point per averaged second, its mean
+    avg_dir = tempfile.mkdtemp(prefix="gpxlog-avg-")
+    saved_dir = gl.LOG_DIR
+    try:
+        gl.LOG_DIR = avg_dir
+        gl.reset()
+        gl.log_reset()
+        gl.wifi_reset()
+        for sec in range(30):
+            for k in range(5):                    # 5 Hz, 1.4 m/s north
+                north = (sec * 5 + k) * 0.28
+                epoch("1201%02d.%02d" % (sec, k * 20),
+                      lat="4730.%04d" % int(round(north / 1.852 * 10000 / 1000)))
+                _clock[0] += 200
+                gl.log_tick()
+        lines = list(gl.log["batch"])
+        secs = [l.strip().split(",")[4] for l in lines]
+        check("AVG: 5 Hz in, at most one point a second out, in time order",
+              len(lines) >= 5 and len(set(secs)) == len(secs)
+              and secs == sorted(secs), "points=%d" % len(lines))
+    finally:
+        gl.LOG_DIR = saved_dir
+        shutil.rmtree(avg_dir, ignore_errors=True)
+
+    # UBX: the setup frames (checked against u-blox reference frames)
+    _uart_tx[:] = []
+    gl.gps_setup()
+    frames = [f.hex() for f in _uart_tx]
+    check("UBX: CFG-MSG turns GSV off (b562 0601 0300 f00300 fd15)",
+          "b56206010300f00300fd15" in frames, repr(frames[:2]))
+    check("UBX: CFG-RATE asks for 200 ms (b562 0608 ... de6a)",
+          frames[-1] == "b56206080600c800010001" + "00de6a", frames[-1])
+    check("UBX: GSA once a second, RMC and GGA every fix",
+          gl._ubx(6, 1, bytes((0xF0, 2, gl.GPS_HZ))).hex() in frames
+          and gl._ubx(6, 1, bytes((0xF0, 0, 1))).hex() in frames
+          and gl._ubx(6, 1, bytes((0xF0, 4, 1))).hex() in frames)
+    gl.reset()
+    st_ok = gl.st["ok"]
+    gl.handle(b"\xb5\x62\x05\x01\x02\x00\x06\x01\x0f\x38"
+              + nmea("GPGSA,A,3,01,02,03,,,,,,,,,,2.0,1.0,1.7"))
+    check("UBX: an ACK that runs into an NMEA line does not lose the line",
+          gl.st["ok"] == st_ok + 1 and gl.st["fixtype"] == 3)
 
     # REVIEW3-2: a strong, visible candidate gets one immediate retry; the
     # fail / retry lines carry the raw status
@@ -3700,24 +3789,29 @@ try:
 
     # MIDNIGHT: a GGA past midnight whose RMC was lost is not dated a day back
     gl.reset()
-    gl.handle(nmea("GPRMC,235959.00,A,4730.000,N,01900.000,E,0.5,0.0,"
-                   "181026,,,A"))
-    gl.handle(nmea("GPGGA,235959.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
-                   "M,40.0,M,,"))
-    check("MIDNIGHT: setup - fix at 23:59:59",
-          bool(gl.has_fix(_clock[0])) and gl.st["date"] == "2026-10-18")
-    _clock[0] += 1000
+    epoch("235959.00", date="181026")
+    epoch("235959.20", date="181026")
     gl.handle(nmea("GPGGA,000000.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
                    "M,40.0,M,,"))                   # its RMC was lost
-    check("MIDNIGHT: GGA alone past midnight is no fix (date unknown)",
-          not gl.has_fix(_clock[0]) and gl._fix_secs() is None)
+    check("MIDNIGHT: setup - fix at 23:59:59",
+          bool(gl.has_fix(_clock[0])) and gl.st["date"] == "2026-10-18"
+          and gl.st["time"] == "23:59:59")
     _clock[0] += 1000
-    gl.handle(nmea("GPRMC,000001.00,A,4730.000,N,01900.000,E,0.5,0.0,"
-                   "191026,,,A"))
+    epoch("000001.00", date="191026")
+    check("MIDNIGHT: the second past midnight without an RMC is no fix",
+          not gl.has_fix(_clock[0]) and gl._fix_secs() is None
+          and gl.st["time"] == "00:00:00")
+    _clock[0] += 1000
+    epoch("000002.00", date="191026")
     s = gl._sample_line(_clock[0], None, None)
-    check("MIDNIGHT: the next RMC brings the new date back",
+    check("MIDNIGHT: the next second brings the new date back",
           bool(gl.has_fix(_clock[0])) and s is not None
           and s[0] == "2026-10-19T00:00:01Z", repr(s))
+    gl.reset()
+    epoch("235959.00", date="181026")
+    epoch("000000.00", date="191026")               # RMC first: new date
+    check("MIDNIGHT: the last second of a day keeps its own date",
+          gl.st["time"] == "23:59:59" and gl.st["date"] == "2026-10-18")
 
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")
