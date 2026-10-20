@@ -29,6 +29,9 @@ _hostnames = []
 _oled_inits = []
 _reset_cause = [1]
 _uart_tx = []
+_uart_rx = bytearray()
+_uart_ack = [True]
+_uart_drop = [0]
 
 
 class Pin(object):
@@ -52,13 +55,33 @@ class UART(object):
         pass
 
     def any(self):
-        return 0
+        return len(_uart_rx)
+
+    def read(self, n=None):
+        n = len(_uart_rx) if n is None else min(n, len(_uart_rx))
+        out = bytes(_uart_rx[:n])
+        del _uart_rx[:n]
+        return out
 
     def readinto(self, buf):
-        return 0
+        out = self.read(len(buf))
+        buf[:len(out)] = out
+        return len(out)
 
     def write(self, data):
-        _uart_tx.append(bytes(data))
+        data = bytes(data)
+        _uart_tx.append(data)
+        # a u-blox acknowledges a UBX-CFG frame (unless told to drop it)
+        if _uart_ack[0] and data[:3] == b"\xb5\x62\x06":
+            if _uart_drop[0]:
+                _uart_drop[0] -= 1
+            else:
+                ack = bytes((0x05, 0x01, 2, 0, data[2], data[3]))
+                ca = cb = 0
+                for x in ack:
+                    ca = (ca + x) & 255
+                    cb = (cb + ca) & 255
+                _uart_rx.extend(b"\xb5\x62" + ack + bytes((ca, cb)))
         return len(data)
 
 
@@ -3171,6 +3194,79 @@ try:
           gl._ubx(6, 1, bytes((0xF0, 2, gl.GPS_HZ))).hex() in frames
           and gl._ubx(6, 1, bytes((0xF0, 0, 1))).hex() in frames
           and gl._ubx(6, 1, bytes((0xF0, 4, 1))).hex() in frames)
+    # ACK: 1 Hz first, every frame until acknowledged, stop if nobody answers
+    _uart_tx[:] = []
+    gl.gps_setup()
+    rate1000 = gl._rate(1000).hex()
+    check("ACK: the setup starts at 1 Hz and ends at GPS_HZ, all acknowledged",
+          _uart_tx[0].hex() == rate1000
+          and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex()
+          and len(_uart_tx) == len(gl.GPS_MSGS) + 2
+          and gl.st["setup_ok"] is True)
+    _uart_tx[:] = []
+    _uart_drop[0] = 2                               # two frames lost
+    gl.gps_setup()
+    check("ACK: a dropped frame is sent again until acknowledged",
+          len(_uart_tx) == len(gl.GPS_MSGS) + 4
+          and _uart_tx[0] == _uart_tx[1] == _uart_tx[2]
+          and gl.st["setup_ok"] is True, "frames=%d" % len(_uart_tx))
+    _uart_tx[:] = []
+    _uart_ack[0] = False
+    t0 = _clock[0]
+    try:
+        gl.gps_setup()
+    finally:
+        _uart_ack[0] = True
+    check("ACK: no answer -> GPS_ACK_TRIES tries, then the whole sequence once",
+          [f.hex() for f in _uart_tx[:gl.GPS_ACK_TRIES]]
+          == [rate1000] * gl.GPS_ACK_TRIES
+          and len(_uart_tx) == gl.GPS_ACK_TRIES + len(gl.GPS_MSGS) + 1
+          and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex()
+          and gl.st["setup_ok"] is False
+          and _clock[0] - t0 <= gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 400,
+          "frames=%d ms=%d" % (len(_uart_tx), _clock[0] - t0))
+    check("ACK: GST is asked once a second",
+          gl._ubx(6, 1, bytes((0xF0, 7, gl.GPS_HZ))).hex()
+          in [f.hex() for f in (_uart_tx or [])] or (0x07, gl.GPS_HZ)
+          in gl.GPS_MSGS)
+
+    # TXT: a u-blox start-up banner counts a receiver restart
+    gl.reset()
+    gl.handle(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
+    gl.handle(nmea("GPTXT,01,01,02,ANTSTATUS=OK"))
+    check("TXT: the u-blox banner counts one receiver restart",
+          gl.st["gps_boots"] == 1)
+    import inspect
+    run_src = inspect.getsource(gl.run)
+    check("HOLD: Ctrl-C / crash flushes keep the held drift out",
+          run_src.count("flush(_still_hold())") == 3
+          and "flush()" not in run_src)
+
+    # GST: the receiver's own error estimate keeps a converging cold start
+    # out (good HDOP, hundreds of metres off), a settled fix is used
+    def gst_second(hhmmss, std):
+        epoch(hhmmss)
+        gl.handle(nmea("GPGST,%s,20,,,,%.1f,%.1f,%.1f"
+                       % (hhmmss, std, std * 0.8, std * 2)))
+
+    gl.reset()
+    gst_second("120100.00", 150.0)
+    epoch("120101.00")
+    check("GST: an estimate of 150 m makes the second unusable",
+          gl.st["std"] == 150.0 and not gl._usable(_clock[0])
+          and gl._sample_line(_clock[0], None, None) is None)
+    gl.reset()
+    gst_second("120110.00", 4.0)
+    epoch("120111.00")
+    check("GST: an estimate of 4 m is usable",
+          gl.st["std"] == 4.0 and gl._usable(_clock[0])
+          and gl._sample_line(_clock[0], None, None) is not None)
+    gl.reset()
+    epoch("120120.00")
+    epoch("120121.00")
+    check("GST: without GST (another receiver) only HDOP decides",
+          gl.st["std"] is None and gl._usable(_clock[0]))
+
     # UBX: a receiver still booting at setup stays at 1 Hz -> sent again,
     # less and less often; one that took it is left alone
     gsv_line = nmea("GPGSV,3,1,12,01,40,083,46,02,17,308,41,12,07,344,39,"
@@ -3861,6 +3957,29 @@ try:
     epoch("000000.00", date="191026")               # RMC first: new date
     check("MIDNIGHT: the last second of a day keeps its own date",
           gl.st["time"] == "23:59:59" and gl.st["date"] == "2026-10-18")
+
+    # SPARSE: indoors only a few usable fixes a minute; a window waits for
+    # STILL_MIN_FIXES (up to STILL_WINDOW_MAX), so the stay is still proven
+    def sparse(minutes, per_min, east_of=lambda s: 0.0):
+        for m in range(minutes):
+            on = set(rnd.sample(range(60), per_min))
+            for k in range(60):
+                if k in on:
+                    sv_fix(east_of(m * 60 + k) + rnd.gauss(0, 20),
+                           rnd.gauss(0, 20))
+                else:
+                    hb_fix(0, 0, nofix=True)
+    sv_reset(home=True)
+    sparse(60, 3)
+    gl.flush()
+    check("SPARSE: 3 usable fixes a minute at home -> a stay, no drift track",
+          sv_active() and len(sv_lines()) <= 5,
+          "active=%s lines=%d" % (sv_active(), len(sv_lines())))
+    sv_reset()
+    sparse(20, 3, east_of=lambda s: s * 1.4)
+    check("SPARSE: a walk with 3 fixes a minute is never a stay",
+          not sv_active() and len(sv_lines()) >= 40,
+          "active=%s lines=%d" % (sv_active(), len(sv_lines())))
 
     # SLEEP: the radio is on only until everything is uploaded, then off for
     # WIFI_SLEEP; a round that finds nothing also sleeps; a new stay wakes it
