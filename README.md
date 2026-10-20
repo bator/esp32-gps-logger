@@ -162,8 +162,18 @@ falls back to DHCP rather than becoming unreachable.
    lets fallback work even when a scan misses a saved SSID; a hidden home is
    still preferred when a strong empty-SSID AP is seen.
 5. If the scan itself fails, fall back to config order, still under backoff.
-6. If every attempt fails, stay in LOG mode and retry later with capped
-   exponential backoff (up to 10 minutes).
+6. If every attempt fails, stay in LOG mode with the radio off and try
+   again after `WIFI_SLEEP` (1 hour).
+6a. The radio is on only until everything is uploaded: once no finished
+   track waits, nothing is in RAM and the open track holds no points, it
+   is turned off for `WIFI_SLEEP`, then a new round starts. A track open
+   for over 5 minutes is closed and uploaded as soon as the WiFi is back.
+   A new stay wakes it at once (so a home stay is known as one and the
+   arrival uploads); away from home its first anchor point waits
+   `WIFI_WAKE_WAIT` for that round. A stay that began on the home network
+   stays a home stay while the radio sleeps (no anchor points) until the
+   device leaves. While uploads fail (server down, 401), the radio stays
+   on.
 7. While connected to a **non-home** net and nearly stopped (fresh fix
    and speed ≥ 5 km/h is skipped unless the logger is in a stay, since indoor
    speed is noise; a stale speed does not block), rescan
@@ -284,6 +294,7 @@ Constants at the top of `gps_logger.py`:
 
 | Constant | Default | Meaning |
 |----------|---------|---------|
+| `WIFI_SLEEP` / `WIFI_IDLE` / `WIFI_WAKE_WAIT` | 1 h / 10 s / 60 s | Radio-off time once all is uploaded (or after a failed round); how often that is checked; how long a new stay away waits for its WiFi round before the first anchor point |
 | `GPS_HZ` | 5 | Fixes a second asked from the receiver; each second's fixes are averaged into one point |
 | `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | First and longest wait before the setup is sent again while the receiver is still at 1 Hz |
 | `STATUS` | 10 min | Console `status` line: chip temperature (`esp32.mcu_temperature()`, the die, not the GPS module), fixes in the last second, satellites, HDOP, points, uploads |

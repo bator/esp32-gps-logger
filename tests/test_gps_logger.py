@@ -3862,6 +3862,114 @@ try:
     check("MIDNIGHT: the last second of a day keeps its own date",
           gl.st["time"] == "23:59:59" and gl.st["date"] == "2026-10-18")
 
+    # SLEEP: the radio is on only until everything is uploaded, then off for
+    # WIFI_SLEEP; a round that finds nothing also sleeps; a new stay wakes it
+    def wl():
+        return gl.wifi["wlan"]
+
+    def both(seconds, east=0.0, box=10.0, speed=NOISE):
+        for _ in range(seconds):
+            sv_fix(east + rnd.uniform(-box, box), rnd.uniform(-box, box), speed)
+            gl.wifi_tick()
+
+    def beats_now():
+        return len([l for l in sv_lines() if l.split(",")[2] == ""])
+
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+    make_trk(os.path.join(rv_dir, "20261018_070000.trk"), 3)
+    gl.up["left"] = 3
+    _clock[0] += gl.WIFI_IDLE
+    gl.wifi_tick()
+    check("SLEEP: a track waiting for upload keeps the WiFi on",
+          gl.wifi["state"] == "connected" and wl().active())
+    _posts[:] = []
+    _post_code[0] = 201
+    pump()
+    _clock[0] += gl.WIFI_IDLE
+    gl.wifi_tick()
+    check("SLEEP: once everything is uploaded the radio goes off",
+          len(_posts) == 1 and gl.wifi["state"] == "sleep"
+          and not wl().active() and gl.online() is False,
+          "posts=%d state=%s" % (len(_posts), gl.wifi["state"]))
+    n_conn = len(WLAN.connects)
+    _clock[0] += gl.WIFI_SLEEP - 1000
+    gl.wifi_tick()
+    check("SLEEP: nothing is tried for WIFI_SLEEP",
+          gl.wifi["state"] == "sleep" and len(WLAN.connects) == n_conn)
+    _clock[0] += 2000
+    gl.wifi_tick()
+    drain_wifi()
+    check("SLEEP: an hour later it looks for a network again",
+          gl.wifi["state"] == "connected" and wl().active()
+          and len(WLAN.connects) > n_conn)
+
+    w, calls, out = rv_start_wifi(rv_env, [], [])
+    n_conn = len(WLAN.connects)
+    check("SLEEP: a round that finds no network turns the radio off",
+          gl.wifi["state"] == "not found" and not wl().active()
+          and gl.wifi["backoff"] == gl.WIFI_SLEEP)
+    for _ in range(10):
+        _clock[0] += (gl.WIFI_SLEEP - 1000) // 10
+        gl.wifi_tick()
+    check("SLEEP: ... for an hour, not every 15 s to 10 min",
+          len(WLAN.connects) == n_conn)
+
+    # a stay at home while the radio sleeps: still a home stay, no anchor
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+    both(15)
+    check("SLEEP: the drift held for a stay being proven keeps the WiFi on",
+          gl.wifi["state"] == "connected")
+    both(150)
+    check("SLEEP: a home stay, all uploaded -> asleep as home",
+          sv_active() and gl.log["still"]["home"]
+          and gl.wifi["state"] == "sleep" and gl.wifi["sleep_home"]
+          and gl.at_home(), "state=%s sleep_home=%s" % (
+              gl.wifi["state"], gl.wifi["sleep_home"]))
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+    gl._wifi_off(wl(), "sleep")                 # asleep before any stay
+    check("SLEEP: setup - asleep, no stay yet: not home",
+          gl.wifi["state"] == "sleep" and not gl.at_home())
+    n_conn = len(WLAN.connects)
+    both(150)
+    check("SLEEP: a new stay wakes the WiFi, finds home, sleeps as home",
+          sv_active() and gl.log["still"]["home"]
+          and len(WLAN.connects) > n_conn and gl.wifi["state"] == "sleep"
+          and gl.wifi["sleep_home"] and gl.at_home(),
+          "state=%s home=%s sleep_home=%s" % (
+              gl.wifi["state"], gl.log["still"]["home"],
+              gl.wifi["sleep_home"]))
+    both(30 * 60)
+    check("SLEEP: 30 min at home asleep writes no anchor point",
+          beats_now() == 0 and gl.wifi["state"] == "sleep",
+          "beats=%d" % beats_now())
+    for i in range(1, 41):
+        sv_fix(i * 5.5, 0, 20.0)
+        gl.wifi_tick()
+    check("SLEEP: leaving ends the home stay while asleep",
+          not sv_active() and not gl.at_home())
+    # somewhere else, no network there: the first anchor waits for the round
+    WLAN.scan_aps, WLAN.ok = [], set()
+    gl.wifi["last_check"] = _clock[0]           # (the hour is not over yet)
+    n_conn = len(WLAN.connects)
+    entered = None
+    for k in range(400):
+        sv_fix(600 + rnd.uniform(-10, 10), rnd.uniform(-10, 10))
+        gl.wifi_tick()
+        if entered is None and sv_active():
+            entered = k
+        if entered is not None and k == entered + 30:
+            early = beats_now()
+    check("SLEEP: a new stay away wakes the WiFi (nothing found)",
+          entered is not None and len(WLAN.connects) > n_conn
+          and gl.wifi["state"] == "not found" and not gl.log["still"]["home"])
+    check("SLEEP: ... and its first anchor point waits for the round",
+          entered is not None and early == 0 and beats_now() >= 1,
+          "early=%s beats=%d" % (early if entered is not None else None,
+                                 beats_now()))
+
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")
     with open(bom, "wb") as fh:
