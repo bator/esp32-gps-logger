@@ -87,6 +87,11 @@ ENV_FILE = "/.env"                       # SSID, WPA2, GEO_URL, API_KEY lines
 WIFI_CHECK = FLUSH                       # ms between checks while connected
 WIFI_RETRY = 15000                       # ms between reconnects while down
 WIFI_BACKOFF_MAX = 600000                # ms cap on wifi reconnect backoff
+WIFI_SLEEP = 3600000                     # ms the radio stays off once all is
+                                         # uploaded, or after a failed round
+WIFI_IDLE = 10000                        # ms between "all uploaded?" checks
+WIFI_WAKE_WAIT = 60000                   # ms a new stay waits for the WiFi
+                                         # round before its first anchor point
 CONNECT_TIMEOUT = 12000                  # ms to wait for GOT_IP per network
 FAIL_HOLD = 120000                       # ms to demote a network that failed
 IGNORE_STALE_MS = 1500                   # leftover fail reason after connect()
@@ -647,7 +652,7 @@ def wifi_reset():
                 cand=[], cand_i=0, try_at=None, saw_connecting=False,
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
-                retried=False,
+                retried=False, idle_at=time.ticks_ms(), sleep_home=False,
                 blank_rssi=None, blank_bssid=None)
 
 def _set_hostname(name):
@@ -870,6 +875,8 @@ def _wifi_got_ip(w):
     except (OSError, ValueError):
         wifi["rssi"] = None
     wifi["home"] = _net_home(wifi.get("ssid"))
+    wifi["sleep_home"] = False
+    wifi["idle_at"] = time.ticks_ms()
     wifi["failed"].pop(wifi.get("ssid"), None)
     wifi["backoff"] = WIFI_RETRY
     wifi["roam_at"] = time.ticks_ms()
@@ -907,23 +914,58 @@ def _wifi_next(w):
     cands = wifi.get("cand") or []
     if i < len(cands):
         return _wifi_connect(w, cands[i])
-    wifi["state"] = "not found"
-    wifi["home"] = False
-    wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
-    wifi["last_check"] = time.ticks_ms()
+    _wifi_off(w, "not found")
     return False
 
+def _wifi_off(w, state):
+    """Radio off until WIFI_SLEEP has passed (or a new stay wakes it): after
+    a round that found no network, or once everything is uploaded. A home
+    stay stays a home stay while the radio sleeps (sleep_home), so it still
+    writes no anchor points; leaving clears it (_still_leave)."""
+    if state == "sleep":
+        wifi["sleep_home"] = bool(at_home() and log["still"]["active"])
+    try:
+        w.disconnect()
+    except OSError:
+        pass
+    try:
+        w.active(False)
+    except OSError:
+        pass
+    wifi.update(state=state, home=False, ip=None, rssi=None,
+                backoff=WIFI_SLEEP, last_check=time.ticks_ms())
+    print("wifi", state, "home" if wifi["sleep_home"] else "")
+
 def _wifi_begin_round(w):
+    try:
+        if not w.active():
+            w.active(True)               # after _wifi_off
+            _set_hostname(HOSTNAME)
+    except OSError:
+        pass
     wifi["cand"] = _candidate_order(w)
     wifi["cand_i"] = 0
     wifi["retried"] = False
     if not wifi["cand"]:
-        wifi["state"] = "not found"
-        wifi["home"] = False
-        wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
-        wifi["last_check"] = time.ticks_ms()
+        _wifi_off(w, "not found")
         return False
     return _wifi_connect(w, wifi["cand"][0])
+
+def _all_uploaded():
+    """Nothing left for the network: no finished track waiting, nothing in
+    RAM, and the open track (if any) holds no points yet. An open track
+    with points is closed by log_tick on WiFi, then uploaded."""
+    if log["batch"] or (log["file"] is not None and log["points"]):
+        return False
+    return not pending()
+
+def wifi_wake():
+    """A new stay: look for a network now instead of after WIFI_SLEEP, so a
+    home stay is known as one and the arrival uploads."""
+    if wifi["state"] in ("sleep", "not found") and wifi["wlan"] is not None:
+        wifi["last_check"] = time.ticks_add(time.ticks_ms(), -wifi["backoff"])
+        return True
+    return False
 
 def _wifi_poll(w):
     """Advance a connecting attempt. Never sleeps. try_at is this attempt."""
@@ -1062,6 +1104,11 @@ def wifi_tick():
                 if due or arrival:
                     wifi["roam_at"] = now
                     _try_roam_home(w, arrival=arrival and not due)
+            if (wifi["state"] == "connected"
+                    and _age(now, wifi["idle_at"]) >= WIFI_IDLE):
+                wifi["idle_at"] = now
+                if _all_uploaded():
+                    _wifi_off(w, "sleep")
         return
     if wifi["state"] == "connected":
         # v1.29 reports STAT_CONNECTING on beacon timeout while the IDF
@@ -1107,8 +1154,11 @@ def online():
     return wifi["state"] == "connected"
 
 def at_home():
-    """Whether the connected network is configured as a home network."""
-    return wifi["state"] == "connected" and wifi.get("home")
+    """Whether the connected network is configured as a home network, or
+    the radio sleeps during a stay that began on one."""
+    if wifi["state"] == "connected":
+        return wifi.get("home")
+    return wifi.get("sleep_home")
 
 # --- GPX logger -------------------------------------------------------------
 # Format (.trk): one point per line, "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ"
@@ -1491,6 +1541,10 @@ def _still_enter(now, anchor, since_tc, n):
     _still_close()                       # the arrival uploads during the stay
     if at_home():
         sl["home"] = True
+    elif wifi_wake():
+        # the radio slept: the first anchor point waits for the round, so
+        # a home stay is not stamped with one
+        sl["hb_at"] = time.ticks_add(now, WIFI_WAKE_WAIT - STILL_HEARTBEAT)
     else:
         _still_heartbeat(now)
     print("stay", "home" if sl["home"] else "away", "kept", i)
@@ -1517,6 +1571,7 @@ def _still_leave():
         _record(s, p)
         prev = p
     print("stay end", int(log["still"]["far_d"]))
+    wifi["sleep_home"] = False           # left: no longer at home
     log["still"] = _still_state()
 
 def _still_active(now, pos):
