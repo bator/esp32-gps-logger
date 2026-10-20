@@ -1,5 +1,9 @@
 from machine import Pin, I2C, UART, WDT
 import machine, sys, time, os, network, gc, math
+try:
+    import esp32                         # mcu_temperature() on C3/C6/S2/S3
+except ImportError:
+    esp32 = None
 
 # Collect garbage early and often. When an allocation doesn't fit, the ESP32
 # port grows the Python heap with the largest free IDF block (~60 kB) instead,
@@ -9,6 +13,9 @@ gc.threshold(8192)
 BAUD = 9600                              # NEO-6M/7M/8M default
 GPS_HZ = 5                               # fixes a second (NEO-6M max 5);
                                          # one averaged point a second is kept
+GPS_RETRY = 5000                         # ms: setup sent again if 1 Hz
+GPS_RETRY_MAX = 300000                   # sentences still come this long after
+STATUS = 600000                          # ms between console status lines
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
 # GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
@@ -153,7 +160,8 @@ def reset():
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, course=None, used=None, view={},
               hdop=None, pdop=None, ttff=None, pos_at=None, hdop_at=None,
-              seq=0, epochs=0)
+              seq=0, epochs=0, extra=0, setup_at=None,
+              setup_wait=GPS_RETRY)
     _ep_new(None)
 
 def _ep_new(t):
@@ -262,12 +270,20 @@ def gsa(talker, f):
     if len(f) > 15:
         st["pdop"] = _num(f[15])
 
+def _extra(talker, f):
+    """A sentence gps_setup turns off: the receiver did not take it."""
+    at = st["setup_at"]
+    if at is not None and _age(time.ticks_ms(), at) >= 1000:
+        st["extra"] += 1
+
 def gsv(talker, f):
+    _extra(talker, f)
     n = _num(f[3], int)
     if n is not None:
         st["view"][talker] = n          # per constellation, summed on display
 
-HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv}
+HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv,
+            "GLL": _extra, "VTG": _extra}
 
 def _ubx(cls, mid, payload):
     """One UBX frame: sync, class, id, length, payload, Fletcher checksum."""
@@ -289,6 +305,7 @@ def gps_setup():
     UBX-CFG-RATE). Not saved in the receiver, so it is sent at every boot.
     A receiver that ignores it (or an unwired ESP TX) keeps 1 Hz, and each
     second's average is then that one fix, as before."""
+    st["setup_at"], st["extra"] = time.ticks_ms(), 0
     try:
         for mid, rate in GPS_MSGS:
             uart.write(_ubx(0x06, 0x01, bytes((0xF0, mid, rate))))
@@ -298,6 +315,31 @@ def gps_setup():
         uart.write(_ubx(0x06, 0x08, bytes((ms & 255, ms >> 8, 1, 0, 1, 0))))
     except Exception as e:
         print("gps setup", repr(e))
+
+def gps_check(now):
+    """Send the setup again while the receiver still sends the sentences it
+    turns off: a receiver powered up with the board is still booting when
+    run() sends it, and stays at 1 Hz. Less and less often, so a receiver
+    that never takes it (or an unwired ESP TX) costs next to nothing."""
+    at = st["setup_at"]
+    if at is None or not st["extra"] or _age(now, at) < st["setup_wait"]:
+        return
+    st["setup_wait"] = min(st["setup_wait"] * 2, GPS_RETRY_MAX)
+    print("gps setup again")
+    gps_setup()
+
+def _temp():
+    try:
+        return esp32.mcu_temperature()
+    except Exception:
+        return None
+
+def _status():
+    """One console line: chip temperature (the die, not the GPS module),
+    fixes in the last second, satellites, HDOP, points and uploads."""
+    print("status temp", _temp(), "hz", st["epochs"], "used", st["used"],
+          "hdop", st["hdop"], "points", log["points"], "sent", up["sent"],
+          "wifi", wifi["state"])
 
 def checksum_ok(line):
     star = line.rfind(b"*")
@@ -2368,9 +2410,11 @@ def _loop():
         _wdt = WDT(timeout=WDT_TIMEOUT)
     loop_start = time.ticks_ms()
     last = None
+    status_at = loop_start
     while True:
         feed()
         read_uart()
+        gps_check(time.ticks_ms())
         log_tick()
         wifi_tick()
         feed()
@@ -2382,4 +2426,7 @@ def _loop():
         if last is None or time.ticks_diff(now, last) >= REFRESH:
             draw()
             last = now
+        if time.ticks_diff(now, status_at) >= STATUS:
+            _status()
+            status_at = now
         time.sleep_ms(20)

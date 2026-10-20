@@ -3171,6 +3171,55 @@ try:
           gl._ubx(6, 1, bytes((0xF0, 2, gl.GPS_HZ))).hex() in frames
           and gl._ubx(6, 1, bytes((0xF0, 0, 1))).hex() in frames
           and gl._ubx(6, 1, bytes((0xF0, 4, 1))).hex() in frames)
+    # UBX: a receiver still booting at setup stays at 1 Hz -> sent again,
+    # less and less often; one that took it is left alone
+    gsv_line = nmea("GPGSV,3,1,12,01,40,083,46,02,17,308,41,12,07,344,39,"
+                    "14,22,228,45")
+    gl.reset()
+    _uart_tx[:] = []
+    gl.gps_setup()
+    n_frames = len(_uart_tx)
+    gl.handle(gsv_line)                             # still in the UART buffer
+    _clock[0] += gl.GPS_RETRY
+    gl.gps_check(_clock[0])
+    check("UBX: sentences queued before the setup do not count",
+          len(_uart_tx) == n_frames and gl.st["extra"] == 0)
+    gl.handle(gsv_line)
+    gl.handle(nmea("GPVTG,,T,,M,0.0,N,0.0,K,A"))
+    gl.gps_check(_clock[0])
+    check("UBX: GSV / VTG after the setup -> it is sent again",
+          len(_uart_tx) == 2 * n_frames and gl.st["extra"] == 0
+          and gl.st["setup_wait"] == 2 * gl.GPS_RETRY)
+    _clock[0] += 1500
+    gl.handle(gsv_line)
+    _clock[0] += gl.GPS_RETRY
+    gl.gps_check(_clock[0])
+    check("UBX: ... and again only after the doubled wait",
+          len(_uart_tx) == 2 * n_frames)
+    _clock[0] += gl.GPS_RETRY
+    gl.gps_check(_clock[0])
+    check("UBX: ... which it then is",
+          len(_uart_tx) == 3 * n_frames
+          and gl.st["setup_wait"] == 4 * gl.GPS_RETRY)
+    _clock[0] += 10 * gl.GPS_RETRY_MAX
+    gl.gps_check(_clock[0])
+    check("UBX: a receiver that took it is never sent it again",
+          len(_uart_tx) == 3 * n_frames)
+    out = []
+    real_print = gl.print if hasattr(gl, "print") else None
+    gl.print = lambda *a, **k: out.append(" ".join(str(x) for x in a))
+    try:
+        gl.log_reset()
+        gl.up["sent"] = 0
+        gl._status()
+    finally:
+        if real_print is None:
+            del gl.print
+        else:
+            gl.print = real_print
+    check("STATUS: the console line works without a temperature sensor",
+          out and out[0].startswith("status temp None hz"), repr(out))
+
     gl.reset()
     st_ok = gl.st["ok"]
     gl.handle(b"\xb5\x62\x05\x01\x02\x00\x06\x01\x0f\x38"
