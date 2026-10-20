@@ -7,6 +7,8 @@ import machine, sys, time, os, network, gc, math
 gc.threshold(8192)
 
 BAUD = 9600                              # NEO-6M/7M/8M default
+GPS_HZ = 5                               # fixes a second (NEO-6M max 5);
+                                         # one averaged point a second is kept
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
 # GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
@@ -134,8 +136,15 @@ def _waiting(now, at, cap):
     return 0 < d <= cap
 
 # --- NMEA parsing -----------------------------------------------------------
+# The receiver runs at GPS_HZ fixes a second (gps_setup). The fixes of one
+# UTC second are averaged, and the mean is published to st when the next
+# second starts: st always holds the last complete second, so the logger
+# records one point a second, the mean of up to GPS_HZ fixes. Dawarich keeps
+# whole seconds only and orders the points of one second by longitude, so
+# more than one point a second would zigzag there.
 
 st = {}
+ep = {}                                  # the second being collected
 
 def reset():
     st.clear()
@@ -143,7 +152,16 @@ def reset():
               status=None, quality=None, fixtype=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, course=None, used=None, view={},
-              hdop=None, pdop=None, ttff=None, pos_at=None, hdop_at=None)
+              hdop=None, pdop=None, ttff=None, pos_at=None, hdop_at=None,
+              seq=0, epochs=0)
+    _ep_new(None)
+
+def _ep_new(t):
+    # g / r: GGA / RMC positions as [ref lat, ref lon, sum dlat, sum dlon, n]
+    # (offsets from the second's first fix: single-precision floats cannot
+    # add up latitudes to the metre); alt / hdop: [sum, n]
+    ep.clear()
+    ep.update(t=t, date=None, g=None, r=None, alt=[0.0, 0], hdop=[0.0, 0])
 
 def _num(s, conv=float):
     return conv(s) if s else None
@@ -158,54 +176,86 @@ def _deg(v, hemi):
     return -deg if hemi in "SW" else deg
 
 def _position(f, i):
-    """Store the sentence's position. False when its fields are empty."""
+    """The sentence's (lat, lon), or None when its fields are empty."""
     lat, lon = _deg(f[i], f[i + 1]), _deg(f[i + 2], f[i + 3])
     if lat is None or lon is None:
-        return False
-    st["lat"], st["lon"] = lat, lon
-    return True
+        return None
+    return lat, lon
 
-def _time(s):
-    """Store the sentence's time. A time earlier than the last one has
-    passed midnight: the date is unknown until an RMC brings it, or a GGA
-    whose RMC was lost would date its fix a day back."""
-    if len(s) >= 6:
-        t = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
-        if st["time"] is not None and t < st["time"]:
-            st["date"] = None
-        st["time"] = t
+def _acc(key, pos):
+    a = ep[key]
+    if a is None:
+        ep[key] = [pos[0], pos[1], 0.0, 0.0, 1]
+    else:
+        a[2] += pos[0] - a[0]
+        a[3] += pos[1] - a[1]
+        a[4] += 1
 
-def _update_fix(ok, have_pos):
-    """ok is this sentence's own verdict (RMC status / GGA quality), so a
-    void RMC is not rescued by the previous epoch's GGA. pos_at only moves
-    when the sentence actually carried a position."""
-    st["valid"] = ok
-    if ok and have_pos:
-        st["pos_at"] = time.ticks_ms()
-        if st["ttff"] is None:
-            st["ttff"] = time.ticks_diff(st["pos_at"], st["start"]) // 1000
+def _second(s):
+    """Start the sentence's UTC second (HHMMSS.ss, the fraction ignored);
+    a new second publishes the one before."""
+    if len(s) < 6:
+        return
+    t = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
+    if t != ep["t"]:
+        if ep["t"] is not None:
+            _publish()
+        _ep_new(t)
+
+def _publish():
+    """Make the finished second the current fix: the mean of its valid GGA
+    positions (RMC ones when it had no GGA). A second without one is no
+    fix. Only RMC carries the date: a second that runs back past midnight
+    without its own RMC has none, or its fix would be dated a day back."""
+    t, date = ep["t"], ep["date"]
+    if date is None and st["time"] is not None and t < st["time"]:
+        st["date"] = None
+    elif date is not None:
+        st["date"] = date
+    st["time"] = t
+    a = ep["g"] or ep["r"]
+    st["valid"] = a is not None
+    st["epochs"] = a[4] if a else 0
+    if a is None:
+        return
+    n = a[4]
+    st["lat"], st["lon"] = a[0] + a[2] / n, a[1] + a[3] / n
+    alt, hd = ep["alt"], ep["hdop"]
+    st["alt"] = alt[0] / alt[1] if alt[1] else None
+    now = time.ticks_ms()
+    st["hdop"], st["hdop_at"] = (hd[0] / hd[1] if hd[1] else None), now
+    st["pos_at"] = now
+    st["seq"] += 1
+    if st["ttff"] is None:
+        st["ttff"] = time.ticks_diff(now, st["start"]) // 1000
 
 def rmc(talker, f):
-    _time(f[1])
+    _second(f[1])
     st["status"] = f[2]
-    have_pos = _position(f, 3)
     kn = _num(f[7])
     st["speed"] = None if kn is None else kn * 1.852
     st["course"] = _num(f[8])
     d = f[9]
     if len(d) == 6:
-        st["date"] = "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
-    _update_fix(st["status"] == "A", have_pos)
+        ep["date"] = "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
+    pos = _position(f, 3)
+    if f[2] == "A" and pos:
+        _acc("r", pos)
 
 def gga(talker, f):
-    _time(f[1])
-    have_pos = _position(f, 2)
+    _second(f[1])
     st["quality"] = _num(f[6], int)
     st["used"] = _num(f[7], int)
-    st["hdop"] = _num(f[8])
-    st["hdop_at"] = time.ticks_ms()
-    st["alt"] = _num(f[9])
-    _update_fix((st["quality"] or 0) > 0, have_pos)
+    pos = _position(f, 2)
+    if (st["quality"] or 0) > 0 and pos:
+        _acc("g", pos)
+        alt, hd = _num(f[9]), _num(f[8])
+        if alt is not None:
+            ep["alt"][0] += alt
+            ep["alt"][1] += 1
+        if hd is not None:
+            ep["hdop"][0] += hd
+            ep["hdop"][1] += 1
 
 def gsa(talker, f):
     st["fixtype"] = _num(f[2], int)
@@ -218,6 +268,36 @@ def gsv(talker, f):
         st["view"][talker] = n          # per constellation, summed on display
 
 HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv}
+
+def _ubx(cls, mid, payload):
+    """One UBX frame: sync, class, id, length, payload, Fletcher checksum."""
+    m = bytes((cls, mid, len(payload) & 255, len(payload) >> 8)) + payload
+    a = b = 0
+    for x in m:
+        a = (a + x) & 255
+        b = (b + a) & 255
+    return b"\xb5\x62" + m + bytes((a, b))
+
+# NMEA message ids (class 0xF0) and their rate per fix on this port. At
+# 9600 baud GPS_HZ fixes fit only with fewer sentences: RMC and GGA every
+# fix (~145 B), GSA once a second, no GSV / GLL / VTG (~790 B/s of 960).
+GPS_MSGS = ((0x03, 0), (0x01, 0), (0x05, 0), (0x02, GPS_HZ),
+            (0x00, 1), (0x04, 1))
+
+def gps_setup():
+    """Ask the receiver for GPS_HZ fixes a second (UBX-CFG-MSG, then
+    UBX-CFG-RATE). Not saved in the receiver, so it is sent at every boot.
+    A receiver that ignores it (or an unwired ESP TX) keeps 1 Hz, and each
+    second's average is then that one fix, as before."""
+    try:
+        for mid, rate in GPS_MSGS:
+            uart.write(_ubx(0x06, 0x01, bytes((0xF0, mid, rate))))
+            time.sleep_ms(30)
+        ms = 1000 // GPS_HZ
+        # measRate ms, navRate 1, timeRef 1 (GPS time)
+        uart.write(_ubx(0x06, 0x08, bytes((ms & 255, ms >> 8, 1, 0, 1, 0))))
+    except Exception as e:
+        print("gps setup", repr(e))
 
 def checksum_ok(line):
     star = line.rfind(b"*")
@@ -233,6 +313,9 @@ def checksum_ok(line):
 
 def handle(line):
     line = line.strip()
+    i = line.find(b"$")
+    if i > 0:
+        line = line[i:]                  # a binary UBX reply ran into it
     if not line:
         return
     if not checksum_ok(line):
@@ -1004,7 +1087,7 @@ def log_reset():
     log.clear()
     log.update(file=None, created=False, batch=[], points=0, err=0,
                fix=False, lost_at=None, new_seg=False, full=False,
-               still=_still_state(), clock=None,
+               still=_still_state(), clock=None, seq=0,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=None, file_at=None, good_size=None)
 
@@ -1494,8 +1577,13 @@ def log_tick():
         elif log["file"] is not None:
             log["new_seg"] = True
             log["prev"] = None           # start the segment with this fix
-    if (log["last_sample"] is None
-            or _age(now, log["last_sample"]) >= SAMPLE):
+    if st["seq"]:
+        due = st["seq"] != log["seq"]    # a new averaged second
+    else:                                # (st set directly: by the clock)
+        due = (log["last_sample"] is None
+               or _age(now, log["last_sample"]) >= SAMPLE)
+    if due:
+        log["seq"] = st["seq"]
         log["last_sample"] = now
         secs = _fix_secs()
         if secs is not None:
@@ -2239,6 +2327,7 @@ def run():
         log_reset()
         wifi_reset()
         up_reset()
+        gps_setup()
         wifi_start()
         _running = True
         _loop()
