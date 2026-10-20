@@ -1516,6 +1516,7 @@ try:
     check("HOME STAY: 20 min of drift at home writes nothing",
           gl.log["file"] is None and gl.log["batch"] == []
           and len(gl.pending()) == n_files and gl.log["still"]["active"])
+    WLAN.scan_aps = [("home", -90)]                 # home AP out of range
     for i in range(1, 40):                          # drive away north, 6 m/s
         hs_fix(52.51 + i * 5.4e-5, 20.0)
     resumed_path = gl.log["file"]
@@ -4101,6 +4102,7 @@ try:
     check("SLEEP: 30 min at home asleep writes no anchor point",
           beats_now() == 0 and gl.wifi["state"] == "sleep",
           "beats=%d" % beats_now())
+    WLAN.scan_aps = [("home", -90)]                 # home AP out of range
     for i in range(1, 41):
         sv_fix(i * 5.5, 0, 20.0)
         gl.wifi_tick()
@@ -4125,6 +4127,50 @@ try:
           entered is not None and early == 0 and beats_now() >= 1,
           "early=%s beats=%d" % (early if entered is not None else None,
                                  beats_now()))
+
+    # VETO: a departure from a home stay while the home WiFi is in range is
+    # a GPS jump (measured: a 194 m multipath jump ended a home stay)
+    def jump_away(n, start=160.0, step=3.0):
+        for i in range(n):
+            sv_fix(start + i * step, 0)
+            gl.wifi_tick()
+
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+    both(150)
+    check("VETO: setup - home stay, radio asleep",
+          sv_active() and gl.log["still"]["home"]
+          and gl.wifi["state"] == "sleep")
+    n_before = len(sv_lines())
+    jump_away(12)
+    both(30)
+    check("VETO: a receding jump with home in range keeps the stay",
+          sv_active() and len(sv_lines()) == n_before
+          and gl.log["still"].get("veto_at") is not None
+          and not wl().active(),
+          "active=%s new=%d radio=%s" % (sv_active(), len(sv_lines()) - n_before,
+                                         wl().active()))
+    WLAN.scan_aps = [("home", -88)]
+    _clock[0] += gl.STILL_HOME_HOLD
+    for i in range(1, 41):
+        sv_fix(i * 5.5, 0, 20.0)
+        gl.wifi_tick()
+    check("VETO: with home out of range (-88 dBm) the departure goes",
+          not sv_active() and len(sv_lines()) > n_before)
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [], [])  # nothing in range: away
+    both(150)
+    check("VETO: setup - away stay", sv_active()
+          and not gl.log["still"]["home"])
+    WLAN.scan_aps, WLAN.ok = [("home", -40)], {"home"}
+    for i in range(1, 41):
+        sv_fix(i * 5.5, 0, 20.0)
+    check("VETO: an away stay is never vetoed",
+          not sv_active() and gl.log["still"].get("veto_at") is None)
+    sv_reset()
+    gl.log["still"]["home"] = True
+    check("VETO: no WLAN (tests, no .env) -> no veto",
+          gl.home_in_range() is None)
 
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")

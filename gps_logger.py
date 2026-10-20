@@ -74,6 +74,8 @@ STILL_SLOW_GAIN = 5                      # m those samples must gain in all
                                          # (a jump frozen for 10 s gains 0)
 STILL_FILE = 1800000                     # ms an away stay's file stays open
 STILL_HEARTBEAT = 300000                 # ms between anchor points (not home)
+STILL_HOME_HOLD = 60000                  # ms a departure from home waits
+                                         # after the home WiFi was in range
 STILL_GAP = 30000                        # ms without a usable fix that counts
                                          # as a gap (the device may have moved)
 STILL_DEP_MAX = 90                       # recent samples kept for the departure
@@ -799,6 +801,57 @@ def _scan_known(w):
         found.append(n)
     return found
 
+def home_in_range():
+    """True while a home network is in range (>= ROAM_MIN_RSSI): the RSSI
+    of the connected home network, else a scan (~2 s, the radio turned on
+    for it and off again when it slept). None when that cannot be told
+    (no home network configured, a connect in progress, scan failed)."""
+    w = wifi.get("wlan")
+    if w is None or not any(n.get("home") for n in wifi.get("nets") or []):
+        return None
+    state = wifi["state"]
+    if state == "connected" and wifi.get("home"):
+        try:
+            r = w.status("rssi")
+        except (OSError, ValueError):
+            r = None
+        return r is None or r >= ROAM_MIN_RSSI
+    if state not in ("connected", "sleep", "not found", "offline"):
+        return None
+    off = state != "connected"
+    try:
+        if off:
+            w.active(True)
+        found = _scan_known(w)
+    except OSError:
+        found = None
+    finally:
+        if off:
+            try:
+                w.active(False)
+            except OSError:
+                pass
+    if found is None:
+        return None
+    for n in found:
+        if n.get("home") and n.get("rssi", -100) >= ROAM_MIN_RSSI:
+            return True
+    return bool(_blank_home_ok())
+
+def _home_veto(now, sl):
+    """A departure from a home stay while the home WiFi is still in range
+    is a GPS jump, not a departure (measured: a 194 m multipath jump ended a
+    home stay and uploaded 80 drift points). After a veto, departures wait
+    STILL_HOME_HOLD before the next check."""
+    at = sl.get("veto_at")
+    if at is not None and _age(now, at) < STILL_HOME_HOLD:
+        return True
+    if home_in_range():
+        sl["veto_at"] = now
+        print("stay kept: home in range")
+        return True
+    return False
+
 def _blank_home_ok():
     """True if a hidden home is configured and a strong empty-SSID AP was seen."""
     r = wifi.get("blank_rssi")
@@ -1301,7 +1354,7 @@ def _still_state():
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
             "ring": [], "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
-            "last_at": None, "last_d": 0, "file_at": None}
+            "last_at": None, "last_d": 0, "file_at": None, "veto_at": None}
 
 def _still_hold():
     """Track time from which a stay still being proven would drop its
@@ -1732,8 +1785,10 @@ def _still_active(now, pos):
         if sl["far_n"] >= STILL_EXIT_N or (
                 sl["far_slow"] >= STILL_EXIT_SLOW
                 and d - sl["far_0"] >= STILL_SLOW_GAIN):
-            _still_leave()
-            return
+            if not (sl["home"] and _home_veto(now, sl)):
+                _still_leave()
+                return
+            sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
     else:
         sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
         if d <= STILL_NEAR:
