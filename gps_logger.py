@@ -13,6 +13,10 @@ gc.threshold(8192)
 BAUD = 9600                              # NEO-6M/7M/8M default
 GPS_HZ = 5                               # fixes a second (NEO-6M max 5);
                                          # one averaged point a second is kept
+GPS_ACK_WAIT = 1000                      # ms to wait for a UBX-ACK per send
+GPS_ACK_TRIES = 4                        # sends of one frame before giving up
+GPS_MAX_STD = 20                         # m: receiver's own error estimate
+                                         # (GST) above this = not usable
 GPS_RETRY = 5000                         # ms: setup sent again if 1 Hz
 GPS_RETRY_MAX = 300000                   # sentences still come this long after
 STATUS = 600000                          # ms between console status lines
@@ -55,6 +59,8 @@ NEW_FILE_GAP = 300                       # s without fix → new file; also WiFi
 # receding beyond STILL_EXIT, well past the drift.
 STILL_WINDOW = 60000                     # ms per centroid window
 STILL_MIN_FIXES = 10                     # usable fixes a window needs
+STILL_WINDOW_MAX = 300000                # ms a sparse window may stay open
+                                         # to collect them (indoors)
 STILL_RADIUS = 50                        # m between consecutive centroids
 STILL_NEAR = 50                          # m: fixes this close refine the anchor
 STILL_EXIT = 150                         # m from the anchor to start leaving
@@ -167,7 +173,8 @@ def reset():
               speed=None, course=None, used=None, view={},
               hdop=None, pdop=None, ttff=None, pos_at=None, hdop_at=None,
               seq=0, epochs=0, extra=0, setup_at=None,
-              setup_wait=GPS_RETRY)
+              setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
+              gps_boots=0)
     _ep_new(None)
 
 def _ep_new(t):
@@ -175,7 +182,8 @@ def _ep_new(t):
     # (offsets from the second's first fix: single-precision floats cannot
     # add up latitudes to the metre); alt / hdop: [sum, n]
     ep.clear()
-    ep.update(t=t, date=None, g=None, r=None, alt=[0.0, 0], hdop=[0.0, 0])
+    ep.update(t=t, date=None, g=None, r=None, alt=[0.0, 0], hdop=[0.0, 0],
+              std=None)
 
 def _num(s, conv=float):
     return conv(s) if s else None
@@ -238,6 +246,7 @@ def _publish():
     st["alt"] = alt[0] / alt[1] if alt[1] else None
     now = time.ticks_ms()
     st["hdop"], st["hdop_at"] = (hd[0] / hd[1] if hd[1] else None), now
+    st["std"], st["std_at"] = ep["std"], now
     st["pos_at"] = now
     st["seq"] += 1
     if st["ttff"] is None:
@@ -288,8 +297,24 @@ def gsv(talker, f):
     if n is not None:
         st["view"][talker] = n          # per constellation, summed on display
 
-HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv,
-            "GLL": _extra, "VTG": _extra}
+def gst(talker, f):
+    """The receiver's own error estimate (1-sigma, metres) of the second's
+    position: the larger of latitude and longitude. A cold start converging
+    shows here while its HDOP already looks good."""
+    _second(f[1])
+    sl, sn = _num(f[6]), _num(f[7])
+    if sl is not None and sn is not None:
+        ep["std"] = sl if sl > sn else sn
+
+def txt(talker, f):
+    """A u-blox prints its banner at start-up: the receiver restarted (power
+    dip, reset) and is back at its defaults until gps_check sets it up."""
+    if "u-blox" in ",".join(f[4:]):
+        st["gps_boots"] += 1
+        print("gps restarted")
+
+HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv, "GST": gst,
+            "GLL": _extra, "VTG": _extra, "TXT": txt}
 
 def _ubx(cls, mid, payload):
     """One UBX frame: sync, class, id, length, payload, Fletcher checksum."""
@@ -302,25 +327,70 @@ def _ubx(cls, mid, payload):
 
 # NMEA message ids (class 0xF0) and their rate per fix on this port. At
 # 9600 baud GPS_HZ fixes fit only with fewer sentences: RMC and GGA every
-# fix (~145 B), GSA once a second, no GSV / GLL / VTG (~790 B/s of 960).
+# fix (~145 B), GSA and GST once a second, no GSV / GLL / VTG (~830 B/s of
+# 960).
 GPS_MSGS = ((0x03, 0), (0x01, 0), (0x05, 0), (0x02, GPS_HZ),
-            (0x00, 1), (0x04, 1))
+            (0x07, GPS_HZ), (0x00, 1), (0x04, 1))
+
+def _rate(ms):
+    """UBX-CFG-RATE: measRate ms, navRate 1, timeRef 1 (GPS time)."""
+    return _ubx(0x06, 0x08, bytes((ms & 255, ms >> 8, 1, 0, 1, 0)))
+
+def _ubx_ack(frame):
+    """Send a UBX-CFG frame until the receiver acknowledges it (UBX-ACK-ACK
+    for its class and id), at most GPS_ACK_TRIES times. An overrun receiver
+    sends the ACK seconds late, so one that comes during a later try counts
+    too; what was read before the first send (an older ACK for the same
+    id) does not. The NMEA read meanwhile is dropped (a few seconds)."""
+    want = b"\xb5\x62\x05\x01\x02\x00" + frame[2:4]
+    while uart.any():
+        uart.read(uart.any())
+    raw = b""
+    for _ in range(GPS_ACK_TRIES):
+        uart.write(frame)
+        t0 = time.ticks_ms()
+        while time.ticks_diff(time.ticks_ms(), t0) < GPS_ACK_WAIT:
+            n = uart.any()
+            if n:
+                raw = raw[-16:] + uart.read(n)
+                if want in raw:
+                    return True
+            time.sleep_ms(5)
+        feed()
+    return False
 
 def gps_setup():
-    """Ask the receiver for GPS_HZ fixes a second (UBX-CFG-MSG, then
-    UBX-CFG-RATE). Not saved in the receiver, so it is sent at every boot.
-    A receiver that ignores it (or an unwired ESP TX) keeps 1 Hz, and each
-    second's average is then that one fix, as before."""
+    """Ask the receiver for GPS_HZ fixes a second, frame by frame until each
+    is acknowledged. First back to 1 Hz: at GPS_HZ with every sentence on
+    (what a receiver that took only part of a setup sends) its output
+    overruns 9600 baud, and then it drops incoming frames (measured on the
+    board). Not saved in the receiver, so it is sent at every boot. If the
+    receiver does not answer at all (still booting, overrun, unwired ESP
+    TX, not a u-blox), the whole sequence is sent once without waiting;
+    gps_check sends it again while the receiver still sends the sentences
+    it turns off, and until then each second's average is that one fix."""
     st["setup_at"], st["extra"] = time.ticks_ms(), 0
+    ok = False
     try:
-        for mid, rate in GPS_MSGS:
-            uart.write(_ubx(0x06, 0x01, bytes((0xF0, mid, rate))))
-            time.sleep_ms(30)
-        ms = 1000 // GPS_HZ
-        # measRate ms, navRate 1, timeRef 1 (GPS time)
-        uart.write(_ubx(0x06, 0x08, bytes((ms & 255, ms >> 8, 1, 0, 1, 0))))
+        if _ubx_ack(_rate(1000)):
+            ok = True
+            for mid, rate in GPS_MSGS:
+                ok = _ubx_ack(_ubx(0x06, 0x01, bytes((0xF0, mid, rate)))) and ok
+            ok = _ubx_ack(_rate(1000 // GPS_HZ)) and ok
+        else:
+            # no answer: an overrun receiver ignores single frames but takes
+            # the whole sequence sent at once (measured), so send it so,
+            # cutting its output first; gps_check repeats it if needed
+            for mid, rate in GPS_MSGS:
+                uart.write(_ubx(0x06, 0x01, bytes((0xF0, mid, rate))))
+                time.sleep_ms(30)
+            uart.write(_rate(1000 // GPS_HZ))
     except Exception as e:
         print("gps setup", repr(e))
+    # sentences sent while the setup ran are not a receiver that ignored it
+    st["setup_at"], st["extra"] = time.ticks_ms(), 0
+    st["setup_ok"] = ok
+    print("gps setup", "ok" if ok else "no ack")
 
 def gps_check(now):
     """Send the setup again while the receiver still sends the sentences it
@@ -1394,13 +1464,31 @@ def _fresh_hdop(now):
         return None
     return hdop
 
-def _sample_line(now, prev, last_t):
-    """(time, track line) for the current fix, or None: HDOP too dilute
-    (try again next SAMPLE), same second as last_t, or within MIN_MOVE of
-    prev."""
+def _fresh_std(now):
+    """The receiver's error estimate (GST) of this second, or None."""
+    std, at = st.get("std"), st.get("std_at")
+    if std is None or at is None or _age(now, at) >= STALE:
+        return None
+    return std
+
+def _usable(now):
+    """The current fix is good enough to use: HDOP at most MAX_HDOP and the
+    receiver's own error estimate at most GPS_MAX_STD (each when known).
+    The estimate catches a cold start converging: measured on the board, a
+    good HDOP (1.2-3) while the position walked in from 230 m away."""
     hdop = _fresh_hdop(now)
     if hdop is not None and hdop > MAX_HDOP:
+        return False
+    std = _fresh_std(now)
+    return std is None or std <= GPS_MAX_STD
+
+def _sample_line(now, prev, last_t):
+    """(time, track line) for the current fix, or None: not usable (try
+    again next SAMPLE), same second as last_t, or within MIN_MOVE of
+    prev."""
+    if not _usable(now):
         return None
+    hdop = _fresh_hdop(now)
     lat, lon = st["lat"], st["lon"]
     t = st["date"] + "T" + st["time"] + "Z"
     if t == last_t or (prev is not None and _dist(
@@ -1489,6 +1577,8 @@ def _still_window(now, pos):
     sm[2] += 1
     if _age(now, sl["win_at"]) < STILL_WINDOW:
         return None
+    if sm[2] < STILL_MIN_FIXES and _age(now, sl["win_at"]) < STILL_WINDOW_MAX:
+        return None                      # sparse fixes: collect more first
     c = None
     if sm[2] >= STILL_MIN_FIXES:
         c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
@@ -1728,8 +1818,7 @@ def log_tick():
         secs = _fix_secs()
         if secs is not None:
             log["clock"] = (secs, now)       # GPS time for the heartbeat
-        hdop = _fresh_hdop(now)
-        if hdop is None or hdop <= MAX_HDOP:
+        if _usable(now):
             pos = (st["lat"], st["lon"])
             if log["still"]["active"]:
                 _still_active(now, pos)
@@ -2475,7 +2564,7 @@ def run():
         _running = False
         print("WDT armed - fed by timer; hold the boot-bypass pin and reset for mpremote")
         try:
-            flush()
+            flush(_still_hold())  # held drift is dropped
         except Exception:
             pass
         wifi_stop()
@@ -2488,7 +2577,7 @@ def run():
         else:
             print("crash", e)
         try:
-            flush()
+            flush(_still_hold())  # held drift is dropped
         except Exception:
             pass
         _boot_fail_bump()
@@ -2497,7 +2586,7 @@ def run():
     finally:
         _running = False
         try:
-            flush()
+            flush(_still_hold())  # held drift is dropped
         except Exception:
             pass
         wifi_stop()
