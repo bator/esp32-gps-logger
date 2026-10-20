@@ -88,7 +88,8 @@ WIFI_CHECK = FLUSH                       # ms between checks while connected
 WIFI_RETRY = 15000                       # ms between reconnects while down
 WIFI_BACKOFF_MAX = 600000                # ms cap on wifi reconnect backoff
 WIFI_SLEEP = 3600000                     # ms the radio stays off once all is
-                                         # uploaded, or after a failed round
+                                         # uploaded (then on only with points
+                                         # to upload)
 WIFI_IDLE = 10000                        # ms between "all uploaded?" checks
 WIFI_WAKE_WAIT = 60000                   # ms a new stay waits for the WiFi
                                          # round before its first anchor point
@@ -653,6 +654,7 @@ def wifi_reset():
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
                 retried=False, idle_at=time.ticks_ms(), sleep_home=False,
+                wake=False,
                 blank_rssi=None, blank_bssid=None)
 
 def _set_hostname(name):
@@ -914,14 +916,35 @@ def _wifi_next(w):
     cands = wifi.get("cand") or []
     if i < len(cands):
         return _wifi_connect(w, cands[i])
-    _wifi_off(w, "not found")
+    _wifi_round_failed(w)
     return False
 
+def _wifi_round_failed(w):
+    """No network in this round. With points to upload, search on with the
+    usual growing backoff (15 s to 10 min) until one connects, the radio
+    off between rounds (_wifi_begin_round turns it on); with nothing to
+    upload, sleep."""
+    if _all_uploaded():
+        _wifi_off(w, "sleep")
+        return
+    try:
+        w.disconnect()
+    except OSError:
+        pass
+    try:
+        w.active(False)
+    except OSError:
+        pass
+    wifi["state"] = "not found"
+    wifi["home"] = False
+    wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
+    wifi["last_check"] = time.ticks_ms()
+
 def _wifi_off(w, state):
-    """Radio off until WIFI_SLEEP has passed (or a new stay wakes it): after
-    a round that found no network, or once everything is uploaded. A home
-    stay stays a home stay while the radio sleeps (sleep_home), so it still
-    writes no anchor points; leaving clears it (_still_leave)."""
+    """Radio off: everything is uploaded. It searches again once WIFI_SLEEP
+    has passed and there is something to upload, or when a new stay wakes
+    it. A home stay stays a home stay while the radio sleeps (sleep_home),
+    so it still writes no anchor points; leaving clears it (_still_leave)."""
     if state == "sleep":
         wifi["sleep_home"] = bool(at_home() and log["still"]["active"])
     try:
@@ -932,8 +955,8 @@ def _wifi_off(w, state):
         w.active(False)
     except OSError:
         pass
-    wifi.update(state=state, home=False, ip=None, rssi=None,
-                backoff=WIFI_SLEEP, last_check=time.ticks_ms())
+    wifi.update(state=state, home=False, ip=None, rssi=None, wake=False,
+                backoff=WIFI_RETRY, last_check=time.ticks_ms())
     print("wifi", state, "home" if wifi["sleep_home"] else "")
 
 def _wifi_begin_round(w):
@@ -947,7 +970,7 @@ def _wifi_begin_round(w):
     wifi["cand_i"] = 0
     wifi["retried"] = False
     if not wifi["cand"]:
-        _wifi_off(w, "not found")
+        _wifi_round_failed(w)
         return False
     return _wifi_connect(w, wifi["cand"][0])
 
@@ -960,9 +983,14 @@ def _all_uploaded():
     return not pending()
 
 def wifi_wake():
-    """A new stay: look for a network now instead of after WIFI_SLEEP, so a
-    home stay is known as one and the arrival uploads."""
-    if wifi["state"] in ("sleep", "not found") and wifi["wlan"] is not None:
+    """A new stay: look for a network now instead of after WIFI_SLEEP or the
+    backoff, so a home stay is known as one and the arrival uploads."""
+    if wifi["wlan"] is None:
+        return False
+    if wifi["state"] == "sleep":
+        wifi["wake"] = True
+        return True
+    if wifi["state"] == "not found":
         wifi["last_check"] = time.ticks_add(time.ticks_ms(), -wifi["backoff"])
         return True
     return False
@@ -1132,6 +1160,21 @@ def wifi_tick():
         # fall through to a fresh round
     if wifi["state"] == "connecting":
         _wifi_poll(w)
+        return
+    if wifi["state"] == "sleep":
+        # after WIFI_SLEEP, only once there is something to upload
+        if not wifi.get("wake"):
+            if _age(now, wifi["last_check"]) < WIFI_SLEEP:
+                return
+            if _age(now, wifi["idle_at"]) < WIFI_IDLE:
+                return
+            wifi["idle_at"] = now
+            if _all_uploaded():
+                return
+        wifi["wake"] = False
+        wifi["backoff"] = WIFI_RETRY
+        wifi["last_check"] = now
+        _wifi_begin_round(w)
         return
     if _age(now, wifi["last_check"]) < wifi["backoff"]:
         return

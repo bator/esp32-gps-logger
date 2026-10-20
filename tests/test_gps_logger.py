@@ -3897,23 +3897,60 @@ try:
     gl.wifi_tick()
     check("SLEEP: nothing is tried for WIFI_SLEEP",
           gl.wifi["state"] == "sleep" and len(WLAN.connects) == n_conn)
-    _clock[0] += 2000
+    for _ in range(30):
+        _clock[0] += gl.WIFI_IDLE
+        gl.wifi_tick()
+    check("SLEEP: after the hour, with nothing to upload, it sleeps on",
+          gl.wifi["state"] == "sleep" and not wl().active()
+          and len(WLAN.connects) == n_conn)
+    make_trk(os.path.join(rv_dir, "20261018_080000.trk"), 3)
+    _clock[0] += gl.WIFI_IDLE
     gl.wifi_tick()
     drain_wifi()
-    check("SLEEP: an hour later it looks for a network again",
+    check("SLEEP: ... and searches once a track waits for upload",
           gl.wifi["state"] == "connected" and wl().active()
           and len(WLAN.connects) > n_conn)
+    os.remove(os.path.join(rv_dir, "20261018_080000.trk"))
 
+    # a round that finds no network: nothing to upload -> sleep; with a
+    # track waiting -> the usual backoff, 15 s doubling to 10 min, until a
+    # network connects
+    w, calls, out = rv_start_wifi(rv_env, [], [])
+    check("SLEEP: no network and nothing to upload -> radio off",
+          gl.wifi["state"] == "sleep" and not wl().active(),
+          "state=%s" % gl.wifi["state"])
+    make_trk(os.path.join(rv_dir, "20261018_090000.trk"), 3)
     w, calls, out = rv_start_wifi(rv_env, [], [])
     n_conn = len(WLAN.connects)
-    check("SLEEP: a round that finds no network turns the radio off",
+    check("SLEEP: no network with a track waiting -> backoff, radio off",
           gl.wifi["state"] == "not found" and not wl().active()
-          and gl.wifi["backoff"] == gl.WIFI_SLEEP)
-    for _ in range(10):
-        _clock[0] += (gl.WIFI_SLEEP - 1000) // 10
+          and gl.wifi["backoff"] == 2 * gl.WIFI_RETRY,
+          "state=%s backoff=%s" % (gl.wifi["state"], gl.wifi["backoff"]))
+    rounds, on_between = [], 0
+    for _ in range(40 * 60 // 5):                  # 40 minutes
+        _clock[0] += 5000
+        before = len(WLAN.connects)
         gl.wifi_tick()
-    check("SLEEP: ... for an hour, not every 15 s to 10 min",
-          len(WLAN.connects) == n_conn)
+        drain_wifi()
+        if len(WLAN.connects) > before:
+            rounds.append(_clock[0])
+        on_between += bool(wl().active())
+    check("SLEEP: ... the radio is off between the rounds",
+          on_between == 0, "ticks with radio on=%d" % on_between)
+    gaps = [(b2 - a2) // 1000 for a2, b2 in zip(rounds, rounds[1:])]
+    check("SLEEP: ... retried with growing gaps up to WIFI_BACKOFF_MAX",
+          len(rounds) >= 5 and gaps == sorted(gaps)
+          and max(gaps) <= gl.WIFI_BACKOFF_MAX // 1000 + 60, "gaps=%s" % gaps)
+    WLAN.scan_aps, WLAN.ok = [("home", -40)], {"home"}
+    for _ in range(gl.WIFI_BACKOFF_MAX // 5000 + 2):
+        _clock[0] += 5000
+        gl.wifi_tick()
+        drain_wifi()
+        if gl.wifi["state"] == "connected":
+            break
+    check("SLEEP: ... until a network connects",
+          gl.wifi["state"] == "connected")
+    os.remove(os.path.join(rv_dir, "20261018_090000.trk"))
 
     # a stay at home while the radio sleeps: still a home stay, no anchor
     sv_reset()
