@@ -3209,6 +3209,31 @@ try:
         gl.LOG_DIR = saved_dir
         shutil.rmtree(q_dir, ignore_errors=True)
 
+    # AVG: valid seconds published just before a fix loss still count
+    q_dir = tempfile.mkdtemp(prefix="gpxlog-q2-")
+    saved_dir = gl.LOG_DIR
+    try:
+        gl.LOG_DIR = q_dir
+        gl.reset()
+        gl.log_reset()
+        gl.wifi_reset()
+        epoch("120300.00", lat="4730.0000")
+        epoch("120301.00", lat="4730.0100")
+        gl.log_tick()
+        n0 = len(gl.log["batch"])
+        for k, la in ((2, "4730.0200"), (3, "4730.0300")):
+            epoch("12030%d.00" % k, lat=la)
+            _clock[0] += 1000                        # a POST: no ticks
+        epoch("120304.00", q=0, status="V")          # the fix is lost
+        epoch("120305.00", q=0, status="V")
+        gl.log_tick()
+        check("AVG: seconds before a fix loss in the same burst are points",
+              len(gl.log["batch"]) - n0 == 3 and not gl.log["fix"],
+              "new=%d" % (len(gl.log["batch"]) - n0))
+    finally:
+        gl.LOG_DIR = saved_dir
+        shutil.rmtree(q_dir, ignore_errors=True)
+
     # UBX: the setup frames (checked against u-blox reference frames)
     _uart_tx[:] = []
     gl.gps_setup()
@@ -3244,11 +3269,12 @@ try:
         gl.gps_setup()
     finally:
         _uart_ack[0] = True
-    check("ACK: no answer -> GPS_ACK_TRIES tries, then the whole sequence once",
+    rates = (rate1000, gl._rate(1000 // gl.GPS_HZ).hex())
+    check("ACK: no answer -> GPS_ACK_TRIES tries, then the message frames once",
           [f.hex() for f in _uart_tx[:gl.GPS_ACK_TRIES]]
           == [rate1000] * gl.GPS_ACK_TRIES
-          and len(_uart_tx) == gl.GPS_ACK_TRIES + len(gl.GPS_MSGS) + 1
-          and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex()
+          and len(_uart_tx) == gl.GPS_ACK_TRIES + len(gl.GPS_MSGS)
+          and not any(f.hex() in rates for f in _uart_tx[gl.GPS_ACK_TRIES:])
           and gl.st["setup_ok"] is False
           and _clock[0] - t0 <= gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 400,
           "frames=%d ms=%d" % (len(_uart_tx), _clock[0] - t0))
@@ -3374,8 +3400,11 @@ try:
     check("UBX: a receiver silent after the first frame blocks ~4 s",
           gl.st["setup_ok"] is False
           and _clock[0] - t0 <= 2 * gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 500
-          and len(_uart_tx) == 1 + gl.GPS_ACK_TRIES + len(gl.GPS_MSGS),
+          and len(_uart_tx) == 1 + gl.GPS_ACK_TRIES + len(gl.GPS_MSGS) - 1,
           "ms=%d frames=%d" % (_clock[0] - t0, len(_uart_tx)))
+    check("UBX: ... and stays at 1 Hz: no GPS_HZ frame after an unanswered one",
+          gl._rate(1000 // gl.GPS_HZ).hex()
+          not in [f.hex() for f in _uart_tx])
     out = []
     real_print = gl.print if hasattr(gl, "print") else None
     gl.print = lambda *a, **k: out.append(" ".join(str(x) for x in a))
@@ -3916,6 +3945,17 @@ try:
           sv_active() is True and gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
           "%.1f m" % gl._dist(a[0], a[1], 47.5, 19.0))
 
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    for secs, (e, n) in ((125, (80, 0)), (60, (0, 80)), (125, (80, 0)),
+                         (60, (0, 80)), (125, (80, 0))):
+        for _ in range(secs):                       # recurring, not steady
+            sv_fix(e + rnd.uniform(-5, 5), n + rnd.uniform(-5, 5))
+    a = gl.log["still"]["anchor"]
+    check("BAND: recurring 80 m episodes (hits not consecutive) keep the anchor",
+          sv_active() is True and gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
+          "%.1f m" % gl._dist(a[0], a[1], 47.5, 19.0))
+
     # FLASH: anchor points written without a fix reach flash every FLUSH
     sv_reset()
     sv_drift(150, box=10.0, step=3.0)
@@ -4092,6 +4132,72 @@ try:
     check("CLOSE: the held lines move on to a file named after the first",
           gl.log["file"].endswith("20261018_080010.trk")
           and len(gl.log["batch"]) == 2 and not gl.log["created"])
+    # GARAGE: a window at A, no fix for 2 min, then a stay 120 m away at B:
+    # the stay is anchored at B, not between the two
+    sv_reset()
+    for _ in range(40):
+        sv_fix(rnd.uniform(-5, 5), rnd.uniform(-5, 5))
+    for _ in range(120):
+        hb_fix(0, 0, nofix=True)
+    for _ in range(200):
+        sv_fix(120 + rnd.uniform(-5, 5), rnd.uniform(-5, 5))
+    a = gl.log["still"]["anchor"]
+    off = gl._dist(a[0], a[1], 47.5, 19.0 + 120 * M_LON) if a else None
+    check("GARAGE: a stay after a gap 120 m away is anchored there",
+          sv_active() and off is not None and off < 15.0, "off=%s" % off)
+
+    # SEG: a short fix loss puts the segment break before the first line
+    # after it, not before lines recorded earlier and not yet flushed
+    sv_reset()
+    for i in range(10):
+        sv_fix(i * 6.0, 0, 22.0)                    # driving, in RAM
+    for _ in range(20):
+        hb_fix(0, 0, nofix=True)                    # 20 s without a fix
+    for i in range(10, 20):
+        sv_fix(i * 6.0, 0, 22.0)
+    gl.flush()
+    with open(gl.log["file"]) as fh:
+        body = [l for l in fh if not l.startswith("#")]
+    mark = body.index("-\n") if "-\n" in body else None
+    check("SEG: the break lands between the lines before and after the loss",
+          mark is not None and 8 <= mark <= 10 and body.count("-\n") == 1,
+          "mark=%s lines=%d" % (mark, len(body)))
+
+    # FIXGAP: a fix back after a long gap closes the track; what a stay
+    # still being proven holds moves on, nothing of it is written
+    sv_reset()
+    gl.wifi.update(state="offline")
+    for i in range(20):
+        sv_fix(i * 6.0, 0, 22.0)                    # a drive
+    gl.flush()
+    trip = gl.log["file"]
+    for _ in range(40):
+        sv_fix(120 + rnd.uniform(-5, 5), rnd.uniform(-5, 5))   # held
+    for _ in range(gl.NEW_FILE_GAP + 10):
+        hb_fix(0, 0, nofix=True)
+    held_before = len(gl.log["batch"])
+    _clock[0] += gl.FLUSH
+    sv_fix(120, 0)
+    with open(trip) as fh:
+        trip_pts = [l for l in fh if l.count(",") == 4]
+    check("FIXGAP: the trip closes with only its own lines",
+          trip in gl.pending() and len(trip_pts) == 20
+          and gl.log["file"] != trip, "pts=%d file=%s" % (len(trip_pts),
+                                                         gl.log["file"]))
+    check("FIXGAP: the held drift moved on in RAM, not to flash",
+          held_before > 0 and len(gl.log["batch"]) >= held_before)
+    sv_reset()
+    gl.wifi.update(state="offline")
+    for i in range(20):
+        sv_fix(i * 6.0, 0, 22.0)
+    for _ in range(gl.NEW_FILE_GAP + 10):
+        hb_fix(0, 0, nofix=True)
+    gl.log["last_flush"] = _clock[0]                # a flush just happened
+    gl.log["batch"].append("47.6,19.1,1.0,1.0,20261018T235959Z\n")
+    sv_fix(500, 0, 22.0)
+    check("FIXGAP: right after a flush the track stays, with a new segment",
+          gl.log["new_seg"] is True and gl.log["prev"] is not None)
+
     sv_reset()
     sparse(20, 3, east_of=lambda s: s * 1.4)
     check("SPARSE: a walk with 3 fixes a minute is never a stay",
