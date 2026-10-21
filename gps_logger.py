@@ -13,6 +13,7 @@ gc.threshold(8192)
 BAUD = 9600                              # NEO-6M/7M/8M default
 GPS_HZ = 5                               # fixes a second (NEO-6M max 5);
                                          # one averaged point a second is kept
+SECONDS_Q = 8                            # published seconds kept for log_tick
 GPS_ACK_WAIT = 1000                      # ms to wait for a UBX-ACK per send
 GPS_ACK_TRIES = 4                        # sends of one frame before giving up
 GPS_MAX_STD = 20                         # m: receiver's own error estimate
@@ -74,6 +75,9 @@ STILL_SLOW_GAIN = 5                      # m those samples must gain in all
                                          # (a jump frozen for 10 s gains 0)
 STILL_FILE = 1800000                     # ms an away stay's file stays open
 STILL_HEARTBEAT = 300000                 # ms between anchor points (not home)
+STILL_MOVE_HITS = 3                      # matching window pairs that move
+                                         # the anchor (a two-window multipath
+                                         # shift moved it twice in 2 h)
 STILL_HOME_HOLD = 60000                  # ms a departure from home waits
                                          # after the home WiFi was in range
 STILL_GAP = 30000                        # ms without a usable fix that counts
@@ -176,7 +180,7 @@ def reset():
               hdop=None, pdop=None, ttff=None, pos_at=None, hdop_at=None,
               seq=0, epochs=0, extra=0, setup_at=None,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
-              gps_boots=0)
+              gps_boots=0, q=[])
     _ep_new(None)
 
 def _ep_new(t):
@@ -253,6 +257,18 @@ def _publish():
     st["seq"] += 1
     if st["ttff"] is None:
         st["ttff"] = time.ticks_diff(now, st["start"]) // 1000
+    # queued for log_tick: after a blocking POST, scan or setup read_uart
+    # publishes several seconds at once, and each is a point
+    q = st["q"]
+    q.append(_snap())
+    if len(q) > SECONDS_Q:
+        q.pop(0)
+
+_SNAP = ("seq", "lat", "lon", "alt", "hdop", "hdop_at", "std", "std_at",
+         "pos_at", "time", "date", "valid", "epochs")
+
+def _snap():
+    return {k: st[k] for k in _SNAP}
 
 def rmc(talker, f):
     _second(f[1])
@@ -313,6 +329,8 @@ def txt(talker, f):
     dip, reset) and is back at its defaults until gps_check sets it up."""
     if "u-blox" in ",".join(f[4:]):
         st["gps_boots"] += 1
+        st["extra"] += 1                 # back at its defaults: set it up
+        st["setup_wait"] = GPS_RETRY     # again within GPS_RETRY, not 5 min
         print("gps restarted")
 
 HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv, "GST": gst,
@@ -345,8 +363,9 @@ def _ubx_ack(frame):
     too; what was read before the first send (an older ACK for the same
     id) does not. The NMEA read meanwhile is dropped (a few seconds)."""
     want = b"\xb5\x62\x05\x01\x02\x00" + frame[2:4]
-    while uart.any():
-        uart.read(uart.any())
+    t0 = time.ticks_ms()
+    while uart.any() and time.ticks_diff(time.ticks_ms(), t0) < 200:
+        uart.read(uart.any())            # a streaming receiver never empties
     raw = b""
     for _ in range(GPS_ACK_TRIES):
         uart.write(frame)
@@ -375,10 +394,18 @@ def gps_setup():
     ok = False
     try:
         if _ubx_ack(_rate(1000)):
+            # once a frame goes unanswered the rest is sent without waiting,
+            # so a receiver that stops answering blocks the loop ~4 s, not
+            # GPS_ACK_TRIES x GPS_ACK_WAIT per frame
             ok = True
-            for mid, rate in GPS_MSGS:
-                ok = _ubx_ack(_ubx(0x06, 0x01, bytes((0xF0, mid, rate)))) and ok
-            ok = _ubx_ack(_rate(1000 // GPS_HZ)) and ok
+            frames = [_ubx(0x06, 0x01, bytes((0xF0, mid, rate)))
+                      for mid, rate in GPS_MSGS] + [_rate(1000 // GPS_HZ)]
+            for fr in frames:
+                if ok:
+                    ok = _ubx_ack(fr)
+                else:
+                    uart.write(fr)
+                    time.sleep_ms(30)
         else:
             # no answer: an overrun receiver ignores single frames but takes
             # the whole sequence sent at once (measured), so send it so,
@@ -392,6 +419,8 @@ def gps_setup():
     # sentences sent while the setup ran are not a receiver that ignored it
     st["setup_at"], st["extra"] = time.ticks_ms(), 0
     st["setup_ok"] = ok
+    if ok:
+        st["setup_wait"] = GPS_RETRY     # it listens: a later revert is quick
     print("gps setup", "ok" if ok else "no ack")
 
 def gps_check(now):
@@ -815,7 +844,9 @@ def home_in_range():
             r = w.status("rssi")
         except (OSError, ValueError):
             r = None
-        return r is None or r >= ROAM_MIN_RSSI
+        if r is not None:
+            return r >= ROAM_MIN_RSSI
+        # unknown RSSI: a scan tells (it works while connected)
     if state not in ("connected", "sleep", "not found", "offline"):
         return None
     off = state != "connected"
@@ -1050,6 +1081,13 @@ def _wifi_round_failed(w):
     if _all_uploaded():
         _wifi_off(w, "sleep")
         return
+    _radio_off(w)
+    wifi["state"] = "not found"
+    wifi["home"] = False
+    wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
+    wifi["last_check"] = time.ticks_ms()
+
+def _radio_off(w):
     try:
         w.disconnect()
     except OSError:
@@ -1058,10 +1096,6 @@ def _wifi_round_failed(w):
         w.active(False)
     except OSError:
         pass
-    wifi["state"] = "not found"
-    wifi["home"] = False
-    wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
-    wifi["last_check"] = time.ticks_ms()
 
 def _wifi_off(w, state):
     """Radio off: everything is uploaded. It searches again once WIFI_SLEEP
@@ -1070,14 +1104,7 @@ def _wifi_off(w, state):
     so it still writes no anchor points; leaving clears it (_still_leave)."""
     if state == "sleep":
         wifi["sleep_home"] = bool(at_home() and log["still"]["active"])
-    try:
-        w.disconnect()
-    except OSError:
-        pass
-    try:
-        w.active(False)
-    except OSError:
-        pass
+    _radio_off(w)
     wifi.update(state=state, home=False, ip=None, rssi=None, wake=False,
                 backoff=WIFI_RETRY, last_check=time.ticks_ms())
     print("wifi", state, "home" if wifi["sleep_home"] else "")
@@ -1354,7 +1381,8 @@ def _still_state():
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
             "ring": [], "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
-            "last_at": None, "last_d": 0, "file_at": None, "veto_at": None}
+            "last_at": None, "last_d": 0, "file_at": None, "veto_at": None,
+            "move_c": None}
 
 def _still_hold():
     """Track time from which a stay still being proven would drop its
@@ -1551,8 +1579,7 @@ def _sample_line(now, prev, last_t):
     if st["alt"] is not None and st.get("fixtype") != 2:
         ele = "%.1f" % st["alt"]
     hd = ("%.1f" % hdop) if hdop is not None else ""
-    tc = st["date"].replace("-", "") + "T" + st["time"].replace(":", "") + "Z"
-    return t, "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hd, tc)
+    return t, "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hd, _tc())
 
 def _record(s, pos):
     """Append a (time, line) from _sample_line; pos is what it wrote."""
@@ -1614,12 +1641,15 @@ def _still_window(now, pos):
     sl = log["still"]
     if sl["last_at"] is not None and _age(now, sl["last_at"]) > STILL_GAP:
         # After a gap the device may be elsewhere: an open window (or the
-        # previous one) from before it must not prove a stay here.
+        # previous one) from before it must not prove a stay here. Only a
+        # fix beyond STILL_EXIT counts as elsewhere: indoors usable fixes
+        # come seconds apart and drift past STILL_RADIUS, and each reset
+        # released the drift held for the stay (measured: 13 lines/14 min).
         c = sl["prev"][0] if sl["prev"] else None
         if sl["win_at"] is not None and sl["sum"][2]:
             r, sm = sl["ref"], sl["sum"]
             c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
-        if c is not None and _dist(c[0], c[1], pos[0], pos[1]) > STILL_RADIUS:
+        if c is not None and _dist(c[0], c[1], pos[0], pos[1]) > STILL_EXIT:
             sl.update(win_at=None, prev=None)
     sl["last_at"] = now
     if sl["win_at"] is None:
@@ -1704,6 +1734,23 @@ def _still_close(now=None):
         flush()
     if not log["batch"]:
         log.update(file=None, created=False, file_at=None, new_seg=False)
+
+def _close_file():
+    """Close the open track so it uploads, without the drift a stay still
+    being proven holds in RAM (a full flush would write it): what is held
+    moves on to a new file named after its first line. False when the
+    write failed and the file stays open."""
+    flush(_still_hold())
+    b = log["batch"]
+    if not b:
+        log.update(file=None, created=False, file_at=None, new_seg=False)
+        return True
+    hold = _still_hold()
+    if hold is not None and b[0].rstrip()[-16:] >= hold:
+        tc = b[0].rstrip()[-16:]
+        start_file(tc[:8] + "_" + tc[9:15])
+        return True
+    return False
 
 def _still_enter(now, anchor, since_tc, n):
     """Become stationary at anchor. The stay's drift (lines from since_tc
@@ -1793,20 +1840,28 @@ def _still_active(now, pos):
         sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
         if d <= STILL_NEAR:
             _still_mean(sl, pos)
-            sl["win_at"] = sl["prev"] = None
+            sl["win_at"] = sl["prev"] = sl["move_c"] = None
         else:
             # Settled between STILL_NEAR and STILL_EXIT (out of the car and
-            # into the building): the same two calm windows that start a
-            # stay move its anchor there. Otherwise the anchor would stay
+            # into the building): STILL_MOVE_HITS calm window pairs at the
+            # same place move the anchor there (fewer and an indoor
+            # multipath shift moves it). Otherwise the anchor would stay
             # behind and no heartbeat would ever be written.
             hit = _still_window(now, pos)
             if hit and _dist(a[0], a[1], hit[0][0], hit[0][1]) > STILL_NEAR:
-                a = hit[0]
-                sl.update(anchor=a, aref=a, aoff=(0.0, 0.0),
-                          n=min(hit[2], STILL_MEAN_N), hb_at=None,
-                          win_at=None, prev=None)
-                d = _dist(a[0], a[1], pos[0], pos[1])
-                print("stay moved")
+                mc = sl["move_c"]
+                if mc and _dist(mc[0][0], mc[0][1],
+                                hit[0][0], hit[0][1]) <= STILL_RADIUS:
+                    mc[1] += 1
+                else:
+                    mc = sl["move_c"] = [hit[0], 1]
+                if mc[1] >= STILL_MOVE_HITS:
+                    a = hit[0]
+                    sl.update(anchor=a, aref=a, aoff=(0.0, 0.0),
+                              n=min(hit[2], STILL_MEAN_N), hb_at=None,
+                              win_at=None, prev=None, move_c=None)
+                    d = _dist(a[0], a[1], pos[0], pos[1])
+                    print("stay moved")
     sl["last_at"], sl["last_d"] = now, d
     home = bool(at_home())
     if home != sl["home"]:
@@ -1824,9 +1879,7 @@ def log_tick():
             and log["points"] + len(log["batch"]) > 0
             and _age(now, log["file_at"]) >= NEW_FILE_GAP * 1000
             and _age(now, log["last_flush"]) >= FLUSH):
-        flush()
-        if not log["batch"]:
-            log.update(file=None, created=False, file_at=None)
+        _close_file()
     if log["full"]:
         last = log.get("full_check")
         if last is not None and _age(now, last) < FULL_CHECK:
@@ -1838,6 +1891,7 @@ def log_tick():
         log["full"] = False
     _still_beat(now)
     if not has_fix(now):
+        st["q"] = []                     # seconds before the loss: stale
         if log["fix"]:
             log["fix"], log["lost_at"] = False, now
             flush(_still_hold())
@@ -1850,42 +1904,52 @@ def log_tick():
             pass                         # same place: the stay keeps its file
         elif (log["file"] is not None and log.get("lost_at") is not None
                 and _age(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
-            if _age(now, log["last_flush"]) >= FLUSH:
-                flush()
-            if not log["batch"]:
-                log.update(file=None, created=False, file_at=None)
-                log["prev"] = None       # first point of the new trip is kept
-                log["new_seg"] = False
-            else:
+            closed = ((not log["batch"]
+                       or _age(now, log["last_flush"]) >= FLUSH)
+                      and _close_file())
+            log["prev"] = None           # first point of the new trip is kept
+            if not closed:
                 log["new_seg"] = True    # write failed: new trip in same file
-                log["prev"] = None
         elif log["file"] is not None:
             log["new_seg"] = True
             log["prev"] = None           # start the segment with this fix
     if st["seq"]:
-        due = st["seq"] != log["seq"]    # a new averaged second
-    else:                                # (st set directly: by the clock)
-        due = (log["last_sample"] is None
-               or _age(now, log["last_sample"]) >= SAMPLE)
-    if due:
-        log["seq"] = st["seq"]
+        # every averaged second not seen yet, oldest first, each at the
+        # ticks it was published (its own fix time and freshness)
+        if st["seq"] != log["seq"]:
+            q, st["q"] = st["q"], []
+            cur = _snap()
+            for snap in q:
+                if snap["seq"] > log["seq"]:
+                    st.update(snap)
+                    _sample(snap["pos_at"])
+            st.update(cur)
+            log["seq"] = cur["seq"]
+    elif (log["last_sample"] is None     # (st set directly: by the clock)
+          or _age(now, log["last_sample"]) >= SAMPLE):
         log["last_sample"] = now
-        secs = _fix_secs()
-        if secs is not None:
-            log["clock"] = (secs, now)       # GPS time for the heartbeat
-        if _usable(now):
-            pos = (st["lat"], st["lon"])
-            if log["still"]["active"]:
-                _still_active(now, pos)
-            else:
-                s = _sample_line(now, log["prev"], log["last_t"])
-                if s is not None:
-                    _record(s, pos)
-                hit = _still_window(now, pos)
-                if hit:
-                    _still_enter(now, hit[0], hit[1], hit[2])
+        _sample(now)
     if _age(now, log["last_flush"]) >= FLUSH:
         flush(_still_hold())
+
+def _sample(now):
+    """One second of the current fix (st): the heartbeat clock, then the
+    stay logic and the track when the fix is usable."""
+    secs = _fix_secs()
+    if secs is not None:
+        log["clock"] = (secs, now)       # GPS time for the heartbeat
+    if not _usable(now):
+        return
+    pos = (st["lat"], st["lon"])
+    if log["still"]["active"]:
+        _still_active(now, pos)
+        return
+    s = _sample_line(now, log["prev"], log["last_t"])
+    if s is not None:
+        _record(s, pos)
+    hit = _still_window(now, pos)
+    if hit:
+        _still_enter(now, hit[0], hit[1], hit[2])
 
 # --- Upload ---------------------------------------------------------------
 # Finished track files (never the one being recorded) are sent to Dawarich's

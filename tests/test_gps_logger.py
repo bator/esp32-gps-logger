@@ -3183,6 +3183,32 @@ try:
         gl.LOG_DIR = saved_dir
         shutil.rmtree(avg_dir, ignore_errors=True)
 
+    # AVG: seconds published together (after a blocking POST) all count
+    q_dir = tempfile.mkdtemp(prefix="gpxlog-q-")
+    saved_dir = gl.LOG_DIR
+    try:
+        gl.LOG_DIR = q_dir
+        gl.reset()
+        gl.log_reset()
+        gl.wifi_reset()
+        epoch("120200.00", lat="4730.0000")
+        epoch("120201.00", lat="4730.0100")
+        gl.log_tick()                                # first second
+        n0 = len(gl.log["batch"])
+        for k, la in ((2, "4730.0200"), (3, "4730.0300"), (4, "4730.0400")):
+            epoch("12020%d.00" % k, lat=la)
+            _clock[0] += 1000                        # a 3 s POST: no ticks
+        epoch("120205.00", lat="4730.0500")
+        gl.log_tick()
+        secs = [l.strip().split(",")[4][9:15] for l in gl.log["batch"]]
+        check("AVG: seconds published during a blocking call are all points",
+              len(gl.log["batch"]) - n0 == 4
+              and secs == ["120200", "120201", "120202", "120203", "120204"]
+              and gl.st["time"] == "12:02:04", "secs=%s" % secs)
+    finally:
+        gl.LOG_DIR = saved_dir
+        shutil.rmtree(q_dir, ignore_errors=True)
+
     # UBX: the setup frames (checked against u-blox reference frames)
     _uart_tx[:] = []
     gl.gps_setup()
@@ -3286,22 +3312,70 @@ try:
     gl.gps_check(_clock[0])
     check("UBX: GSV / VTG after the setup -> it is sent again",
           len(_uart_tx) == 2 * n_frames and gl.st["extra"] == 0
-          and gl.st["setup_wait"] == 2 * gl.GPS_RETRY)
+          and gl.st["setup_wait"] == gl.GPS_RETRY)
     _clock[0] += 1500
     gl.handle(gsv_line)
     _clock[0] += gl.GPS_RETRY
     gl.gps_check(_clock[0])
-    check("UBX: ... and again only after the doubled wait",
-          len(_uart_tx) == 2 * n_frames)
-    _clock[0] += gl.GPS_RETRY
-    gl.gps_check(_clock[0])
-    check("UBX: ... which it then is",
-          len(_uart_tx) == 3 * n_frames
-          and gl.st["setup_wait"] == 4 * gl.GPS_RETRY)
+    check("UBX: a receiver that acknowledges is set up again every GPS_RETRY",
+          len(_uart_tx) == 3 * n_frames and gl.st["setup_wait"] == gl.GPS_RETRY)
     _clock[0] += 10 * gl.GPS_RETRY_MAX
     gl.gps_check(_clock[0])
     check("UBX: a receiver that took it is never sent it again",
           len(_uart_tx) == 3 * n_frames)
+    # a receiver that never answers: less and less often
+    _uart_ack[0] = False
+    try:
+        gl.reset()
+        gl.gps_setup()
+        sends = []
+        for _ in range(40):
+            _clock[0] += 1500
+            gl.handle(gsv_line)
+            n0 = len(_uart_tx)
+            gl.gps_check(_clock[0])
+            if len(_uart_tx) > n0:
+                sends.append(_clock[0])
+        gaps = [(b2 - a2) // 1000 for a2, b2 in zip(sends, sends[1:])]
+    finally:
+        _uart_ack[0] = True
+    check("UBX: a silent receiver is retried with a doubling wait",
+          len(gaps) >= 2 and gaps == sorted(gaps) and gaps[-1] > gaps[0],
+          "gaps=%s" % gaps)
+    # a restart banner sets it up again within GPS_RETRY
+    gl.reset()
+    gl.gps_setup()
+    gl.st["setup_wait"] = gl.GPS_RETRY_MAX
+    n0 = len(_uart_tx)
+    _clock[0] += gl.GPS_RETRY
+    gl.handle(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
+    gl.gps_check(_clock[0])
+    check("UBX: a restart banner sends the setup again at once",
+          len(_uart_tx) > n0 and gl.st["gps_boots"] == 1)
+    # a receiver that stops answering mid-setup blocks ~4 s, not ~36 s
+    gl.reset()
+    _uart_tx[:] = []
+    real_write = UART.write
+    calls = [0]
+
+    def silent_after_one(self, data):
+        """Acknowledge only the first frame (the 1 Hz one)."""
+        calls[0] += 1
+        if calls[0] == 1:
+            return real_write(self, data)
+        _uart_tx.append(bytes(data))
+        return len(data)
+    UART.write = silent_after_one
+    t0 = _clock[0]
+    try:
+        gl.gps_setup()
+    finally:
+        UART.write = real_write
+    check("UBX: a receiver silent after the first frame blocks ~4 s",
+          gl.st["setup_ok"] is False
+          and _clock[0] - t0 <= 2 * gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 500
+          and len(_uart_tx) == 1 + gl.GPS_ACK_TRIES + len(gl.GPS_MSGS),
+          "ms=%d frames=%d" % (_clock[0] - t0, len(_uart_tx)))
     out = []
     real_print = gl.print if hasattr(gl, "print") else None
     gl.print = lambda *a, **k: out.append(" ".join(str(x) for x in a))
@@ -3832,6 +3906,16 @@ try:
           sv_active() is True and gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
           "%.1f m" % gl._dist(a[0], a[1], 47.5, 19.0))
 
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    for _ in range(210):                           # 3.5 min shifted 100 m
+        sv_fix(100 + rnd.uniform(-10, 10), rnd.uniform(-10, 10))
+    sv_drift(60, box=10.0, step=3.0)
+    a = gl.log["still"]["anchor"]
+    check("BAND: a 3.5 min shift (a multipath episode) keeps the anchor",
+          sv_active() is True and gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
+          "%.1f m" % gl._dist(a[0], a[1], 47.5, 19.0))
+
     # FLASH: anchor points written without a fix reach flash every FLUSH
     sv_reset()
     sv_drift(150, box=10.0, step=3.0)
@@ -3976,6 +4060,38 @@ try:
     check("SPARSE: 3 usable fixes a minute at home -> a stay, no drift track",
           sv_active() and len(sv_lines()) <= 5,
           "active=%s lines=%d" % (sv_active(), len(sv_lines())))
+    leaks = []
+    for seed in range(5):                            # home WiFi connected
+        sv_reset(home=True)
+        rnd.seed(seed)
+        sparse(14, 3)
+        on_flash = 0
+        for n in os.listdir(rv_dir):
+            if n.endswith(".trk"):
+                on_flash += len([l for l in open(os.path.join(rv_dir, n))
+                                 if l.count(",") == 4])
+        leaks.append((sv_active(), on_flash))
+    rnd.seed(1016)
+    check("SPARSE: no drift reaches flash while the stay is proven (WiFi on)",
+          all(a2 and f == 0 for a2, f in leaks), "runs=%s" % leaks)
+    # CLOSE: closing a track for upload keeps the held drift out of it
+    sv_reset()
+    gl.start_file("20261018_080000")
+    gl.log["batch"][:] = ["47.500000,19.000000,100.0,1.0,20261018T0800%02dZ\n"
+                          % k for k in (0, 5)]
+    gl.flush()
+    old = gl.log["file"]
+    gl.log["still"].update(win_at=_clock[0], win_tc="20261018T080010Z")
+    gl.log["batch"][:] = ["47.500100,19.000000,100.0,1.0,20261018T0800%02dZ\n"
+                          % k for k in (10, 15)]
+    closed = gl._close_file()
+    with open(old) as fh:
+        old_pts = [l for l in fh if l.count(",") == 4]
+    check("CLOSE: the closed track has only lines before the hold",
+          closed and len(old_pts) == 2 and old in gl.pending())
+    check("CLOSE: the held lines move on to a file named after the first",
+          gl.log["file"].endswith("20261018_080010.trk")
+          and len(gl.log["batch"]) == 2 and not gl.log["created"])
     sv_reset()
     sparse(20, 3, east_of=lambda s: s * 1.4)
     check("SPARSE: a walk with 3 fixes a minute is never a stay",
@@ -4171,6 +4287,26 @@ try:
     gl.log["still"]["home"] = True
     check("VETO: no WLAN (tests, no .env) -> no veto",
           gl.home_in_range() is None)
+    # connected home with an unreadable RSSI: a scan decides, not a veto
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+    real_status = WLAN.status
+
+    def no_rssi(self, arg=None):
+        if arg == "rssi":
+            raise ValueError("rssi")
+        return real_status(self, arg)
+    WLAN.status = no_rssi
+    try:
+        WLAN.scan_aps = [("home", -90)]
+        weak = gl.home_in_range()
+        WLAN.scan_aps = [("home", -40)]
+        strong = gl.home_in_range()
+    finally:
+        WLAN.status = real_status
+    check("VETO: unknown RSSI while connected -> a scan decides",
+          gl.wifi["state"] == "connected" and weak is False and strong is True,
+          "weak=%s strong=%s" % (weak, strong))
 
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")
