@@ -113,8 +113,8 @@ DEVICE_ID=Dawarich-GPS-tracker
 HOSTNAME=Dawarich-GPS-tracker
 
 # power bank keep-alive: seconds between scans while the radio sleeps
-# (default 15; 0 = off, e.g. on a car charger)
-# KEEPALIVE=15
+# (default 5; 0 = off, e.g. on a car charger)
+# KEEPALIVE=5
 ```
 
 `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` accept
@@ -182,10 +182,12 @@ falls back to DHCP rather than becoming unreachable.
    anchor points) until the device leaves. While uploads fail (server
    down, 401), the radio stays on.
 6b. **Power bank keep-alive.** With the radio asleep the board draws less
-   than many power banks count as a load, and they switch off. Every
-   `PB_KEEPALIVE` (15 s, `.env` `KEEPALIVE=<seconds>`, 5–600, `0` = off)
-   the radio is turned on for one scan (~2 s at ~100 mA) and off again,
-   which keeps them on. Not while the radio is on anyway.
+   than many power banks count as a load, and they switch off (the 20 Ah
+   bank on the board after 1 hour; with a scan every 15 s after 3 hours, so
+   it averages the load). Every `PB_KEEPALIVE` (5 s, `.env`
+   `KEEPALIVE=<seconds>`, 5–600, `0` = off) the radio is turned on for one
+   scan (~2 s at ~100 mA, about +40 mA on average) and off again, which
+   keeps them on. Not while the radio is on anyway.
 7. While connected to a **non-home** net and nearly stopped (fresh fix
    and speed ≥ 5 km/h is skipped unless the logger is in a stay, since indoor
    speed is noise; a stale speed does not block), rescan
@@ -349,6 +351,6 @@ Constants at the top of `gps_logger.py`:
 | `KEEPALIVE_MAX` | 10 min | Ctrl-C timer may feed the WDT this long |
 | `MAX_BAD_BYTES` | 64 kB | Cap on `<file>.bad`; uploads pause when full |
 | `MAX_GLOBAL_PAYLOAD` | 3 | Consecutive 400/422 without 2xx → backoff, no quarantine |
-| `PB_KEEPALIVE` | 15 s | Power bank keep-alive scan interval while the radio sleeps (`.env` `KEEPALIVE`, 0 = off) |
+| `PB_KEEPALIVE` | 5 s | Power bank keep-alive scan interval while the radio sleeps (`.env` `KEEPALIVE`, 0 = off) |
 | `DEVICE_ID` | `Dawarich-GPS-tracker` | Overland tracker id (`.env`, `[A-Za-z0-9._-]{1,32}`) |
 | `HOSTNAME` | `Dawarich-GPS-tracker` | DHCP hostname (`.env`, `[A-Za-z0-9-]{1,32}`) |

@@ -103,9 +103,11 @@ WIFI_SLEEP = 3600000                     # ms the radio stays off once all is
                                          # uploaded (then on only with points
                                          # to upload)
 WIFI_IDLE = 10000                        # ms between "all uploaded?" checks
-PB_KEEPALIVE = 15000                     # ms between power bank keep-alive
+PB_KEEPALIVE = 5000                      # ms between power bank keep-alive
                                          # scans while the radio sleeps (0 =
-                                         # off; .env KEEPALIVE=<seconds>)
+                                         # off; .env KEEPALIVE=<seconds>).
+                                         # 15 s kept the 20 Ah bank on for
+                                         # 3 h, not for good: it averages
 WIFI_WAKE_WAIT = 60000                   # ms a new stay waits for the WiFi
                                          # round before its first anchor point
 CONNECT_TIMEOUT = 12000                  # ms to wait for GOT_IP per network
@@ -1245,10 +1247,12 @@ def _keepalive_env(env):
 
 def keepalive_tick(now):
     """Power bank keep-alive. With the radio asleep the board draws less
-    than many power banks count as a load, and they switch off (seen on
-    the board's 20 Ah bank). Every PB_KEEPALIVE ms the radio is turned on
-    for one scan (~2 s at ~100 mA) and off again. Not while the radio is on
-    anyway (connected, connecting, lost)."""
+    than many power banks count as a load, and they switch off (the
+    board's 20 Ah bank after 1 h; with a scan every 15 s after 3 h, so it
+    averages the load over a long time). Every PB_KEEPALIVE ms the radio is
+    turned on for one scan (~2 s at ~100 mA, ~40% of the time at 5 s) and
+    off again. Not while the radio is on anyway (connected, connecting,
+    lost). GPS seconds published during a scan are queued, not lost."""
     w = wifi.get("wlan")
     if (not PB_KEEPALIVE or w is None
             or wifi["state"] not in ("sleep", "not found")):
