@@ -4414,6 +4414,56 @@ try:
           gl.wifi["state"] == "connected" and weak is False and strong is True,
           "weak=%s strong=%s" % (weak, strong))
 
+    # PB_KEEPALIVE: with the radio asleep, one scan every PB_KEEPALIVE ms keeps a
+    # power bank from switching off; none while the radio is on anyway
+    scans = [0]
+    real_scan = WLAN.scan
+
+    def counting_scan(self):
+        scans[0] += 1
+        return real_scan(self)
+    WLAN.scan = counting_scan
+    try:
+        sv_reset()
+        w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+        for _ in range(3):
+            _clock[0] += gl.PB_KEEPALIVE
+            gl.keepalive_tick(_clock[0])
+        check("PB_KEEPALIVE: no keep-alive scan while connected",
+              gl.wifi["state"] == "connected" and gl.wifi["pb_scans"] == 0)
+        gl._wifi_off(wl(), "sleep")
+        n0 = scans[0]
+        for _ in range(4):
+            _clock[0] += gl.PB_KEEPALIVE // 2
+            gl.keepalive_tick(_clock[0])
+        check("PB_KEEPALIVE: asleep -> one scan per PB_KEEPALIVE, radio off after",
+              scans[0] - n0 == 2 and gl.wifi["pb_scans"] == 2
+              and not wl().active() and gl.wifi["state"] == "sleep",
+              "scans=%d" % (scans[0] - n0))
+        saved = gl.PB_KEEPALIVE
+        try:
+            gl._keepalive_env({"KEEPALIVE": "0"})
+            off = gl.PB_KEEPALIVE
+            gl._keepalive_env({"KEEPALIVE": "30  # seconds"})
+            thirty = gl.PB_KEEPALIVE
+            gl._keepalive_env({"KEEPALIVE": "2"})
+            kept = gl.PB_KEEPALIVE
+            gl._keepalive_env({"KEEPALIVE": "x"})
+            kept2 = gl.PB_KEEPALIVE
+            gl.PB_KEEPALIVE = 0
+            n0 = scans[0]
+            _clock[0] += 10 * saved
+            gl.keepalive_tick(_clock[0])
+            none = scans[0] - n0
+        finally:
+            gl.PB_KEEPALIVE = saved
+        check("PB_KEEPALIVE: .env 0 = off, 30 = 30 s, out of range / invalid kept",
+              off == 0 and thirty == 30000 and kept == 30000
+              and kept2 == 30000 and none == 0,
+              "%s %s %s %s %s" % (off, thirty, kept, kept2, none))
+    finally:
+        WLAN.scan = real_scan
+
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")
     with open(bom, "wb") as fh:

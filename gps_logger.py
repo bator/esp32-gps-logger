@@ -103,6 +103,9 @@ WIFI_SLEEP = 3600000                     # ms the radio stays off once all is
                                          # uploaded (then on only with points
                                          # to upload)
 WIFI_IDLE = 10000                        # ms between "all uploaded?" checks
+PB_KEEPALIVE = 15000                     # ms between power bank keep-alive
+                                         # scans while the radio sleeps (0 =
+                                         # off; .env KEEPALIVE=<seconds>)
 WIFI_WAKE_WAIT = 60000                   # ms a new stay waits for the WiFi
                                          # round before its first anchor point
 CONNECT_TIMEOUT = 12000                  # ms to wait for GOT_IP per network
@@ -765,6 +768,7 @@ def wifi_reset():
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
                 retried=False, idle_at=time.ticks_ms(), sleep_home=False,
+                pb_at=time.ticks_ms(), pb_scans=0,
                 wake=False,
                 blank_rssi=None, blank_bssid=None)
 
@@ -1220,6 +1224,53 @@ def _try_roam_home(w, arrival=False):
     print("wifi roam", target["ssid"])
     _wifi_connect(w, target)
 
+def _keepalive_env(env):
+    """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
+    5-600 s between scans; anything else keeps the default."""
+    global PB_KEEPALIVE
+    v = _plain(env.get("KEEPALIVE"))
+    if not v:
+        return
+    try:
+        n = int(v)
+    except ValueError:
+        print("KEEPALIVE invalid, using", PB_KEEPALIVE // 1000, "s")
+        return
+    if n == 0:
+        PB_KEEPALIVE = 0
+    elif 5 <= n <= 600:
+        PB_KEEPALIVE = n * 1000
+    else:
+        print("KEEPALIVE out of 0 or 5-600 s, using", PB_KEEPALIVE // 1000, "s")
+
+def keepalive_tick(now):
+    """Power bank keep-alive. With the radio asleep the board draws less
+    than many power banks count as a load, and they switch off (seen on
+    the board's 20 Ah bank). Every PB_KEEPALIVE ms the radio is turned on
+    for one scan (~2 s at ~100 mA) and off again. Not while the radio is on
+    anyway (connected, connecting, lost)."""
+    w = wifi.get("wlan")
+    if (not PB_KEEPALIVE or w is None
+            or wifi["state"] not in ("sleep", "not found")):
+        wifi["pb_at"] = now
+        return
+    if _age(now, wifi["pb_at"]) < PB_KEEPALIVE:
+        return
+    wifi["pb_at"] = now
+    feed()
+    try:
+        w.active(True)
+        w.scan()
+    except OSError:
+        pass
+    finally:
+        try:
+            w.active(False)
+        except OSError:
+            pass
+    wifi["pb_scans"] += 1
+    feed()
+
 def wifi_start():
     global DEVICE_ID, HOSTNAME
     env = load_env(ENV_FILE)
@@ -1230,6 +1281,7 @@ def wifi_start():
         wifi["home"] = wifi["nets"][0]["home"]
     up["url"] = env.get("GEO_URL", "").rstrip("/") or None
     up["key"] = env.get("API_KEY") or None
+    _keepalive_env(env)
     DEVICE_ID = _safe_name(_plain(env.get("DEVICE_ID")), DEFAULT_DEVICE_ID)
     HOSTNAME = _safe_name(_plain(env.get("HOSTNAME"))
                           or _plain(env.get("DEVICE_ID")),
@@ -2781,6 +2833,7 @@ def _loop():
         gps_check(time.ticks_ms())
         log_tick()
         wifi_tick()
+        keepalive_tick(time.ticks_ms())
         feed()
         upload_tick()
         now = time.ticks_ms()
