@@ -2,78 +2,71 @@
 
 [![CI](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml/badge.svg)](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml)
 
-MicroPython GPS track logger for the ESP32. It records your position to track
-files on the internal flash (`.trk`, see below) both offline and while on
-WiFi. When connected, it uploads finished tracks to a
-[Dawarich](https://dawarich.app) server via its Overland API. On a
-WiFi network (including a phone hotspot in the car) it keeps logging and
-uploads already-finished files in the background.
+A MicroPython GPS track logger for the ESP32 and ESP32-C6. It records your
+position to the internal flash, offline or on WiFi, and uploads finished
+tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
 
-## Features
+- [At a glance](#at-a-glance)
+- [Hardware](#hardware)
+- [Setup](#setup)
+- [Using it](#using-it)
+- [How it works](#how-it-works)
+- [Configuration](#configuration)
+- [Development](#development)
 
-- Reads NMEA (`RMC`, `GGA`, `GSA`) from a u-blox NEO-6M/7M/8M over UART, with checksum validation. At boot it asks the receiver (UBX-CFG-MSG, UBX-CFG-RATE, not saved in the receiver) for 5 fixes a second (`GPS_HZ`) and, so that this fits 9600 baud, `RMC` and `GGA` every fix, `GSA` and `GST` once a second and no `GSV` / `GLL` / `VTG` (~830 B/s). Each frame is sent until the receiver acknowledges it (UBX-ACK, up to 3 tries), starting with a switch back to 1 Hz: at 5 Hz with every sentence on, which is what a receiver that took only part of a setup sends, its output overruns 9600 baud and it drops incoming frames (measured on the board). 5 Hz is asked only once every message frame was acknowledged (5 Hz with a sentence still on is the overrun state). If it does not answer at all, the message frames are sent once without waiting and the rate is left alone (an overrun receiver takes a burst, measured), and sent again while the turned-off sentences keep coming. Once a later frame goes unanswered the other message frames are sent without waiting and it stays at 1 Hz, so a setup blocks the loop about 4 s at most. A receiver that acknowledges is set up again every 5 s if it reverts; one that never answers less and less often; a start-up banner sets it up again at once. A u-blox start-up banner (`$GPTXT ... u-blox`) is logged as `gps restarted`. The fixes of each UTC second are averaged (their valid `GGA` positions, altitude and HDOP; `GST` gives the receiver's own error estimate of that second), and the logger records at most one point a second, that mean: Dawarich stores whole seconds and orders the points of one second by longitude, so more points a second would zigzag there and inflate its distances. A receiver powered up together with the board is still booting when the setup is first sent: while `GSV` / `GLL` / `VTG` keep coming more than a second after it, the setup is sent again, after 5 s and then less and less often (up to every 5 minutes). A receiver that ignores it (or an unwired ESP TX) stays at 1 Hz, and each mean is then that one fix. Only `RMC` carries the date: a second that runs back past midnight without its own `RMC` has no date, so a `GGA` whose `RMC` was lost is not dated a day back.
-- Samples the position every second and records a point only after moving more than 3 m from the last recorded one (`MIN_MOVE`), to track files named `/gpx/YYYYMMDD_HHMMSS.trk`. A point is ~46 bytes (the old GPX XML was ~112), so a full flash holds about 2.4× more track; the pull script turns them back into GPX. Samples with a fresh HDOP worse than 5 are skipped; 2D fixes omit altitude.
-- Power-loss safe: each file is always complete (header, points, footer), written in batches every 60 s (LittleFS commits on close). A line cut off by a power loss is skipped.
-- Stationary filter, on any network. Indoors the GPS wanders tens of metres with a good HDOP and reports 5–20 km/h while lying still (measured on the board: speed p50 5.4 km/h, max 22 km/h; drift p90 46 m, one-minute centroids up to 72 m apart, excursions to 80 m), so `MIN_MOVE` alone records every step of the drift and speed cannot tell a stay from a drive. A stay is therefore position-based: two consecutive one-minute centroids within 50 m. A window needs 10 usable fixes; with only a few a minute (indoors) it stays open until it has them, up to 5 minutes (`STILL_WINDOW_MAX`). On entry the anchor is their mean (refined while staying), and the stay's drift is dropped: while a stay may still be proven, the periodic flush keeps those windows' lines in RAM (`HOLD_MAX`), so none of it reaches flash, after a boot or a new fix either. The way in is kept up to where it first comes within 50 m of the anchor. Away from home the anchor is written at once and every 5 minutes (without elevation), so Dawarich still sees the stay, and nothing else. These anchor points need no fix: the anchor is known, and they are stamped with the last fix's GPS time plus the time elapsed since, so an indoor stay without a usable fix stays visible too; they reach flash every minute, fix or not, and a fix that comes back after a long gap keeps the stay's file. If the device settles 50–150 m from the anchor (out of the car and into the building), three consecutive matching pairs of calm one-minute windows there (`STILL_MOVE_HITS`, about four minutes) move the anchor, and the anchor points follow; a shorter indoor multipath shift does not. A stay ends on 3 consecutive samples more than 150 m from the anchor (beyond the drift) that each gain at least 2 m, or on 10 samples out there without falling back more than 5 m that gain at least 5 m in all (a slow walk away); a multipath jump that freezes 200 m away does neither, however long it lasts; the way out is then written from near the anchor, from the last 90 samples, and only what comes after the last point written, so the track stays in time order. An excursion that turns back does not end it. A departure from a home stay is accepted only once the home network is out of range (below −75 dBm: the RSSI when connected, else a ~2 s scan with the radio on just for it); while it is in range the departure is a GPS jump (measured: a 194 m multipath jump at the desk) and the stay is kept, with no further check for `STILL_HOME_HOLD`. After a gap of more than 30 s without a usable fix, fixes that come back more than 150 m from the open window start the windows over; more than 50 m restarts only the open window, so two places are never mixed in one, while what it held stays held (indoors usable fixes come seconds apart and drift past 50 m), so a minute at one place before a tunnel cannot prove a stay at the next one. A walk (1.4 m/s) is never a stay: its centroid moves on by more than 50 m a minute; a very slow stroll can be one.
-- Short fix losses start a new track segment (the `-` line goes before the first point after the loss); a gap over 5 minutes starts a new file. On any WiFi network, a file that has been open for 5 minutes is closed so it can upload while logging continues (not during a stay, so anchor points do not open a file each) (offline driving stays one file; parking does not open empty files). Such a close never writes the drift held for a stay still being proven: those lines move on to a new file named after the first of them.
-- Entering a stay closes the current track on any network, so the arrival uploads during the stay; on WiFi the anchor file is closed every 30 minutes for the same reason. On the home network a stay writes no anchor points; leaving opens a new track named after its first point. Arriving and driving through are recorded normally. If the home WiFi drops during a stay, anchor points start (it is still a stay). The serial console logs `stay home|away kept N` (N way-in points kept), `stay moved` and `stay end D` (D metres out when leaving).
-- Keeps 32 kB of flash free; stops logging when full. Logging resumes if space is freed (checked every few seconds).
-- Up to three WiFi networks. Network **#1 is home** by default and is preferred for connections and faster upload pacing; **#2 and #3** are additional networks (for example a phone hotspot). Logging and uploading work on all configured networks. Override home-network preference with `HOME1=0` / `HOME2=1` / `SSID2_HOME=1`. After a scan, a home AP at ≥ −75 dBm is tried first, then other visible known APs strongest-RSSI first (one SSID, strongest BSSID). Remaining configured networks are then tried in config order, so an SSID missed by the scan does not prevent fallback. A **hidden home** is tried first when the scan shows a strong empty-SSID AP (≥ −75 dBm) — that is how a hidden AP appears. If the scan itself fails, config order is used, under backoff. Connect is polled from the main loop so GPS sampling is not blocked. On a non-home net, when nearly stopped, the logger scans for home every ~5 min (backoff to 60 min only after a **visible** home switch fails; a failed hidden-home attempt stays at 5 min). A stop after driving resets that interval only if a visible home is in view, not an unverified empty-SSID AP. A visible home at ≥ −75 dBm, or a hidden home plus a strong empty-SSID AP, is tried between upload batches; hidden roam uses `bssid=None` (firmware matches by SSID) and never pins to the strongest blank AP. **Limitation:** with a hidden home SSID, switching home can be slower (no BSSID pin; arrival after driving does not try an unverified blank AP) and a neighbouring hidden AP can trigger a false attempt. Falls back to another configured network if that connect fails.
-- Uploads finished files oldest-first, 50 points per POST. Progress is a `<file>.pos` sidecar. Offset advances only after HTTP 2xx or a durable write to `<file>.bad`. Older `.gpx` files from earlier firmware are still uploaded. If `.bad` is full (64 kB), that file's uploads pause (`BAD FULL` on the OLED) instead of dropping points. Three consecutive 400/422 responses without a success are treated as a server/config problem: backoff, no more quarantine. A `.bad` retry that still 4xxs is left on flash.
-- 128×64 OLED: connected SSID (never the password), GPS fix, mode (`LOG` / `LOG+UP` / `BAD FULL`), free flash and points left. `LOG+UP` means WiFi is connected; the logger still records tracks while uploading finished ones. Missing or dropping display → headless.
-- Hardware watchdog (120 s) fed in the main loop and inside long reads/POST. Uncaught exceptions print, flush (without the drift of a stay still being proven), wait ~1 s and reset. Ctrl-C starts a keepalive Timer (deinit on the next `run()`, stops feeding after 10 minutes so an accidental Ctrl-C in the field is not forever-REPL). Repeated boot/import failures delay, then drop to the REPL. GPIO25 at reset skips the logger entirely.
+## At a glance
+
+- **One clean point a second.** The u-blox receiver runs at 5 Hz; the five
+  fixes of each second are averaged into one point. Dawarich stores whole
+  seconds, so more than one point a second would zigzag there.
+- **Bad fixes are skipped.** Samples with HDOP above 5, or whose own error
+  estimate (GST) is above 20 m, are not used. This also hides the first,
+  wandering fixes after a cold start.
+- **No zigzag while parked.** A position-based stay filter detects standing
+  still. The indoor drift is never written. Away from home the stay shows up
+  as one anchor point every 5 minutes; at home nothing is written.
+- **Power-loss safe files** on LittleFS, uploaded oldest first in batches of
+  50 points, with a byte offset sidecar so nothing is sent twice or lost.
+- **Up to three WiFi networks** (home, phone hotspot, another place). The
+  radio is on only until everything is uploaded, then sleeps for an hour.
+- **Power bank friendly:** a short WiFi scan every 5 s keeps power banks that
+  switch off at low load awake.
+- **Runs unattended:** hardware watchdog, crash recovery, boot-loop guard,
+  optional 128×64 OLED (headless without it).
 
 ## Hardware
 
 | Part | Notes |
 |------|-------|
-| ESP32 dev board | Original ESP32 (Xtensa, `-march=xtensawin`). Use a **WROOM** module, not WROVER: on WROVER boards GPIO16/17 are wired to PSRAM and cannot be used for UART2. Flash firmware with **LittleFS** (the default ESP32_GENERIC image). Offset sidecars are not crash-atomic on FAT. |
-| GPS module | u-blox NEO-6M / 7M / 8M, UART at 9600 baud |
-| OLED display | SSD1306, 128×64, I²C (address 0x3C); optional (headless if absent) |
-| Push button | E.g. the centre (M) press of a 5-way joystick module; optional |
-
-### Wiring
+| ESP32 or ESP32-C6 board | ESP32: a **WROOM** module (on WROVER, GPIO16/17 belong to the PSRAM). Flash MicroPython **1.29** with **LittleFS** (the default image; on FAT the upload progress is not crash-safe). |
+| GPS module | u-blox NEO-6M / 7M / 8M, UART, 9600 baud |
+| OLED display | SSD1306, 128×64, I²C (0x3C). Optional. |
+| Push button | Boot bypass, e.g. the centre press of a 5-way joystick. Optional. |
 
 ![Wiring schematic](docs/wiring.svg)
 
-| ESP32 pin | Connects to | Function |
-|-----------|-------------|----------|
-| 3V3 | GPS VCC, OLED VCC | Power |
-| GND | GPS GND, OLED GND, button | Common ground |
-| GPIO16 | GPS TX | UART2 RX (NMEA in) |
-| GPIO17 | GPS RX | UART2 TX |
-| GPIO21 | OLED SDA | I²C0 data |
-| GPIO22 | OLED SCL | I²C0 clock |
-| GPIO25 | Button → GND | Boot bypass (internal pull-up, active low) |
+| Function | ESP32 | ESP32-C6 |
+|----------|-------|----------|
+| GPS TX → ESP RX (NMEA in) | GPIO16 (UART2 RX) | GPIO5 (UART1 RX) |
+| ESP TX → GPS RX (setup) | GPIO17 (UART2 TX) | GPIO4 (UART1 TX) |
+| OLED SDA / SCL | GPIO21 / GPIO22 | GPIO6 / GPIO7 |
+| Boot bypass button → GND | GPIO25 | GPIO10 |
+| Power | 3V3 and GND to GPS, OLED and button | same |
 
-Most GPS and OLED breakout boards already have I²C pull-ups and a regulator;
-check yours if powering the GPS from 5 V instead.
+- The firmware detects the C6 by itself (it has no UART2, and GPIO16/17 are
+  its console). `deploy.sh` detects it too and compiles for `rv32imc`.
+- The ESP TX → GPS RX wire is needed for the 5 Hz setup. Without it the
+  receiver stays at 1 Hz and everything else still works.
+- Most GPS and OLED breakouts have their own regulator and I²C pull-ups;
+  check yours if you power the GPS from 5 V.
+- On the original ESP32, `https://` uploads are tight on RAM (about 17 kB
+  largest free IDF block with the logger loaded); the C6 has about 190 kB.
 
-**ESP32-C6** (MicroPython `ESP32_GENERIC_C6` 1.29, RISC-V): the firmware
-detects the board and uses UART1 instead, because the C6 has no UART2 and
-GPIO16/17 are its console UART. `deploy.sh` also detects it and compiles for
-`rv32imc`. The C6 has far more free internal RAM than the original ESP32 (about
-190 kB largest free IDF block with the logger loaded, versus 17 kB), so
-`https://` uploads work there.
+## Setup
 
-| ESP32-C6 pin | Connects to | Function |
-|--------------|-------------|----------|
-| GPIO5 | GPS TX | UART1 RX (NMEA in) |
-| GPIO4 | GPS RX | UART1 TX |
-| GPIO6 / GPIO7 | OLED SDA / SCL | I²C0 |
-| GPIO10 | Button → GND | Boot bypass (the C6 has no GPIO25) |
+### 1. Host tools
 
-Power (3V3, GND) is wired as in the table above. The C6 board used here shows
-up as `/dev/ttyACM0`: `PORT=/dev/ttyACM0 ./deploy.sh`.
-
-**ESP32-WROVER:** GPIO16 and GPIO17 are used by the PSRAM. This firmware's
-UART2 default will not work on those modules; pick a WROOM board or change
-`tx`/`rx` in `gps_logger.py` to free pins.
-
-## Software setup
-
-Requirements on the host: Linux, Python 3, and the ESP32 flashed with
-**MicroPython 1.29** (the `.mpy` version must match).
+Linux with Python 3:
 
 ```bash
 python3 -m venv .venv
@@ -84,45 +77,54 @@ python3 -m venv .venv
 .venv/bin/mpremote mip install requests
 ```
 
-Create `.env` and copy it to the device root:
+### 2. `.env`
+
+Create `.env` and copy it to the device root with
+`.venv/bin/mpremote cp .env :.env`. Without it the logger still records
+tracks; it just never goes online.
 
 ```ini
-# Network #1 is HOME by default and is preferred for connections.
-# Logging and uploading happen on all configured WiFi networks.
+# network #1 is home by default and preferred for connections
 SSID=MyHomeWifi
 WPA2=wifi-password
 
-# Phone hotspot for a car trip: NOT home, so the trip is still logged
-# and finished files upload when the hotspot has data.
+# phone hotspot: not home, so a trip is logged and uploads on the way
 SSID2=PhoneHotspot
 WPA2_2=hotspot-password
-# HOME2=0          # default for #2/#3; set HOME2=1 to treat as home
-# SSID2_HIDDEN=1   # try even when the scan does not list it
 
-# Optional third network
+# optional third network
 SSID3=CabinWifi
 WPA2_3=cabin-password
-# HOME3=1
-# SSID3_HIDDEN=1
 
 GEO_URL=https://dawarich.example.com
 API_KEY=your-dawarich-api-key
 
-# [A-Za-z0-9._-]{1,32} — invalid values fall back to the default
 DEVICE_ID=Dawarich-GPS-tracker
 HOSTNAME=Dawarich-GPS-tracker
-
-# power bank keep-alive: seconds between scans while the radio sleeps
-# (default 5; 0 = off, e.g. on a car charger)
 # KEEPALIVE=5
 ```
 
-`HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` accept
-`1`/`0` (also `true`/`false`). Network #1 defaults to home; #2 and #3 do not.
+| Key | Meaning |
+|-----|---------|
+| `SSID`, `WPA2` / `SSID2`, `WPA2_2` / `SSID3`, `WPA2_3` | Networks #1–#3 |
+| `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` | `1`/`0` (or `true`/`false`): treat as home. #1 is home by default, #2 and #3 are not. |
+| `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried even when the scan does not list it |
+| `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a console message. |
+| `GEO_URL` | Dawarich origin. Use `https://`; see [Upload](#upload). |
+| `API_KEY` | Dawarich API key, sent as `Authorization: Bearer <key>` |
+| `DEVICE_ID` | Overland tracker id, `[A-Za-z0-9._-]{1,32}` |
+| `HOSTNAME` | DHCP hostname, `[A-Za-z0-9-]{1,32}` (defaults to `DEVICE_ID`) |
+| `KEEPALIVE` | Seconds between power bank keep-alive scans, 5–600; `0` turns it off (e.g. on a car charger). Default 5. |
 
-**Static IP (optional, per network).** Networks use DHCP unless they set
-`IP` (#1), `IP2` (#2) or `IP3` (#3). A static IP also needs a gateway; the mask
-defaults to `255.255.255.0` and DNS to the gateway:
+- Put comments on their own lines. A trailing `# ...` is ignored only on
+  flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`). SSIDs, passwords, `GEO_URL` and
+  `API_KEY` are taken verbatim, since they may contain `#`.
+- Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
+  ignored.
+
+A static IP for network #1 (a network without `IP` stays on DHCP, and moving
+from a static network to a DHCP one hands the interface back to DHCP):
 
 ```ini
 IP=192.168.1.60
@@ -134,130 +136,337 @@ DNS=192.168.1.111
 # network #2/#3: IP2 / GW2 / MASK2 / DNS2, IP3 / GW3 / MASK3 / DNS3
 ```
 
-A UTF-8 BOM (Windows Notepad) before the first key is ignored. Put comments on their own lines. A trailing `# ...` is ignored only on the
-flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-`DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`); SSIDs, passwords, `GEO_URL` and `API_KEY` are taken
-verbatim, because they may contain `#`. An invalid `MASK`/`DNS` falls back to
-the default with a console message.
-
-A network without `IP` stays on DHCP; moving from a static network to a DHCP
-one hands the interface back to DHCP. An invalid or incomplete entry (for
-example `IP` without `GW`) is ignored with a console message, so the board
-falls back to DHCP rather than becoming unreachable.
-
-**How a network is chosen**
-
-1. Scan once (this is the only blocking radio step).
-2. Deduplicate by SSID (strongest BSSID wins).
-3. Prefer a home AP at ≥ −75 dBm, then other visible known APs strongest
-   RSSI first. Each try is polled from the main loop with a ~12 s
-   deadline (WDT fed; GPS keeps sampling). A failed try of an AP the scan
-   showed at ≥ −75 dBm is retried once right away: on the ESP32-C6 the
-   first association after a cold boot often fails after ~7.5 s with
-   status 202 (`STAT_WRONG_PASSWORD`) even with the right password, and
-   the retry connects within ~1 s. Wrong password / no DHCP after that → mark that
-   SSID “recently failed” and move on. `wifi retry` / `wifi fail` console
-   lines carry the raw `status()` code and the elapsed time. A leftover fail reason
-   from the previous SSID (MicroPython 1.29 `connect()` does not always
-   clear it) is **not** treated as this attempt failing until CONNECTING
-   is seen or the 12 s deadline elapses. Confirm on device with a bad
-   password on #1 and a good #2.
-4. Then try configured nets not listed in the scan, in config order. This
-   lets fallback work even when a scan misses a saved SSID; a hidden home is
-   still preferred when a strong empty-SSID AP is seen.
-5. If the scan itself fails, fall back to config order, still under backoff.
-6. If every attempt fails and there is something to upload, stay in LOG
-   mode and retry with capped exponential backoff (15 s doubling up to
-   10 minutes) until a network connects, with the radio off between the
-   rounds. With nothing to upload, the radio is turned off instead (6a).
-6a. The radio is on only until everything is uploaded: once no finished
-   track waits, nothing is in RAM and the open track holds no points, it
-   is turned off. After `WIFI_SLEEP` (1 hour) it searches again, but only
-   once there is something to upload (checked every `WIFI_IDLE`), with the
-   backoff of step 6. A track open for over 5 minutes is closed and
-   uploaded as soon as the WiFi is back. A new stay wakes it at once (so a
-   home stay is known as one and the arrival uploads); away from home its
-   first anchor point waits `WIFI_WAKE_WAIT` for that round. A stay that
-   began on the home network stays a home stay while the radio sleeps (no
-   anchor points) until the device leaves. While uploads fail (server
-   down, 401), the radio stays on.
-6b. **Power bank keep-alive.** With the radio asleep the board draws less
-   than many power banks count as a load, and they switch off (the 20 Ah
-   bank on the board after 1 hour; with a scan every 15 s after 3 hours, so
-   it averages the load). Every `PB_KEEPALIVE` (5 s, `.env`
-   `KEEPALIVE=<seconds>`, 5–600, `0` = off) the radio is turned on for one
-   scan (~2 s at ~100 mA, about +40 mA on average) and off again, which
-   keeps them on. Not while the radio is on anyway.
-7. While connected to a **non-home** net and nearly stopped (fresh fix
-   and speed ≥ 5 km/h is skipped unless the logger is in a stay, since indoor
-   speed is noise; a stale speed does not block), rescan
-   for home every ~5 min. Back off (10, 20, … 60 min) only after a
-   **failed switch** to a *visible* home. Unseen home and a failed
-   hidden-home attempt keep the 5 min interval. A stop after driving
-   resets backoff only when a visible home is in view — not when the
-   only match is an unverified empty-SSID AP (that can be a neighbour).
-   A home AP at ≥ −75 dBm is preferred; if that switch fails, the
-   hotspot is tried again. A hidden home is tried when the scan lists
-   a strong empty-SSID AP (the ESP32 reports hidden APs that way),
-   with `bssid=None` so the firmware matches by SSID. **Limitation:**
-   a hidden home SSID can switch more slowly, and a neighbouring
-   hidden AP can cause a false attempt. Offset only advances
-   after HTTP 2xx, so a mid-upload drop is retried (Dawarich dedups).
-   Far from home, a hidden home is not tried before a visible hotspot.
-
-OLED / log show the connected SSID, never the password. Mode is `LOG+UP`
-on any connected WiFi network and `LOG` when offline.
-
-The API key is sent as `Authorization: Bearer <key>` (Dawarich accepts that
-header as well as `?api_key=`). Prefer `https://` for `GEO_URL`: an `http://`
-URL is still used (typical for a LAN self-host) but the logger prints a
-warning, because the key and GPS data then go in the clear.
-
-**TLS caveat:** the MicroPython `requests` library sets
-`ssl.CERT_NONE`, so `https://` does **not** authenticate the server. A MITM
-on the path can still see the Bearer key and the points. Pinning Let's
-Encrypt ISRG Root X1 (or your own CA) would need a custom `ssl.SSLContext`
-and a tiny HTTP client; that is not wired up here because mbedTLS already
-sits close to the ~40 kB IDF-heap budget. Use a trusted LAN or a VPN if
-that matters.
-
-micropython-lib `requests` follows 301/302/303 with a GET and no body.
-An `http://`→`https://` redirect therefore becomes a 404, not an upload.
-Put the https origin in `GEO_URL` directly.
-
-```bash
-.venv/bin/mpremote cp .env :.env
-```
-
-Without `.env` the logger still records tracks; it just never goes online.
-
-## Deploy
+### 3. Deploy
 
 ```bash
 ./deploy.sh                      # default port /dev/ttyUSB0
-PORT=/dev/ttyUSB1 ./deploy.sh
+PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 ```
 
-The script compiles `gps_logger.py` to `gps_logger.mpy`, copies it with
-`main.py`, removes any stray `gps_logger.py` on the device, and resets it.
-`tests/` is not copied to the device.
+The script asks the board which chip it is, compiles `gps_logger.py` to
+`gps_logger.mpy` for it, copies it with `main.py`, removes a stray
+`gps_logger.py`, clears the boot-fail counter and resets the board.
 
 The module must run precompiled: compiling on the device grows the Python
-heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, so
-HTTPS uploads fail with `ENOMEM`.
+heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, and
+HTTPS uploads then fail with `ENOMEM`.
 
-## CI
+## Using it
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `master` and on every pull request:
+Power it on: the logger starts by itself, sets up the GPS, connects to WiFi
+and shows the status screen (or runs headless).
 
-- `python3 tests/test_gps_logger.py` (CPython harness, exits 1 on any FAIL),
-  with `MICROPYTHON` pointing at a MicroPython 1.29 unix-port build, so
-  `tests/mpy_unix_check.py` also runs. The binary is built once and cached.
-- `mpy-cross` 1.29 compile of `gps_logger.py` for `xtensawin` (ESP32) and
-  `rv32imc` (ESP32-C6).
+**OLED:** connected SSID (never the password), GPS state, mode (`LOG`
+offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
+
+**Serial console** (115200 baud) lines worth knowing:
+
+| Line | Meaning |
+|------|---------|
+| `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
+| `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
+| `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
+| `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
+| `upload <file> <n> <ok> <http> <mem>` | One POST |
+| `stay home\|away kept N` | A stay began; N points of the way in were kept |
+| `stay moved` / `stay kept: home in range` / `stay end D` | Anchor moved; a home departure refused; the stay ended D m out |
+| `status temp … hz … used … hdop … points … sent … wifi …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, HDOP, points, uploads |
+
+**Boot bypass:** hold the button (GPIO25, C6: GPIO10) while resetting to
+skip the logger: REPL and `mpremote`, no watchdog. Use it to copy files off
+the device.
+
+**Ctrl-C** on a running logger leaves the watchdog armed. A timer feeds it
+for 10 minutes, then the chip resets, so a stray Ctrl-C in the field does not
+leave the device in the REPL for good.
+
+**Boot loop guard:** repeated import, crash or watchdog resets at boot get an
+increasing delay (5 s, 10 s, … 30 s); after 5 the board stays in the REPL. The
+counter (RTC memory, `/boot_fail` as fallback) is cleared after ~60 s of a
+healthy main loop, by `deploy.sh` or by a power cycle. By hand:
+`mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
+
+**Getting tracks:** they live in `/gpx/`. With the boot bypass held:
+
+```bash
+.venv/bin/mpremote cp :/gpx/20261005_101500.trk .
+python3 tools/trk2gpx.py 20261005_101500.trk > 20261005_101500.gpx
+```
+
+Next to a track you may find `<file>.pos` (upload progress) and
+`<file>.bad` (batches the server rejected; retried a few times per boot).
+To queue a `.bad` again:
+
+```bash
+.venv/bin/mpremote exec "import os; os.rename('/gpx/20261005_101500.trk.bad', '/gpx/20261005_101500.trk')"
+```
+
+## How it works
+
+### GPS
+
+- **5 Hz with averaging.** At every boot the logger asks the receiver for 5
+  fixes a second (UBX-CFG-RATE) and, to fit 9600 baud (~830 of 960 B/s),
+  for `RMC` and `GGA` every fix, `GSA` and `GST` once a second and no `GSV`,
+  `GLL` or `VTG` (UBX-CFG-MSG). The setup is not saved in the receiver.
+- **Reliable setup.** Every frame is sent until the receiver acknowledges it
+  (UBX-ACK, up to 4 tries). It starts with a switch to 1 Hz, and 5 Hz is
+  asked only once every message frame was acknowledged. Reason: at 5 Hz with
+  all sentences on, the receiver's output overruns 9600 baud, and then it
+  drops incoming frames (measured).
+- **When it does not answer:** the message frames are sent once without
+  waiting and the rate is left alone. If a frame goes unanswered mid-setup,
+  the rest goes out the same way and it stays at 1 Hz. A setup blocks the
+  loop about 4 s at most.
+- **Retries.** While sentences it turned off keep coming, the setup is sent
+  again: after 5 s, and for a receiver that never answers less and less often
+  (up to 5 minutes). A start-up banner (power dip) sets it up again at once.
+  A receiver that ignores everything (or an unwired ESP TX) stays at 1 Hz,
+  and each second's average is then that one fix.
+- **Averaging.** The valid `GGA` positions, altitude and HDOP of each UTC
+  second are averaged and published when the next second starts (`RMC`
+  positions if a second had no `GGA`). `GST` gives the receiver's own error
+  estimate of that second.
+- **Midnight.** Only `RMC` carries the date. A second that runs back past
+  midnight without its own `RMC` has no date, so it is not a fix rather than
+  a day off.
+
+### Points and track files
+
+- **Sampling.** Each averaged second is sampled once. Seconds published
+  together after a blocking POST, scan or setup are queued and all sampled.
+  A point is recorded when it is more than 3 m from the last one.
+- **Filter.** Skipped: fresh HDOP above 5, or a GST estimate above 20 m (the
+  larger of latitude and longitude, 1σ). A cold start can show a good HDOP
+  while the position walks in from far away (measured: 230 m, over 65 s); GST
+  catches it. 2D fixes omit altitude.
+- **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
+  line (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop
+  empty when unknown), `-` for a new segment and an `#END` footer. Older
+  `.gpx` files are still uploaded.
+- **Power-loss safe.** Points are written in batches every 60 s. Each write
+  replaces the footer with the new points plus the footer; LittleFS commits
+  on close, so a power cut leaves the old or the new version. A line cut off
+  by a power loss is skipped on read.
+- **Segments and files.** A short fix loss starts a new segment (the `-`
+  goes before the first point after it). A loss over 5 minutes starts a new
+  file. On WiFi a file open for 5 minutes is closed so it can upload; driving
+  offline stays one file, and parking does not open empty files.
+- **Flash.** 32 kB are kept free. Logging stops when full and resumes when
+  space is freed.
+
+### Stays
+
+Indoors the GPS wanders tens of metres with a good HDOP and reports 5–20 km/h
+while lying still (measured on the board: speed p50 5.4 km/h, drift p90 46 m,
+one-minute centroids up to 72 m apart). Neither the 3 m rule nor speed can
+tell a stay from a drive, so the stay filter works on positions.
+
+- **Entering.** Two consecutive one-minute centroids within 50 m make a
+  stay. A window needs 10 usable fixes; with only a few a minute (indoors) it
+  stays open until it has them, up to 5 minutes.
+- **No drift on flash.** While a stay may still be proven, its windows'
+  lines are held in RAM, and they are dropped when it begins, after a boot or
+  a new fix too. The way in is kept up to where it first comes within 50 m of
+  the anchor. Closing a file for upload never writes the held lines; they
+  move on to the next file.
+- **Anchor.** The mean of the two windows, refined by fixes within 50 m. If
+  the device settles 50–150 m away (out of the car, into the building), three
+  consecutive matching window pairs there (about four minutes) move the
+  anchor. A shorter multipath shift does not.
+- **Away from home.** The anchor is written as a point at once and every 5
+  minutes (no elevation), so Dawarich still sees the stay. These points need
+  no fix: they carry the last fix's GPS time plus the time since, and reach
+  flash every minute. On WiFi the anchor file is closed every 30 minutes so it
+  uploads.
+- **At home** (a home network): no anchor points. If the home WiFi drops,
+  anchor points start; it is still a stay.
+- **Arrival.** Entering a stay closes the current track on any network, so
+  the arrival uploads during the stay.
+- **Leaving.** 3 consecutive samples beyond 150 m that each gain at least
+  2 m (a vehicle), or 10 samples out there that gain at least 5 m in all (a
+  walk). A multipath jump that freezes 200 m away does neither, however long
+  it lasts, and an excursion that turns back does not count. The way out is
+  written from near the anchor, from the last 90 samples, in time order.
+- **Leaving home** is accepted only once the home network is out of range
+  (below −75 dBm: the RSSI when connected, else a ~2 s scan). While it is in
+  range the departure is a GPS jump (measured: a 194 m jump at a desk) and
+  further departures wait 60 s.
+- **After a fix gap** (over 30 s): fixes more than 150 m from the open window
+  restart both windows; more than 50 m restart only the open one, so two
+  places are never mixed while what it held stays held.
+- A walk (1.4 m/s) is never a stay: its centroid moves on by more than 50 m a
+  minute.
+
+### WiFi
+
+**Choosing a network:**
+
+1. Scan once, keep the strongest BSSID per SSID.
+2. Try a home AP at ≥ −75 dBm first, then other visible known APs, strongest
+   first, then configured networks the scan missed, in config order. A hidden
+   home is preferred when the scan shows a strong empty-SSID AP. If the scan
+   fails, config order is used.
+3. Each try is polled from the main loop (~12 s deadline), so GPS sampling
+   goes on. An AP seen at ≥ −75 dBm gets one immediate retry: on the C6 the
+   first association after a cold boot often fails after ~7.5 s with status
+   202 although the password is right, and the retry connects within ~1 s.
+   Otherwise the SSID is marked failed for 2 minutes and the next one is
+   tried. A leftover fail reason from the previous SSID (MicroPython 1.29) is
+   not taken as this attempt failing.
+
+**Radio on only when needed:**
+
+- Once no finished track waits, nothing is in RAM and the open track holds
+  no points, the radio is turned off (`wifi sleep`).
+- After an hour it searches again, but only once there is something to
+  upload.
+- A new stay wakes it at once, so a home stay is known as one and the arrival
+  uploads. Away from home the first anchor point waits 60 s for that round. A
+  stay that began at home stays a home stay while the radio sleeps.
+- If no network is found and there is something to upload, it retries with
+  backoff (15 s doubling to 10 minutes) until one connects, the radio off in
+  between; with nothing to upload it sleeps.
+- While uploads fail (server down, 401), the radio stays on.
+
+**Power bank keep-alive:** with the radio asleep the board draws less than
+many power banks count as a load, and they switch off. The 20 Ah bank used
+here switched off after 1 hour; with a scan every 15 s, after 3 hours, so it
+averages the load. Every 5 s (`KEEPALIVE`) the radio is turned on for one
+scan (~2 s at ~100 mA, about +40 mA on average) and off again. Not while the
+radio is on anyway.
+
+**Roaming home:** on a non-home network, when nearly stopped (speed below
+5 km/h, or in a stay), the logger scans for home every 5 minutes and switches
+to a home AP at ≥ −75 dBm. It backs off to 60 minutes only after a failed
+switch to a visible home; stopping after a drive resets that only when a
+visible home is in view. A hidden home is tried with `bssid=None` (matched by
+SSID) when a strong empty-SSID AP is seen; a neighbour's hidden AP can cause
+a false attempt, and switching to a hidden home can be slower.
+
+### Upload
+
+- Finished files go oldest first, 50 points per POST, to
+  `<GEO_URL>/api/v1/overland/batches`. The file being recorded is never sent.
+- Progress is a `<file>.pos` byte offset, written atomically. It advances
+  only after HTTP 2xx or a durable copy to `<file>.bad`, so an interrupted
+  POST is resent (Dawarich deduplicates).
+- 400 / 413 / 422 quarantine the batch to `<file>.bad`. Three in a row
+  without a success count as a server problem: backoff, no more quarantine.
+  A full `.bad` (64 kB) pauses that file (`BAD FULL`) instead of dropping
+  points; pull or delete it, then reset.
+- Other errors back off from 15 s up to 30 minutes (`Retry-After` is
+  honoured); 401 waits 30 minutes. Between POSTs it pauses 5 s at home, 30 s
+  elsewhere.
+- **TLS caveat:** MicroPython `requests` uses `ssl.CERT_NONE`, so `https://`
+  encrypts but does not authenticate the server. A MITM can still see the key
+  and the points; use a trusted network or a VPN if that matters. With an
+  `http://` `GEO_URL` the logger warns that everything goes in the clear.
+- `requests` follows a redirect with a GET and no body, so an
+  `http://`→`https://` redirect ends in a 404. Put the https origin in
+  `GEO_URL` directly.
+
+### Watchdog and recovery
+
+- A 120 s hardware watchdog is fed in the main loop and inside long reads and
+  POSTs.
+- An uncaught exception is printed, the batch is flushed (without the drift
+  held for a stay), and the board resets after ~1 s.
+- The [boot loop guard](#using-it) stops repeated crashes; a missing or
+  failing OLED is switched off instead of crashing.
+
+## Configuration
+
+Constants at the top of `gps_logger.py`. Defaults are tuned on the ESP32-C6
+with a NEO-6M; most never need changing.
+
+**GPS and points**
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `GPS_HZ` | 5 | Fixes a second asked from the receiver, averaged into one point |
+| `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
+| `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling only while it does not answer) |
+| `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
+| `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP |
+| `GPS_MAX_STD` | 20 m | Skip samples with a worse GST error estimate |
+| `MIN_MOVE` | 3 m | Distance from the last point before a new one |
+| `SAMPLE` | 1 s | Sampling interval when no averaged second is available (tests) |
+
+**Track files**
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `FLUSH` | 60 s | Interval between flash writes |
+| `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file; also the max age of an open file on WiFi |
+| `MIN_FREE` | 32 kB | Flash reserve |
+| `MAX_BATCH` | 240 | Points kept in RAM while flash writes fail |
+| `HOLD_MAX` | 150 | Lines a stay still being proven keeps in RAM |
+
+**Stays**
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `STILL_WINDOW` / `STILL_MIN_FIXES` | 60 s / 10 | Centroid window and the usable fixes it needs |
+| `STILL_WINDOW_MAX` | 5 min | How long a sparse window may stay open |
+| `STILL_RADIUS` | 50 m | Max distance between two consecutive centroids |
+| `STILL_NEAR` | 50 m | Fixes this close refine the anchor |
+| `STILL_EXIT` / `STILL_EXIT_N` / `STILL_TOL` | 150 m / 3 / 5 m | Leaving: distance, samples in a row, allowed fallback |
+| `STILL_STEP` / `STILL_EXIT_SLOW` / `STILL_SLOW_GAIN` | 2 m / 10 / 5 m | Gain per leaving sample, or samples out there and their total gain |
+| `STILL_MOVE_HITS` | 3 | Consecutive window pairs 50–150 m away that move the anchor |
+| `STILL_HEARTBEAT` | 5 min | Anchor point interval away from home |
+| `STILL_FILE` | 30 min | Age at which an away stay's file is closed on WiFi |
+| `STILL_HOME_HOLD` | 60 s | Wait after a refused home departure |
+| `STILL_GAP` | 30 s | Time without a usable fix that counts as a gap |
+| `STILL_DEP_MAX` | 90 | Recent samples kept to write the way out |
+| `STILL_MEAN_N` | 1800 | Fixes the anchor mean averages over |
+
+**WiFi**
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `CONNECT_TIMEOUT` | 12 s | Per-network wait for an IP (polled) |
+| `WIFI_RETRY` / `WIFI_BACKOFF_MAX` | 15 s / 10 min | Reconnect backoff with something to upload |
+| `WIFI_SLEEP` / `WIFI_IDLE` | 1 h / 10 s | Radio-off time once all is uploaded; how often that is checked |
+| `WIFI_WAKE_WAIT` | 60 s | A new stay away waits this long for its WiFi round |
+| `PB_KEEPALIVE` | 5 s | Keep-alive scan interval while the radio sleeps (`.env` `KEEPALIVE`) |
+| `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
+| `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
+
+**Upload**
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `UPLOAD_BATCH` | 50 | Points per POST |
+| `UPLOAD_GAP` / `UPLOAD_GAP_AWAY` | 5 s / 30 s | Pause between POSTs at home / elsewhere |
+| `BACKOFF_START` / `BACKOFF_MAX` | 15 s / 30 min | Upload backoff (and `Retry-After` cap) |
+| `AUTH_BACKOFF` | 30 min | Wait after HTTP 401 |
+| `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout |
+| `MAX_BAD_BYTES` | 64 kB | Cap on a `.bad` file |
+| `MAX_GLOBAL_PAYLOAD` | 3 | Payload errors in a row that stop quarantining |
+
+**System**
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `WDT_TIMEOUT` | 120 s | Hardware watchdog |
+| `KEEPALIVE_MAX` | 10 min | How long a Ctrl-C timer feeds the watchdog |
+| `BOOT_OK_MS` | 60 s | Healthy loop time that clears the boot-fail counter |
+| `STATUS` | 10 min | Console `status` line interval |
+| `DEVICE_ID` / `HOSTNAME` | `Dawarich-GPS-tracker` | Overland id and DHCP hostname (set in `.env`) |
+
+## Development
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `master` and on
+every pull request:
+
+- `python3 tests/test_gps_logger.py`: the CPython harness with mocked
+  `machine`/`network`/UART (exits 1 on any FAIL), plus
+  `tests/mpy_unix_check.py` on a cached MicroPython 1.29 unix build.
+- `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
 - `pyflakes` on `gps_logger.py`, `main.py` and `tools/trk2gpx.py`.
 
-Run the same locally:
+The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
@@ -266,91 +475,5 @@ Run the same locally:
 MICROPYTHON=/path/to/micropython python3 tests/test_gps_logger.py
 ```
 
-## Usage
-
-- Power on: the logger starts automatically, scans once for configured
-  networks, then shows the status screen (or runs headless).
-- **Skip the logger** (REPL / `mpremote`, **no watchdog**): hold GPIO25
-  while resetting. Use this for copying files off the device.
-- Ctrl-C from a running logger leaves the WDT armed; a timer feeds it for
-  **10 minutes**, then the chip resets (so a stray 0x03 on USB-UART in the
-  field does not leave the device in REPL forever). The next `run()` deinit's
-  that timer. GPIO25 bypass is still the reliable way to pull a large `/gpx`.
-- Repeated import/crash/WDT at boot: increasing delay (5 s, 10 s, … cap
-  30 s), then the board stays in the REPL after 5 failures (RTC memory
-  counter, `/boot_fail` fallback). The counter is **not** cleared on
-  import — only after ~60 s of a healthy main loop, or by `deploy.sh`,
-  or by a power cycle. A WDT reset counts. If the device is stuck in
-  REPL after a failed flash, power-cycle it or
-  `mpremote exec "from machine import RTC; RTC().memory(b'0')"` then
-  reset. `./deploy.sh` clears the counter before rebooting.
-- Track logs live in `/gpx/`; pull them with the GPIO25 bypass, then convert to GPX:
-
-  ```bash
-  .venv/bin/mpremote cp :/gpx/20261005_101500.trk .
-  python3 tools/trk2gpx.py 20261005_101500.trk > 20261005_101500.gpx
-  ```
-
-  Progress is `/gpx/20261005_101500.trk.pos`. Payload-rejected batches are
-  appended to `/gpx/20261005_101500.trk.bad`. After a successful upload the
-  logger retries a `.bad` file a few times per boot. To re-queue by hand:
-
-  ```bash
-  .venv/bin/mpremote exec "import os; os.rename('/gpx/20261005_101500.trk.bad', '/gpx/20261005_101500.trk')"
-  ```
-
-  If `.bad` reaches 64 kB the OLED shows `BAD FULL` and **no more points
-  are dropped** — pull or delete the `.bad` file, then reset.
-
-## Configuration
-
-Constants at the top of `gps_logger.py`:
-
-| Constant | Default | Meaning |
-|----------|---------|---------|
-| `WIFI_SLEEP` / `WIFI_IDLE` / `WIFI_WAKE_WAIT` | 1 h / 10 s / 60 s | Minimum radio-off time once all is uploaded (then it searches only with something to upload); how often that is checked; how long a new stay away waits for its WiFi round before the first anchor point |
-| `GPS_HZ` | 5 | Fixes a second asked from the receiver; each second's fixes are averaged into one point |
-| `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Wait before the setup is sent again while the receiver still sends the sentences it turns off (doubling up to the maximum only while it does not acknowledge) |
-| `SECONDS_Q` | 8 | Averaged seconds queued for the logger, so the seconds published together after a blocking POST, scan or setup are all points (also those just before a fix loss) |
-| `STATUS` | 10 min | Console `status` line: chip temperature (`esp32.mcu_temperature()`, the die, not the GPS module), fixes in the last second, satellites, HDOP, points, uploads |
-| `SAMPLE` | 1000 ms | Interval between position samples when no averaged second is available (tests) |
-| `MIN_MOVE` | 3 m | Distance from the last recorded point before a new one is recorded |
-| `FLUSH` | 60000 ms | Interval between flash writes |
-| `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file; also max age of an open file on WiFi |
-| `STILL_WINDOW` / `STILL_MIN_FIXES` | 60 s / 10 | Centroid window, and the usable fixes it needs |
-| `STILL_WINDOW_MAX` | 5 min | How long a window with fewer usable fixes stays open to collect them |
-| `STILL_RADIUS` | 50 m | Max distance between two consecutive centroids for a stay |
-| `STILL_NEAR` | 50 m | Fixes this close to the anchor refine it |
-| `STILL_EXIT` / `STILL_EXIT_N` / `STILL_TOL` | 150 m / 3 / 5 m | Leaving: samples beyond this, how many in a row, how far one may fall back |
-| `STILL_STEP` / `STILL_EXIT_SLOW` | 2 m / 10 | Gain each leaving sample needs, or how many samples out there leave without it |
-| `STILL_SLOW_GAIN` | 5 m | Gain those `STILL_EXIT_SLOW` samples need in all (a frozen jump gains 0) |
-| `STILL_FILE` | 30 min | Age at which an away stay's anchor file is closed on WiFi |
-| `STILL_HEARTBEAT` | 5 min | Anchor point interval during a stay (not on the home network); no fix needed |
-| `STILL_MOVE_HITS` | 3 | Matching window pairs 50–150 m from the anchor that move it there |
-| `STILL_HOME_HOLD` | 60 s | After the home network was in range at a departure, how long further departures from the home stay are not accepted |
-| `STILL_GAP` | 30 s | Time without a usable fix after which windows restart if the device moved |
-| `STILL_DEP_MAX` | 90 | Recent samples kept to write the way out |
-| `STILL_MEAN_N` | 1800 | Fixes the anchor mean averages over |
-| `ROAM_CHECK` | 5 min | Home-roam scan interval on a hotspot (and after arriving) |
-| `ROAM_BACKOFF_MAX` | 60 min | Cap on roam retry after a failed home switch |
-| `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI to switch away from a hotspot (also boot preference) |
-| `UPLOAD_GAP_AWAY` | 30 s | Pause between POSTs on a non-home net (UART drain) |
-| `BOOT_OK_MS` | 60 s | Healthy `_loop` before the boot-fail counter is cleared |
-| `MIN_FREE` | 32 kB | Flash reserve |
-| `MAX_BATCH` | 240 | RAM points kept if flash writes fail |
-| `HOLD_MAX` | 150 | Lines a stay still being proven keeps in RAM, so entering it drops all of its drift |
-| `MAX_HDOP` | 5 | Skip samples with a fresh GGA dilution worse than this |
-| `GPS_MAX_STD` | 20 m | Skip samples whose `GST` error estimate (the larger of latitude and longitude, 1σ) is above this: a cold start converging has a good HDOP but is off by hundreds of metres (measured: 230 m, walking in over 65 s) |
-| `UPLOAD_BATCH` | 50 | Points per POST |
-| `CONNECT_TIMEOUT` | 12 s | Per-network wait for DHCP (polled, not a blocking sleep) |
-| `BACKOFF_START` | 15 s | First retry after net/5xx/4xx |
-| `BACKOFF_MAX` | 30 min | Cap on upload backoff and `Retry-After` |
-| `AUTH_BACKOFF` | 30 min | Retry after HTTP 401 |
-| `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (WDT 120 s is the wall-clock cap) |
-| `WDT_TIMEOUT` | 120 s | Hardware watchdog |
-| `KEEPALIVE_MAX` | 10 min | Ctrl-C timer may feed the WDT this long |
-| `MAX_BAD_BYTES` | 64 kB | Cap on `<file>.bad`; uploads pause when full |
-| `MAX_GLOBAL_PAYLOAD` | 3 | Consecutive 400/422 without 2xx → backoff, no quarantine |
-| `PB_KEEPALIVE` | 5 s | Power bank keep-alive scan interval while the radio sleeps (`.env` `KEEPALIVE`, 0 = off) |
-| `DEVICE_ID` | `Dawarich-GPS-tracker` | Overland tracker id (`.env`, `[A-Za-z0-9._-]{1,32}`) |
-| `HOSTNAME` | `Dawarich-GPS-tracker` | DHCP hostname (`.env`, `[A-Za-z0-9-]{1,32}`) |
+`tests/device_bench.py` is an optional on-device timing probe; nothing under
+`tests/` is copied to the board.
