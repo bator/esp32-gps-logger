@@ -32,17 +32,30 @@ _uart_tx = []
 _uart_rx = bytearray()
 _uart_ack = [True]
 _uart_drop = [0]
+_freqs = [240000000]
+
+
+_pin_levels = []
 
 
 class Pin(object):
     IN = 1
     PULL_UP = 2
+    OUT = 3
+    fail = ()                                   # pin numbers that raise
 
     def __init__(self, n, *a, **k):
+        if n in Pin.fail:
+            raise ValueError("invalid pin")
         self.n = n
+        self._v = 0
 
-    def value(self):
-        return 1
+    def value(self, v=None):
+        if v is None:
+            return 1
+        self._v = v
+        _pin_levels.append((self.n, v, _clock[0]))
+        return None
 
 
 class I2C(object):
@@ -342,6 +355,15 @@ def _install_mocks():
     machine.SOFT_RESET = 4
     machine.HARD_RESET = 2
     machine.reset_cause = lambda: _reset_cause[0]
+
+    def _freq(v=None):
+        if v is None:
+            return _freqs[-1]
+        if v not in (20000000, 40000000, 80000000, 160000000, 240000000):
+            raise ValueError("bad freq")
+        _freqs.append(v)
+        return None
+    machine.freq = _freq
     sys.modules["machine"] = machine
 
     ssd = types.ModuleType("ssd1306")
@@ -3101,9 +3123,9 @@ try:
         return ("$%s*%02X" % (body, c)).encode()
 
     def epoch(hhmmss, lat="4730.000", lon="01900.000", status="A", q=1,
-              hdop="1.0", alt="100.0", date="171026"):
-        gl.handle(nmea("GPRMC,%s,%s,%s,N,%s,E,10.0,90.0,%s,,,A"
-                       % (hhmmss, status, lat, lon, date)))
+              hdop="1.0", alt="100.0", date="171026", kn="2.0"):
+        gl.handle(nmea("GPRMC,%s,%s,%s,N,%s,E,%s,90.0,%s,,,A"
+                       % (hhmmss, status, lat, lon, kn, date)))
         gl.handle(nmea("GPGGA,%s,%s,N,%s,E,%d,08,%s,%s,M,40.0,M,,"
                        % (hhmmss, lat, lon, q, hdop, alt)))
 
@@ -3142,6 +3164,17 @@ try:
           and gl.st["seq"] == 1 and abs(gl.st["hdop"] - 1.2) < 1e-6,
           "lat=%r epochs=%s hdop=%s" % (gl.st["lat"], gl.st["epochs"],
                                         gl.st["hdop"]))
+    # AVG: moving faster than AVG_MAX_SPEED the point is the second's first
+    # fix (the mean would lie ~0.4 s along the track, stamped the second)
+    gl.reset()
+    for k, la in enumerate(lats):
+        epoch("120010.%02d" % (k * 20), lat=la, kn="20.0" if k == 2 else "2.0",
+              hdop="%.1f" % (1.0 + k * 0.1))
+    epoch("120011.00", lat="4731.0000")
+    check("AVG: above AVG_MAX_SPEED the point is the second's first fix",
+          gl.st["epochs"] == 5 and abs(gl.st["lat"] - 47.5) < 1e-7
+          and abs(gl.st["hdop"] - 1.2) < 1e-6,
+          "lat=%r hdop=%s" % (gl.st["lat"], gl.st["hdop"]))
     gl.reset()
     for k in range(5):
         epoch("120020.%02d" % (k * 20), q=0 if k < 3 else 1,
@@ -3246,6 +3279,14 @@ try:
           gl._ubx(6, 1, bytes((0xF0, 2, gl.GPS_HZ))).hex() in frames
           and gl._ubx(6, 1, bytes((0xF0, 0, 1))).hex() in frames
           and gl._ubx(6, 1, bytes((0xF0, 4, 1))).hex() in frames)
+    nav5 = gl._nav5()
+    pl = nav5[6:-2]
+    check("UBX: CFG-NAV5 (36 B) sets automotive, 3D only, 10 deg, static hold",
+          nav5[2:4] == b"\x06\x24" and len(pl) == 36
+          and pl[0] == 0x17 and pl[1] == 0 and pl[2] == gl.GPS_DYN_MODEL
+          and pl[3] == gl.GPS_FIX_MODE and pl[12] == gl.GPS_MIN_ELEV
+          and pl[22] == gl.GPS_STATIC_HOLD and nav5.hex() in frames
+          and frames.index(nav5.hex()) == 1, nav5.hex())
     # ACK: 1 Hz first, every frame until acknowledged, stop if nobody answers
     _uart_tx[:] = []
     gl.gps_setup()
@@ -3253,13 +3294,13 @@ try:
     check("ACK: the setup starts at 1 Hz and ends at GPS_HZ, all acknowledged",
           _uart_tx[0].hex() == rate1000
           and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex()
-          and len(_uart_tx) == len(gl.GPS_MSGS) + 2
+          and len(_uart_tx) == len(gl.GPS_MSGS) + 3
           and gl.st["setup_ok"] is True)
     _uart_tx[:] = []
     _uart_drop[0] = 2                               # two frames lost
     gl.gps_setup()
     check("ACK: a dropped frame is sent again until acknowledged",
-          len(_uart_tx) == len(gl.GPS_MSGS) + 4
+          len(_uart_tx) == len(gl.GPS_MSGS) + 5
           and _uart_tx[0] == _uart_tx[1] == _uart_tx[2]
           and gl.st["setup_ok"] is True, "frames=%d" % len(_uart_tx))
     _uart_tx[:] = []
@@ -3400,7 +3441,7 @@ try:
     check("UBX: a receiver silent after the first frame blocks ~4 s",
           gl.st["setup_ok"] is False
           and _clock[0] - t0 <= 2 * gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 500
-          and len(_uart_tx) == 1 + gl.GPS_ACK_TRIES + len(gl.GPS_MSGS) - 1,
+          and len(_uart_tx) == 1 + gl.GPS_ACK_TRIES + len(gl.GPS_MSGS),
           "ms=%d frames=%d" % (_clock[0] - t0, len(_uart_tx)))
     check("UBX: ... and stays at 1 Hz: no GPS_HZ frame after an unanswered one",
           gl._rate(1000 // gl.GPS_HZ).hex()
@@ -4254,6 +4295,86 @@ try:
           and len(WLAN.connects) > n_conn)
     os.remove(os.path.join(rv_dir, "20261018_080000.trk"))
 
+    # OFF: while uploads back off for WIFI_OFF_WAIT or more (server down,
+    # 401) the radio goes off until the retry is due, then a round
+    # reconnects and the upload goes on; a short backoff keeps it on
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+    off_trk = os.path.join(rv_dir, "20261018_100000.trk")
+    make_trk(off_trk, 3)
+    gl.up["left"] = 3
+    _posts[:] = []
+    _post_code[0] = 503
+    pump()                                           # backoff 15 s: on
+    _clock[0] += gl.WIFI_IDLE
+    gl.wifi_tick()
+    check("OFF: a short upload backoff keeps the radio on",
+          len(_posts) == 1 and gl.up["state"] == "err 503"
+          and gl.wifi["state"] == "connected" and wl().active(),
+          "state=%s up=%s" % (gl.wifi["state"], gl.up["state"]))
+    for _ in range(3):                               # 30 s, 60 s, 120 s
+        _clock[0] = gl.up["next_at"]
+        gl.upload_tick()
+    wait = gl.up["next_at"] - _clock[0]
+    _clock[0] += gl.WIFI_IDLE
+    gl.wifi_tick()
+    check("OFF: a backoff of WIFI_OFF_WAIT or more turns the radio off",
+          wait >= gl.WIFI_OFF_WAIT and gl.wifi["state"] == "sleep"
+          and not wl().active()
+          and gl.wifi["wake_at"] == gl.up["next_at"],
+          "wait=%s state=%s" % (wait, gl.wifi["state"]))
+    n_conn = len(WLAN.connects)
+    _clock[0] = gl.wifi["wake_at"] - 2 * gl.WIFI_IDLE
+    gl.wifi_tick()
+    check("OFF: it stays off until the retry is due",
+          gl.wifi["state"] == "sleep" and len(WLAN.connects) == n_conn)
+    _post_code[0] = 201
+    _clock[0] = gl.wifi["wake_at"] + 1
+    gl.wifi_tick()
+    drain_wifi()
+    gl.upload_tick()
+    _clock[0] += gl.WIFI_IDLE
+    gl.wifi_tick()
+    check("OFF: when the retry is due a round connects, uploads and sleeps",
+          len(WLAN.connects) > n_conn and len(_posts) == 5
+          and _posts[-1]["data"].count(b'"type":"Feature"') == 3
+          and gl.up["state"] == "ok" and gl.wifi["state"] == "sleep"
+          and gl.wifi["wake_at"] is None,
+          "posts=%d up=%s state=%s" % (len(_posts), gl.up["state"],
+                                        gl.wifi["state"]))
+
+    # CPU: 80 MHz in the loop, CPU_MHZ_UPLOAD around a POST, back after
+    sv_reset()
+    w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+    check("CPU: wifi_start sets CPU_MHZ (default 80 MHz)",
+          _freqs[-1] == gl.CPU_MHZ * 1000000 and gl.CPU_MHZ == 80,
+          "freqs=%s" % _freqs[-3:])
+    make_trk(off_trk, 2)
+    gl.up["left"] = 2
+    _posts[:] = []
+    n0 = len(_freqs)
+    pump()
+    check("CPU: a POST runs at CPU_MHZ_UPLOAD and the loop clock comes back",
+          len(_posts) == 1 and _freqs[n0:] == [gl.CPU_MHZ_UPLOAD * 1000000,
+                                               gl.CPU_MHZ * 1000000],
+          "freqs=%s" % _freqs[n0:])
+    saved_cpu = gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD
+    try:
+        a = gl._mhz_env({"CPU_MHZ": "160  # fast"}, "CPU_MHZ", 80)
+        b = gl._mhz_env({"CPU_MHZ": "0"}, "CPU_MHZ", 80)
+        c = gl._mhz_env({"CPU_MHZ": "100"}, "CPU_MHZ", 80)
+        d = gl._mhz_env({}, "CPU_MHZ", 80)
+        n0 = len(_freqs)
+        gl._set_freq(0)
+        gl._set_freq(100)                            # unsupported: left alone
+        gl._set_freq(_freqs[-1] // 1000000)          # already there: no call
+        same = len(_freqs) == n0
+    finally:
+        gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD = saved_cpu
+    check("CPU: .env CPU_MHZ 160 / 0 taken, 100 and missing keep the default",
+          (a, b, c, d) == (160, 0, 80, 80) and same,
+          "%s %s %s %s same=%s" % (a, b, c, d, same))
+
     # a round that finds no network: nothing to upload -> sleep; with a
     # track waiting -> the usual backoff, 15 s doubling to 10 min, until a
     # network connects
@@ -4414,32 +4535,84 @@ try:
           gl.wifi["state"] == "connected" and weak is False and strong is True,
           "weak=%s strong=%s" % (weak, strong))
 
-    # PB_KEEPALIVE: with the radio asleep, one scan every PB_KEEPALIVE ms keeps a
-    # power bank from switching off; none while the radio is on anyway
+    # PB_KEEPALIVE: with the radio asleep, one pulse every PB_KEEPALIVE ms
+    # keeps a power bank from switching off; none while the radio is on
+    # anyway. PB_MODE: "radio" (on/off, default), "scan", "gpio" (a pin)
     scans = [0]
+    ons = [0]
     real_scan = WLAN.scan
+    real_active = WLAN.active
 
     def counting_scan(self):
         scans[0] += 1
         return real_scan(self)
+
+    def counting_active(self, x=None):
+        if x:
+            ons[0] += 1
+        return real_active(self, x)
     WLAN.scan = counting_scan
+    WLAN.active = counting_active
+    saved_mode, saved_pin = gl.PB_MODE, gl.PB_PIN
     try:
         sv_reset()
         w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
         for _ in range(3):
             _clock[0] += gl.PB_KEEPALIVE
             gl.keepalive_tick(_clock[0])
-        check("PB_KEEPALIVE: no keep-alive scan while connected",
+        check("PB_KEEPALIVE: no keep-alive pulse while connected",
               gl.wifi["state"] == "connected" and gl.wifi["pb_scans"] == 0)
         gl._wifi_off(wl(), "sleep")
+        gl.PB_MODE = "radio"
+        n0, o0 = scans[0], ons[0]
+        for _ in range(4):
+            _clock[0] += gl.PB_KEEPALIVE // 2
+            gl.keepalive_tick(_clock[0])
+        check("PB_KEEPALIVE radio: asleep -> radio on/off per PB_KEEPALIVE, no scan",
+              scans[0] - n0 == 0 and ons[0] - o0 == 2 and gl.wifi["pb_scans"] == 2
+              and not wl().active() and gl.wifi["state"] == "sleep",
+              "scans=%d ons=%d" % (scans[0] - n0, ons[0] - o0))
+        gl.PB_MODE = "scan"
         n0 = scans[0]
         for _ in range(4):
             _clock[0] += gl.PB_KEEPALIVE // 2
             gl.keepalive_tick(_clock[0])
-        check("PB_KEEPALIVE: asleep -> one scan per PB_KEEPALIVE, radio off after",
-              scans[0] - n0 == 2 and gl.wifi["pb_scans"] == 2
+        check("PB_KEEPALIVE scan: one scan per PB_KEEPALIVE, radio off after",
+              scans[0] - n0 == 2 and gl.wifi["pb_scans"] == 4
               and not wl().active() and gl.wifi["state"] == "sleep",
               "scans=%d" % (scans[0] - n0))
+        gl.PB_MODE = "gpio"
+        gl.PB_PIN = 26
+        gl._pb_pin = None
+        del _pin_levels[:]
+        n0, o0 = scans[0], ons[0]
+        _clock[0] += gl.PB_KEEPALIVE
+        gl.keepalive_tick(_clock[0])
+        lv = list(_pin_levels)
+        check("PB_KEEPALIVE gpio: the pin goes high for PB_PULSE_MS, radio untouched",
+              [(n, v) for n, v, t in lv] == [(26, 0), (26, 1), (26, 0)]
+              and lv[2][2] - lv[1][2] == gl.PB_PULSE_MS
+              and scans[0] == n0 and ons[0] == o0 and gl.wifi["pb_scans"] == 5,
+              "levels=%r" % lv)
+        gl.PB_PIN = 99
+        gl._pb_pin = None
+        Pin.fail = (99,)
+        o0 = ons[0]
+        try:
+            _clock[0] += gl.PB_KEEPALIVE
+            gl.keepalive_tick(_clock[0])
+        finally:
+            Pin.fail = ()
+        check("PB_KEEPALIVE gpio: an unusable pin falls back to radio for good",
+              gl.PB_MODE == "radio" and ons[0] - o0 == 1
+              and gl.wifi["pb_scans"] == 6, "mode=%s" % gl.PB_MODE)
+        gl.PB_MODE = "radio"
+        gl._keepalive_env({"KEEPALIVE_MODE": "Scan", "KEEPALIVE_PIN": "12"})
+        m1, p1 = gl.PB_MODE, gl.PB_PIN
+        gl._keepalive_env({"KEEPALIVE_MODE": "laser", "KEEPALIVE_PIN": "x"})
+        check("PB_KEEPALIVE: .env KEEPALIVE_MODE / KEEPALIVE_PIN, bad ones kept",
+              m1 == "scan" and p1 == 12 and gl.PB_MODE == "scan"
+              and gl.PB_PIN == 12, "%s %s %s %s" % (m1, p1, gl.PB_MODE, gl.PB_PIN))
         saved = gl.PB_KEEPALIVE
         try:
             gl._keepalive_env({"KEEPALIVE": "0"})
@@ -4463,6 +4636,8 @@ try:
               "%s %s %s %s %s" % (off, thirty, kept, kept2, none))
     finally:
         WLAN.scan = real_scan
+        WLAN.active = real_active
+        gl.PB_MODE, gl.PB_PIN, gl._pb_pin = saved_mode, saved_pin, None
 
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")
