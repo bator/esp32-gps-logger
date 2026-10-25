@@ -20,6 +20,26 @@ GPS_MAX_STD = 20                         # m: receiver's own error estimate
                                          # (GST) above this = not usable
 GPS_RETRY = 5000                         # ms: setup sent again if 1 Hz
 GPS_RETRY_MAX = 300000                   # sentences still come this long after
+# UBX-CFG-NAV5: how the receiver's own filter is tuned (sent with the setup)
+GPS_DYN_MODEL = 4                        # 0 portable, 2 stationary, 3 pedestrian,
+                                         # 4 automotive (filter tuned to a car)
+GPS_FIX_MODE = 2                         # 1 2D only, 2 3D only, 3 auto. 2D
+                                         # fixes guess the altitude and are
+                                         # tens of metres off horizontally
+GPS_MIN_ELEV = 10                        # deg: ignore satellites lower than
+                                         # this (the multipath-prone ones)
+GPS_STATIC_HOLD = 50                     # cm/s: below this speed the receiver
+                                         # freezes its position (no parked
+                                         # zigzag); 0 = off. A walk is 140.
+AVG_MAX_SPEED = 10                       # km/h: above this a second's point
+                                         # is its first fix, not the mean (the
+                                         # mean lies ~0.4 s along the track:
+                                         # 6 m at 50 km/h, stamped the second)
+CPU_MHZ = 80                             # CPU clock in the main loop (ESP32:
+                                         # 20/40/80/160/240, C6: 80/160);
+                                         # 0 leaves the firmware default
+CPU_MHZ_UPLOAD = 160                     # clock during a POST (TLS); 0 = no
+                                         # change. .env CPU_MHZ / CPU_MHZ_UP
 STATUS = 600000                          # ms between console status lines
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
@@ -104,10 +124,22 @@ WIFI_SLEEP = 3600000                     # ms the radio stays off once all is
                                          # to upload)
 WIFI_IDLE = 10000                        # ms between "all uploaded?" checks
 PB_KEEPALIVE = 5000                      # ms between power bank keep-alive
-                                         # scans while the radio sleeps (0 =
+                                         # pulses while the radio sleeps (0 =
                                          # off; .env KEEPALIVE=<seconds>).
                                          # 15 s kept the 20 Ah bank on for
                                          # 3 h, not for good: it averages
+PB_MODE = "radio"                        # what a pulse is (.env KEEPALIVE_MODE):
+                                         # "scan": radio on, one scan (~2 s at
+                                         # ~100 mA: +40 mA average at 5 s);
+                                         # "radio": radio on and off again, no
+                                         # scan (~0.2 s burst, ~5 mA average);
+                                         # "gpio": PB_PIN high PB_PULSE_MS
+                                         # (a load resistor via a MOSFET)
+PB_PIN = 2 if "ESP32C6" in getattr(sys.implementation, "_machine", "") else 26
+PB_PULSE_MS = 100                        # ms the gpio pulse lasts
+WIFI_OFF_WAIT = 60000                    # ms: an upload backoff at least
+                                         # this long turns the radio off
+                                         # until it is due (server down, 401)
 WIFI_WAKE_WAIT = 60000                   # ms a new stay waits for the WiFi
                                          # round before its first anchor point
 CONNECT_TIMEOUT = 12000                  # ms to wait for GOT_IP per network
@@ -194,7 +226,7 @@ def _ep_new(t):
     # add up latitudes to the metre); alt / hdop: [sum, n]
     ep.clear()
     ep.update(t=t, date=None, g=None, r=None, alt=[0.0, 0], hdop=[0.0, 0],
-              std=None)
+              std=None, spd=None)
 
 def _num(s, conv=float):
     return conv(s) if s else None
@@ -237,9 +269,10 @@ def _second(s):
 
 def _publish():
     """Make the finished second the current fix: the mean of its valid GGA
-    positions (RMC ones when it had no GGA). A second without one is no
-    fix. Only RMC carries the date: a second that runs back past midnight
-    without its own RMC has none, or its fix would be dated a day back."""
+    positions (RMC ones when it had no GGA), or its first fix when it moved
+    faster than AVG_MAX_SPEED. A second without one is no fix. Only RMC
+    carries the date: a second that runs back past midnight without its own
+    RMC has none, or its fix would be dated a day back."""
     t, date = ep["t"], ep["date"]
     if date is None and st["time"] is not None and t < st["time"]:
         st["date"] = None
@@ -252,7 +285,13 @@ def _publish():
     if a is None:
         return
     n = a[4]
-    st["lat"], st["lon"] = a[0] + a[2] / n, a[1] + a[3] / n
+    spd = ep["spd"]
+    if n > 1 and spd is not None and spd > AVG_MAX_SPEED:
+        # moving: the mean of the second lies ~0.4 s along the track but is
+        # stamped with the second, so the point is the second's first fix
+        st["lat"], st["lon"] = a[0], a[1]
+    else:
+        st["lat"], st["lon"] = a[0] + a[2] / n, a[1] + a[3] / n
     alt, hd = ep["alt"], ep["hdop"]
     st["alt"] = alt[0] / alt[1] if alt[1] else None
     now = time.ticks_ms()
@@ -286,6 +325,8 @@ def rmc(talker, f):
     st["status"] = f[2]
     kn = _num(f[7])
     st["speed"] = None if kn is None else kn * 1.852
+    if kn is not None and (ep["spd"] is None or st["speed"] > ep["spd"]):
+        ep["spd"] = st["speed"]          # the second's top speed
     st["course"] = _num(f[8])
     d = f[9]
     if len(d) == 6:
@@ -367,6 +408,18 @@ def _rate(ms):
     """UBX-CFG-RATE: measRate ms, navRate 1, timeRef 1 (GPS time)."""
     return _ubx(0x06, 0x08, bytes((ms & 255, ms >> 8, 1, 0, 1, 0)))
 
+def _nav5():
+    """UBX-CFG-NAV5: dynamic model, fix mode, elevation mask and static
+    hold (mask bits 0x01, 0x02, 0x04, 0x10); the other fields are left as
+    they are (not masked). 36-byte payload, u-blox 6 to M10."""
+    p = bytearray(36)
+    p[0] = 0x17                          # mask: dyn | minEl | posFixMode |
+    p[2] = GPS_DYN_MODEL                 # staticHoldMask
+    p[3] = GPS_FIX_MODE
+    p[12] = GPS_MIN_ELEV & 255           # minElev, int8 degrees
+    p[22] = min(max(GPS_STATIC_HOLD, 0), 255)   # staticHoldThresh cm/s
+    return _ubx(0x06, 0x24, bytes(p))
+
 def _ubx_ack(frame):
     """Send a UBX-CFG frame until the receiver acknowledges it (UBX-ACK-ACK
     for its class and id), at most GPS_ACK_TRIES times. An overrun receiver
@@ -392,8 +445,9 @@ def _ubx_ack(frame):
     return False
 
 def gps_setup():
-    """Ask the receiver for GPS_HZ fixes a second, frame by frame until each
-    is acknowledged. First back to 1 Hz: at GPS_HZ with every sentence on
+    """Ask the receiver for GPS_HZ fixes a second (and the NAV5 filter
+    settings), frame by frame until each is acknowledged. First back to 1
+    Hz: at GPS_HZ with every sentence on
     (what a receiver that took only part of a setup sends) its output
     overruns 9600 baud, and then it drops incoming frames (measured on the
     board). Not saved in the receiver, so it is sent at every boot. If the
@@ -413,7 +467,7 @@ def gps_setup():
         # receiver that stops answering blocks the loop ~4 s, not ~4 s per
         # frame) and the receiver stays at 1 Hz until gps_check retries.
         if _ubx_ack(_rate(1000)):
-            ok = True
+            ok = _ubx_ack(_nav5())
             for fr in msgs:
                 if ok:
                     ok = _ubx_ack(fr)
@@ -456,12 +510,39 @@ def _temp():
     except Exception:
         return None
 
+def _set_freq(mhz):
+    """CPU clock: 80 MHz saves ~15-25 mA on the ESP32 against 240 (the UART
+    runs off the fixed APB clock, WiFi needs 80 or more). Unsupported on
+    this board or value: left alone, with a console line once."""
+    if not mhz:
+        return
+    try:
+        if machine.freq() != mhz * 1000000:
+            machine.freq(mhz * 1000000)
+    except Exception as e:
+        print("cpu freq", mhz, repr(e))
+
+def _mhz_env(env, key, default):
+    v = _plain(env.get(key))
+    if not v:
+        return default
+    try:
+        n = int(v)
+    except ValueError:
+        print(key, "invalid, using", default)
+        return default
+    if n == 0 or n in (20, 40, 80, 160, 240):
+        return n
+    print(key, "not 0/20/40/80/160/240, using", default)
+    return default
+
 def _status():
     """One console line: chip temperature (the die, not the GPS module),
     fixes in the last second, satellites, HDOP, points and uploads."""
     print("status temp", _temp(), "hz", st["epochs"], "used", st["used"],
           "hdop", st["hdop"], "points", log["points"], "sent", up["sent"],
-          "wifi", wifi["state"])
+          "wifi", wifi["state"], "pulses", wifi["pb_scans"],
+          "mem", gc.mem_free())
 
 def checksum_ok(line):
     star = line.rfind(b"*")
@@ -771,7 +852,7 @@ def wifi_reset():
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
                 retried=False, idle_at=time.ticks_ms(), sleep_home=False,
                 pb_at=time.ticks_ms(), pb_scans=0,
-                wake=False,
+                wake=False, wake_at=None,
                 blank_rssi=None, blank_bssid=None)
 
 def _set_hostname(name):
@@ -1122,8 +1203,29 @@ def _wifi_off(w, state):
         wifi["sleep_home"] = bool(at_home() and log["still"]["active"])
     _radio_off(w)
     wifi.update(state=state, home=False, ip=None, rssi=None, wake=False,
-                backoff=WIFI_RETRY, last_check=time.ticks_ms())
+                wake_at=None, backoff=WIFI_RETRY, last_check=time.ticks_ms())
     print("wifi", state, "home" if wifi["sleep_home"] else "")
+
+def _upload_wait(now):
+    """ms until the next upload attempt is due, 0 when it is (or nothing
+    waits): the time an upload error (server down, 401, 5xx) backed off."""
+    if not str(up.get("state") or "").startswith("err"):
+        return 0
+    d = time.ticks_diff(up["next_at"], now)
+    return d if 0 < d <= UP_WAIT_MAX else 0
+
+def _wifi_off_backoff(w, now):
+    """Uploads back off for a while (WIFI_OFF_WAIT or more): the radio
+    idles connected for nothing (~20-30 mA), so it goes off until the
+    attempt is due (wake_at), then a round connects and uploads again. A
+    stay that began at home stays a home stay meanwhile (sleep_home)."""
+    wait = _upload_wait(now)
+    if wait < WIFI_OFF_WAIT:
+        return False
+    _wifi_off(w, "sleep")
+    wifi["wake_at"] = time.ticks_add(now, wait)
+    print("wifi off until upload retry", wait // 1000, "s")
+    return True
 
 def _wifi_begin_round(w):
     try:
@@ -1228,31 +1330,83 @@ def _try_roam_home(w, arrival=False):
 
 def _keepalive_env(env):
     """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
-    5-600 s between scans; anything else keeps the default."""
-    global PB_KEEPALIVE
+    5-600 s between pulses; anything else keeps the default. KEEPALIVE_MODE
+    picks the pulse (scan / radio / gpio), KEEPALIVE_PIN the gpio."""
+    global PB_KEEPALIVE, PB_MODE, PB_PIN
     v = _plain(env.get("KEEPALIVE"))
-    if not v:
-        return
+    if v:
+        try:
+            n = int(v)
+            if n == 0:
+                PB_KEEPALIVE = 0
+            elif 5 <= n <= 600:
+                PB_KEEPALIVE = n * 1000
+            else:
+                print("KEEPALIVE out of 0 or 5-600 s, using",
+                      PB_KEEPALIVE // 1000, "s")
+        except ValueError:
+            print("KEEPALIVE invalid, using", PB_KEEPALIVE // 1000, "s")
+    m = _plain(env.get("KEEPALIVE_MODE"))
+    if m:
+        m = m.lower()
+        if m in ("scan", "radio", "gpio"):
+            PB_MODE = m
+        else:
+            print("KEEPALIVE_MODE not scan/radio/gpio, using", PB_MODE)
+    v = _plain(env.get("KEEPALIVE_PIN"))
+    if v:
+        try:
+            PB_PIN = int(v)
+        except ValueError:
+            print("KEEPALIVE_PIN invalid, using", PB_PIN)
+
+_pb_pin = None
+
+def _pb_pulse_gpio():
+    """PB_PIN high for PB_PULSE_MS: a load resistor through a MOSFET draws
+    the burst a power bank looks for (22 ohm on 5 V: ~230 mA for 0.1 s,
+    ~5 mA average at 5 s). False when the pin cannot be driven."""
+    global _pb_pin
     try:
-        n = int(v)
-    except ValueError:
-        print("KEEPALIVE invalid, using", PB_KEEPALIVE // 1000, "s")
-        return
-    if n == 0:
-        PB_KEEPALIVE = 0
-    elif 5 <= n <= 600:
-        PB_KEEPALIVE = n * 1000
-    else:
-        print("KEEPALIVE out of 0 or 5-600 s, using", PB_KEEPALIVE // 1000, "s")
+        if _pb_pin is None:
+            _pb_pin = Pin(PB_PIN, Pin.OUT)
+            _pb_pin.value(0)
+        _pb_pin.value(1)
+        time.sleep_ms(PB_PULSE_MS)
+        _pb_pin.value(0)
+        return True
+    except Exception as e:
+        try:
+            _pb_pin.value(0)
+        except Exception:
+            pass
+        print("keepalive gpio", PB_PIN, repr(e))
+        return False
+
+def _pb_pulse_radio(w, scan):
+    """Radio on (and one scan), off again. The radio start-up alone is a
+    ~100-200 mA burst for a fraction of a second; a scan holds it ~2 s."""
+    try:
+        w.active(True)
+        if scan:
+            w.scan()
+    except OSError:
+        pass
+    finally:
+        try:
+            w.active(False)
+        except OSError:
+            pass
 
 def keepalive_tick(now):
     """Power bank keep-alive. With the radio asleep the board draws less
     than many power banks count as a load, and they switch off (the
     board's 20 Ah bank after 1 h; with a scan every 15 s after 3 h, so it
-    averages the load over a long time). Every PB_KEEPALIVE ms the radio is
-    turned on for one scan (~2 s at ~100 mA, ~40% of the time at 5 s) and
-    off again. Not while the radio is on anyway (connected, connecting,
-    lost). GPS seconds published during a scan are queued, not lost."""
+    averages the load over a long time). Every PB_KEEPALIVE ms one pulse
+    goes out (PB_MODE: a gpio load pulse, the radio turned on and off, or
+    a full scan). Not while the radio is on anyway (connected, connecting,
+    lost). GPS seconds published during a pulse are queued, not lost."""
+    global PB_MODE
     w = wifi.get("wlan")
     if (not PB_KEEPALIVE or w is None
             or wifi["state"] not in ("sleep", "not found")):
@@ -1262,22 +1416,22 @@ def keepalive_tick(now):
         return
     wifi["pb_at"] = now
     feed()
-    try:
-        w.active(True)
-        w.scan()
-    except OSError:
-        pass
-    finally:
-        try:
-            w.active(False)
-        except OSError:
-            pass
+    if PB_MODE == "gpio":
+        if not _pb_pulse_gpio():
+            PB_MODE = "radio"            # no such pin: fall back for good
+            print("keepalive mode radio")
+            _pb_pulse_radio(w, False)
+    else:
+        _pb_pulse_radio(w, PB_MODE == "scan")
     wifi["pb_scans"] += 1
     feed()
 
 def wifi_start():
-    global DEVICE_ID, HOSTNAME
+    global DEVICE_ID, HOSTNAME, CPU_MHZ, CPU_MHZ_UPLOAD
     env = load_env(ENV_FILE)
+    CPU_MHZ = _mhz_env(env, "CPU_MHZ", CPU_MHZ)
+    CPU_MHZ_UPLOAD = _mhz_env(env, "CPU_MHZ_UP", CPU_MHZ_UPLOAD)
+    _set_freq(CPU_MHZ)
     wifi["nets"] = _load_nets(env)
     if wifi["nets"]:
         wifi["ssid"] = wifi["nets"][0]["ssid"]
@@ -1353,6 +1507,8 @@ def wifi_tick():
                 wifi["idle_at"] = now
                 if _all_uploaded():
                     _wifi_off(w, "sleep")
+                else:
+                    _wifi_off_backoff(w, now)
         return
     if wifi["state"] == "connected":
         # v1.29 reports STAT_CONNECTING on beacon timeout while the IDF
@@ -1378,14 +1534,18 @@ def wifi_tick():
         _wifi_poll(w)
         return
     if wifi["state"] == "sleep":
-        # after WIFI_SLEEP, only once there is something to upload
+        # after WIFI_SLEEP, only once there is something to upload; sooner
+        # when a backed-off upload is due again (wake_at)
         if not wifi.get("wake"):
-            if _age(now, wifi["last_check"]) < WIFI_SLEEP:
+            at = wifi.get("wake_at")
+            due = at is not None and not _waiting(now, at, UP_WAIT_MAX)
+            if not due and _age(now, wifi["last_check"]) < WIFI_SLEEP:
                 return
             if _age(now, wifi["idle_at"]) < WIFI_IDLE:
                 return
             wifi["idle_at"] = now
             if _all_uploaded():
+                wifi["wake_at"] = None
                 return
         wifi["wake"] = False
         wifi["backoff"] = WIFI_RETRY
@@ -2639,12 +2799,17 @@ def upload_tick():
         up["state"] = "sending"
     read_uart()                          # drain NMEA before blocking
     gc.collect()
+    if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
+        _set_freq(CPU_MHZ_UPLOAD)        # TLS handshake at full speed
     try:
         code, retry = _http_post(size)
     except MemoryError:
         up["skip"] = path
         _low_mem(time.ticks_ms())
         return
+    finally:
+        if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
+            _set_freq(CPU_MHZ)
     read_uart()                          # catch up after a multi-second POST
     now = time.ticks_ms()
     print("upload", path, n, n_ok, code, gc.mem_free())
