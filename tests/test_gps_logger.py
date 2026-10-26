@@ -32,6 +32,8 @@ _uart_tx = []
 _uart_rx = bytearray()
 _uart_ack = [True]
 _uart_drop = [0]
+_uart_nak = set()
+_uart_silent = set()
 _freqs = [240000000]
 
 
@@ -88,8 +90,11 @@ class UART(object):
         if _uart_ack[0] and data[:3] == b"\xb5\x62\x06":
             if _uart_drop[0]:
                 _uart_drop[0] -= 1
+            elif (data[2], data[3]) in _uart_silent:
+                pass
             else:
-                ack = bytes((0x05, 0x01, 2, 0, data[2], data[3]))
+                kind = 0x00 if (data[2], data[3]) in _uart_nak else 0x01
+                ack = bytes((0x05, kind, 2, 0, data[2], data[3]))
                 ca = cb = 0
                 for x in ack:
                     ca = (ca + x) & 255
@@ -3281,12 +3286,98 @@ try:
           and gl._ubx(6, 1, bytes((0xF0, 4, 1))).hex() in frames)
     nav5 = gl._nav5()
     pl = nav5[6:-2]
-    check("UBX: CFG-NAV5 (36 B) sets automotive, 3D only, 10 deg, static hold",
+    check("UBX: CFG-NAV5 (36 B) sets the model, 3D only, 10 deg, static hold",
           nav5[2:4] == b"\x06\x24" and len(pl) == 36
-          and pl[0] == 0x17 and pl[1] == 0 and pl[2] == gl.GPS_DYN_MODEL
+          and pl[1] == 0 and pl[2] == gl.GPS_DYN_MODEL
           and pl[3] == gl.GPS_FIX_MODE and pl[12] == gl.GPS_MIN_ELEV
           and pl[22] == gl.GPS_STATIC_HOLD and nav5.hex() in frames
           and frames.index(nav5.hex()) == 1, nav5.hex())
+    # u-blox CFG-NAV5 mask: 0x01 dyn, 0x02 minEl, 0x04 fixMode, 0x08 drLim,
+    # 0x10 posMask, 0x20 timeMask, 0x40 staticHoldMask
+    check("UBX: NAV5 mask applies dyn, minEl, fixMode and static hold only",
+          pl[0] == 0x01 | 0x02 | 0x04 | 0x40 and not pl[0] & 0x10
+          and not pl[0] & 0x20, "mask=0x%02x" % pl[0])
+    check("UBX: the default dynamic model is portable (car and foot alike)",
+          gl.GPS_DYN_MODEL == 0)
+    # NAV5 refused (NAK) -> the 5 Hz setup goes on; silent -> stays at 1 Hz
+    _uart_tx[:] = []
+    _uart_nak.add((0x06, 0x24))
+    try:
+        gl.gps_setup()
+    finally:
+        _uart_nak.discard((0x06, 0x24))
+    check("UBX: a NAV5 NAK does not stop the 5 Hz setup",
+          gl.st["setup_ok"] is True and gl.st["nav5_ok"] is False
+          and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex(),
+          "ok=%s nav5=%s" % (gl.st["setup_ok"], gl.st["nav5_ok"]))
+    _uart_tx[:] = []
+    _uart_silent.add((0x06, 0x24))
+    t0 = _clock[0]
+    try:
+        gl.gps_setup()
+    finally:
+        _uart_silent.discard((0x06, 0x24))
+    check("UBX: a receiver silent at NAV5 stays at 1 Hz, ~4 s block",
+          gl.st["setup_ok"] is False
+          and gl._rate(1000 // gl.GPS_HZ).hex()
+          not in [f.hex() for f in _uart_tx]
+          and _clock[0] - t0 <= 2 * gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT,
+          "ms=%d" % (_clock[0] - t0))
+    _uart_tx[:] = []
+    gl.gps_setup()
+    check("UBX: setup acknowledged again afterwards (NAV5 accepted)",
+          gl.st["setup_ok"] is True and gl.st["nav5_ok"] is True)
+    # GPS_MODEL from .env, read before the first setup
+    saved_model = gl.GPS_DYN_MODEL
+    try:
+        gl._gps_model_env({"GPS_MODEL": "3  # on foot"})
+        m3 = gl.GPS_DYN_MODEL
+        gl._gps_model_env({"GPS_MODEL": "1"})
+        m_bad = gl.GPS_DYN_MODEL
+        gl._gps_model_env({"GPS_MODEL": "car"})
+        m_bad2 = gl.GPS_DYN_MODEL
+        gl.GPS_DYN_MODEL = 4
+        gl_nav = gl._nav5()[6 + 2]
+    finally:
+        gl.GPS_DYN_MODEL = saved_model
+    import inspect
+    run_src = inspect.getsource(gl.run)
+    check("UBX: .env GPS_MODEL sets the model (invalid kept), before the setup",
+          m3 == 3 and m_bad == 3 and m_bad2 == 3 and gl_nav == 4
+          and run_src.index("_gps_model_env") < run_src.index("gps_setup()"),
+          "%s %s %s %s" % (m3, m_bad, m_bad2, gl_nav))
+    # reset loop: banner starts over and over, no NMEA -> warned and counted
+    out = []
+    real_print = gl.print if hasattr(gl, "print") else None
+    gl.print = lambda *a, **k: out.append(" ".join(str(x) for x in a))
+    try:
+        gl.reset()
+        for _ in range(4):
+            _uart_rx.extend(b"$GPTXT,01,01,02,u\xff\xff\xff" * 3)
+            gl.read_uart()
+            _clock[0] += gl.GPS_LOOP_WINDOW // 4 + 10
+            gl.gps_check(_clock[0])
+        looped = gl.st["loops"]
+        warned = any("gps reset loop" in o for o in out)
+        gl.reset()
+        _uart_rx.extend(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+                        + b"\r\n")
+        for k in range(12):
+            _uart_rx.extend(nmea("GPRMC,1205%02d.00,V,,,,,,,171026,,,N" % k)
+                            + b"\r\n")
+            gl.read_uart()
+            _clock[0] += 1000
+            gl.gps_check(_clock[0])
+        normal = gl.st["loops"]
+    finally:
+        if real_print is None:
+            del gl.print
+        else:
+            gl.print = real_print
+    check("LOOP: banner starts and no NMEA for a window -> 'gps reset loop?'",
+          looped == 1 and warned, "loops=%d out=%s" % (looped, out[-2:]))
+    check("LOOP: one start-up banner followed by NMEA is not a loop",
+          normal == 0, "loops=%d" % normal)
     # ACK: 1 Hz first, every frame until acknowledged, stop if nobody answers
     _uart_tx[:] = []
     gl.gps_setup()
@@ -4360,6 +4451,28 @@ try:
           "freqs=%s" % _freqs[n0:])
     saved_cpu = gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD
     try:
+        out = []
+        real_print = gl.print if hasattr(gl, "print") else None
+        gl.print = lambda *x, **k: out.append(" ".join(str(y) for y in x))
+        saved_c6 = gl.IS_C6
+        try:
+            gl._freq_bad[:] = []
+            gl._set_freq(100)
+            gl._set_freq(100)
+            once = sum(1 for o in out if o.startswith("cpu freq 100")) == 1
+            gl.IS_C6 = True
+            c6 = [gl._mhz_env({"CPU_MHZ": v}, "CPU_MHZ", 80)
+                  for v in ("40", "240", "160", "80", "0")]
+        finally:
+            gl.IS_C6 = saved_c6
+            if real_print is None:
+                del gl.print
+            else:
+                gl.print = real_print
+        check("CPU: an unsupported clock is reported once, not per POST",
+              once, repr(out))
+        check("CPU: on a C6 only 80/160 (or 0) are accepted from .env",
+              c6 == [80, 80, 160, 80, 0], repr(c6))
         a = gl._mhz_env({"CPU_MHZ": "160  # fast"}, "CPU_MHZ", 80)
         b = gl._mhz_env({"CPU_MHZ": "0"}, "CPU_MHZ", 80)
         c = gl._mhz_env({"CPU_MHZ": "100"}, "CPU_MHZ", 80)
@@ -4553,6 +4666,8 @@ try:
         return real_active(self, x)
     WLAN.scan = counting_scan
     WLAN.active = counting_active
+    check("PB_KEEPALIVE: the default pulse is a scan (radio was too little)",
+          gl.PB_MODE == "scan")
     saved_mode, saved_pin = gl.PB_MODE, gl.PB_PIN
     try:
         sv_reset()
@@ -4603,8 +4718,8 @@ try:
             gl.keepalive_tick(_clock[0])
         finally:
             Pin.fail = ()
-        check("PB_KEEPALIVE gpio: an unusable pin falls back to radio for good",
-              gl.PB_MODE == "radio" and ons[0] - o0 == 1
+        check("PB_KEEPALIVE gpio: an unusable pin falls back to scan for good",
+              gl.PB_MODE == "scan" and ons[0] - o0 == 1
               and gl.wifi["pb_scans"] == 6, "mode=%s" % gl.PB_MODE)
         gl.PB_MODE = "radio"
         gl._keepalive_env({"KEEPALIVE_MODE": "Scan", "KEEPALIVE_PIN": "12"})
