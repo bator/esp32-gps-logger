@@ -21,8 +21,10 @@ GPS_MAX_STD = 20                         # m: receiver's own error estimate
 GPS_RETRY = 5000                         # ms: setup sent again if 1 Hz
 GPS_RETRY_MAX = 300000                   # sentences still come this long after
 # UBX-CFG-NAV5: how the receiver's own filter is tuned (sent with the setup)
-GPS_DYN_MODEL = 4                        # 0 portable, 2 stationary, 3 pedestrian,
-                                         # 4 automotive (filter tuned to a car)
+GPS_DYN_MODEL = 0                        # 0 portable (car and foot alike),
+                                         # 2 stationary, 3 pedestrian,
+                                         # 4 automotive; .env GPS_MODEL
+GPS_MODELS = (0, 2, 3, 4, 5, 6, 7, 8)    # u-blox dynModel values
 GPS_FIX_MODE = 2                         # 1 2D only, 2 3D only, 3 auto. 2D
                                          # fixes guess the altitude and are
                                          # tens of metres off horizontally
@@ -41,11 +43,14 @@ CPU_MHZ = 80                             # CPU clock in the main loop (ESP32:
 CPU_MHZ_UPLOAD = 160                     # clock during a POST (TLS); 0 = no
                                          # change. .env CPU_MHZ / CPU_MHZ_UP
 STATUS = 600000                          # ms between console status lines
+GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
+GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
 # GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
 # main.py keeps the matching boot-bypass pin.
-if "ESP32C6" in getattr(sys.implementation, "_machine", ""):
+IS_C6 = "ESP32C6" in getattr(sys.implementation, "_machine", "")
+if IS_C6:
     GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 4, 5, 7, 6
 else:
     GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 2, 17, 16, 22, 21
@@ -128,14 +133,16 @@ PB_KEEPALIVE = 5000                      # ms between power bank keep-alive
                                          # off; .env KEEPALIVE=<seconds>).
                                          # 15 s kept the 20 Ah bank on for
                                          # 3 h, not for good: it averages
-PB_MODE = "radio"                        # what a pulse is (.env KEEPALIVE_MODE):
+PB_MODE = "scan"                         # what a pulse is (.env KEEPALIVE_MODE):
                                          # "scan": radio on, one scan (~2 s at
                                          # ~100 mA: +40 mA average at 5 s);
                                          # "radio": radio on and off again, no
-                                         # scan (~0.2 s burst, ~5 mA average);
+                                         # scan (~0.2 s burst, ~5 mA average;
+                                         # too little for the 20 Ah bank, which
+                                         # averages: +13 mA lasted 3 h only);
                                          # "gpio": PB_PIN high PB_PULSE_MS
                                          # (a load resistor via a MOSFET)
-PB_PIN = 2 if "ESP32C6" in getattr(sys.implementation, "_machine", "") else 26
+PB_PIN = 2 if IS_C6 else 26
 PB_PULSE_MS = 100                        # ms the gpio pulse lasts
 WIFI_OFF_WAIT = 60000                    # ms: an upload backoff at least
                                          # this long turns the radio off
@@ -217,7 +224,8 @@ def reset():
               hdop=None, pdop=None, ttff=None, pos_at=None, hdop_at=None,
               seq=0, epochs=0, extra=0, setup_at=None,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
-              gps_boots=0, q=[])
+              gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
+              loop_at=time.ticks_ms(), loop_b=0, loop_ok=0)
     _ep_new(None)
 
 def _ep_new(t):
@@ -410,11 +418,13 @@ def _rate(ms):
 
 def _nav5():
     """UBX-CFG-NAV5: dynamic model, fix mode, elevation mask and static
-    hold (mask bits 0x01, 0x02, 0x04, 0x10); the other fields are left as
-    they are (not masked). 36-byte payload, u-blox 6 to M10."""
+    hold (mask bits 0x01 dyn, 0x02 minEl, 0x04 fixMode, 0x40 staticHold);
+    the other fields are left as they are. Not 0x10: that is posMask, and
+    it would set the PDOP/TDOP/pAcc/tAcc masks to the zeros below. 36-byte
+    payload, u-blox 6 to M10."""
     p = bytearray(36)
-    p[0] = 0x17                          # mask: dyn | minEl | posFixMode |
-    p[2] = GPS_DYN_MODEL                 # staticHoldMask
+    p[0] = 0x47                          # dyn | minEl | fixMode | staticHold
+    p[2] = GPS_DYN_MODEL
     p[3] = GPS_FIX_MODE
     p[12] = GPS_MIN_ELEV & 255           # minElev, int8 degrees
     p[22] = min(max(GPS_STATIC_HOLD, 0), 255)   # staticHoldThresh cm/s
@@ -422,11 +432,13 @@ def _nav5():
 
 def _ubx_ack(frame):
     """Send a UBX-CFG frame until the receiver acknowledges it (UBX-ACK-ACK
-    for its class and id), at most GPS_ACK_TRIES times. An overrun receiver
+    for its class and id), at most GPS_ACK_TRIES times: True, None for a
+    UBX-ACK-NAK (it answers, but refuses the frame), False for silence. An overrun receiver
     sends the ACK seconds late, so one that comes during a later try counts
     too; what was read before the first send (an older ACK for the same
     id) does not. The NMEA read meanwhile is dropped (a few seconds)."""
     want = b"\xb5\x62\x05\x01\x02\x00" + frame[2:4]
+    nak = b"\xb5\x62\x05\x00\x02\x00" + frame[2:4]
     t0 = time.ticks_ms()
     while uart.any() and time.ticks_diff(time.ticks_ms(), t0) < 200:
         uart.read(uart.any())            # a streaming receiver never empties
@@ -440,6 +452,8 @@ def _ubx_ack(frame):
                 raw = raw[-16:] + uart.read(n)
                 if want in raw:
                     return True
+                if nak in raw:
+                    return None          # answered, but refused
             time.sleep_ms(5)
         feed()
     return False
@@ -467,15 +481,21 @@ def gps_setup():
         # receiver that stops answering blocks the loop ~4 s, not ~4 s per
         # frame) and the receiver stays at 1 Hz until gps_check retries.
         if _ubx_ack(_rate(1000)):
-            ok = _ubx_ack(_nav5())
+            # NAV5 is a filter tuning, not part of the 5 Hz setup: a receiver
+            # that refuses it (another model, a NAK) still gets the rest
+            r = _ubx_ack(_nav5())
+            st["nav5_ok"] = r is True
+            ok = r is not False          # silent: it stopped answering
+            if r is None:
+                print("gps nav5 refused")
             for fr in msgs:
                 if ok:
-                    ok = _ubx_ack(fr)
+                    ok = _ubx_ack(fr) is True
                 else:
                     uart.write(fr)
                     time.sleep_ms(30)
             if ok:
-                ok = _ubx_ack(_rate(1000 // GPS_HZ))
+                ok = _ubx_ack(_rate(1000 // GPS_HZ)) is True
         else:
             # no answer: an overrun receiver ignores single frames but takes
             # a burst (measured): the message frames at once cut its output
@@ -497,6 +517,7 @@ def gps_check(now):
     turns off: a receiver powered up with the board is still booting when
     run() sends it, and stays at 1 Hz. Less and less often, so a receiver
     that never takes it (or an unwired ESP TX) costs next to nothing."""
+    _gps_loop_check(now)
     at = st["setup_at"]
     if at is None or not st["extra"] or _age(now, at) < st["setup_wait"]:
         return
@@ -504,22 +525,41 @@ def gps_check(now):
     print("gps setup again")
     gps_setup()
 
+def _gps_loop_check(now):
+    """A receiver in a reset loop (supply dips, a bad module) sends only the
+    start of its banner over and over, cut off before the newline, and no
+    NMEA (seen on the board: "$GPTXT,01,01,02,u" + 0xFF junk, nothing else,
+    no UBX answer). Every GPS_LOOP_WINDOW: GPS_LOOP_BANNERS or more banner
+    starts and not one valid sentence -> a console warning, counted."""
+    if _age(now, st["loop_at"]) < GPS_LOOP_WINDOW:
+        return
+    b = st["banners"] - st["loop_b"]
+    ok = st["ok"] - st["loop_ok"]
+    if b >= GPS_LOOP_BANNERS and ok == 0:
+        st["loops"] += 1
+        print("gps reset loop?", b, "banners, no NMEA in",
+              GPS_LOOP_WINDOW // 1000, "s: check the GPS power")
+    st.update(loop_at=now, loop_b=st["banners"], loop_ok=st["ok"])
+
 def _temp():
     try:
         return esp32.mcu_temperature()
     except Exception:
         return None
 
+_freq_bad = []                           # clocks this board refused
+
 def _set_freq(mhz):
     """CPU clock: 80 MHz saves ~15-25 mA on the ESP32 against 240 (the UART
     runs off the fixed APB clock, WiFi needs 80 or more). Unsupported on
     this board or value: left alone, with a console line once."""
-    if not mhz:
+    if not mhz or mhz in _freq_bad:
         return
     try:
         if machine.freq() != mhz * 1000000:
             machine.freq(mhz * 1000000)
     except Exception as e:
+        _freq_bad.append(mhz)
         print("cpu freq", mhz, repr(e))
 
 def _mhz_env(env, key, default):
@@ -531,9 +571,11 @@ def _mhz_env(env, key, default):
     except ValueError:
         print(key, "invalid, using", default)
         return default
-    if n == 0 or n in (20, 40, 80, 160, 240):
+    allowed = (80, 160) if IS_C6 else (20, 40, 80, 160, 240)
+    if n == 0 or n in allowed:
         return n
-    print(key, "not 0/20/40/80/160/240, using", default)
+    print(key, "not 0 or", "/".join(str(m) for m in allowed), "on this",
+          "board, using", default)
     return default
 
 def _status():
@@ -542,7 +584,7 @@ def _status():
     print("status temp", _temp(), "hz", st["epochs"], "used", st["used"],
           "hdop", st["hdop"], "points", log["points"], "sent", up["sent"],
           "wifi", wifi["state"], "pulses", wifi["pb_scans"],
-          "mem", gc.mem_free())
+          "mem", gc.mem_free(), "gpsloops", st["loops"])
 
 def checksum_ok(line):
     star = line.rfind(b"*")
@@ -588,7 +630,10 @@ def read_uart():
             return
         st["rx"] = time.ticks_ms()
         st["spin"] += 1
-        _buf += _chunk[:k]
+        piece = _chunk[:k]
+        if piece.find(b"TXT,01,01,02,u") >= 0:
+            st["banners"] += 1           # a start-up banner (or its start)
+        _buf += piece
         while True:
             i = _buf.find(b"\n")
             if i < 0:
@@ -1328,6 +1373,22 @@ def _try_roam_home(w, arrival=False):
     print("wifi roam", target["ssid"])
     _wifi_connect(w, target)
 
+def _gps_model_env(env):
+    """GPS_MODEL=<u-blox dynModel> in .env (0 portable, 3 pedestrian, 4
+    automotive, ...). Takes effect at the next GPS setup (boot)."""
+    global GPS_DYN_MODEL
+    v = _plain(env.get("GPS_MODEL"))
+    if not v:
+        return
+    try:
+        n = int(v)
+    except ValueError:
+        n = -1
+    if n in GPS_MODELS:
+        GPS_DYN_MODEL = n
+    else:
+        print("GPS_MODEL not one of", GPS_MODELS, "using", GPS_DYN_MODEL)
+
 def _keepalive_env(env):
     """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
     5-600 s between pulses; anything else keeps the default. KEEPALIVE_MODE
@@ -1418,9 +1479,9 @@ def keepalive_tick(now):
     feed()
     if PB_MODE == "gpio":
         if not _pb_pulse_gpio():
-            PB_MODE = "radio"            # no such pin: fall back for good
-            print("keepalive mode radio")
-            _pb_pulse_radio(w, False)
+            PB_MODE = "scan"             # no such pin: fall back for good
+            print("keepalive mode scan")
+            _pb_pulse_radio(w, True)
     else:
         _pb_pulse_radio(w, PB_MODE == "scan")
     wifi["pb_scans"] += 1
@@ -2954,6 +3015,7 @@ def run():
         log_reset()
         wifi_reset()
         up_reset()
+        _gps_model_env(load_env(ENV_FILE))   # before the first setup
         gps_setup()
         wifi_start()
         _running = True

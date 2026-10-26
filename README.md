@@ -21,8 +21,8 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
   second's first fix is the point above 10 km/h (a mean would lag the
   timestamp). Dawarich stores whole seconds, so more than one point a
   second would zigzag there.
-- **The receiver is tuned too** (UBX-CFG-NAV5): automotive filter, 3D fixes
-  only, satellites below 10° ignored, static hold below 0.5 m/s.
+- **The receiver is tuned too** (UBX-CFG-NAV5): portable filter (car and
+  foot alike), 3D fixes only, satellites below 10° ignored, static hold below 0.5 m/s.
 - **Bad fixes are skipped.** Samples with HDOP above 5, or whose own error
   estimate (GST) is above 20 m, are not used. This also hides the first,
   wandering fixes after a cold start.
@@ -115,8 +115,9 @@ API_KEY=your-dawarich-api-key
 DEVICE_ID=Dawarich-GPS-tracker
 HOSTNAME=Dawarich-GPS-tracker
 # KEEPALIVE=5
-# KEEPALIVE_MODE=radio
+# KEEPALIVE_MODE=scan
 # CPU_MHZ=80
+# GPS_MODEL=0
 ```
 
 | Key | Meaning |
@@ -130,13 +131,14 @@ HOSTNAME=Dawarich-GPS-tracker
 | `DEVICE_ID` | Overland tracker id, `[A-Za-z0-9._-]{1,32}` |
 | `HOSTNAME` | DHCP hostname, `[A-Za-z0-9-]{1,32}` (defaults to `DEVICE_ID`) |
 | `KEEPALIVE` | Seconds between power bank keep-alive pulses, 5–600; `0` turns it off (e.g. on a car charger). Default 5. |
-| `KEEPALIVE_MODE` | What a pulse is: `radio` (default: the radio switched on and off, ~0.2 s), `scan` (a full WiFi scan, ~2 s, the old behaviour), `gpio` (the keep-alive pin high for 0.1 s, for a load resistor). |
-| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin that cannot be driven falls back to `radio`. |
-| `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160); `0` leaves the firmware default. Defaults 80 and 160. |
+| `KEEPALIVE_MODE` | What a pulse is: `scan` (default: a full WiFi scan, ~2 s), `radio` (the radio switched on and off, ~0.2 s; too little for a bank that averages the load), `gpio` (the keep-alive pin high for 0.1 s, for a load resistor). |
+| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin that cannot be driven falls back to `scan`. |
+| `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
+| `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored.
@@ -183,12 +185,14 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
+| `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring |
+| `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
 | `upload <file> <n> <ok> <http> <mem>` | One POST |
 | `stay home\|away kept N` | A stay began; N points of the way in were kept |
 | `stay moved` / `stay kept: home in range` / `stay end D` | Anchor moved; a home departure refused; the stay ended D m out |
-| `status temp … hz … used … hdop … points … sent … wifi … pulses … mem …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, HDOP, points, uploads, keep-alive pulses so far, free heap |
+| `status temp … hz … used … hdop … points … sent … wifi … pulses … mem … gpsloops …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, HDOP, points, uploads, keep-alive pulses so far, free heap |
 | `wifi off until upload retry N s` | Uploads back off for N s (server down, 401): the radio sleeps until then |
 | `cpu freq N …` | The board refused that CPU clock; it runs at the firmware default |
 
@@ -230,12 +234,15 @@ To queue a `.bad` again:
   for `RMC` and `GGA` every fix, `GSA` and `GST` once a second and no `GSV`,
   `GLL` or `VTG` (UBX-CFG-MSG). The setup is not saved in the receiver.
 - **Receiver filter** (UBX-CFG-NAV5, sent right after the 1 Hz frame):
-  automotive dynamic model (`GPS_DYN_MODEL`), 3D fixes only
+  portable dynamic model (`GPS_DYN_MODEL`, `.env` `GPS_MODEL`: 3
+  pedestrian, 4 automotive, …), 3D fixes only
   (`GPS_FIX_MODE`: a 2D fix guesses the altitude and is tens of metres off
   horizontally), satellites below 10° ignored (`GPS_MIN_ELEV`, the
   multipath-prone ones) and static hold below 0.5 m/s (`GPS_STATIC_HOLD`:
   the receiver freezes its position while parked; a walk at 1.4 m/s is well
-  above). Set `GPS_DYN_MODEL = 3` for a tracker carried on foot.
+  above). Only these four settings are applied (mask 0x47); the
+  receiver's position masks stay as they are. A receiver that refuses NAV5
+  (`gps nav5 refused`) still gets the 5 Hz setup.
 - **Reliable setup.** Every frame is sent until the receiver acknowledges it
   (UBX-ACK, up to 4 tries). It starts with a switch to 1 Hz, and 5 Hz is
   asked only once every message frame was acknowledged. Reason: at 5 Hz with
@@ -370,12 +377,14 @@ here switched off after 1 hour; with a scan every 15 s, after 3 hours, so it
 averages the load. Every 5 s (`KEEPALIVE`) one pulse goes out, not while the
 radio is on anyway. What the pulse is (`KEEPALIVE_MODE`):
 
-- `radio` (default): the radio is turned on and off again, no scan. The
-  start-up alone is a 100–200 mA burst for a fraction of a second, ~5 mA on
-  average. Try this first; if the bank still switches off, use `scan`.
-- `scan`: the radio is turned on for one scan (~2 s at ~100 mA, about
-  +40 mA on average) and off again. The old behaviour; it also blocks the
-  main loop for the scan (GPS seconds are queued, not lost).
+- `scan` (default): the radio is turned on for one scan (~2 s at ~100 mA,
+  about +40 mA on average) and off again. It blocks the main loop for the
+  scan (GPS seconds are queued, not lost). The only pulse measured to keep
+  the 20 Ah bank on longer.
+- `radio`: the radio is turned on and off again, no scan. The start-up
+  alone is a 100–200 mA burst for a fraction of a second, ~5 mA on average:
+  less than the +13 mA that still let the 20 Ah bank switch off after 3 h,
+  so only for banks that react to a burst rather than the average.
 - `gpio`: the keep-alive pin (`KEEPALIVE_PIN`) is high for 0.1 s and drives
   a load resistor through a MOSFET (see [Hardware](#hardware)): a ~230 mA
   burst the bank cannot miss, ~5 mA on average, nothing blocked.
@@ -435,8 +444,9 @@ with a NEO-6M; most never need changing.
 | Constant | Default | Meaning |
 |----------|---------|---------|
 | `GPS_HZ` | 5 | Fixes a second asked from the receiver, averaged into one point |
-| `GPS_DYN_MODEL` / `GPS_FIX_MODE` | 4 (automotive) / 2 (3D only) | UBX-CFG-NAV5 dynamic platform model and fix mode |
+| `GPS_DYN_MODEL` / `GPS_FIX_MODE` | 0 (portable) / 2 (3D only) | UBX-CFG-NAV5 dynamic platform model and fix mode |
 | `GPS_MIN_ELEV` / `GPS_STATIC_HOLD` | 10° / 50 cm/s | NAV5 elevation mask and static hold threshold (0 = off) |
+| `GPS_LOOP_WINDOW` / `GPS_LOOP_BANNERS` | 10 s / 3 | Banner starts with no NMEA in this window = `gps reset loop?` |
 | `AVG_MAX_SPEED` | 10 km/h | Faster than this a second's point is its first fix, not the mean |
 | `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
 | `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling only while it does not answer) |
@@ -483,7 +493,7 @@ with a NEO-6M; most never need changing.
 | `WIFI_SLEEP` / `WIFI_IDLE` | 1 h / 10 s | Radio-off time once all is uploaded; how often that is checked |
 | `WIFI_WAKE_WAIT` | 60 s | A new stay away waits this long for its WiFi round |
 | `PB_KEEPALIVE` | 5 s | Keep-alive pulse interval while the radio sleeps (`.env` `KEEPALIVE`) |
-| `PB_MODE` / `PB_PIN` / `PB_PULSE_MS` | `radio` / 26 (C6: 2) / 100 ms | Pulse kind, gpio and pulse length (`.env` `KEEPALIVE_MODE`, `KEEPALIVE_PIN`) |
+| `PB_MODE` / `PB_PIN` / `PB_PULSE_MS` | `scan` / 26 (C6: 2) / 100 ms | Pulse kind, gpio and pulse length (`.env` `KEEPALIVE_MODE`, `KEEPALIVE_PIN`) |
 | `WIFI_OFF_WAIT` | 60 s | An upload backoff at least this long turns the radio off until it is due |
 | `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
 | `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
