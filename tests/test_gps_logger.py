@@ -3369,6 +3369,34 @@ try:
             _clock[0] += 1000
             gl.gps_check(_clock[0])
         normal = gl.st["loops"]
+        # restarts with NMEA in between: GPS_FLAP_RESTARTS in the window
+        banner = (nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+                  + b"\r\n")
+        def restarts(n, gap):
+            for k in range(n):
+                _uart_rx.extend(banner)
+                for j in range(3):
+                    _uart_rx.extend(
+                        nmea("GPRMC,1206%02d.00,V,,,,,,,171026,,,N" % j)
+                        + b"\r\n")
+                gl.read_uart()
+                _clock[0] += gap
+                gl.gps_check(_clock[0])
+        gl.reset()
+        out[:] = []
+        restarts(gl.GPS_FLAP_RESTARTS, 10000)
+        flap = gl.st["loops"]
+        flap_warned = any("gps reset loop" in o and "restarts" in o
+                          for o in out)
+        flap_ok = gl.st["ok"]
+        restarts(gl.GPS_FLAP_RESTARTS - 1, 10000)
+        flap_again = gl.st["loops"]
+        restarts(1, 10000)
+        flap_twice = gl.st["loops"]
+        gl.reset()
+        restarts(gl.GPS_FLAP_RESTARTS * 2,
+                 gl.GPS_FLAP_WINDOW // (gl.GPS_FLAP_RESTARTS - 1) + 1000)
+        flap_slow = gl.st["loops"]
     finally:
         if real_print is None:
             del gl.print
@@ -3378,6 +3406,14 @@ try:
           looped == 1 and warned, "loops=%d out=%s" % (looped, out[-2:]))
     check("LOOP: one start-up banner followed by NMEA is not a loop",
           normal == 0, "loops=%d" % normal)
+    check("LOOP: GPS_FLAP_RESTARTS restarts with NMEA in between -> warned",
+          flap == 1 and flap_warned and flap_ok > 0,
+          "loops=%d ok=%d out=%s" % (flap, flap_ok, out[-2:]))
+    check("LOOP: after a warning the next restarts are counted afresh",
+          flap_again == 1 and flap_twice == 2,
+          "%d %d" % (flap_again, flap_twice))
+    check("LOOP: restarts spread wider than GPS_FLAP_WINDOW are no loop",
+          flap_slow == 0, "loops=%d" % flap_slow)
     # ACK: 1 Hz first, every frame until acknowledged, stop if nobody answers
     _uart_tx[:] = []
     gl.gps_setup()
