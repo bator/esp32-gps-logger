@@ -186,13 +186,14 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
 | `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring |
+| `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring |
 | `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
 | `upload <file> <n> <ok> <http> <mem>` | One POST |
 | `stay home\|away kept N` | A stay began; N points of the way in were kept |
 | `stay moved` / `stay kept: home in range` / `stay end D` | Anchor moved; a home departure refused; the stay ended D m out |
-| `status temp … hz … used … hdop … points … sent … wifi … pulses … mem … gpsloops …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, HDOP, points, uploads, keep-alive pulses so far, free heap |
+| `status temp … hz … used … hdop … points … sent … wifi … pulses … mem … gpsloops …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, HDOP, points, uploads, keep-alive pulses so far, free heap, GPS reset-loop warnings so far |
 | `wifi off until upload retry N s` | Uploads back off for N s (server down, 401): the radio sleeps until then |
 | `cpu freq N …` | The board refused that CPU clock; it runs at the firmware default |
 
@@ -447,6 +448,7 @@ with a NEO-6M; most never need changing.
 | `GPS_DYN_MODEL` / `GPS_FIX_MODE` | 0 (portable) / 2 (3D only) | UBX-CFG-NAV5 dynamic platform model and fix mode |
 | `GPS_MIN_ELEV` / `GPS_STATIC_HOLD` | 10° / 50 cm/s | NAV5 elevation mask and static hold threshold (0 = off) |
 | `GPS_LOOP_WINDOW` / `GPS_LOOP_BANNERS` | 10 s / 3 | Banner starts with no NMEA in this window = `gps reset loop?` |
+| `GPS_FLAP_WINDOW` / `GPS_FLAP_RESTARTS` | 10 min / 5 | Full restarts within this window, NMEA or not = `gps reset loop?` |
 | `AVG_MAX_SPEED` | 10 km/h | Faster than this a second's point is its first fix, not the mean |
 | `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
 | `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling only while it does not answer) |

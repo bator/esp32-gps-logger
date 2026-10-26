@@ -45,6 +45,8 @@ CPU_MHZ_UPLOAD = 160                     # clock during a POST (TLS); 0 = no
 STATUS = 600000                          # ms between console status lines
 GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
 GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
+GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
+GPS_FLAP_WINDOW = 600000                 # within this many ms = a reset loop
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
 # GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
@@ -225,7 +227,7 @@ def reset():
               seq=0, epochs=0, extra=0, setup_at=None,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
-              loop_at=time.ticks_ms(), loop_b=0, loop_ok=0)
+              loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[])
     _ep_new(None)
 
 def _ep_new(t):
@@ -392,6 +394,23 @@ def txt(talker, f):
         st["extra"] += 1                 # back at its defaults: set it up
         st["setup_wait"] = GPS_RETRY     # again within GPS_RETRY, not 5 min
         print("gps restarted")
+        _gps_flap(time.ticks_ms())
+
+def _gps_flap(now):
+    """A receiver that restarts every few seconds but sends NMEA in between
+    (seen on the board after a flash: 51 restarts in 5 min, each after a
+    full banner) passes _gps_loop_check. GPS_FLAP_RESTARTS restarts within
+    GPS_FLAP_WINDOW -> the same warning and count, then the next ones are
+    counted afresh (one warning per GPS_FLAP_RESTARTS restarts at most)."""
+    t = st["boot_t"]
+    t.append(now)
+    if len(t) > GPS_FLAP_RESTARTS:
+        t.pop(0)
+    if len(t) == GPS_FLAP_RESTARTS and _age(now, t[0]) <= GPS_FLAP_WINDOW:
+        st["loops"] += 1
+        print("gps reset loop?", len(t), "restarts in",
+              _age(now, t[0]) // 1000, "s: check the GPS power")
+        del t[:]
 
 HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv, "GST": gst,
             "GLL": _extra, "VTG": _extra, "TXT": txt}
