@@ -250,7 +250,7 @@ minute. After a walk, plug the board in and read it:
 | `utc` | GPS time, `-` until the receiver has one |
 | `nmea ok/bad` | Valid and broken NMEA sentences so far |
 | `gpsboots` / `loops` | Receiver restarts and reset-loop warnings so far |
-| `sats seen/used` | Satellites in view (all constellations) and used in the fix |
+| `sats seen/used` | Satellites with a signal (from the receiver's satellite list, polled once a minute) and used in the fix |
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state, keep-alive pulses so far, free heap |
@@ -258,7 +258,8 @@ minute. After a walk, plug the board in and read it:
 **Status page:** <a id="status-page"></a>while the board is on a home
 network it serves a page at `http://<board ip>/` (e.g.
 `http://192.168.1.60/`, reloads every 15 s) and the same data as JSON at
-`/status.json`: fix, satellites seen/used, HDOP, GPS time, position, NMEA
+`/status.json`: fix, satellites seen/used and the satellite list (GPS or
+SBAS number, signal in dBHz, elevation, azimuth, used), HDOP, GPS time, position, NMEA
 counts, receiver restarts; points logged, waiting and uploaded, upload
 state, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON), boot cause, chip temperature, free heap and flash,
@@ -285,6 +286,12 @@ the radio stays connected at home (idling connected costs ~20–30 mA);
   above). Only these four settings are applied (mask 0x47); the
   receiver's position masks stay as they are. A receiver that refuses NAV5
   (`gps nav5 refused`) still gets the 5 Hz setup.
+- **Satellite list without GSV.** `GSV` does not fit next to 5 Hz, so the
+  logger polls UBX-NAV-SVINFO once a minute (`SV_POLL`, ~210 bytes) and
+  when a status page is opened and the list is older than 5 s (waiting up
+  to 0.7 s for it). The binary answer is cut out of the NMEA stream by its
+  length. The receiver only gives numbers: GPS 1–32, SBAS (e.g. EGNOS)
+  120–158.
 - **Reliable setup.** Every frame is sent until the receiver acknowledges it
   (UBX-ACK, up to 4 tries). It starts with a switch to 1 Hz, and 5 Hz is
   asked only once every message frame was acknowledged. Reason: at 5 Hz with
@@ -565,6 +572,7 @@ with a NEO-6M; most never need changing.
 | `STATUS` | 10 min | Console `status` line interval |
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` / `WEB_TIMEOUT` | on / 80 / 2 s | Status page (`.env` `WEB`), its port, how long one client may take |
+| `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `DEVICE_ID` / `HOSTNAME` | `Dawarich-GPS-tracker` | Overland id and DHCP hostname (set in `.env`) |
 
 ## Development

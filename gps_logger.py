@@ -53,6 +53,10 @@ WEB_PORT = 80                            # radio stays on at home for it
 WEB_TIMEOUT = 2                          # s a client may take (.env WEB=0)
 WEB_REFRESH = 15                         # s between page reloads
 WEB_DIAG = 15                            # diag.log lines on the page
+SV_POLL = 60000                          # ms between UBX-NAV-SVINFO polls (the
+SV_FRESH = 5000                          # satellite list); a page view asks
+SV_WAIT = 700                            # again if older than SV_FRESH and
+                                         # waits SV_WAIT ms for the answer
 GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
 GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
 GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
@@ -237,7 +241,8 @@ def reset():
               seq=0, epochs=0, extra=0, setup_at=None,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
-              loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[])
+              loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
+              svs=None, svs_at=None, sv_poll_at=None)
     _ep_new(None)
 
 def _ep_new(t):
@@ -434,6 +439,49 @@ def _ubx(cls, mid, payload):
         b = (b + a) & 255
     return b"\xb5\x62" + m + bytes((a, b))
 
+def sv_poll(now):
+    """Ask for UBX-NAV-SVINFO (the satellite list). No GSV at 9600 baud
+    (see GPS_MSGS): one ~210-byte answer a minute, or per page view."""
+    st["sv_poll_at"] = now
+    try:
+        uart.write(b"\xb5\x62\x01\x30\x00\x00\x31\x94")
+    except OSError:
+        pass
+
+def _ubx_frame(fr):
+    """A whole UBX frame read from the stream (read_uart). NAV-SVINFO fills
+    st["svs"]: (svid, cno dBHz, elevation, azimuth, used, unhealthy) per
+    channel; svid 1-32 GPS, 120-158 SBAS. Others (late ACKs) are dropped."""
+    a = b = 0
+    for x in fr[2:-2]:
+        a = (a + x) & 255
+        b = (b + a) & 255
+    if a != fr[-2] or b != fr[-1]:
+        st["err"] += 1
+        return
+    if fr[2] != 0x01 or fr[3] != 0x30 or len(fr) < 16:
+        return
+    n = fr[10]
+    svs = []
+    for k in range(n):
+        o = 14 + 12 * k
+        if o + 12 > len(fr) - 2:
+            break
+        el = fr[o + 5] - 256 if fr[o + 5] > 127 else fr[o + 5]
+        svs.append((fr[o + 1], fr[o + 4], el, fr[o + 6] | fr[o + 7] << 8,
+                    bool(fr[o + 2] & 1), bool(fr[o + 2] & 16)))
+    st["svs"], st["svs_at"] = svs, time.ticks_ms()
+
+def sv_seen():
+    """Satellites with a signal: from the last NAV-SVINFO, else the GSV
+    count (before the setup turns GSV off)."""
+    if st["svs"] is not None:
+        return len([v for v in st["svs"] if v[1] > 0])
+    n = 0
+    for c in st["view"].values():
+        n += c
+    return n
+
 # NMEA message ids (class 0xF0) and their rate per fix on this port. At
 # 9600 baud GPS_HZ fixes fit only with fewer sentences: RMC and GGA every
 # fix (~145 B), GSA and GST once a second, no GSV / GLL / VTG (~830 B/s of
@@ -539,6 +587,7 @@ def gps_setup():
     st["setup_ok"] = ok
     if ok:
         st["setup_wait"] = GPS_RETRY     # it listens: a later revert is quick
+        st["view"] = {}                  # GSV is off now: no frozen count
     print("gps setup", "ok" if ok else "no ack")
 
 def gps_check(now):
@@ -547,6 +596,9 @@ def gps_check(now):
     run() sends it, and stays at 1 Hz. Less and less often, so a receiver
     that never takes it (or an unwired ESP TX) costs next to nothing."""
     _gps_loop_check(now)
+    if (st["setup_ok"] and (st["sv_poll_at"] is None
+                            or _age(now, st["sv_poll_at"]) >= SV_POLL)):
+        sv_poll(now)
     at = st["setup_at"]
     if at is None or not st["extra"] or _age(now, at) < st["setup_wait"]:
         return
@@ -728,9 +780,7 @@ def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
     HDOP, points logged/sent, WiFi state, keep-alive pulses, free heap."""
-    view = 0
-    for n in st["view"].values():
-        view += n
+    view = sv_seen()
     _diag_write(
         "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
         "hdop %s points %d sent %d wifi %s pulses %d mem %d" % (
@@ -789,12 +839,28 @@ def read_uart():
         _buf += piece
         while True:
             i = _buf.find(b"\n")
+            u = _buf.find(b"\xb5\x62")      # never in NMEA (ASCII)
+            if u >= 0 and (i < 0 or u < i):
+                # a binary UBX answer: whole, by its length (it may hold
+                # 0x0A bytes); what came before it is a cut-off line
+                if len(_buf) < u + 6:
+                    break
+                need = u + 8 + (_buf[u + 4] | _buf[u + 5] << 8)
+                if need - u > 1024:      # not a frame: skip the sync bytes
+                    _buf = _buf[u + 2:]
+                    continue
+                if len(_buf) < need:
+                    break
+                fr, _buf = _buf[u:need], _buf[need:]
+                _ubx_frame(fr)
+                continue
             if i < 0:
                 break
             line, _buf = _buf[:i], _buf[i + 1:]
             handle(line)
-        if len(_buf) > 256:              # no newline in sight: garbage/baud
-            _buf = b""
+        u = _buf.find(b"\xb5\x62")
+        if len(_buf) > (1100 if u >= 0 else 256):
+            _buf = b""                   # no newline in sight: garbage/baud
 
 # --- Watchdog ---------------------------------------------------------------
 # Created only from run()/_loop(), so the GPIO25 boot-bypass REPL is not
@@ -3146,9 +3212,7 @@ def _prev_text():
 
 def _web_rows():
     """(section, label, key, value) rows for the page and the JSON."""
-    view = 0
-    for n in st["view"].values():
-        view += n
+    view = sv_seen()
     t = _fix_secs()
     pos = None
     if st["valid"] and st["lat"] is not None and st["lon"] is not None:
@@ -3197,8 +3261,38 @@ def _esc(v):
     return ("-" if v is None else str(v)).replace("&", "&amp;").replace(
         "<", "&lt;").replace(">", "&gt;")
 
+def _sv_fresh():
+    """Before a page: a satellite list older than SV_FRESH is asked for
+    again; the answer is read (with the NMEA around it) for up to SV_WAIT
+    ms. Silence leaves the older list."""
+    now = time.ticks_ms()
+    at = st["svs_at"]
+    if at is not None and _age(now, at) < SV_FRESH:
+        return
+    sv_poll(now)
+    while _age(time.ticks_ms(), now) < SV_WAIT:
+        read_uart()
+        if st["svs_at"] is not None and st["svs_at"] != at:
+            return
+        time.sleep_ms(20)
+
+def _sv_name(svid):
+    return ("GPS %d" % svid) if svid <= 32 else (
+        "SBAS %d" % svid if 120 <= svid <= 158 else "SV %d" % svid)
+
+def _sv_list():
+    """The satellite list for the page, used first, then by signal."""
+    if st["svs"] is None:
+        return []
+    return sorted(st["svs"], key=lambda v: (not v[4], -v[1], v[0]))
+
 def _web_json():
-    d = {"device": DEVICE_ID, "diag": _web_diag()}
+    d = {"device": DEVICE_ID, "diag": _web_diag(),
+         "satellites": [{"name": _sv_name(v[0]), "svid": v[0], "cno": v[1],
+                         "elev": v[2], "azim": v[3], "used": v[4],
+                         "unhealthy": v[5]} for v in _sv_list()],
+         "satellites_age_s": None if st["svs_at"] is None else
+         _age(time.ticks_ms(), st["svs_at"]) // 1000}
     for _sec, _label, key, v in _web_rows():
         d[key] = v
     return json.dumps(d)
@@ -3230,7 +3324,21 @@ def _web_html():
                                                   s_))
             sec = s_
         out.append("<tr><td>%s</td><td>%s</td></tr>" % (label, _esc(v)))
-    out.append("</table><h2>Diagnostic log</h2><pre>")
+    out.append("</table><h2>Satellites</h2>")
+    svs = _sv_list()
+    if svs:
+        out.append("<table><tr><td>Satellite</td><td>Signal (dBHz)</td>"
+                   "<td>Elevation</td><td>Azimuth</td><td>Used</td></tr>")
+        for v in svs:
+            out.append("<tr><td>%s%s</td><td>%s</td><td>%d&deg;</td>"
+                       "<td>%d&deg;</td><td>%s</td></tr>" % (
+                           _sv_name(v[0]), " (unhealthy)" if v[5] else "",
+                           v[1] if v[1] else "-", v[2], v[3],
+                           "yes" if v[4] else ""))
+        out.append("</table>")
+    else:
+        out.append("<p>No satellite list from the receiver yet.</p>")
+    out.append("<h2>Diagnostic log</h2><pre>")
     for line in _web_diag():
         out.append(_esc(line) + "\n")
     out.append("</pre></body></html>")
@@ -3240,8 +3348,10 @@ def _web_reply(c, req):
     parts = req.split(b" ", 2)
     path = parts[1] if len(parts) > 1 else b"/"
     if path.startswith(b"/status.json"):
+        _sv_fresh()
         code, ctype, body = "200 OK", "application/json", _web_json()
     elif path == b"/" or path.startswith(b"/?"):
+        _sv_fresh()
         code, ctype, body = "200 OK", "text/html", _web_html()
     else:
         code, ctype, body = "404 Not Found", "text/plain", "not found"

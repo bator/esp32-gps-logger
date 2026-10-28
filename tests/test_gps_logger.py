@@ -28,6 +28,7 @@ _timers = []
 _hostnames = []
 _oled_inits = []
 _reset_cause = [1]
+_uart_sv = [None]                       # NAV-SVINFO answer to a poll
 _uart_tx = []
 _uart_rx = bytearray()
 _uart_ack = [True]
@@ -86,6 +87,8 @@ class UART(object):
     def write(self, data):
         data = bytes(data)
         _uart_tx.append(data)
+        if data[:4] == b"\xb5\x62\x01\x30" and _uart_sv[0]:
+            _uart_rx.extend(_uart_sv[0])
         # a u-blox acknowledges a UBX-CFG frame (unless told to drop it)
         if _uart_ack[0] and data[:3] == b"\xb5\x62\x06":
             if _uart_drop[0]:
@@ -3499,31 +3502,34 @@ try:
     # less and less often; one that took it is left alone
     gsv_line = nmea("GPGSV,3,1,12,01,40,083,46,02,17,308,41,12,07,344,39,"
                     "14,22,228,45")
+    def cfg_n():                                    # UBX-CFG frames only
+        return len([f for f in _uart_tx if f[2:3] == b"\x06"])
+
     gl.reset()
     _uart_tx[:] = []
     gl.gps_setup()
-    n_frames = len(_uart_tx)
+    n_frames = cfg_n()
     gl.handle(gsv_line)                             # still in the UART buffer
     _clock[0] += gl.GPS_RETRY
     gl.gps_check(_clock[0])
     check("UBX: sentences queued before the setup do not count",
-          len(_uart_tx) == n_frames and gl.st["extra"] == 0)
+          cfg_n() == n_frames and gl.st["extra"] == 0)
     gl.handle(gsv_line)
     gl.handle(nmea("GPVTG,,T,,M,0.0,N,0.0,K,A"))
     gl.gps_check(_clock[0])
     check("UBX: GSV / VTG after the setup -> it is sent again",
-          len(_uart_tx) == 2 * n_frames and gl.st["extra"] == 0
+          cfg_n() == 2 * n_frames and gl.st["extra"] == 0
           and gl.st["setup_wait"] == gl.GPS_RETRY)
     _clock[0] += 1500
     gl.handle(gsv_line)
     _clock[0] += gl.GPS_RETRY
     gl.gps_check(_clock[0])
     check("UBX: a receiver that acknowledges is set up again every GPS_RETRY",
-          len(_uart_tx) == 3 * n_frames and gl.st["setup_wait"] == gl.GPS_RETRY)
+          cfg_n() == 3 * n_frames and gl.st["setup_wait"] == gl.GPS_RETRY)
     _clock[0] += 10 * gl.GPS_RETRY_MAX
     gl.gps_check(_clock[0])
     check("UBX: a receiver that took it is never sent it again",
-          len(_uart_tx) == 3 * n_frames)
+          cfg_n() == 3 * n_frames)
     # a receiver that never answers: less and less often
     _uart_ack[0] = False
     try:
@@ -4593,6 +4599,117 @@ try:
     check("WEB: _loop serves the page; wifi_stop closes it",
           "web_tick()" in inspect.getsource(gl._loop)
           and "_web_close()" in inspect.getsource(gl.wifi_stop))
+
+    # SATS: the satellite list from UBX-NAV-SVINFO, read out of the stream
+    import struct
+
+    def svinfo(chans):
+        pl = struct.pack("<IBBH", 1000, len(chans), 0, 0)
+        for k, (svid, flags, cno, el, az) in enumerate(chans):
+            pl += struct.pack("<BBBBBbhi", k, svid, flags, 4, cno, el, az, 0)
+        return gl._ubx(0x01, 0x30, pl)
+
+    chans = [(12, 0x01, 38, 54, 10),         # used; azimuth 10 = a 0x0A byte
+             (5, 0x01, 44, 71, 200),
+             (25, 0x00, 0, 8, 300),          # no signal
+             (123, 0x10, 33, 30, 160)]       # SBAS, unhealthy
+    frame = svinfo(chans)
+    gl.reset()
+    _uart_rx[:] = []
+    rmc = nmea("GPRMC,120500.00,V,,,,,,,171026,,,N") + b"\r\n"
+    data = rmc + frame + rmc
+    half = len(rmc) + len(frame) // 2
+    _uart_rx.extend(data[:half])
+    gl.read_uart()
+    _uart_rx.extend(data[half:])
+    gl.read_uart()
+    check("SATS: NAV-SVINFO is read out of the NMEA stream, 0x0A and all",
+          b"\n" in frame[6:-2] and gl.st["svs"] is not None
+          and [v[0] for v in gl.st["svs"]] == [12, 5, 25, 123]
+          and gl.st["svs"][0] == (12, 38, 54, 10, True, False)
+          and gl.st["svs"][3][5] is True
+          and gl.st["ok"] == 2 and gl.st["err"] == 0,
+          "svs=%r ok=%d err=%d" % (gl.st["svs"], gl.st["ok"], gl.st["err"]))
+    check("SATS: seen counts the channels with a signal",
+          gl.sv_seen() == 3, gl.sv_seen())
+    bad = bytearray(frame)
+    bad[-1] ^= 0xFF
+    old_svs = gl.st["svs"]
+    ack = b"\xb5\x62\x05\x01\x02\x00\x06\x01\x0f\x38"
+    _uart_rx.extend(bytes(bad) + ack + rmc)
+    gl.read_uart()
+    check("SATS: a broken frame is an error, a late ACK is just dropped",
+          gl.st["svs"] is old_svs and gl.st["err"] == 1 and gl.st["ok"] == 3,
+          "err=%d ok=%d" % (gl.st["err"], gl.st["ok"]))
+
+    gl.reset()
+    gl.handle(gsv_line)
+    seen_gsv = gl.sv_seen()
+    _uart_tx[:] = []
+    gl.gps_setup()
+    check("SATS: before the setup GSV counts; a good setup drops that count",
+          seen_gsv == 12 and gl.st["view"] == {} and gl.sv_seen() == 0,
+          "%d %r" % (seen_gsv, gl.st["view"]))
+
+    def polls():
+        return len([f for f in _uart_tx if f[:4] == b"\xb5\x62\x01\x30"])
+
+    _uart_tx[:] = []
+    for _ in range(3):
+        gl.gps_check(_clock[0])
+        _clock[0] += gl.SV_POLL // 2
+    p_ok = polls()
+    gl.st["setup_ok"] = False
+    _uart_tx[:] = []
+    _clock[0] += gl.SV_POLL
+    gl.gps_check(_clock[0])
+    p_nosetup = polls()
+    gl.st["setup_ok"] = True
+    check("SATS: polled every SV_POLL, not before the setup took",
+          p_ok == 2 and p_nosetup == 0, "%d %d" % (p_ok, p_nosetup))
+    check("SATS: the poll frame has a valid checksum",
+          gl._ubx(0x01, 0x30, b"") == b"\xb5\x62\x01\x30\x00\x00\x31\x94")
+
+    gl.reset()
+    gl.st["setup_ok"] = True
+    _uart_rx[:] = []
+    _uart_tx[:] = []
+    _uart_sv[0] = frame
+    try:
+        c = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
+        gl._web_reply(c, c.req)
+        page = c.sent.decode()
+        p_page = polls()
+        c2 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
+        gl._web_reply(c2, c2.req)
+        p_again = polls()
+        jd = json.loads(c2.sent.partition(b"\r\n\r\n")[2])
+        _uart_sv[0] = None
+        gl.reset()
+        t0 = _clock[0]
+        c3 = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
+        gl._web_reply(c3, c3.req)
+        waited = _clock[0] - t0
+    finally:
+        _uart_sv[0] = None
+    check("SATS: a page view asks the receiver and lists the satellites",
+          p_page == 1 and "<h2>Satellites</h2>" in page
+          and "<td>GPS 12</td><td>38</td><td>54&deg;</td><td>10&deg;</td>"
+              "<td>yes</td>" in page
+          and "SBAS 123 (unhealthy)" in page
+          and page.index("GPS 5") < page.index("GPS 12")
+              < page.index("SBAS 123") < page.index("GPS 25"),
+          page[page.find("Satellites"):page.find("Satellites") + 400])
+    check("SATS: a list younger than SV_FRESH is not asked for again; JSON",
+          p_again == 1 and jd["satellites"][0]["name"] == "GPS 5"
+          and jd["satellites"][1] == {"name": "GPS 12", "svid": 12,
+                                      "cno": 38, "elev": 54, "azim": 10,
+                                      "used": True, "unhealthy": False}
+          and len(jd["satellites"]) == 4, repr(jd.get("satellites"))[:300])
+    check("SATS: a silent receiver costs at most SV_WAIT, the page says so",
+          waited <= gl.SV_WAIT + 100
+          and b"No satellite list from the receiver yet" in c3.sent,
+          "waited=%d" % waited)
 
     # OFF: while uploads back off for WIFI_OFF_WAIT or more (server down,
     # 401) the radio goes off until the retry is due, then a round
