@@ -4457,14 +4457,36 @@ try:
         gl.wifi_tick()
         drain_wifi()
         web_hourly = len(WLAN.connects) > n_conn
+        # WEB_AWAY=1: the page keeps the radio on on the other networks too
+        gl.WEB_AWAY = True
+        sv_reset()
+        w, calls, out = rv_start_wifi(rv_env, [("phone", -40)], ["phone"])
+        aw_conn = (gl.wifi["state"] == "connected"
+                   and gl.wifi["ssid"] == "phone" and not gl.wifi["home"])
+        for _ in range(5):
+            _clock[0] += gl.WIFI_IDLE
+            gl.wifi_tick()
+        web_away_on = (gl.wifi["state"] if aw_conn else "not connected",
+                       wl().active())
+        gl.WEB, gl.WEB_AWAY = False, True
+        sv_reset()
+        w, calls, out = rv_start_wifi(rv_env, [("phone", -40)], ["phone"])
+        _clock[0] += gl.WIFI_IDLE
+        gl.wifi_tick()
+        away_no_web = gl.wifi["state"]
     finally:
         gl.WEB = False
+        gl.WEB_AWAY = False
     check("WEB: at home, everything uploaded, the radio stays connected",
           web_home, "state=%s" % gl.wifi["state"])
     check("WEB: on a non-home network it still sleeps once uploaded",
           web_away == "sleep", web_away)
     check("WEB: after WIFI_SLEEP a round runs even with nothing to upload",
           web_hourly)
+    check("WEB_AWAY: on a non-home network the radio stays connected",
+          web_away_on == ("connected", True), repr(web_away_on))
+    check("WEB_AWAY: without WEB the radio still sleeps away",
+          away_no_web == "sleep", away_no_web)
 
     # WEB server: GET / and /status.json answered from the main loop
     class FakeConn:
@@ -4567,10 +4589,17 @@ try:
             gl.WEB = True
             gl._web_env({"WEB": v})
             envs.append(gl.WEB)
+        aways = []
+        for start, v in ((False, "1"), (True, "0"), (True, "maybe"),
+                         (False, None)):
+            gl.WEB_AWAY = start
+            gl._web_env({"WEB_AWAY": v} if v is not None else {})
+            aways.append(gl.WEB_AWAY)
     finally:
         gl._web_close()
         gl.socket = real_socket
         gl.WEB = False
+        gl.WEB_AWAY = False
         gl.wifi["state"] = "sleep"
     check("WEB: listens on port 80, non-blocking, while connected", opened)
     check("WEB: GET / is the HTML page with points, upload and diag lines",
@@ -4595,6 +4624,8 @@ try:
           closed_on_sleep and off_no_socket)
     check("WEB: .env WEB 0/1, anything else keeps the setting",
           envs == [False, True, True], repr(envs))
+    check("WEB_AWAY: .env 1/0, invalid or missing keeps the setting",
+          aways == [True, False, True, False], repr(aways))
     import inspect
     check("WEB: _loop serves the page; wifi_stop closes it",
           "web_tick()" in inspect.getsource(gl._loop)
