@@ -245,6 +245,7 @@ minute. After a walk, plug the board in and read it:
 | Field | Meaning |
 |-------|---------|
 | `boot cause N` | Why the chip started: 1 power-on (also a power bank switching back on), 3 watchdog, 5 soft or esptool reset, 6 crash (panic, brownout) |
+| `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; `0` = under a minute, `-` = no log) |
 | `up` | Seconds since boot |
 | `utc` | GPS time, `-` until the receiver has one |
 | `nmea ok/bad` | Valid and broken NMEA sentences so far |
@@ -259,7 +260,8 @@ network it serves a page at `http://<board ip>/` (e.g.
 `http://192.168.1.60/`, reloads every 15 s) and the same data as JSON at
 `/status.json`: fix, satellites seen/used, HDOP, GPS time, position, NMEA
 counts, receiver restarts; points logged, waiting and uploaded, upload
-state, stay; uptime, boot cause, chip temperature, free heap and flash,
+state, stay; uptime and how long the previous run lasted (e.g. `58 min
+14 s`; seconds in the JSON), boot cause, chip temperature, free heap and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. It is
 plain HTTP without a password: keep it on your own network. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
