@@ -53,6 +53,8 @@ WEB_PORT = 80                            # radio stays on at home for it
 WEB_TIMEOUT = 2                          # s a client may take (.env WEB=0)
 WEB_REFRESH = 15                         # s between page reloads
 WEB_DIAG = 15                            # diag.log lines on the page
+WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
+                                         # for the page on the other networks too
 SV_POLL = 60000                          # ms between UBX-NAV-SVINFO polls (the
 SV_FRESH = 5000                          # satellite list); a page view asks
 SV_WAIT = 700                            # again if older than SV_FRESH and
@@ -1786,7 +1788,7 @@ def wifi_tick():
             if (wifi["state"] == "connected"
                     and _age(now, wifi["idle_at"]) >= WIFI_IDLE):
                 wifi["idle_at"] = now
-                if WEB and wifi.get("home"):
+                if WEB and (wifi.get("home") or WEB_AWAY):
                     pass                 # the status page keeps it on
                 elif _all_uploaded():
                     _wifi_off(w, "sleep")
@@ -3152,15 +3154,17 @@ def _low_mem(now):
     print("upload MemoryError, free", gc.mem_free())
 
 # --- Status page ------------------------------------------------------------
-# A small HTTP page on the LAN while the radio is connected (at home it
-# stays connected for it, see wifi_tick): http://<ip>/ and /status.json.
+# A small HTTP page on the LAN while the radio is connected (at home, or
+# everywhere with WEB_AWAY, it stays connected for it, see wifi_tick):
+# http://<ip>/ and /status.json.
 # Served from the main loop, one client at a time, at most WEB_TIMEOUT s.
 
 _web_sock = None
 
 def _web_env(env):
-    """WEB=0 in .env: no status page, the radio sleeps at home as before."""
-    global WEB
+    """WEB=0 in .env: no status page, the radio sleeps at home as before.
+    WEB_AWAY=1: the radio stays on for the page on a non-home network too."""
+    global WEB, WEB_AWAY
     v = _plain(env.get("WEB"))
     if v:
         t = _truthy(v)
@@ -3168,6 +3172,13 @@ def _web_env(env):
             print("WEB not 1/0, using", 1 if WEB else 0)
         else:
             WEB = t
+    v = _plain(env.get("WEB_AWAY"))
+    if v:
+        t = _truthy(v)
+        if t is None:
+            print("WEB_AWAY not 1/0, using", 1 if WEB_AWAY else 0)
+        else:
+            WEB_AWAY = t
 
 def _web_open():
     global _web_sock
