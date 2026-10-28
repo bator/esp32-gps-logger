@@ -406,11 +406,17 @@ def _install_mocks():
     time.sleep = lambda s: None
 
 
+diag_dir = tempfile.mkdtemp(prefix="diaglog-")
+
+
 def _reload_logger():
     if "gps_logger" in sys.modules:
-        return importlib.reload(sys.modules["gps_logger"])
-    import gps_logger
-    return gps_logger
+        m = importlib.reload(sys.modules["gps_logger"])
+    else:
+        import gps_logger as m
+    m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
+    m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
+    return m
 
 
 _install_mocks()
@@ -4896,6 +4902,123 @@ if order_root is not None:
           [c.tag[len(ns):] for c in opts[1]] == ["time"])
     check("REVIEW-5: track name is escaped",
           order_root.find(".//%sname" % ns).text == "a&b")
+
+# DIAG: persistent diagnostic log (what happened on a walk)
+def diag_lines(path=None):
+    try:
+        with open(path or gl.DIAG_FILE) as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def diag_clear():
+    for p in (gl.DIAG_FILE, gl.DIAG_OLD):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+saved_diag = (gl.DIAG, gl.DIAG_MAX)
+try:
+    vals = []
+    for v in ("0", "30", "5", "x", "3600"):
+        gl.DIAG = 60000
+        gl._diag_env({"DIAG": v})
+        vals.append(gl.DIAG)
+    gl.DIAG = 60000
+    gl._diag_env({})
+    vals.append(gl.DIAG)
+    check("DIAG: .env DIAG 0 off, 10-3600 s, anything else the default",
+          vals == [0, 30000, 60000, 60000, 3600000, 60000], repr(vals))
+
+    diag_clear()
+    gl.DIAG = 60000
+    gl.reset()
+    gl.log_reset()
+    gl.up_reset()
+    _reset_cause[0] = 6
+    gl._diag_boot()
+    _reset_cause[0] = 1
+    gl.st.update(ok=120, err=3, gps_boots=2, loops=1, used=7,
+                 view={"GP": 9, "GL": 4}, hdop=1.4)
+    gl._diag(125000)
+    lines = diag_lines()
+    check("DIAG: boot line with the reset cause, then a status line",
+          len(lines) == 2 and lines[0].startswith("boot cause 6 ")
+          and lines[1].startswith("up 125 utc ")
+          and "nmea 120/3 gpsboots 2 loops 1 sats 13/7 " in lines[1]
+          and " hdop 1.4 " in lines[1] and " wifi " in lines[1],
+          repr(lines))
+    gl.st.update(date="2026-10-28", time="11:40:05")
+    gl._diag(126000)
+    check("DIAG: the GPS UTC time is in the line once known",
+          " utc 20261028T114005Z " in diag_lines()[-1], diag_lines()[-1:])
+
+    diag_clear()
+    gl.DIAG_MAX = 300
+    for k in range(12):
+        gl._diag(k * 60000)
+    first = diag_lines(gl.DIAG_OLD)
+    cur = diag_lines()
+    for k in range(12, 24):
+        gl._diag(k * 60000)
+    second = diag_lines(gl.DIAG_OLD)
+    check("DIAG: past DIAG_MAX the file becomes DIAG_OLD (old one replaced)",
+          first and cur and os.path.getsize(gl.DIAG_FILE) < 300 + 200
+          and second and second[0] != first[0],
+          "%d %d %d" % (len(first), len(cur), len(second)))
+    gl.DIAG_MAX = saved_diag[1]
+
+    diag_clear()
+    gl.DIAG = 0
+    gl._diag_boot()
+    gl._diag(1000)
+    check("DIAG: DIAG=0 writes nothing", diag_lines() == [])
+    gl.DIAG = 60000
+
+    saved_file = gl.DIAG_FILE
+    gl.DIAG_FILE = os.path.join(diag_dir, "no", "such", "dir", "d.log")
+    try:
+        gl._diag(1000)
+        raised = None
+    except Exception as e:
+        raised = e
+    finally:
+        gl.DIAG_FILE = saved_file
+    check("DIAG: a write error is printed, never raised", raised is None,
+          repr(raised))
+
+    # run(): boot line before the GPS setup, crash line before the reset
+    diag_clear()
+    _resets[:] = []
+    _timers[:] = []
+    gl._wdt = None
+    write_env(diag_dir, "")
+
+    def diag_boom():
+        raise ValueError("diag boom")
+
+    orig_loop = gl._loop
+    gl._loop = diag_boom
+    try:
+        gl.run()
+    except SystemExit:
+        pass
+    finally:
+        gl._loop = orig_loop
+    lines = diag_lines()
+    check("DIAG: run() logs the boot and a crash before machine.reset()",
+          len(lines) == 2 and lines[0].startswith("boot cause ")
+          and lines[1].startswith("crash up ") and "diag boom" in lines[1]
+          and bool(_resets), repr(lines))
+    import inspect
+    loop_src = inspect.getsource(gl._loop)
+    check("DIAG: _loop writes a line every DIAG ms",
+          "_diag(now)" in loop_src and "DIAG" in loop_src)
+finally:
+    gl.DIAG, gl.DIAG_MAX = saved_diag
 
 print()
 print("%d passed, %d failed" % (passed, failed))

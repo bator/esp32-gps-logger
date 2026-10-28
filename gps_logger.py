@@ -43,6 +43,11 @@ CPU_MHZ = 80                             # CPU clock in the main loop (ESP32:
 CPU_MHZ_UPLOAD = 160                     # clock during a POST (TLS); 0 = no
                                          # change. .env CPU_MHZ / CPU_MHZ_UP
 STATUS = 600000                          # ms between console status lines
+DIAG = 60000                             # ms between diagnostic log lines
+                                         # (0 = off; .env DIAG=<seconds>)
+DIAG_FILE = "/diag.log"                  # survives power-off: what happened
+DIAG_OLD = "/diag.1"                     # on a walk, read it back over USB
+DIAG_MAX = 32768                         # bytes, then DIAG_FILE -> DIAG_OLD
 GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
 GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
 GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
@@ -604,6 +609,73 @@ def _status():
           "hdop", st["hdop"], "points", log["points"], "sent", up["sent"],
           "wifi", wifi["state"], "pulses", wifi["pb_scans"],
           "mem", gc.mem_free(), "gpsloops", st["loops"])
+
+def _diag_env(env):
+    """DIAG=<seconds> in .env: 0 turns the diagnostic log off, otherwise
+    10-3600 s between lines; anything else keeps the default."""
+    global DIAG
+    v = _plain(env.get("DIAG"))
+    if not v:
+        return
+    try:
+        n = int(v)
+    except ValueError:
+        n = -1
+    if n == 0:
+        DIAG = 0
+    elif 10 <= n <= 3600:
+        DIAG = n * 1000
+    else:
+        print("DIAG not 0 or 10-3600 s, using", DIAG // 1000, "s")
+
+def _diag_write(line):
+    """Append one line to DIAG_FILE (closed again, so a power-off loses at
+    most the line being written). Past DIAG_MAX the file becomes DIAG_OLD,
+    so both together stay under 2 * DIAG_MAX. Never raises."""
+    if not DIAG:
+        return
+    try:
+        size = _file_size(DIAG_FILE)
+        if size is not None and size >= DIAG_MAX:
+            _rm(DIAG_OLD)
+            os.rename(DIAG_FILE, DIAG_OLD)
+        f = open(DIAG_FILE, "a")
+        try:
+            f.write(line + "\n")
+        finally:
+            f.close()
+    except Exception as e:
+        print("diag", repr(e))
+
+def _diag_utc():
+    t = _fix_secs()
+    return "-" if t is None else _stamp_at(t)[1]
+
+def _diag_boot():
+    """First line after a boot: why the chip (re)started. 1 power-on (also a
+    power bank switching back on), 3 WDT, 4 deep sleep, 5 soft or esptool
+    reset, 6 crash (panic, brownout)."""
+    try:
+        cause = machine.reset_cause()
+    except Exception:
+        cause = None
+    _diag_write("boot cause %s mhz %d mem %d" % (
+        cause, machine.freq() // 1000000, gc.mem_free()))
+
+def _diag(now):
+    """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
+    receiver restarts and reset-loop warnings, satellites seen/used, fix,
+    HDOP, points logged/sent, WiFi state, keep-alive pulses, free heap."""
+    view = 0
+    for n in st["view"].values():
+        view += n
+    _diag_write(
+        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
+        "hdop %s points %d sent %d wifi %s pulses %d mem %d" % (
+            now // 1000, _diag_utc(), st["ok"], st["err"], st["gps_boots"],
+            st["loops"], view, st["used"], status().replace(" ", "_"),
+            st["hdop"], log["points"], up["sent"], wifi["state"],
+            wifi["pb_scans"], gc.mem_free()))
 
 def checksum_ok(line):
     star = line.rfind(b"*")
@@ -3034,7 +3106,11 @@ def run():
         log_reset()
         wifi_reset()
         up_reset()
-        _gps_model_env(load_env(ENV_FILE))   # before the first setup
+        env = load_env(ENV_FILE)
+        _gps_model_env(env)              # before the first setup
+        _diag_env(env)
+        env = None
+        _diag_boot()
         gps_setup()
         wifi_start()
         _running = True
@@ -3055,6 +3131,7 @@ def run():
             sys.print_exception(e)
         else:
             print("crash", e)
+        _diag_write("crash up %d %s" % (time.ticks_ms() // 1000, repr(e)))
         try:
             flush(_still_hold())  # held drift is dropped
         except Exception:
@@ -3077,6 +3154,7 @@ def _loop():
     loop_start = time.ticks_ms()
     last = None
     status_at = loop_start
+    diag_at = loop_start
     while True:
         feed()
         read_uart()
@@ -3096,4 +3174,7 @@ def _loop():
         if time.ticks_diff(now, status_at) >= STATUS:
             _status()
             status_at = now
+        if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
+            _diag(now)
+            diag_at = now
         time.sleep_ms(20)
