@@ -656,16 +656,73 @@ def _diag_utc():
     t = _fix_secs()
     return "-" if t is None else _stamp_at(t)[1]
 
+def _diag_tail(path, n):
+    """The last n lines of a diag file (reads only its tail), [] if none."""
+    try:
+        size = _file_size(path) or 0
+        with open(path) as f:
+            if size > 160 * n:
+                f.seek(size - 160 * n)
+                f.readline()             # a partial line
+            lines = f.read().splitlines()
+        return lines[-n:]
+    except (OSError, ValueError):
+        return []
+
+# How long the run before this boot lasted, from the last diag lines it
+# wrote: up (s, to within DIAG; 0 = it ended before its first status line),
+# end (GPS time of its last line, "2026-10-28 12:19:42Z") and how
+# ("status", "crash" or "short"). Read once at boot.
+prev_run = {"up": None, "end": None, "how": None}
+
+def _diag_prev():
+    prev_run.update(up=None, end=None, how=None)
+    lines = _diag_tail(DIAG_FILE, 8) or _diag_tail(DIAG_OLD, 8)
+    for line in reversed(lines):
+        f = line.split()
+        try:
+            if line.startswith("up "):
+                prev_run["up"], prev_run["how"] = int(f[1]), "status"
+                t = f[3] if len(f) > 3 and f[2] == "utc" else "-"
+                if len(t) == 16:
+                    prev_run["end"] = "%s-%s-%s %s:%s:%sZ" % (
+                        t[0:4], t[4:6], t[6:8], t[9:11], t[11:13], t[13:15])
+                return
+            if line.startswith("crash up "):
+                prev_run["up"], prev_run["how"] = int(f[2]), "crash"
+                return
+            if line.startswith("boot "):
+                prev_run["up"], prev_run["how"] = 0, "short"
+                return
+        except (ValueError, IndexError):
+            continue
+
+def _hms(secs):
+    """Seconds as '45 s', '12 min 05 s', '3 h 04 min', '2 d 03 h'."""
+    if secs is None:
+        return "-"
+    secs = int(secs)
+    if secs < 60:
+        return "%d s" % secs
+    if secs < 3600:
+        return "%d min %02d s" % (secs // 60, secs % 60)
+    if secs < 86400:
+        return "%d h %02d min" % (secs // 3600, secs // 60 % 60)
+    return "%d d %02d h" % (secs // 86400, secs // 3600 % 24)
+
 def _diag_boot():
-    """First line after a boot: why the chip (re)started. 1 power-on (also a
-    power bank switching back on), 3 WDT, 4 deep sleep, 5 soft or esptool
-    reset, 6 crash (panic, brownout)."""
+    """First line after a boot: why the chip (re)started (1 power-on, also a
+    power bank switching back on; 3 WDT; 4 deep sleep; 5 soft or esptool
+    reset; 6 crash: panic, brownout) and how long the run before lasted
+    (prev_up s, to within DIAG; from that run's last lines, read first)."""
+    _diag_prev()
     try:
         cause = machine.reset_cause()
     except Exception:
         cause = None
-    _diag_write("boot cause %s mhz %d mem %d" % (
-        cause, machine.freq() // 1000000, gc.mem_free()))
+    _diag_write("boot cause %s prev_up %s mhz %d mem %d" % (
+        cause, "-" if prev_run["up"] is None else prev_run["up"],
+        machine.freq() // 1000000, gc.mem_free()))
 
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
@@ -3075,17 +3132,17 @@ def _web_close():
         _web_sock = None
 
 def _web_diag():
-    """The last WEB_DIAG lines of DIAG_FILE (reads only its tail)."""
-    try:
-        size = _file_size(DIAG_FILE) or 0
-        with open(DIAG_FILE) as f:
-            if size > 160 * WEB_DIAG:
-                f.seek(size - 160 * WEB_DIAG)
-                f.readline()             # a partial line
-            lines = f.read().splitlines()
-        return lines[-WEB_DIAG:]
-    except (OSError, ValueError):
-        return []
+    return _diag_tail(DIAG_FILE, WEB_DIAG)
+
+def _prev_text():
+    if prev_run["up"] is None:
+        return None
+    if prev_run["how"] == "short":
+        return "under %d s" % (DIAG // 1000)
+    t = _hms(prev_run["up"])
+    if prev_run["how"] == "crash":
+        return t + ", ended by a crash"
+    return t + (" (last line %s)" % prev_run["end"] if prev_run["end"] else "")
 
 def _web_rows():
     """(section, label, key, value) rows for the page and the JSON."""
@@ -3123,7 +3180,8 @@ def _web_rows():
         ("Points", "Upload state", "upload", up["state"]),
         ("Points", "Upload errors", "upload_err", up["err"]),
         ("Points", "Stay", "stay", "yes" if still.get("active") else "no"),
-        ("Device", "Uptime (s)", "uptime", time.ticks_ms() // 1000),
+        ("Device", "Uptime", "uptime", time.ticks_ms() // 1000),
+        ("Device", "Previous run", "prev_uptime", prev_run["up"]),
         ("Device", "Boot cause", "boot_cause", cause),
         ("Device", "Chip temperature (C)", "temp", _temp()),
         ("Device", "CPU (MHz)", "mhz", machine.freq() // 1000000),
@@ -3162,7 +3220,11 @@ def _web_html():
            '</style></head><body><h1>%s</h1>' % (
                WEB_REFRESH, _esc(DEVICE_ID), _esc(DEVICE_ID))]
     sec = None
-    for s_, label, _key, v in _web_rows():
+    for s_, label, key, v in _web_rows():
+        if key == "uptime":
+            v = _hms(v)                  # the JSON keeps seconds
+        elif key == "prev_uptime":
+            v = _prev_text()
         if s_ != sec:
             out.append("%s<h2>%s</h2><table>" % ("</table>" if sec else "",
                                                   s_))

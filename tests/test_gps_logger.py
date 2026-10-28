@@ -5179,6 +5179,58 @@ try:
           len(lines) == 2 and lines[0].startswith("boot cause ")
           and lines[1].startswith("crash up ") and "diag boom" in lines[1]
           and bool(_resets), repr(lines))
+    # previous run: read from the last diag lines at boot
+    check("UPTIME: seconds read as s, min, h, d",
+          [gl._hms(x) for x in (None, 45, 754, 3494, 11040, 183600)]
+          == ["-", "45 s", "12 min 34 s", "58 min 14 s", "3 h 04 min",
+              "2 d 03 h"],
+          repr([gl._hms(x) for x in (45, 754, 3494, 11040, 183600)]))
+
+    def prev_after(text, old=None):
+        diag_clear()
+        if text is not None:
+            with open(gl.DIAG_FILE, "w") as f:
+                f.write(text)
+        if old is not None:
+            with open(gl.DIAG_OLD, "w") as f:
+                f.write(old)
+        gl._diag_boot()
+        return dict(gl.prev_run), diag_lines()[-1], gl._prev_text()
+
+    st_lines = ("boot cause 1 prev_up - mhz 160 mem 1\n"
+                "up 63 utc 20261028T115937Z nmea 752/0 x\n"
+                "up 3494 utc 20261028T125942Z nmea 9000/0 x\n")
+    p1, boot1, t1 = prev_after(st_lines)
+    check("UPTIME: the last status line gives the previous run's uptime",
+          p1 == {"up": 3494, "end": "2026-10-28 12:59:42Z", "how": "status"}
+          and boot1.startswith("boot cause 1 prev_up 3494 ")
+          and t1 == "58 min 14 s (last line 2026-10-28 12:59:42Z)",
+          "%r %r %r" % (p1, boot1, t1))
+    p2, _, t2 = prev_after(st_lines + "crash up 3500 ValueError('x')\n")
+    p3, boot3, t3 = prev_after(st_lines + "boot cause 1 prev_up 3494 mhz 1\n")
+    p4, _, _ = prev_after("up 125 utc - nmea 1/0\n")
+    p5, _, _ = prev_after(None, old=st_lines)
+    p6, boot6, t6 = prev_after(None)
+    check("UPTIME: crash, a run without a status line, no GPS time",
+          p2["up"] == 3500 and p2["how"] == "crash"
+          and t2 == "58 min 20 s, ended by a crash"
+          and p3 == {"up": 0, "end": None, "how": "short"}
+          and t3 == "under 60 s" and " prev_up 0 " in boot3
+          and p4 == {"up": 125, "end": None, "how": "status"},
+          "%r %r %r %r" % (p2, t2, p3, p4))
+    check("UPTIME: just rotated -> diag.1; no log at all -> unknown",
+          p5["up"] == 3494 and p6["up"] is None and t6 is None
+          and " prev_up - " in boot6, "%r %r %r" % (p5, p6, boot6))
+    prev_after(st_lines)
+    rows = {r[2]: r[3] for r in gl._web_rows()}
+    page = gl._web_html()
+    check("UPTIME: page shows readable times, the JSON keeps seconds",
+          isinstance(rows["uptime"], int) and rows["prev_uptime"] == 3494
+          and "<td>Previous run</td><td>58 min 14 s (last line "
+              "2026-10-28 12:59:42Z)</td>" in page
+          and "<td>Uptime</td><td>" in page and "Uptime (s)" not in page,
+          page[page.find("Uptime"):page.find("Uptime") + 200])
+
     import inspect
     loop_src = inspect.getsource(gl._loop)
     check("DIAG: _loop writes a line every DIAG ms",
