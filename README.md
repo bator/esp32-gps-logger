@@ -118,6 +118,7 @@ HOSTNAME=Dawarich-GPS-tracker
 # KEEPALIVE_MODE=scan
 # CPU_MHZ=80
 # GPS_MODEL=0
+# DIAG=60
 ```
 
 | Key | Meaning |
@@ -135,10 +136,11 @@ HOSTNAME=Dawarich-GPS-tracker
 | `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin that cannot be driven falls back to `scan`. |
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
+| `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `DIAG`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored.
@@ -225,6 +227,30 @@ To queue a `.bad` again:
 ```bash
 .venv/bin/mpremote exec "import os; os.rename('/gpx/20261005_101500.trk.bad', '/gpx/20261005_101500.trk')"
 ```
+
+**Diagnostic log:** <a id="diagnostic-log"></a>the console is gone once
+the board is on a power bank, so the logger also appends to `/diag.log` on
+flash: a `boot cause N` line at every start, one status line a minute, and a
+`crash` line before a crash reset. Past 32 KB the file becomes `/diag.1`
+(the older one is dropped), so the two hold about 7 hours at one line a
+minute. After a walk, plug the board in and read it:
+
+```bash
+.venv/bin/mpremote resume fs cat :/diag.log
+.venv/bin/mpremote reset
+```
+
+| Field | Meaning |
+|-------|---------|
+| `boot cause N` | Why the chip started: 1 power-on (also a power bank switching back on), 3 watchdog, 5 soft or esptool reset, 6 crash (panic, brownout) |
+| `up` | Seconds since boot |
+| `utc` | GPS time, `-` until the receiver has one |
+| `nmea ok/bad` | Valid and broken NMEA sentences so far |
+| `gpsboots` / `loops` | Receiver restarts and reset-loop warnings so far |
+| `sats seen/used` | Satellites in view (all constellations) and used in the fix |
+| `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
+| `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
+| `wifi`, `pulses`, `mem` | WiFi state, keep-alive pulses so far, free heap |
 
 ## How it works
 
@@ -521,6 +547,7 @@ with a NEO-6M; most never need changing.
 | `KEEPALIVE_MAX` | 10 min | How long a Ctrl-C timer feeds the watchdog |
 | `BOOT_OK_MS` | 60 s | Healthy loop time that clears the boot-fail counter |
 | `STATUS` | 10 min | Console `status` line interval |
+| `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `DEVICE_ID` / `HOSTNAME` | `Dawarich-GPS-tracker` | Overland id and DHCP hostname (set in `.env`) |
 
 ## Development
