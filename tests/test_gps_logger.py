@@ -416,6 +416,7 @@ def _reload_logger():
         import gps_logger as m
     m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
     m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
+    m.WEB = False                        # radio-sleep tests; WEB has its own
     return m
 
 
@@ -4427,6 +4428,171 @@ try:
           gl.wifi["state"] == "connected" and wl().active()
           and len(WLAN.connects) > n_conn)
     os.remove(os.path.join(rv_dir, "20261018_080000.trk"))
+
+    # WEB: at home the status page keeps the radio on; away it sleeps as
+    # before, but an hourly round finds home again without points
+    gl.WEB = True
+    try:
+        sv_reset()
+        w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
+        for _ in range(5):
+            _clock[0] += gl.WIFI_IDLE
+            gl.wifi_tick()
+        web_home = gl.wifi["state"] == "connected" and wl().active()
+        sv_reset()
+        w, calls, out = rv_start_wifi(rv_env, [("phone", -40)], ["phone"])
+        away_conn = (gl.wifi["state"] == "connected"
+                     and gl.wifi["ssid"] == "phone" and not gl.wifi["home"])
+        _clock[0] += gl.WIFI_IDLE
+        gl.wifi_tick()
+        web_away = gl.wifi["state"] if away_conn else "not connected"
+        n_conn = len(WLAN.connects)
+        _clock[0] += gl.WIFI_SLEEP + gl.WIFI_IDLE
+        gl.wifi_tick()
+        drain_wifi()
+        web_hourly = len(WLAN.connects) > n_conn
+    finally:
+        gl.WEB = False
+    check("WEB: at home, everything uploaded, the radio stays connected",
+          web_home, "state=%s" % gl.wifi["state"])
+    check("WEB: on a non-home network it still sleeps once uploaded",
+          web_away == "sleep", web_away)
+    check("WEB: after WIFI_SLEEP a round runs even with nothing to upload",
+          web_hourly)
+
+    # WEB server: GET / and /status.json answered from the main loop
+    class FakeConn:
+        def __init__(self, req, fail=False):
+            self.req, self.fail, self.sent, self.closed = req, fail, b"", False
+            self.timeout = None
+
+        def settimeout(self, t):
+            self.timeout = t
+
+        def recv(self, n):
+            if self.fail:
+                raise OSError(104)
+            return self.req[:n]
+
+        def sendall(self, b):
+            self.sent += b
+
+        def close(self):
+            self.closed = True
+
+    class FakeListen:
+        def __init__(self):
+            self.waiting, self.closed, self.bound = [], False, None
+            self.opts, self.blocking, self.backlog = [], True, None
+
+        def setsockopt(self, *a):
+            self.opts.append(a)
+
+        def bind(self, addr):
+            self.bound = addr
+
+        def listen(self, n):
+            self.backlog = n
+
+        def setblocking(self, b):
+            self.blocking = b
+
+        def accept(self):
+            if not self.waiting:
+                raise OSError(11)
+            return self.waiting.pop(0), ("192.168.1.209", 50000)
+
+        def close(self):
+            self.closed = True
+
+    class FakeSocketMod:
+        AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR = 2, 1, 1, 4
+        made = []
+
+        @classmethod
+        def socket(cls, *a):
+            cls.made.append(FakeListen())
+            return cls.made[-1]
+
+        @staticmethod
+        def getaddrinfo(host, port):
+            return [(2, 1, 0, "", (host, port))]
+
+    real_socket = gl.socket
+    gl.socket = FakeSocketMod
+    gl.WEB = True
+    try:
+        gl._web_close()
+        gl.wifi.update(state="connected", ip="192.168.1.60", ssid="<b>home",
+                       rssi=-50)
+        gl.log["points"] = 42
+        gl.up["left"] = 7
+        gl.up["sent"] = 35
+        gl._diag_write("boot cause 1 mhz 80 mem 1")
+        gl._diag_write("up 60 utc - nmea 300/0 <x>")
+        gl.web_tick()
+        lst = FakeSocketMod.made[-1]
+        opened = (lst.bound == ("0.0.0.0", 80) and lst.blocking is False
+                  and gl._web_sock is lst)
+        reqs = [FakeConn(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+                FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n"),
+                FakeConn(b"GET /nope HTTP/1.1\r\n\r\n"),
+                FakeConn(b"", fail=True)]
+        for c in reqs:
+            lst.waiting.append(c)
+            gl.web_tick()
+        gl.web_tick()                        # nobody waiting: no error
+        head, _, html = reqs[0].sent.partition(b"\r\n\r\n")
+        jhead, _, jbody = reqs[1].sent.partition(b"\r\n\r\n")
+        try:
+            jd = json.loads(jbody)
+        except ValueError:
+            jd = {}
+        gl.wifi["state"] = "sleep"
+        gl.web_tick()
+        closed_on_sleep = lst.closed and gl._web_sock is None
+        gl.WEB = False
+        gl.wifi["state"] = "connected"
+        n_made = len(FakeSocketMod.made)
+        gl.web_tick()
+        off_no_socket = len(FakeSocketMod.made) == n_made
+        envs = []
+        for v in ("0", "1", "maybe"):
+            gl.WEB = True
+            gl._web_env({"WEB": v})
+            envs.append(gl.WEB)
+    finally:
+        gl._web_close()
+        gl.socket = real_socket
+        gl.WEB = False
+        gl.wifi["state"] = "sleep"
+    check("WEB: listens on port 80, non-blocking, while connected", opened)
+    check("WEB: GET / is the HTML page with points, upload and diag lines",
+          head.startswith(b"HTTP/1.0 200 OK") and b"text/html" in head
+          and (b"Content-Length: %d" % len(html)) in head
+          and b"Logged since boot</td><td>42<" in html
+          and b"Waiting for upload</td><td>7<" in html
+          and b"boot cause 1" in html and reqs[0].closed
+          and reqs[0].timeout == gl.WEB_TIMEOUT, reqs[0].sent[:300])
+    check("WEB: SSID and diag text are HTML-escaped",
+          b"&lt;b&gt;home" in html and b"&lt;x&gt;" in html
+          and b"<b>home" not in html)
+    check("WEB: /status.json has the same values and the diag tail",
+          jhead.startswith(b"HTTP/1.0 200 OK") and jd.get("points") == 42
+          and jd.get("left") == 7 and jd.get("sent") == 35
+          and "fix" in jd and "sats" in jd
+          and jd.get("diag", [""])[-1].startswith("up 60"), repr(jd)[:300])
+    check("WEB: unknown path 404, a failing client is closed, no raise",
+          reqs[2].sent.startswith(b"HTTP/1.0 404") and reqs[3].closed
+          and reqs[3].sent == b"")
+    check("WEB: the server closes when the radio sleeps; WEB=0 opens none",
+          closed_on_sleep and off_no_socket)
+    check("WEB: .env WEB 0/1, anything else keeps the setting",
+          envs == [False, True, True], repr(envs))
+    import inspect
+    check("WEB: _loop serves the page; wifi_stop closes it",
+          "web_tick()" in inspect.getsource(gl._loop)
+          and "_web_close()" in inspect.getsource(gl.wifi_stop))
 
     # OFF: while uploads back off for WIFI_OFF_WAIT or more (server down,
     # 401) the radio goes off until the retry is due, then a round

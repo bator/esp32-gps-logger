@@ -1,5 +1,5 @@
 from machine import Pin, I2C, UART, WDT
-import machine, sys, time, os, network, gc, math
+import machine, sys, time, os, network, gc, math, socket, json
 try:
     import esp32                         # mcu_temperature() on C3/C6/S2/S3
 except ImportError:
@@ -48,6 +48,11 @@ DIAG = 60000                             # ms between diagnostic log lines
 DIAG_FILE = "/diag.log"                  # survives power-off: what happened
 DIAG_OLD = "/diag.1"                     # on a walk, read it back over USB
 DIAG_MAX = 32768                         # bytes, then DIAG_FILE -> DIAG_OLD
+WEB = True                               # status page on port WEB_PORT; the
+WEB_PORT = 80                            # radio stays on at home for it
+WEB_TIMEOUT = 2                          # s a client may take (.env WEB=0)
+WEB_REFRESH = 15                         # s between page reloads
+WEB_DIAG = 15                            # diag.log lines on the page
 GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
 GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
 GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
@@ -1592,6 +1597,7 @@ def wifi_start():
     up["url"] = env.get("GEO_URL", "").rstrip("/") or None
     up["key"] = env.get("API_KEY") or None
     _keepalive_env(env)
+    _web_env(env)
     DEVICE_ID = _safe_name(_plain(env.get("DEVICE_ID")), DEFAULT_DEVICE_ID)
     HOSTNAME = _safe_name(_plain(env.get("HOSTNAME"))
                           or _plain(env.get("DEVICE_ID")),
@@ -1657,7 +1663,9 @@ def wifi_tick():
             if (wifi["state"] == "connected"
                     and _age(now, wifi["idle_at"]) >= WIFI_IDLE):
                 wifi["idle_at"] = now
-                if _all_uploaded():
+                if WEB and wifi.get("home"):
+                    pass                 # the status page keeps it on
+                elif _all_uploaded():
                     _wifi_off(w, "sleep")
                 else:
                     _wifi_off_backoff(w, now)
@@ -1696,7 +1704,7 @@ def wifi_tick():
             if _age(now, wifi["idle_at"]) < WIFI_IDLE:
                 return
             wifi["idle_at"] = now
-            if _all_uploaded():
+            if _all_uploaded() and not WEB:
                 wifi["wake_at"] = None
                 return
         wifi["wake"] = False
@@ -1710,6 +1718,7 @@ def wifi_tick():
     _wifi_begin_round(w)
 
 def wifi_stop():
+    _web_close()
     w = wifi["wlan"]
     if w is None:
         return
@@ -3019,6 +3028,193 @@ def _low_mem(now):
     _schedule(now)
     print("upload MemoryError, free", gc.mem_free())
 
+# --- Status page ------------------------------------------------------------
+# A small HTTP page on the LAN while the radio is connected (at home it
+# stays connected for it, see wifi_tick): http://<ip>/ and /status.json.
+# Served from the main loop, one client at a time, at most WEB_TIMEOUT s.
+
+_web_sock = None
+
+def _web_env(env):
+    """WEB=0 in .env: no status page, the radio sleeps at home as before."""
+    global WEB
+    v = _plain(env.get("WEB"))
+    if v:
+        t = _truthy(v)
+        if t is None:
+            print("WEB not 1/0, using", 1 if WEB else 0)
+        else:
+            WEB = t
+
+def _web_open():
+    global _web_sock
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(socket.getaddrinfo("0.0.0.0", WEB_PORT)[0][-1])
+        s.listen(2)
+        s.setblocking(False)
+        _web_sock = s
+        print("web http://%s/" % wifi.get("ip"))
+    except OSError as e:
+        print("web", repr(e))
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+def _web_close():
+    global _web_sock
+    if _web_sock is not None:
+        try:
+            _web_sock.close()
+        except OSError:
+            pass
+        _web_sock = None
+
+def _web_diag():
+    """The last WEB_DIAG lines of DIAG_FILE (reads only its tail)."""
+    try:
+        size = _file_size(DIAG_FILE) or 0
+        with open(DIAG_FILE) as f:
+            if size > 160 * WEB_DIAG:
+                f.seek(size - 160 * WEB_DIAG)
+                f.readline()             # a partial line
+            lines = f.read().splitlines()
+        return lines[-WEB_DIAG:]
+    except (OSError, ValueError):
+        return []
+
+def _web_rows():
+    """(section, label, key, value) rows for the page and the JSON."""
+    view = 0
+    for n in st["view"].values():
+        view += n
+    t = _fix_secs()
+    pos = None
+    if st["valid"] and st["lat"] is not None and st["lon"] is not None:
+        pos = "%.5f, %.5f" % (st["lat"], st["lon"])
+    try:
+        cause = machine.reset_cause()
+    except Exception:
+        cause = None
+    try:
+        v = os.statvfs("/")
+        flash = v[0] * v[3] // 1024
+    except OSError:
+        flash = None
+    still = log.get("still") or {}
+    return [
+        ("GPS", "Fix", "fix", status()),
+        ("GPS", "Satellites seen / used", "sats", "%d / %s" % (view, st["used"])),
+        ("GPS", "HDOP", "hdop", st["hdop"]),
+        ("GPS", "GPS time (UTC)", "utc", None if t is None else _stamp_at(t)[0]),
+        ("GPS", "Position", "position", pos),
+        ("GPS", "NMEA ok / bad", "nmea", "%d / %d" % (st["ok"], st["err"])),
+        ("GPS", "Receiver restarts", "gps_boots", st["gps_boots"]),
+        ("GPS", "Reset-loop warnings", "gps_loops", st["loops"]),
+        ("GPS", "Setup acknowledged", "setup_ok", st["setup_ok"]),
+        ("Points", "Logged since boot", "points", log["points"]),
+        ("Points", "Waiting for upload", "left", up["left"]),
+        ("Points", "Track files waiting", "files", len(pending())),
+        ("Points", "Uploaded since boot", "sent", up["sent"]),
+        ("Points", "Upload state", "upload", up["state"]),
+        ("Points", "Upload errors", "upload_err", up["err"]),
+        ("Points", "Stay", "stay", "yes" if still.get("active") else "no"),
+        ("Device", "Uptime (s)", "uptime", time.ticks_ms() // 1000),
+        ("Device", "Boot cause", "boot_cause", cause),
+        ("Device", "Chip temperature (C)", "temp", _temp()),
+        ("Device", "CPU (MHz)", "mhz", machine.freq() // 1000000),
+        ("Device", "Free heap (B)", "mem", gc.mem_free()),
+        ("Device", "Free flash (KB)", "flash_kb", flash),
+        ("Device", "WiFi", "wifi", "%s %s" % (wifi["state"],
+                                             wifi.get("ssid") or "")),
+        ("Device", "RSSI (dBm)", "rssi", wifi.get("rssi")),
+        ("Device", "Keep-alive pulses", "pulses", wifi["pb_scans"]),
+    ]
+
+def _esc(v):
+    return ("-" if v is None else str(v)).replace("&", "&amp;").replace(
+        "<", "&lt;").replace(">", "&gt;")
+
+def _web_json():
+    d = {"device": DEVICE_ID, "diag": _web_diag()}
+    for _sec, _label, key, v in _web_rows():
+        d[key] = v
+    return json.dumps(d)
+
+def _web_html():
+    out = ['<!doctype html><html><head><meta charset="utf-8">'
+           '<meta name="viewport" content="width=device-width,'
+           'initial-scale=1"><meta http-equiv="refresh" content="%d">'
+           '<title>%s</title><style>'
+           'body{font:15px system-ui,sans-serif;margin:16px;max-width:640px;'
+           'background:#fafafa;color:#222}'
+           '@media(prefers-color-scheme:dark){body{background:#16181c;'
+           'color:#ddd}td{border-color:#333!important}}'
+           'h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:18px 0'
+           ' 4px;opacity:.7}table{border-collapse:collapse;width:100%%}'
+           'td{padding:4px 6px;border-bottom:1px solid #ddd}'
+           'td:last-child{text-align:right;font-variant-numeric:tabular-nums}'
+           'pre{font-size:12px;overflow-x:auto;white-space:pre}'
+           '</style></head><body><h1>%s</h1>' % (
+               WEB_REFRESH, _esc(DEVICE_ID), _esc(DEVICE_ID))]
+    sec = None
+    for s_, label, _key, v in _web_rows():
+        if s_ != sec:
+            out.append("%s<h2>%s</h2><table>" % ("</table>" if sec else "",
+                                                  s_))
+            sec = s_
+        out.append("<tr><td>%s</td><td>%s</td></tr>" % (label, _esc(v)))
+    out.append("</table><h2>Diagnostic log</h2><pre>")
+    for line in _web_diag():
+        out.append(_esc(line) + "\n")
+    out.append("</pre></body></html>")
+    return "".join(out)
+
+def _web_reply(c, req):
+    parts = req.split(b" ", 2)
+    path = parts[1] if len(parts) > 1 else b"/"
+    if path.startswith(b"/status.json"):
+        code, ctype, body = "200 OK", "application/json", _web_json()
+    elif path == b"/" or path.startswith(b"/?"):
+        code, ctype, body = "200 OK", "text/html", _web_html()
+    else:
+        code, ctype, body = "404 Not Found", "text/plain", "not found"
+    body = body.encode()
+    c.sendall(("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n"
+               "Content-Length: %d\r\nCache-Control: no-store\r\n"
+               "Connection: close\r\n\r\n" % (code, ctype, len(body))
+               ).encode())
+    c.sendall(body)
+
+def web_tick():
+    """Listen while connected, close otherwise; answer one waiting client."""
+    if not WEB or wifi["state"] != "connected":
+        _web_close()
+        return
+    if _web_sock is None:
+        _web_open()
+        if _web_sock is None:
+            return
+    try:
+        c = _web_sock.accept()[0]
+    except OSError:
+        return                           # nobody waiting (EAGAIN)
+    try:
+        c.settimeout(WEB_TIMEOUT)
+        _web_reply(c, c.recv(512))
+    except (OSError, MemoryError) as e:
+        print("web client", repr(e))
+    finally:
+        try:
+            c.close()
+        except OSError:
+            pass
+        gc.collect()
+
 # --- Screen -----------------------------------------------------------------
 
 def status():
@@ -3164,6 +3360,7 @@ def _loop():
         keepalive_tick(time.ticks_ms())
         feed()
         upload_tick()
+        web_tick()
         now = time.ticks_ms()
         if (not _boot_ok_done
                 and time.ticks_diff(now, loop_start) >= BOOT_OK_MS):

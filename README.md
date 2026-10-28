@@ -119,6 +119,7 @@ HOSTNAME=Dawarich-GPS-tracker
 # CPU_MHZ=80
 # GPS_MODEL=0
 # DIAG=60
+# WEB=1
 ```
 
 | Key | Meaning |
@@ -137,10 +138,11 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
+| `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `DIAG`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `DIAG`, `WEB`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored.
@@ -251,6 +253,17 @@ minute. After a walk, plug the board in and read it:
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state, keep-alive pulses so far, free heap |
+
+**Status page:** <a id="status-page"></a>while the board is on a home
+network it serves a page at `http://<board ip>/` (e.g.
+`http://192.168.1.60/`, reloads every 15 s) and the same data as JSON at
+`/status.json`: fix, satellites seen/used, HDOP, GPS time, position, NMEA
+counts, receiver restarts; points logged, waiting and uploaded, upload
+state, stay; uptime, boot cause, chip temperature, free heap and flash,
+WiFi, keep-alive pulses; and the last lines of the diagnostic log. It is
+plain HTTP without a password: keep it on your own network. For the page
+the radio stays connected at home (idling connected costs ~20–30 mA);
+`WEB=0` in `.env` turns both off.
 
 ## How it works
 
@@ -383,9 +396,10 @@ tell a stay from a drive, so the stay filter works on positions.
 **Radio on only when needed:**
 
 - Once no finished track waits, nothing is in RAM and the open track holds
-  no points, the radio is turned off (`wifi sleep`).
+  no points, the radio is turned off (`wifi sleep`). On a home network with
+  the [status page](#status-page) on (`WEB`, default) it stays connected.
 - After an hour it searches again, but only once there is something to
-  upload.
+  upload (with `WEB` on, every hour anyway, so it finds home again).
 - A new stay wakes it at once, so a home stay is known as one and the arrival
   uploads. Away from home the first anchor point waits 60 s for that round. A
   stay that began at home stays a home stay while the radio sleeps.
@@ -548,6 +562,7 @@ with a NEO-6M; most never need changing.
 | `BOOT_OK_MS` | 60 s | Healthy loop time that clears the boot-fail counter |
 | `STATUS` | 10 min | Console `status` line interval |
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
+| `WEB` / `WEB_PORT` / `WEB_TIMEOUT` | on / 80 / 2 s | Status page (`.env` `WEB`), its port, how long one client may take |
 | `DEVICE_ID` / `HOSTNAME` | `Dawarich-GPS-tracker` | Overland id and DHCP hostname (set in `.env`) |
 
 ## Development
