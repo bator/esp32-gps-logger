@@ -5800,15 +5800,19 @@ try:
     WLAN.ok = set()
     calls = []
     real_disc = getattr(WLAN, "disconnect", None)
+    real_scan2 = WLAN.scan
     WLAN.disconnect = lambda self: (calls.append("disc"),
                                     real_disc(self) if real_disc else None)
+    WLAN.scan = lambda self: (calls.append("scan"), real_scan2(self))[1]
     try:
         gl.wifi_tick()
     finally:
         if real_disc:
             WLAN.disconnect = real_disc
-    check("W-22: lost -> offline disconnects before the next round",
-          "disc" in calls, repr(calls))
+        WLAN.scan = real_scan2
+    check("W-22: lost -> offline disconnects before the round's scan",
+          "scan" in calls and "disc" in calls
+          and calls.index("disc") < calls.index("scan"), repr(calls))
 
     # W-23: no .env: gpio pulses still go out; scan pulses get a WLAN
     gl.wifi_reset()
@@ -5954,24 +5958,27 @@ check("L-6: after a drive at most a window waits in RAM; later written",
 # L-12: the heartbeat comes after the queued seconds, in time order
 sv_reset()
 sv_drift(150)
-gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT
-_uart_rx[:] = []
-base = 8 * 3600 + rv_sec[0] + 5
-for k in range(6):
-    sec = base + k
-    t = "%02d%02d%02d" % (sec // 3600, sec // 60 % 60, sec % 60)
-    for _ in range(5):
-        _uart_rx.extend(rv_nmea(
-            "GNRMC,%s.00,A,4730.%04d,N,01900.0000,E,30.0,,181026,,,A"
-            % (t, 100 + k * 100)) + b"\r\n" + rv_nmea(
-            "GNGGA,%s.00,4730.%04d,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,,"
-            % (t, 100 + k * 100)) + b"\r\n")
-_clock[0] += 12000                       # a 12 s blocking call
-gl.read_uart()
+sl12 = gl.log["still"]
+while gl._age(_clock[0] + 1000, sl12["hb_at"]) < gl.STILL_HEARTBEAT - 3000:
+    sv_fix(rnd.uniform(-5, 5), rnd.uniform(-5, 5))
+gl.log["seq"] = gl.st["seq"]
+gl.st["q"] = []
+_clock[0] += 12000                       # a 12 s blocking POST
+for k in range(10):                      # meanwhile: driving off, queued
+    sec = rv_sec[0]
+    rv_sec[0] += 1
+    gl.st.update(seq=gl.st["seq"] + 1, valid=True, date="2026-10-18",
+                 time="%02d:%02d:%02d" % (8 + sec // 3600, sec // 60 % 60,
+                                          sec % 60),
+                 lat=47.5, lon=19.0 + (160 + 20 * k) * M_LON, alt=100.0,
+                 hdop=1.0, std=None, std_at=None, epochs=5, status="A",
+                 fixtype=3, pos_at=_clock[0], hdop_at=_clock[0])
+    gl.st["q"].append(gl._snap())
 gl.log_tick()
 times = [l.split(",")[4].strip() for l in sv_lines()]
-check("L-12: lines stay in time order after a blocking call",
-      times == sorted(times), repr(times[-8:]))
+check("L-12: no heartbeat before queued seconds (lines in time order)",
+      times == sorted(times) and len(set(times)) == len(times),
+      repr(times[-12:]))
 
 # L-24: the arrival file could not be closed: the stay still rotates it
 sv_reset()
@@ -6273,7 +6280,6 @@ with open(t_bad, "wb") as f:
     f.write(b"#TRK1\n47.5,19.0,100.0,0.9,20261029T101500Z\n"
             b"47.5,19.0,,,2026102XT101501Z\n"
             b"47.6,19.\xff1,,,20261029T101502Z\n#END\n")
-import io
 saved_out = sys.stdout
 sys.stdout = io.StringIO()
 try:
