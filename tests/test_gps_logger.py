@@ -5308,8 +5308,33 @@ if mpy_bin:
               "mpy unix check passed" in text)
     except Exception as e:
         check("mpy-unix: ran MicroPython unix port", False, repr(e))
+    try:
+        out = subprocess.check_output(
+            [mpy_bin, os.path.join(ROOT, "tests", "mpy_unix_logger.py")],
+            stderr=subprocess.STDOUT, timeout=60)
+        text = out.decode() if isinstance(out, bytes) else out
+        print(text.rstrip())
+        check("mpy-unix: gps_logger imports and runs (smoke)",
+              "mpy logger smoke passed" in text, text[-300:])
+    except Exception as e:
+        out = getattr(e, "output", b"") or b""
+        check("mpy-unix: gps_logger smoke", False, repr(e) + " "
+              + out.decode(errors="replace")[-400:])
+
 else:
     print("SKIP  mpy-unix (no micropython binary)")
+
+# The same smoke under CPython (keeps the script itself working)
+import subprocess
+try:
+    out = subprocess.check_output(
+        [sys.executable, os.path.join(ROOT, "tests", "mpy_unix_logger.py")],
+        stderr=subprocess.STDOUT, timeout=60)
+    smoke = out.decode()
+except subprocess.CalledProcessError as e:
+    smoke = e.output.decode(errors="replace")
+check("SMOKE: tests/mpy_unix_logger.py passes under CPython",
+      "mpy logger smoke passed" in smoke, smoke[-300:])
 
 # --- tools/trk2gpx.py: .trk -> GPX 1.1 ------------------------------------
 import xml.etree.ElementTree as ET
@@ -6239,6 +6264,30 @@ finally:
     os.statvfs = real_statvfs
 check("WEB: free flash is read at most every 30 s", len(calls) == 2,
       repr(calls))
+
+
+# trk2gpx: .bad/.err files, damaged bytes, non-digit times
+t_td = tempfile.mkdtemp(prefix="rev29t-")
+t_bad = os.path.join(t_td, "20261029_101500.trk.bad")
+with open(t_bad, "wb") as f:
+    f.write(b"#TRK1\n47.5,19.0,100.0,0.9,20261029T101500Z\n"
+            b"47.5,19.0,,,2026102XT101501Z\n"
+            b"47.6,19.\xff1,,,20261029T101502Z\n#END\n")
+import io
+saved_out = sys.stdout
+sys.stdout = io.StringIO()
+try:
+    rc = trk2gpx.main(["trk2gpx.py", t_bad])
+    gpx_out = sys.stdout.getvalue()
+finally:
+    sys.stdout = saved_out
+check("trk2gpx: a .trk.bad converts; damaged bytes and bad times dropped",
+      rc == 0 and gpx_out.count("<trkpt") == 1
+      and "<name>20261029_101500</name>" in gpx_out, gpx_out[:300])
+check("trk2gpx: a non-digit time is not a time",
+      trk2gpx._iso("2026102XT101501Z") is None
+      and trk2gpx._iso("20261029T101501Z") == "2026-10-29T10:15:01Z")
+shutil.rmtree(t_td, ignore_errors=True)
 
 print()
 print("%d passed, %d failed" % (passed, failed))
