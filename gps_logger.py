@@ -52,6 +52,7 @@ WEB = True                               # status page on port WEB_PORT; the
 WEB_PORT = 80                            # radio stays on at home for it
 WEB_TIMEOUT = 2                          # s a client may take (.env WEB=0)
 WEB_REQ_MAX = 2048                       # bytes of a request head read
+WEB_CHUNK = 1024                         # reply bytes per send
 WEB_REFRESH = 15                         # s between page reloads
 WEB_DIAG = 15                            # diag.log lines on the page
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
@@ -3922,10 +3923,17 @@ def _web_reply(c, req):
     c.sendall(("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n"
                "Content-Length: %d\r\nCache-Control: no-store\r\n"
                "Connection: close\r\n\r\n" % (code, ctype, n)).encode())
-    for k in range(len(body)):
-        c.sendall(body[k])
-        if k & 15 == 15:
+    # ~1 KB per send: one send per small piece waited for an ACK each
+    # (measured: 7 KB took 5 s and the next requests timed out)
+    buf = bytearray()
+    for b in body:
+        buf += b
+        if len(buf) >= WEB_CHUNK:
+            c.sendall(buf)
+            buf = bytearray()
             read_uart()                  # a slow client costs no NMEA
+    if buf:
+        c.sendall(buf)
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client."""

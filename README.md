@@ -662,7 +662,7 @@ with a NEO-6M; most never need changing.
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |
 | `GSA_EVERY` / `GSA_MAX` | 5 s / 8 | GSA round interval; more GSA a second means the rate was not taken |
 | `PB_CONNECTED` / `SEEN_WAIT` | off / 60 s | Pulses while connected (`.env` `KEEPALIVE_CONNECTED`); least time between home-seen wakes |
-| `WEB_REQ_MAX` | 2 KB | Request head read by the status page |
+| `WEB_REQ_MAX` / `WEB_CHUNK` | 2 KB / 1 KB | Request head read by the status page; reply bytes per send |
 | `DEVICE_ID` / `HOSTNAME` | `Dawarich-GPS-tracker` | Overland id and DHCP hostname (set in `.env`) |
 
 ## Development

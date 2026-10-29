@@ -6258,6 +6258,18 @@ except ValueError:
 check("WEB: the streamed JSON is valid and its Content-Length right",
       jd is not None and b"Content-Length: %d" % len(jb) in head
       and "bad_files" in jd and "satellites" in jd, head[:120])
+sends = []
+
+
+class RvConnN(RvConn):
+    def sendall(self, b):
+        sends.append(len(b))
+        RvConn.sendall(self, b)
+c = RvConnN(b"")
+gl._web_reply(c, b"GET / HTTP/1.1")
+check("WEB: the reply goes out in ~WEB_CHUNK sends, not one per piece",
+      2 <= len(sends) <= 2 + len(c.sent) // gl.WEB_CHUNK
+      and all(n <= gl.WEB_CHUNK + 600 for n in sends[1:]), repr(sends))
 gl._fl[:] = [None, None]
 calls = []
 real_statvfs = os.statvfs
