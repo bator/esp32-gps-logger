@@ -127,6 +127,11 @@ STILL_GAP = 30000                        # ms without a usable fix that counts
                                          # as a gap (the device may have moved)
 STILL_DEP_MAX = 90                       # recent samples kept for the departure
 STILL_MEAN_N = 1800                      # samples the anchor mean averages over
+STAY_WIFI = True                         # an away stay ends when none of the
+STAY_WIFI_LEARN = 3                      # access points of its first scans
+STAY_WIFI_MAX = 16                       # (strongest kept) shows up in
+STAY_WIFI_MISS = 6                       # this many scans in a row over at
+STAY_WIFI_GONE = 60000                   # least this many ms (no fix needed)
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
@@ -1165,6 +1170,7 @@ def _scan_known(w):
         wifi["blank_rssi"] = None
         wifi["blank_bssid"] = None
         return None
+    _stay_scan(aps)
     best = {}
     blank_rssi, blank_bssid = None, None
     for rec in aps:
@@ -1671,7 +1677,7 @@ def _pb_pulse_radio(w, scan):
     try:
         w.active(True)
         if scan:
-            w.scan()
+            _stay_scan(w.scan())
     except OSError:
         pass
     finally:
@@ -1895,7 +1901,8 @@ def _still_state():
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
             "ring": [], "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
             "last_at": None, "last_d": 0, "file_at": None, "veto_at": None,
-            "move_c": None, "wins": 0, "hold_tc": None}
+            "move_c": None, "wins": 0, "hold_tc": None, "aps": {},
+            "ap_scans": 0, "ap_miss": 0, "ap_miss_at": None}
 
 def _still_hold():
     """Track time from which a stay still being proven would drop its
@@ -2326,6 +2333,54 @@ def _still_enter(now, anchor, since_tc, n):
     else:
         _still_heartbeat(now)
     print("stay", "home" if sl["home"] else "away", "kept", i)
+
+def _stay_scan(aps):
+    """One WiFi scan during an away stay. The first STAY_WIFI_LEARN scans
+    note the access points around (our own networks left out: a phone
+    hotspot travels along). When none of them shows up in STAY_WIFI_MISS
+    scans in a row over STAY_WIFI_GONE ms, the board has left, fix or not,
+    and the stay ends: no more heartbeats stamped with the old anchor
+    (without a fix on the way, e.g. inside a train, they went on until
+    home). Without access points around, nothing changes."""
+    sl = log["still"]
+    if not STAY_WIFI or not sl["active"] or sl["home"]:
+        return
+    own = [n.get("ssid") for n in wifi.get("nets") or []]
+    seen = []
+    for rec in aps:
+        raw = rec[0]
+        ssid = raw.decode() if isinstance(raw, bytes) else raw
+        if ssid and ssid in own:
+            continue
+        seen.append((rec[3], bytes(rec[1])))
+    aps_known = sl["aps"]
+    if sl["ap_scans"] < STAY_WIFI_LEARN:
+        sl["ap_scans"] += 1
+        for r, b in seen:
+            if b not in aps_known:
+                aps_known[b] = r
+            elif r > aps_known[b]:
+                aps_known[b] = r
+        if len(aps_known) > STAY_WIFI_MAX:
+            keep = sorted(aps_known.items(), key=lambda x: -x[1])
+            sl["aps"] = dict(keep[:STAY_WIFI_MAX])
+        return
+    if not aps_known:
+        return
+    now = time.ticks_ms()
+    if any(b in aps_known for r, b in seen):
+        sl["ap_miss"], sl["ap_miss_at"] = 0, None
+        return
+    sl["ap_miss"] += 1
+    if sl["ap_miss_at"] is None:
+        sl["ap_miss_at"] = now
+    if (sl["ap_miss"] >= STAY_WIFI_MISS
+            and _age(now, sl["ap_miss_at"]) >= STAY_WIFI_GONE):
+        print("stay left, wifi: none of %d access points in %d scans"
+              % (len(aps_known), sl["ap_miss"]))
+        _diag_write("stay left wifi aps %d scans %d"
+                    % (len(aps_known), sl["ap_miss"]))
+        _still_leave()
 
 def _still_leave():
     """End the stay and write the way out: the trailing run of recent
