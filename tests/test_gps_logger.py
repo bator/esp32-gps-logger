@@ -426,6 +426,8 @@ def _reload_logger():
     m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
     m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
     m.WEB = False                        # radio-sleep tests; WEB has its own
+    m.HTTP_POST = lambda url, data, headers, timeout: _post(
+        url, data=data, headers=headers, timeout=timeout)
     return m
 
 
@@ -4784,7 +4786,8 @@ try:
     finally:
         _uart_sv[0] = None
     check("SATS: a page view asks the receiver and lists the satellites",
-          p_page == 1 and "<h2>Satellites</h2>" in page
+          p_page == 1 and "<h2>Satellites <small>(list 0 s old)</small></h2>"
+          in page
           and "<td>GPS 12</td><td>38</td><td>54&deg;</td><td>10&deg;</td>"
               "<td>yes</td>" in page
           and "SBAS 123 (unhealthy)" in page
@@ -5963,6 +5966,279 @@ gl.start_file("20261018_090000")
 gl.flush()
 check("FLUSH: nothing to write creates no file",
       not os.path.exists(os.path.join(rv_dir, "20261018_090000.trk")))
+
+
+# Upload / web: findings 10, 11, 13-17 and the upload/web improvements
+up_td = tempfile.mkdtemp(prefix="rev29up-")
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
+# U-10: an unreadable oldest track neither blocks the rest nor stays
+bad_p = os.path.join(up_td, "20261001_100000.trk")
+ok_p = os.path.join(up_td, "20261002_100000.trk")
+make_trk(bad_p, 3)
+make_trk(ok_p, 3)
+real_rb = gl.read_batch
+
+
+def rb_fail(path, off=0):
+    if path == bad_p:
+        raise OSError(5)
+    return real_rb(path, off)
+gl.read_batch = rb_fail
+_posts[:] = []
+_post_code[0] = 201
+try:
+    for _ in range(gl.READ_ERR_MAX + 4):
+        gl.up["next_at"] = _clock[0]
+        for p_ in list(gl.up["hold"]):
+            gl.up["hold"][p_] = _clock[0] - 1    # holds over
+        gl.upload_tick()
+        _clock[0] += 1000
+finally:
+    gl.read_batch = real_rb
+check("U-10: an unreadable track is held, the next uploads, then .err",
+      len(_posts) >= 1 and not os.path.exists(ok_p)
+      and os.path.exists(bad_p + ".err") and not os.path.exists(bad_p),
+      "posts=%d %r" % (len(_posts), os.listdir(up_td)))
+os.remove(bad_p + ".err")
+
+# U-14: the quarantine copy lands but the offset write fails: no crash
+q_p = os.path.join(up_td, "20261003_100000.trk")
+make_trk(q_p, gl.UPLOAD_BATCH + 5)      # not EOF: the .pos is written
+_post_code[0] = 422
+real_wo = gl.write_offset
+gl.write_offset = lambda path, off: (_ for _ in ()).throw(OSError(28))
+crash = None
+try:
+    pump()
+except Exception as e:
+    crash = e
+finally:
+    gl.write_offset = real_wo
+    _post_code[0] = 201
+check("U-14: quarantine with a failing offset write: fs err, no crash",
+      crash is None and gl.up["state"] == "fs err", repr(crash))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
+# U-15: a long .bad drains past MAX_BAD_RETRY good batches in one boot
+b_p = os.path.join(up_td, "20261004_100000.trk.bad")
+make_trk(b_p, gl.UPLOAD_BATCH * (gl.MAX_BAD_RETRY + 3))
+_posts[:] = []
+for _ in range(gl.MAX_BAD_RETRY + 6):
+    pump()
+    _clock[0] += 1000
+check("U-15: a .bad keeps draining after MAX_BAD_RETRY good batches",
+      len(_posts) >= gl.MAX_BAD_RETRY + 3 and not os.path.exists(b_p),
+      "posts=%d" % len(_posts))
+
+# U-16: at EOF the track goes without writing a .pos first (full flash)
+e_p = os.path.join(up_td, "20261005_100000.trk")
+make_trk(e_p, 3)
+gl.write_offset = lambda path, off: (_ for _ in ()).throw(OSError(28))
+try:
+    pump()
+finally:
+    gl.write_offset = real_wo
+check("U-16: the last batch deletes the track even if .pos cannot be written",
+      not os.path.exists(e_p), repr(os.listdir(up_td)))
+
+# U-17 / U-11: own POST: no redirects, chunked body and polled wait
+class RvSock:
+    def __init__(self, resp, polls=3):
+        self.resp, self.polls, self.out, self.closed = resp, polls, b"", False
+        self.rd = 0
+        self.timeout = None
+
+    def settimeout(self, t):
+        self.timeout = t
+
+    def connect(self, addr):
+        self.addr = addr
+
+    def write(self, b):
+        b = bytes(b)
+        self.out += b
+        return len(b)
+
+    def readline(self):
+        i = self.resp.find(b"\n", self.rd)
+        i = len(self.resp) if i < 0 else i + 1
+        line, self.rd = self.resp[self.rd:i], i
+        return line
+
+    def close(self):
+        self.closed = True
+
+
+class RvPoll:
+    def __init__(self, sock):
+        self.sock = sock
+
+    def register(self, s, ev):
+        pass
+
+    def poll(self, ms):
+        _clock[0] += ms
+        if self.sock.polls > 0:
+            self.sock.polls -= 1
+            return []
+        return [(self.sock, 1)]
+
+
+class RvTls:
+    PROTOCOL_TLS_CLIENT, CERT_NONE, CERT_REQUIRED = 2, 0, 2
+    made = []
+
+    class SSLContext:
+        def __init__(self, proto):
+            self.verify_mode, self.ca = None, None
+            RvTls.made.append(self)
+
+        def load_verify_locations(self, cadata=None):
+            self.ca = cadata
+
+        def wrap_socket(self, s, server_hostname=None):
+            self.host = server_hostname
+            return s
+
+
+rv_sock = [None]
+fake_sockmod = types.ModuleType("socket")
+fake_sockmod.SOCK_STREAM = 1
+fake_sockmod.getaddrinfo = lambda h, p, a=0, b=0: [(2, 1, 6, "", (h, p))]
+fake_sockmod.socket = lambda *a: rv_sock[0]
+fake_sel = types.ModuleType("select")
+fake_sel.POLLIN = 1
+fake_sel.poll = lambda: RvPoll(rv_sock[0])
+real_mods = (gl.socket, gl.select, sys.modules.get("tls"))
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+uart_reads = [0]
+real_ru = gl.read_uart
+gl.read_uart = lambda: uart_reads.__setitem__(0, uart_reads[0] + 1)
+try:
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\nRetry-After: 7\r\n\r\n",
+                        polls=3)
+    body = b"x" * (gl.HTTP_CHUNK * 3 + 10)
+    r = gl._raw_post("https://d.example:8443/sub", body,
+                     {"Authorization": "Bearer k"}, 15)
+    sent = rv_sock[0].out
+    ok_post = (r.status_code == 201 and r.headers.get("Retry-After") == "7"
+               and sent.startswith(b"POST /sub HTTP/1.0\r\nHost: d.example\r\n")
+               and b"Content-Length: %d\r\n" % len(body) in sent
+               and sent.endswith(body) and rv_sock[0].closed
+               and rv_sock[0].addr == ("d.example", 8443)
+               and RvTls.made[-1].verify_mode == RvTls.CERT_NONE
+               and uart_reads[0] >= 4 + 3)
+    rv_sock[0] = RvSock(b"HTTP/1.1 301 Moved\r\nLocation: https://x/\r\n\r\n",
+                        polls=0)
+    r301 = gl._raw_post("https://d.example", b"{}", {}, 15)
+    one_req = rv_sock[0].out.count(b"POST ") == 1
+    ca_path = os.path.join(up_td, "ca.der")
+    with open(ca_path, "wb") as f:
+        f.write(b"\x30\x82der")
+    gl.CA_FILE = ca_path
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    gl._raw_post("https://d.example", b"{}", {}, 15)
+    ca_ctx = RvTls.made[-1]
+    rv_sock[0] = RvSock(b"", polls=10 ** 6)
+    t0 = _clock[0]
+    try:
+        gl._raw_post("https://d.example", b"{}", {}, 15)
+        to = None
+    except OSError as e:
+        to = e
+finally:
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = real_mods[2]
+    gl.read_uart = real_ru
+    gl.CA_FILE = "/ca.der"
+check("U-11: POST body in chunks, UART read while writing and waiting",
+      ok_post, repr(rv_sock[0].out[:80]))
+check("U-17: a 301 is returned, not followed (no GET, no Bearer elsewhere)",
+      r301.status_code == 301 and one_req)
+check("TLS: with CA_FILE on flash the server is verified",
+      ca_ctx.verify_mode == RvTls.CERT_REQUIRED and ca_ctx.ca == b"\x30\x82der")
+check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
+      to is not None and _clock[0] - t0 >= gl.HTTP_WAIT, repr(to))
+
+# TLS out of memory TLS_REBOOT_N times in a row at home: a clean reboot
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.wifi["home"] = True
+make_trk(os.path.join(up_td, "20261006_100000.trk"), 3)
+_resets[:] = []
+for _ in range(gl.TLS_REBOOT_N):
+    _post_raise[0] = OSError(-0x7F00)
+    try:
+        pump()
+    except SystemExit:
+        break
+    _clock[0] += 1000
+check("TLS: ENOMEM TLS_REBOOT_N times at home -> one controlled reboot",
+      len(_resets) == 1 and gl.up["enomem"] >= gl.TLS_REBOOT_N,
+      "resets=%d enomem=%d" % (len(_resets), gl.up["enomem"]))
+_post_raise[0] = None
+gl.wifi["home"] = False
+
+# U-13: a request head over 512 B is read whole before the reply
+class RvConn:
+    def __init__(self, req):
+        self.req, self.sent, self.closed = req, b"", False
+
+    def settimeout(self, t):
+        pass
+
+    def recv(self, n):
+        b, self.req = self.req[:n], self.req[n:]
+        return b
+
+    def sendall(self, b):
+        self.sent += bytes(b)
+
+    def close(self):
+        self.closed = True
+
+
+long_req = (b"GET /status.json HTTP/1.1\r\nHost: x\r\nCookie: "
+            + b"a" * 900 + b"\r\n\r\n")
+c = RvConn(long_req)
+got = gl._web_read(c)
+check("U-13: the whole request head is read (900 B cookie)",
+      got == long_req and c.req == b"", "%d" % len(got))
+gl.reset()
+c = RvConn(b"")
+gl._web_reply(c, b"GET /status.json HTTP/1.1")
+head, _, jb = c.sent.partition(b"\r\n\r\n")
+try:
+    jd = json.loads(jb)
+except ValueError:
+    jd = None
+check("WEB: the streamed JSON is valid and its Content-Length right",
+      jd is not None and b"Content-Length: %d" % len(jb) in head
+      and "bad_files" in jd and "satellites" in jd, head[:120])
+gl._fl[:] = [None, None]
+calls = []
+real_statvfs = os.statvfs
+os.statvfs = lambda p: calls.append(p) or real_statvfs(up_td)
+try:
+    gl._flash_kb()
+    gl._flash_kb()
+    _clock[0] += 31000
+    gl._flash_kb()
+finally:
+    os.statvfs = real_statvfs
+check("WEB: free flash is read at most every 30 s", len(calls) == 2,
+      repr(calls))
 
 print()
 print("%d passed, %d failed" % (passed, failed))

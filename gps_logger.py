@@ -1,5 +1,5 @@
 from machine import Pin, I2C, UART, WDT
-import machine, sys, time, os, network, gc, math, socket, json
+import machine, sys, time, os, network, gc, math, socket, json, select
 try:
     import esp32                         # mcu_temperature() on C3/C6/S2/S3
 except ImportError:
@@ -51,6 +51,7 @@ DIAG_MAX = 32768                         # bytes, then DIAG_FILE -> DIAG_OLD
 WEB = True                               # status page on port WEB_PORT; the
 WEB_PORT = 80                            # radio stays on at home for it
 WEB_TIMEOUT = 2                          # s a client may take (.env WEB=0)
+WEB_REQ_MAX = 2048                       # bytes of a request head read
 WEB_REFRESH = 15                         # s between page reloads
 WEB_DIAG = 15                            # diag.log lines on the page
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
@@ -199,14 +200,23 @@ UPLOAD_GAP_AWAY = 30000                  # ms between batches on a non-home net
 BACKOFF_START = 15000                    # ms first retry after net/5xx/4xx
 BACKOFF_MAX = 1800000                    # ms cap (30 min) on upload backoff
 AUTH_BACKOFF = 1800000                   # ms retry after 401 (plan/key/limit)
-HTTP_TIMEOUT = 15                        # s per socket op, not a wall clock
+HTTP_TIMEOUT = 15                        # s per socket op (connect, TLS)
+HTTP_WAIT = 30000                        # ms for the server's answer, the
+                                         # UART read meanwhile (a 4 KB buffer
+                                         # holds ~5 s of NMEA)
+HTTP_CHUNK = 1024                        # body bytes per write, UART between
+CA_FILE = "/ca.der"                      # if present: verify the server
+TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
+                                         # home): a clean reboot, the IDF heap
+                                         # stays fragmented otherwise
+READ_ERR_MAX = 3                         # unreadable track: tries, then .err
 DEFAULT_DEVICE_ID = "Dawarich-GPS-tracker"
 DEFAULT_HOSTNAME = "Dawarich-GPS-tracker"
 DEVICE_ID = DEFAULT_DEVICE_ID            # Overland tracker id (overridable)
 HOSTNAME = DEFAULT_HOSTNAME              # DHCP hostname (overridable)
 ID_MAX = 32                              # DEVICE_ID / HOSTNAME length cap
 MAX_BAD_BYTES = 65536                    # cap on appended <file>.bad
-MAX_BAD_RETRY = 8                        # successful .bad batches per file per boot
+MAX_BAD_RETRY = 8                        # rejected .bad batches per file per boot
 MAX_GLOBAL_PAYLOAD = 3                   # consecutive 400/422 -> global backoff
 WDT_TIMEOUT = 120000                     # ms; ESP32 WDT cannot be disarmed
 KEEPALIVE_MAX = 600000                   # ms Ctrl-C timer may feed the WDT
@@ -802,6 +812,9 @@ def _diag_write(line):
     if not DIAG:
         return
     try:
+        room = free()
+        if room is not None and room < MIN_FREE:
+            return                       # the tracks keep the reserve
         size = _file_size(DIAG_FILE)
         if size is not None and size >= DIAG_MAX:
             _rm(DIAG_OLD)
@@ -1959,7 +1972,7 @@ def wifi_start():
                           DEFAULT_HOSTNAME, host=True)
     if up["url"] and up["url"].startswith("http://"):
         print("WARNING: GEO_URL is http:// - API key and GPS data are unencrypted")
-        print("WARNING: requests follows http redirects as GET; use https origin")
+        print("WARNING: redirects are not followed; use the https origin")
     if not wifi["nets"]:
         wifi["state"] = "no .env"
         return
@@ -2924,8 +2937,8 @@ def up_reset():
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
-              bad_try={}, skip=None, hold={}, bad_full={},
-              next_at=time.ticks_ms())
+              bad_try={}, skip=None, hold={}, bad_full={}, read_err={},
+              enomem=0, next_at=time.ticks_ms())
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -3200,14 +3213,16 @@ def read_batch(path, off=0):
 
 def commit_offset(path, n, new_off, eof=False):
     """Record that n points are done. Delete only at true EOF.
-    Crash between POST and this call resends (at-least-once)."""
-    write_offset(path, new_off)
+    Crash between POST and this call resends (at-least-once). At EOF the
+    file goes without a .pos write first: on a full flash that write
+    failed, so the file was never deleted and no room came back."""
+    if eof:
+        _rm(path)
+        _rm(path + ".pos")
+        _clear_bad_full(path)
+    else:
+        write_offset(path, new_off)
     up["left"] = max(up["left"] - n, 0)
-    if not eof:
-        return
-    _rm(path)
-    _rm(path + ".pos")
-    _clear_bad_full(path)
 
 def _append_bad(path, off, new_off):
     """Copy consumed point lines to <path>.bad. False if not durable."""
@@ -3218,6 +3233,10 @@ def _append_bad(path, off, new_off):
     need = max(new_off - off, 0)
     if sz >= MAX_BAD_BYTES or sz + need > MAX_BAD_BYTES:
         print("bad file full", bad)
+        return False
+    room = free()
+    if room is not None and room - need < MIN_FREE:
+        print("bad file: flash reserve", bad)
         return False
     gpx = not _is_trk(path)
     try:
@@ -3247,7 +3266,15 @@ def _quarantine_batch(path, off, n, new_off, eof):
         bf[path] = True
         up["bad_full"] = bf
         return False
-    commit_offset(path, n, new_off, eof)
+    try:
+        commit_offset(path, n, new_off, eof)
+    except OSError as e:
+        # the copy landed but the offset did not: the next try copies the
+        # batch again (duplicates in .bad, deduplicated by Dawarich)
+        print("quarantine offset", repr(e))
+        up["err"] += 1
+        up["state"] = "fs err"
+        return False
     up["allow_bad"] = False
     up["state"] = "quarantine"
     return True
@@ -3299,25 +3326,134 @@ def _clear_bad_full(path):
         bf.pop(path, None)
         up["bad_full"] = bf
 
+class _Resp:
+    def __init__(self, code, retry):
+        self.status_code = code
+        self.headers = {"Retry-After": retry} if retry is not None else {}
+
+    def close(self):
+        pass
+
+def _io_write(s, b):
+    """All of b to a socket or TLS stream (MicroPython: write; CPython
+    test doubles: sendall)."""
+    w = getattr(s, "write", None)
+    if w is None:
+        s.sendall(b)
+        return
+    mv = memoryview(b)
+    i = 0
+    while i < len(mv):
+        n = w(mv[i:])
+        if n is None:
+            n = 0                        # would block: try again
+        i += n
+
+def _tls_wrap(s, host):
+    """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
+    with CA_FILE on flash (a DER root certificate), verifying the server."""
+    try:
+        import tls
+    except ImportError:
+        import ssl as tls
+    ctx = tls.SSLContext(tls.PROTOCOL_TLS_CLIENT)
+    ca = None
+    try:
+        with open(CA_FILE, "rb") as f:
+            ca = f.read()
+    except OSError:
+        pass
+    if ca:
+        ctx.verify_mode = tls.CERT_REQUIRED
+        ctx.load_verify_locations(cadata=ca)
+    else:
+        ctx.verify_mode = tls.CERT_NONE
+    return ctx.wrap_socket(s, server_hostname=host)
+
+def _raw_post(url, data, headers, timeout):
+    """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
+    followed one as a GET with the old Content-Length (the server then
+    waits for a body) and the Bearer header, without the timeout. The body
+    goes out in HTTP_CHUNK pieces and the wait for the answer polls, both
+    reading the UART meanwhile, so a slow server costs no NMEA. -> _Resp."""
+    proto, _, rest = url.partition("://")
+    host, _, path = rest.partition("/")
+    path = "/" + path
+    port = 443 if proto == "https" else 80
+    if ":" in host:
+        host, _, p = host.rpartition(":")
+        port = int(p)
+    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
+    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
+    try:
+        s.settimeout(timeout)
+        s.connect(ai[-1])
+        if proto == "https":
+            s = _tls_wrap(s, host)
+        hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (path, host)
+        for k in headers:
+            hdr += "%s: %s\r\n" % (k, headers[k])
+        hdr += "Content-Length: %d\r\nConnection: close\r\n\r\n" % len(data)
+        _io_write(s, hdr.encode())
+        mv = memoryview(data)
+        for i in range(0, len(mv), HTTP_CHUNK):
+            _io_write(s, mv[i:i + HTTP_CHUNK])
+            read_uart()
+            feed()
+        poll = select.poll()
+        poll.register(s, select.POLLIN)
+        t0 = time.ticks_ms()
+        while not poll.poll(200):
+            read_uart()
+            feed()
+            if _age(time.ticks_ms(), t0) >= HTTP_WAIT:
+                raise OSError(110)       # ETIMEDOUT
+        line = s.readline()
+        code = int(line.split(None, 2)[1])
+        retry = None
+        while True:
+            h = s.readline()
+            if not h or h == b"\r\n":
+                break
+            k, _, v = h.partition(b":")
+            if k.strip().lower() == b"retry-after":
+                retry = v.strip().decode()
+        return _Resp(code, retry)
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+HTTP_POST = _raw_post                    # (tests swap it)
+
+def _enomem(e):
+    """TLS out of memory: MemoryError, ENOMEM or mbedTLS ALLOC_FAILED."""
+    if isinstance(e, MemoryError):
+        return True
+    a = getattr(e, "args", None) or (None,)
+    return a[0] in (12, -0x7F00, -0x10)
+
 def _http_post(size):
-    """POST _body[:size]. Returns (status_code or None, retry_after_ms or None).
-    Always closes the response so a non-OSError does not leak the TLS socket
-    until the GC finalizer (micropython-lib requests)."""
+    """POST _body[:size]. Returns (status_code or None, retry_after_ms or None)."""
     feed()
     r = None
     code, retry = None, None
     try:
-        import requests
-        r = requests.post("%s/api/v1/overland/batches" % up["url"],
-                          data=memoryview(_body)[:size],
-                          headers={"Content-Type": "application/json",
-                                   "Authorization": "Bearer %s" % up["key"]},
-                          timeout=HTTP_TIMEOUT)
+        r = HTTP_POST("%s/api/v1/overland/batches" % up["url"],
+                      memoryview(_body)[:size],
+                      {"Content-Type": "application/json",
+                       "Authorization": "Bearer %s" % up["key"]},
+                      HTTP_TIMEOUT)
         code = r.status_code
         retry = _retry_after_ms(r)
+        up["enomem"] = 0
     except MemoryError:
+        up["enomem"] = up.get("enomem", 0) + 1
         raise
     except Exception as e:
+        if _enomem(e):
+            up["enomem"] = up.get("enomem", 0) + 1
         print("upload", repr(e))
     finally:
         if r is not None:
@@ -3327,7 +3463,24 @@ def _http_post(size):
                 pass
         feed()
         gc.collect()
+    if code is not None and 300 <= code < 400:
+        print("GEO_URL redirects (%d): put the final https origin in .env"
+              % code)
     return code, retry
+
+def _tls_reboot():
+    """TLS_REBOOT_N TLS allocations failed in a row at home: the IDF heap
+    is fragmented for good. Write what is in RAM and restart."""
+    if up.get("enomem", 0) < TLS_REBOOT_N or not at_home():
+        return False
+    print("upload: TLS out of memory %d times, reboot" % up["enomem"])
+    try:
+        flush(_still_hold())
+    except Exception:
+        pass
+    _diag_write("reboot tls memory %d" % up["enomem"])
+    machine.reset()
+    return True
 
 def upload_tick():
     """Send one batch when WiFi is up and due. Runs on home and hotspot."""
@@ -3391,9 +3544,24 @@ def upload_tick():
             commit_offset(path, n, new_off, eof)
             up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
             return
-    except OSError:
+    except OSError as e:
+        # unreadable (corrupt LittleFS block, EIO): hold it back so the
+        # newer tracks still go, and after READ_ERR_MAX tries park it as
+        # <file>.err (left for a manual look) instead of blocking for good
         up["err"] += 1
         up["state"] = "fs err"
+        re_ = up["read_err"]
+        re_[path] = re_.get(path, 0) + 1
+        print("upload read", path, repr(e))
+        if re_[path] >= READ_ERR_MAX:
+            re_.pop(path, None)
+            try:
+                os.rename(path, path + ".err")
+                _rm(path + ".pos")
+                print("parked", path + ".err")
+            except OSError:
+                pass
+        _hold_file(path, now, BACKOFF_MAX)
         _schedule(now)
         return
     except MemoryError:
@@ -3406,18 +3574,23 @@ def upload_tick():
     gc.collect()
     if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
         _set_freq(CPU_MHZ_UPLOAD)        # TLS handshake at full speed
+    t_post = time.ticks_ms()
     try:
         code, retry = _http_post(size)
     except MemoryError:
         up["skip"] = path
         _low_mem(time.ticks_ms())
+        _tls_reboot()
         return
     finally:
         if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
             _set_freq(CPU_MHZ)
     read_uart()                          # catch up after a multi-second POST
     now = time.ticks_ms()
-    print("upload", path, n, n_ok, code, gc.mem_free())
+    print("upload", path, n, n_ok, code, gc.mem_free(),
+          "%d ms" % time.ticks_diff(now, t_post))
+    if code is None and _tls_reboot():
+        return
     gap = UPLOAD_GAP_AWAY if not at_home() else UPLOAD_GAP
     if code is not None and 200 <= code < 300:
         try:
@@ -3436,16 +3609,18 @@ def upload_tick():
         held.pop(path, None)
         up["hold"] = held
         _clear_bad_full(path)
-        if from_bad:
-            bt = up.get("bad_try") or {}
-            bt[path] = bt.get(path, 0) + 1
-            up["bad_try"] = bt
         if not _bad_full_left():
             up["state"] = "ok"
         up["next_at"] = time.ticks_add(now, gap)
     elif code in PAYLOAD_ERR:
         up["err"] += 1
         up["fail4"] = up.get("fail4", 0) + 1
+        if from_bad:
+            # count the rejections of a .bad, not its successes: it used to
+            # stop after MAX_BAD_RETRY good batches until the next boot
+            bt = up.get("bad_try") or {}
+            bt[path] = bt.get(path, 0) + 1
+            up["bad_try"] = bt
         if path.endswith(".bad") or up["fail4"] >= MAX_GLOBAL_PAYLOAD:
             up["state"] = "err payload"
             _hold_file(path, now, retry if retry else BACKOFF_MAX)
@@ -3551,11 +3726,7 @@ def _web_rows():
         cause = machine.reset_cause()
     except Exception:
         cause = None
-    try:
-        v = os.statvfs("/")
-        flash = v[0] * v[3] // 1024
-    except OSError:
-        flash = None
+    flash = _flash_kb()
     still = log.get("still") or {}
     return [
         ("GPS", "Fix", "fix", status()),
@@ -3571,6 +3742,7 @@ def _web_rows():
         ("Points", "Logged since boot", "points", log["points"]),
         ("Points", "Waiting for upload", "left", up["left"]),
         ("Points", "Track files waiting", "files", len(pending())),
+        ("Points", "Quarantined files (.bad)", "bad_files", len(pending_bad())),
         ("Points", "Uploaded since boot", "sent", up["sent"]),
         ("Points", "Upload state", "upload", up["state"]),
         ("Points", "Upload errors", "upload_err", up["err"]),
@@ -3587,6 +3759,22 @@ def _web_rows():
         ("Device", "RSSI (dBm)", "rssi", wifi.get("rssi")),
         ("Device", "Keep-alive pulses", "pulses", wifi["pb_scans"]),
     ]
+
+_fl = [None, None]                       # (KB, ticks) of the last statvfs
+
+def _flash_kb():
+    """Free flash in KB, at most every 30 s: statvfs walks the whole
+    LittleFS (slow, and the page asks every WEB_REFRESH)."""
+    now = time.ticks_ms()
+    if _fl[1] is not None and _age(now, _fl[1]) < 30000:
+        return _fl[0]
+    try:
+        v = os.statvfs("/")
+        _fl[0] = v[0] * v[3] // 1024
+    except OSError:
+        _fl[0] = None
+    _fl[1] = now
+    return _fl[0]
 
 def _esc(v):
     return ("-" if v is None else str(v)).replace("&", "&amp;").replace(
@@ -3621,19 +3809,34 @@ def _sv_list():
     return sorted(st["svs"], key=lambda v: (not v[4], -v[1], v[6] or 0,
                                             v[0]))
 
-def _web_json():
-    d = {"device": DEVICE_ID, "diag": _web_diag(),
-         "satellites": [{"name": _sv_name(v), "system": GNSS.get(v[6]),
-                         "svid": v[0], "cno": v[1], "elev": v[2],
-                         "azim": v[3], "used": v[4], "unhealthy": v[5]}
-                        for v in _sv_list()],
-         "satellites_age_s": None if st["svs_at"] is None else
-         _age(time.ticks_ms(), st["svs_at"]) // 1000}
+def _sv_age():
+    at = st["svs_at"]
+    return None if at is None else _age(time.ticks_ms(), at) // 1000
+
+def _web_json_parts():
+    """The JSON in small pieces (no 8 KB string and its encoded copy)."""
+    out = ['{"device":', json.dumps(DEVICE_ID), ',"diag":',
+           json.dumps(_web_diag()), ',"satellites":[']
+    sep = ""
+    for v in _sv_list():
+        out.append(sep + json.dumps({
+            "name": _sv_name(v), "system": GNSS.get(v[6]), "svid": v[0],
+            "cno": v[1], "elev": v[2], "azim": v[3], "used": v[4],
+            "unhealthy": v[5]}))
+        sep = ","
+    out.append('],"satellites_age_s":' + json.dumps(_sv_age()))
     for _sec, _label, key, v in _web_rows():
-        d[key] = v
-    return json.dumps(d)
+        out.append(",%s:%s" % (json.dumps(key), json.dumps(v)))
+    out.append("}")
+    return out
+
+def _web_json():
+    return "".join(_web_json_parts())
 
 def _web_html():
+    return "".join(_web_html_parts())
+
+def _web_html_parts():
     out = ['<!doctype html><html><head><meta charset="utf-8">'
            '<meta name="viewport" content="width=device-width,'
            'initial-scale=1"><meta http-equiv="refresh" content="%d">'
@@ -3660,7 +3863,9 @@ def _web_html():
                                                   s_))
             sec = s_
         out.append("<tr><td>%s</td><td>%s</td></tr>" % (label, _esc(v)))
-    out.append("</table><h2>Satellites</h2>")
+    age = _sv_age()
+    out.append("</table><h2>Satellites%s</h2>" % (
+        "" if age is None else " <small>(list %s old)</small>" % _hms(age)))
     svs = _sv_list()
     if svs:
         out.append("<table><tr><td>Satellite</td><td>Signal (dBHz)</td>"
@@ -3680,25 +3885,47 @@ def _web_html():
     for line in _web_diag():
         out.append(_esc(line) + "\n")
     out.append("</pre></body></html>")
-    return "".join(out)
+    return out
+
+def _web_read(c):
+    """The request head: recv until the blank line, at most WEB_REQ_MAX
+    bytes. One recv(512) left the rest of a long request (cookies) unread,
+    and closing a socket with unread data sends an RST that cut the reply
+    short."""
+    data = b""
+    t0 = time.ticks_ms()
+    while len(data) < WEB_REQ_MAX and b"\r\n\r\n" not in data:
+        b = c.recv(512)
+        if not b:
+            break
+        data += b
+        if _age(time.ticks_ms(), t0) >= WEB_TIMEOUT * 1000:
+            break
+    return data
 
 def _web_reply(c, req):
     parts = req.split(b" ", 2)
     path = parts[1] if len(parts) > 1 else b"/"
     if path.startswith(b"/status.json"):
         _sv_fresh()
-        code, ctype, body = "200 OK", "application/json", _web_json()
+        code, ctype, body = "200 OK", "application/json", _web_json_parts()
     elif path == b"/" or path.startswith(b"/?"):
         _sv_fresh()
-        code, ctype, body = "200 OK", "text/html", _web_html()
+        code, ctype, body = "200 OK", "text/html", _web_html_parts()
     else:
-        code, ctype, body = "404 Not Found", "text/plain", "not found"
-    body = body.encode()
+        code, ctype, body = "404 Not Found", "text/plain", ["not found"]
+    for i in range(len(body)):
+        body[i] = body[i].encode()       # small pieces, one at a time
+    n = 0
+    for b in body:
+        n += len(b)
     c.sendall(("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n"
                "Content-Length: %d\r\nCache-Control: no-store\r\n"
-               "Connection: close\r\n\r\n" % (code, ctype, len(body))
-               ).encode())
-    c.sendall(body)
+               "Connection: close\r\n\r\n" % (code, ctype, n)).encode())
+    for k in range(len(body)):
+        c.sendall(body[k])
+        if k & 15 == 15:
+            read_uart()                  # a slow client costs no NMEA
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client."""
@@ -3715,7 +3942,9 @@ def web_tick():
         return                           # nobody waiting (EAGAIN)
     try:
         c.settimeout(WEB_TIMEOUT)
-        _web_reply(c, c.recv(512))
+        req = _web_read(c)
+        read_uart()
+        _web_reply(c, req)
     except (OSError, MemoryError) as e:
         print("web client", repr(e))
     finally:
