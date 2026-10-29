@@ -3296,8 +3296,9 @@ try:
           "b56206010300f00300fd15" in frames, repr(frames[:2]))
     check("UBX: CFG-RATE asks for 200 ms (b562 0608 ... de6a)",
           frames[-1] == "b56206080600c800010001" + "00de6a", frames[-1])
-    check("UBX: GSA once a second, RMC and GGA every fix",
-          gl._ubx(6, 1, bytes((0xF0, 2, gl.GPS_HZ))).hex() in frames
+    check("UBX: GSA every GSA_EVERY s, RMC and GGA every fix",
+          gl._ubx(6, 1, bytes((0xF0, 2, gl.GPS_HZ * gl.GSA_EVERY))).hex()
+          in frames
           and gl._ubx(6, 1, bytes((0xF0, 0, 1))).hex() in frames
           and gl._ubx(6, 1, bytes((0xF0, 4, 1))).hex() in frames)
     nav5 = gl._nav5()
@@ -3545,9 +3546,9 @@ try:
         for _ in range(40):
             _clock[0] += 1500
             gl.handle(gsv_line)
-            n0 = len(_uart_tx)
+            n0 = cfg_n()                 # setup frames (not list polls)
             gl.gps_check(_clock[0])
-            if len(_uart_tx) > n0:
+            if cfg_n() > n0:
                 sends.append(_clock[0])
         gaps = [(b2 - a2) // 1000 for a2, b2 in zip(sends, sends[1:])]
     finally:
@@ -4767,8 +4768,8 @@ try:
     gl.gps_check(_clock[0])
     p_nosetup = polls()
     gl.st["setup_ok"] = True
-    check("SATS: polled every SV_POLL, not before the setup took",
-          p_ok == 2 and p_nosetup == 0, "%d %d" % (p_ok, p_nosetup))
+    check("SATS: polled every SV_POLL, also while the setup is not acked",
+          p_ok == 2 and p_nosetup == 1, "%d %d" % (p_ok, p_nosetup))
     check("SATS: the poll frame has a valid checksum",
           gl._ubx(0x01, 0x30, b"") == b"\xb5\x62\x01\x30\x00\x00\x31\x94")
 
@@ -5417,6 +5418,7 @@ try:
     gl.log_reset()
     gl.up_reset()
     _reset_cause[0] = 6
+    gl._up[:] = [0, 0]                   # uptime from tick 0
     gl._diag_boot()
     _reset_cause[0] = 1
     gl.st.update(ok=120, err=3, gps_boots=2, loops=1, used=7,
@@ -5549,6 +5551,120 @@ try:
           "_diag(now)" in loop_src and "DIAG" in loop_src)
 finally:
     gl.DIAG, gl.DIAG_MAX = saved_diag
+
+
+# REV29: fixes from the 2026-10-29 review (one check per finding)
+def rv_nmea(body):
+    c = 0
+    for ch in body.encode():
+        c ^= ch
+    return ("$%s*%02X" % (body, c)).encode()
+
+
+# GPS-2: GSA every GSA_EVERY s; the page stops waiting for a silent list
+gl.reset()
+gl.st["setup_ok"] = True
+_uart_rx[:] = []
+_uart_tx[:] = []
+gl.sv_poll(_clock[0])
+_clock[0] += gl.SV_POLL
+gl.sv_poll(_clock[0])
+_clock[0] += gl.SV_POLL
+gl.sv_poll(_clock[0])
+miss = gl.st["sv_miss"]
+t0 = _clock[0] + gl.SV_FRESH
+_clock[0] = t0
+gl._sv_fresh()
+check("GPS-2: GSA rate is one round per GSA_EVERY s at GPS_HZ",
+      (0x02, gl.GPS_HZ * gl.GSA_EVERY) in gl.GPS_MSGS)
+check("GPS-2: unanswered polls are counted; the page then does not wait",
+      miss == 2 and _clock[0] - t0 < 100, "miss=%d waited=%d"
+      % (miss, _clock[0] - t0))
+
+# GPS-7: a lost ACK leaves setup_ok False with nothing extra: set up again
+gl.reset()
+_uart_drop[0] = 99                       # every ACK lost
+try:
+    gl.gps_setup()
+finally:
+    _uart_drop[0] = 0
+lost = gl.st["setup_ok"]
+_uart_tx[:] = []
+_clock[0] += gl.GPS_RETRY + 1000
+gl.gps_check(_clock[0])
+again = len([f for f in _uart_tx if f[2:3] == b"\x06"]) > 0
+check("GPS-7: setup not acknowledged and no extra sentence -> sent again",
+      lost is False and gl.st["extra"] == 0 and again
+      and gl.st["setup_ok"] is True, "%r %r" % (lost, gl.st["setup_ok"]))
+
+# GPS-18: a GSA flood (rate not taken) counts as a setup not taken
+gl.reset()
+gl.st["setup_at"] = _clock[0] - 5000
+for _ in range(20):
+    gl.handle(rv_nmea("GNGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2,1"))
+flood = gl.st["extra"]
+gl.reset()
+gl.st["setup_at"] = _clock[0] - 5000
+for _ in range(4):
+    gl.handle(rv_nmea("GNGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2,1"))
+check("GPS-18: >GSA_MAX GSA a second -> extra; one round of 4 does not",
+      flood >= 1 and gl.st["extra"] == 0, "%d %d" % (flood, gl.st["extra"]))
+
+# GPS-19: the rotation's first line is no status line: look in diag.1
+diag_clear()
+with open(gl.DIAG_OLD, "w") as f:
+    f.write("boot cause 1 prev_up - mhz 80 mem 1\n"
+            "up 3494 utc 20261028T125942Z nmea 1/0\n")
+with open(gl.DIAG_FILE, "w") as f:
+    f.write("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10\n")
+gl._diag_prev()
+check("GPS-19: previous run found in diag.1 behind a non-status line",
+      gl.prev_run["up"] == 3494 and gl.prev_run["how"] == "status",
+      repr(gl.prev_run))
+diag_clear()
+
+# GPS-20: a cut-off sentence glued to a whole one keeps the whole one
+gl.reset()
+gl.handle(b"$GNGGA,120000.80,4728.0" + rv_nmea(
+    "GNRMC,120001.00,A,4728.0000,N,01900.0000,E,0.1,,291026,,,A,V"))
+check("GPS-20: the whole sentence after a cut-off one is parsed",
+      gl.st["ok"] == 1 and gl.st["err"] == 0 and gl.st["status"] == "A",
+      "%d %d" % (gl.st["ok"], gl.st["err"]))
+
+# GPS-21: uptime sums tick differences across a ticks_ms wrap
+TPW = 1 << 30
+saved_t = (time.ticks_ms, time.ticks_diff)
+time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
+try:
+    gl._up[:] = [0, TPW - 1000]
+    ups = []
+    for k in range(1, 15):
+        ups.append(gl.uptime_s((TPW - 1000 + k * 86400000) & (TPW - 1)))
+finally:
+    time.ticks_ms, time.ticks_diff = saved_t
+check("GPS-21: uptime keeps counting past the 12.4-day ticks wrap",
+      ups == [k * 86400 for k in range(1, 15)], repr(ups[-3:]))
+
+# GPS: used from the satellite list (GGA stops at 12), banner split
+gl.reset()
+gl.st["used"] = 12
+gl.st["svs"] = [(k, 30, 40, 100, True, False, 0) for k in range(1, 17)]
+gl.st["svs_at"] = _clock[0]
+used_list = gl.sv_used()
+gl.st["svs_at"] = _clock[0] - 3 * gl.SV_POLL
+used_old = gl.sv_used()
+check("GPS: used from a fresh satellite list, else GGA",
+      used_list == 16 and used_old == 12, "%r %r" % (used_list, used_old))
+gl.reset()
+_uart_rx[:] = []
+ban = rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com") + b"\r\n"
+gl._buf = b"x" * 10
+_uart_rx.extend(ban[:12])
+gl.read_uart()
+_uart_rx.extend(ban[12:])
+gl.read_uart()
+check("GPS: a start-up banner split across two reads is counted",
+      gl.st["banners"] == 1, gl.st["banners"])
 
 print()
 print("%d passed, %d failed" % (passed, failed))

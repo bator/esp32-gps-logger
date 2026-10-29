@@ -59,6 +59,7 @@ SV_POLL = 60000                          # ms between satellite-list polls (NAV-
 SV_FRESH = 5000                          # SVINFO or NAV-SAT); a page view asks
 SV_WAIT = 700                            # again if older than SV_FRESH and
                                          # waits SV_WAIT ms for the answer
+SV_MISS = 2                              # unanswered polls: no more waiting
 GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
 GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
 GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
@@ -250,7 +251,7 @@ def reset():
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
-              gps_ver=None)
+              gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0)
     _ep_new(None)
 
 def _ep_new(t):
@@ -384,9 +385,19 @@ def gga(talker, f):
             ep["hdop"][1] += 1
 
 def gsa(talker, f):
+    """Fix type (and PDOP). One per system and round on a multi-GNSS
+    receiver; more than GSA_MAX in a second means the GSA rate of the
+    setup was lost (a late ACK of another frame looked like its own), and
+    that load overruns 9600 baud: gps_check sets it up again."""
     st["fixtype"] = _num(f[2], int)
     if len(f) > 15:
         st["pdop"] = _num(f[15])
+    now = time.ticks_ms()
+    if st["gsa_at"] is None or _age(now, st["gsa_at"]) >= 1000:
+        st["gsa_at"], st["gsa_n"] = now, 0
+    st["gsa_n"] += 1
+    if st["gsa_n"] == GSA_MAX + 1:
+        _extra(talker, f)
 
 def _extra(talker, f):
     """A sentence gps_setup turns off: the receiver did not take it."""
@@ -463,6 +474,9 @@ def sv_poll(now):
     answer a minute, or per page view. NAV-SVINFO (u-blox 6/7/M8) or
     NAV-SAT (M8 and later; an M10 knows only that); until one answered,
     both. Also asks for MON-VER (the receiver model) until it answers."""
+    at, got = st["sv_poll_at"], st["svs_at"]
+    if at is not None and (got is None or time.ticks_diff(got, at) < 0):
+        st["sv_miss"] += 1               # the last poll got no answer
     st["sv_poll_at"] = now
     m = st["sv_msg"]
     try:
@@ -541,7 +555,16 @@ def _ubx_frame(fr):
         st["sv_msg"] = "sat"
     else:
         return
-    st["svs"], st["svs_at"] = svs, time.ticks_ms()
+    st["svs"], st["svs_at"], st["sv_miss"] = svs, time.ticks_ms(), 0
+
+def sv_used():
+    """Satellites in the fix: from a satellite list younger than two polls
+    (GGA stops at 12 on u-blox), else GGA."""
+    at = st["svs_at"]
+    if (st["svs"] is not None and at is not None
+            and _age(time.ticks_ms(), at) < 2 * SV_POLL):
+        return len([v for v in st["svs"] if v[4]])
+    return st["used"]
 
 def sv_seen():
     """Satellites with a signal: from the last satellite list, else the GSV
@@ -555,9 +578,14 @@ def sv_seen():
 
 # NMEA message ids (class 0xF0) and their rate per fix on this port. At
 # 9600 baud GPS_HZ fixes fit only with fewer sentences: RMC and GGA every
-# fix (~145 B), GSA and GST once a second, no GSV / GLL / VTG (~830 B/s of
-# 960).
-GPS_MSGS = ((0x03, 0), (0x01, 0), (0x05, 0), (0x02, GPS_HZ),
+# fix (~150 B), GST once a second, GSA every GSA_EVERY s, no GSV / GLL /
+# VTG. A multi-GNSS receiver (M8, M10) sends one GSA per system: four a
+# second took the M10 to ~104% of the 960 B/s and it dropped sentences
+# and the satellite list (measured 2026-10-29); now ~850 B/s.
+GSA_EVERY = 5                            # s between GSA (fix type) rounds
+GSA_MAX = 8                              # GSA in a second beyond this: the
+                                         # receiver did not take its rate
+GPS_MSGS = ((0x03, 0), (0x01, 0), (0x05, 0), (0x02, GPS_HZ * GSA_EVERY),
             (0x07, GPS_HZ), (0x00, 1), (0x04, 1))
 
 def _rate(ms):
@@ -589,7 +617,8 @@ def _ubx_ack(frame):
     nak = b"\xb5\x62\x05\x00\x02\x00" + frame[2:4]
     t0 = time.ticks_ms()
     while uart.any() and time.ticks_diff(time.ticks_ms(), t0) < 200:
-        uart.read(uart.any())            # a streaming receiver never empties
+        uart.readinto(_chunk)            # a streaming receiver never empties
+                                         # (small reads: see _chunk)
     raw = b""
     for _ in range(GPS_ACK_TRIES):
         uart.write(frame)
@@ -667,11 +696,13 @@ def gps_check(now):
     run() sends it, and stays at 1 Hz. Less and less often, so a receiver
     that never takes it (or an unwired ESP TX) costs next to nothing."""
     _gps_loop_check(now)
-    if (st["setup_ok"] and (st["sv_poll_at"] is None
-                            or _age(now, st["sv_poll_at"]) >= SV_POLL)):
+    if st["sv_poll_at"] is None or _age(now, st["sv_poll_at"]) >= SV_POLL:
         sv_poll(now)
+    # also when the setup went out but was not acknowledged (an ACK lost,
+    # a silent receiver that took the blind burst): it may sit at 1 Hz
     at = st["setup_at"]
-    if at is None or not st["extra"] or _age(now, at) < st["setup_wait"]:
+    if (at is None or (not st["extra"] and st["setup_ok"] is True)
+            or _age(now, at) < st["setup_wait"]):
         return
     st["setup_wait"] = min(st["setup_wait"] * 2, GPS_RETRY_MAX)
     print("gps setup again")
@@ -792,6 +823,17 @@ def _diag_tail(path, n):
     except (OSError, ValueError):
         return []
 
+_up = [time.ticks_ms(), time.ticks_ms()]  # ms since boot, ticks then
+
+def uptime_s(now=None):
+    """Seconds since boot. ticks_ms wraps every 2^30 ms (12.4 days), so
+    the time is summed up from tick differences (called every loop)."""
+    if now is None:
+        now = time.ticks_ms()
+    _up[0] += time.ticks_diff(now, _up[1])
+    _up[1] = now
+    return _up[0] // 1000
+
 # How long the run before this boot lasted, from the last diag lines it
 # wrote: up (s, to within DIAG; 0 = it ended before its first status line),
 # end (GPS time of its last line, "2026-10-28 12:19:42Z") and how
@@ -800,7 +842,9 @@ prev_run = {"up": None, "end": None, "how": None}
 
 def _diag_prev():
     prev_run.update(up=None, end=None, how=None)
-    lines = _diag_tail(DIAG_FILE, 8) or _diag_tail(DIAG_OLD, 8)
+    # a rotation leaves the new file with the line that caused it, which
+    # need not be a status line: then the older file holds the run's end
+    lines = (_diag_tail(DIAG_OLD, 8) or []) + (_diag_tail(DIAG_FILE, 8) or [])
     for line in reversed(lines):
         f = line.split()
         try:
@@ -855,8 +899,8 @@ def _diag(now):
     _diag_write(
         "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
         "hdop %s points %d sent %d wifi %s pulses %d mem %d" % (
-            now // 1000, _diag_utc(), st["ok"], st["err"], st["gps_boots"],
-            st["loops"], view, st["used"], status().replace(" ", "_"),
+            uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
+            st["loops"], view, sv_used(), status().replace(" ", "_"),
             st["hdop"], log["points"], up["sent"], wifi["state"],
             wifi["pb_scans"], gc.mem_free()))
 
@@ -874,9 +918,10 @@ def checksum_ok(line):
 
 def handle(line):
     line = line.strip()
-    i = line.find(b"$")
+    i = line.rfind(b"$")
     if i > 0:
-        line = line[i:]                  # a binary UBX reply ran into it
+        line = line[i:]                  # a binary UBX reply or a cut-off
+                                         # sentence ran into it
     if not line:
         return
     if not checksum_ok(line):
@@ -904,10 +949,11 @@ def read_uart():
             return
         st["rx"] = time.ticks_ms()
         st["spin"] += 1
-        piece = _chunk[:k]
-        if piece.find(b"TXT,01,01,02,u") >= 0:
-            st["banners"] += 1           # a start-up banner (or its start)
-        _buf += piece
+        old = len(_buf)
+        _buf += memoryview(_chunk)[:k]
+        # a start-up banner (or its start), also when split across reads
+        if _buf.find(b"TXT,01,01,02,u", old - 13 if old > 13 else 0) >= 0:
+            st["banners"] += 1
         while True:
             i = _buf.find(b"\n")
             u = _buf.find(b"\xb5\x62")      # never in NMEA (ASCII)
@@ -3359,7 +3405,7 @@ def _web_rows():
     still = log.get("still") or {}
     return [
         ("GPS", "Fix", "fix", status()),
-        ("GPS", "Satellites seen / used", "sats", "%d / %s" % (view, st["used"])),
+        ("GPS", "Satellites seen / used", "sats", "%d / %s" % (view, sv_used())),
         ("GPS", "HDOP", "hdop", st["hdop"]),
         ("GPS", "GPS time (UTC)", "utc", None if t is None else _stamp_at(t)[0]),
         ("GPS", "Position", "position", pos),
@@ -3375,7 +3421,7 @@ def _web_rows():
         ("Points", "Upload state", "upload", up["state"]),
         ("Points", "Upload errors", "upload_err", up["err"]),
         ("Points", "Stay", "stay", "yes" if still.get("active") else "no"),
-        ("Device", "Uptime", "uptime", time.ticks_ms() // 1000),
+        ("Device", "Uptime", "uptime", uptime_s()),
         ("Device", "Previous run", "prev_uptime", prev_run["up"]),
         ("Device", "Boot cause", "boot_cause", cause),
         ("Device", "Chip temperature (C)", "temp", _temp()),
@@ -3395,12 +3441,16 @@ def _esc(v):
 def _sv_fresh():
     """Before a page: a satellite list older than SV_FRESH is asked for
     again; the answer is read (with the NMEA around it) for up to SV_WAIT
-    ms. Silence leaves the older list."""
+    ms. Silence leaves the older list; after SV_MISS unanswered polls in a
+    row the page asks but does not wait (a receiver that drops the answer
+    would cost every page view SV_WAIT)."""
     now = time.ticks_ms()
     at = st["svs_at"]
     if at is not None and _age(now, at) < SV_FRESH:
         return
     sv_poll(now)
+    if st["sv_miss"] >= SV_MISS:
+        return
     while _age(time.ticks_ms(), now) < SV_WAIT:
         read_uart()
         if st["svs_at"] is not None and st["svs_at"] != at:
@@ -3633,7 +3683,7 @@ def run():
             sys.print_exception(e)
         else:
             print("crash", e)
-        _diag_write("crash up %d %s" % (time.ticks_ms() // 1000, repr(e)))
+        _diag_write("crash up %d %s" % (uptime_s(), repr(e)))
         try:
             flush(_still_hold())  # held drift is dropped
         except Exception:
@@ -3659,6 +3709,7 @@ def _loop():
     diag_at = loop_start
     while True:
         feed()
+        uptime_s()                       # sums ticks before they wrap
         read_uart()
         gps_check(time.ticks_ms())
         log_tick()
