@@ -199,6 +199,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `upload <file> <n> <ok> <http> <mem>` | One POST |
 | `stay home\|away kept N` | A stay began; N points of the way in were kept |
 | `stay moved` / `stay kept: home in range` / `stay end D` | Anchor moved; a home departure refused; the stay ended D m out |
+| `stay left, wifi: none of N access points in M scans` | An away stay ended without a fix: its access points are gone (also in the diagnostic log as `stay left wifi`) |
 | `status temp … hz … used … hdop … points … sent … wifi … pulses … mem … gpsloops …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, HDOP, points, uploads, keep-alive pulses so far, free heap, GPS reset-loop warnings so far |
 | `wifi off until upload retry N s` | Uploads back off for N s (server down, 401): the radio sleeps until then |
 | `cpu freq N …` | The board refused that CPU clock; it runs at the firmware default |
@@ -234,6 +235,9 @@ To queue a `.bad` again:
 
 **Diagnostic log:** <a id="diagnostic-log"></a>the console is gone once
 the board is on a power bank, so the logger also appends to `/diag.log` on
+flash: a `boot cause N` line at every start, one status line a minute, a
+`stay left wifi` line when an away stay ends without a fix (see
+[Stays](#stays)), and a `crash` line before a crash reset. Past 32 KB the file becomes `/diag.1`
 flash: a `boot cause N` line at every start, a `gps <model>` line once
 the receiver says what it is (UBX-MON-VER, e.g. `gps u-blox M10, ROM SPG
 5.10 (7b202e), PROTVER=34.10`; again after a receiver restart), one status
@@ -392,6 +396,15 @@ tell a stay from a drive, so the stay filter works on positions.
   walk). A multipath jump that freezes 200 m away does neither, however long
   it lasts, and an excursion that turns back does not count. The way out is
   written from near the anchor, from the last 90 samples, in time order.
+- **Leaving without a fix** (away from home). The first 3 WiFi scans of the
+  stay (keep-alive pulses, roam and connect rounds) note the access points
+  around, up to the 16 strongest; our own networks are left out, since a
+  phone hotspot travels along. When none of them shows up in 6 scans in a
+  row over at least 60 s, the stay ends (`stay left, wifi`): no more anchor
+  points at the old place. Before, a train ride home without a fix kept
+  writing the old anchor every 5 minutes until home. Where no access point
+  is around while learning, or with no scans (keep-alive `gpio`/`radio` or
+  off, the radio connected), only a fix ends the stay.
 - **Leaving home** is accepted only once the home network is out of range
   (below −75 dBm: the RSSI when connected, else a ~2 s scan). While it is in
   range the departure is a GPS jump (measured: a 194 m jump at a desk) and
@@ -552,6 +565,8 @@ with a NEO-6M; most never need changing.
 | `STILL_GAP` | 30 s | Time without a usable fix that counts as a gap |
 | `STILL_DEP_MAX` | 90 | Recent samples kept to write the way out |
 | `STILL_MEAN_N` | 1800 | Fixes the anchor mean averages over |
+| `STAY_WIFI` / `STAY_WIFI_LEARN` / `STAY_WIFI_MAX` | on / 3 / 16 | Away stay ends when its access points are gone: on, scans that learn them, how many kept |
+| `STAY_WIFI_MISS` / `STAY_WIFI_GONE` | 6 / 60 s | Scans in a row without any of them, and the least time they span |
 
 **WiFi**
 

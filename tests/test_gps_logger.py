@@ -3965,6 +3965,71 @@ try:
     check("HB: a home stay writes nothing without a fix either",
           len(sv_lines()) == n_before and gl.log["file"] is None)
 
+    # STAYWIFI: without a fix on the way (a train), an away stay ended only
+    # at home, and every heartbeat until then was stamped at the old place.
+    # The keep-alive scans tell that the access points around are gone.
+    def ka_setup(aps):
+        sv_reset()
+        sv_drift(150)
+        w = gl.network.WLAN(gl.network.STA_IF)
+        gl.wifi.update(wlan=w, state="not found",
+                       nets=[{"ssid": "phone", "pw": "x", "home": False}])
+        WLAN.scan_aps = aps
+        return gl.log["still"]["active"]
+
+    def ka_run(secs):
+        for _ in range(secs):
+            hb_fix(0, 0, nofix=True)
+            gl.keepalive_tick(_clock[0])
+
+    def ka_beats():
+        return len([l for l in sv_lines() if l.split(",")[2] == ""])
+
+    office = ("office", -60, b"\x01" * 6)
+    cafe = ("cafe", -85, b"\x02" * 6)
+    phone = ("phone", -40, b"\x09" * 6)
+    train = ("MAVSTART-WIFI", -70, b"\x03" * 6)
+    saved_aps, saved_mode = WLAN.scan_aps, gl.PB_MODE
+    gl.PB_MODE = "scan"
+    try:
+        ok_a = ka_setup([office, cafe, phone])
+        ka_run(60)
+        WLAN.scan_aps = [phone, train]   # the phone hotspot comes along
+        ka_run(3 * 60)
+        left = not gl.log["still"]["active"]
+        b0 = ka_beats()
+        ka_run(30 * 60)
+        beats_after = ka_beats() - b0
+        # the same place: APs fading in and out for 40 s is no departure
+        ok_b = ka_setup([office, cafe])
+        ka_run(60)
+        WLAN.scan_aps = []
+        ka_run(40)
+        WLAN.scan_aps = [cafe]
+        ka_run(10 * 60)
+        stayed = gl.log["still"]["active"]
+        b0 = ka_beats()
+        ka_run(10 * 60)
+        stayed_beats = ka_beats() - b0
+        # nothing around while learning: no WiFi verdict, as before
+        ok_c = ka_setup([])
+        ka_run(60)
+        WLAN.scan_aps = [train]
+        ka_run(5 * 60)
+        no_aps = gl.log["still"]["active"]
+    finally:
+        WLAN.scan_aps, gl.PB_MODE = saved_aps, saved_mode
+        gl.wifi.update(wlan=None, state="offline", nets=[])
+    check("STAYWIFI: setup - away stays", ok_a and ok_b and ok_c)
+    check("STAYWIFI: the stay's access points gone -> the stay ends, no fix",
+          left)
+    check("STAYWIFI: no heartbeat at the old place after leaving",
+          beats_after == 0, "beats=%d" % beats_after)
+    check("STAYWIFI: APs fading for 40 s at the same place keep the stay",
+          stayed and stayed_beats >= 1, "beats=%d" % stayed_beats)
+    check("STAYWIFI: no access points while learning -> the stay goes on",
+          no_aps)
+
     # GAP: a minute at A, fix lost for an hour, back 1.5 km away
     sv_reset()
     sv_drift(119, box=10.0, step=3.0)
