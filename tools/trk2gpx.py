@@ -4,6 +4,9 @@
     .venv/bin/mpremote cp :/gpx/20261005_120005.trk .
     python3 tools/trk2gpx.py 20261005_120005.trk > 20261005_120005.gpx
 
+Quarantined (.trk.bad) and parked unreadable (.trk.err) files convert the
+same way; bytes that are not UTF-8 (a damaged flash block) are replaced.
+
 Line format: "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ" (ele/hdop may be empty),
 "-" starts a new segment, "#..." lines are the header/footer, and a line
 without its newline (cut off by a power loss) is skipped.
@@ -21,7 +24,8 @@ GPX_TAIL = "</trkseg></trk></gpx>\n"
 
 def _iso(tc):
     """YYYYMMDDTHHMMSSZ -> YYYY-MM-DDTHH:MM:SSZ, or None."""
-    if len(tc) != 16 or tc[8] != "T" or tc[15] != "Z":
+    if (len(tc) != 16 or tc[8] != "T" or tc[15] != "Z"
+            or not (tc[:8] + tc[9:15]).isdigit()):
         return None
     return "%s-%s-%sT%s:%s:%sZ" % (tc[0:4], tc[4:6], tc[6:8],
                                    tc[9:11], tc[11:13], tc[13:15])
@@ -76,13 +80,18 @@ def convert(lines, name):
     return "".join(out)
 
 
+SUFFIXES = (".trk", ".trk.bad", ".trk.err")
+
+
 def main(argv):
-    if len(argv) != 2 or not argv[1].endswith(".trk"):
-        sys.stderr.write("usage: trk2gpx.py FILE.trk > FILE.gpx\n")
+    if len(argv) != 2 or not argv[1].endswith(SUFFIXES):
+        sys.stderr.write("usage: trk2gpx.py FILE.trk|.trk.bad|.trk.err"
+                         " > FILE.gpx\n")
         return 2
     path = argv[1]
-    name = path.rsplit("/", 1)[-1][:-4]
-    with open(path) as f:
+    name = path.rsplit("/", 1)[-1]
+    name = name[:name.index(".trk")]
+    with open(path, encoding="utf-8", errors="replace") as f:
         sys.stdout.write(convert(f, name))
     return 0
 

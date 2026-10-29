@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pyflakes
-      - run: python -m pyflakes gps_logger.py main.py tools/trk2gpx.py
+      - run: python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py
 
   mpy-cross:
     name: mpy-cross (${{ matrix.march }})
