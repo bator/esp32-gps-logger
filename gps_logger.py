@@ -168,6 +168,13 @@ PB_MODE = "scan"                         # what a pulse is (.env KEEPALIVE_MODE)
                                          # (a load resistor via a MOSFET)
 PB_PIN = 2 if IS_C6 else 26
 PB_PULSE_MS = 100                        # ms the gpio pulse lasts
+PB_CONNECTED = False                     # .env KEEPALIVE_CONNECTED=1: pulses
+                                         # also while connected and idle (a
+                                         # bank on the status page at home;
+                                         # scan or gpio, not radio)
+SEEN_WAIT = 60000                        # ms: a keep-alive scan that sees home
+                                         # wakes the radio at most this often
+                                         # (doubling while rounds fail)
 WIFI_OFF_WAIT = 60000                    # ms: an upload backoff at least
                                          # this long turns the radio off
                                          # until it is due (server down, 401)
@@ -175,7 +182,6 @@ WIFI_WAKE_WAIT = 60000                   # ms a new stay waits for the WiFi
                                          # round before its first anchor point
 CONNECT_TIMEOUT = 12000                  # ms to wait for GOT_IP per network
 FAIL_HOLD = 120000                       # ms to demote a network that failed
-IGNORE_STALE_MS = 1500                   # leftover fail reason after connect()
 CLEAR_WAIT = 500                         # ms to wait for STAT_IDLE after clear
 LOST_GRACE = 5000                        # ms to let IDF auto-reconnect after drop
 ROAM_CHECK = 300000                      # ms between home-roam scans on hotspot
@@ -1084,8 +1090,6 @@ def _wdt_keepalive():
 # GPS sampling is not blocked. Scan once per round; try strongest visible
 # known SSID (deduped by SSID). Remaining configured nets are tried in config
 # order after visible ones, so a missed scan does not block fallback.
-# v1.29 connect() may leave a stale status reason: the first IGNORE_STALE_MS
-# of a try are not treated as final.
 
 def load_env(path):
     """KEY=VALUE lines -> dict. Surrounding quotes are stripped."""
@@ -1212,15 +1216,6 @@ def _load_nets(env):
                      "ip": _static_ip(env, ipkeys)})
     return nets
 
-WIFI_STATES = {}
-for _n, _s in (("STAT_IDLE", "idle"), ("STAT_CONNECTING", "connecting"),
-               ("STAT_GOT_IP", "connected"), ("STAT_NO_AP_FOUND", "no AP"),
-               ("STAT_WRONG_PASSWORD", "auth fail"),
-               ("STAT_BEACON_TIMEOUT", "lost"), ("STAT_ASSOC_FAIL", "assoc fail"),
-               ("STAT_HANDSHAKE_TIMEOUT", "handshake")):
-    if hasattr(network, _n):
-        WIFI_STATES[getattr(network, _n)] = _s
-
 wifi = {}
 
 def wifi_reset():
@@ -1234,7 +1229,8 @@ def wifi_reset():
                 retried=False, idle_at=time.ticks_ms(), sleep_home=False,
                 pb_at=time.ticks_ms(), pb_scans=0,
                 wake=False, wake_at=None,
-                blank_rssi=None, blank_bssid=None)
+                blank_rssi=None, blank_bssid=None, blank_bad=[],
+                seen_at=None, seen_wait=SEEN_WAIT, pb_conn_at=time.ticks_ms())
 
 def _set_hostname(name):
     if not name:
@@ -1265,6 +1261,14 @@ def _mark_failed(ssid, why=""):
         if not _net_hidden(ssid):
             b = wifi.get("roam_backoff") or ROAM_CHECK
             wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
+        else:
+            # that empty-SSID AP is a neighbour's, not ours: do not drop
+            # the hotspot for it every ROAM_CHECK
+            bad = wifi["blank_bad"]
+            b = wifi.get("blank_bssid")
+            if b is not None and b not in bad:
+                bad.append(b)
+                del bad[:-4]
         wifi["roaming"] = False
 
 def _scan_known(w):
@@ -1273,7 +1277,7 @@ def _scan_known(w):
     a hint that *some* hidden AP is nearby (not necessarily ours)."""
     by = {}
     for n in wifi["nets"]:
-        by[n["ssid"]] = n
+        by[n["ssid"].encode()] = n
     try:
         aps = w.scan()
     except OSError:
@@ -1281,11 +1285,14 @@ def _scan_known(w):
         wifi["blank_bssid"] = None
         return None
     _stay_scan(aps)
+    _home_seen(aps)
     best = {}
     blank_rssi, blank_bssid = None, None
     for rec in aps:
+        # SSIDs compared as bytes: a neighbour's Latin-1 or cut-off UTF-8
+        # SSID raised UnicodeError on decode() and crashed the logger
         raw = rec[0]
-        ssid = raw.decode() if isinstance(raw, bytes) else raw
+        ssid = raw if isinstance(raw, bytes) else raw.encode()
         rssi = rec[3]
         bssid = rec[1] if len(rec) > 1 else None
         if not ssid:
@@ -1367,6 +1374,8 @@ def _blank_home_ok():
     r = wifi.get("blank_rssi")
     if r is None or r < ROAM_MIN_RSSI:
         return False
+    if wifi.get("blank_bssid") in wifi.get("blank_bad", ()):
+        return False                     # a hidden-home try there failed
     for n in wifi.get("nets") or []:
         if n.get("home") and n.get("hidden"):
             return True
@@ -1443,16 +1452,16 @@ def _wifi_clear(w):
         time.sleep_ms(50)
 
 def _wifi_ip(w, net):
-    """Apply this network's static IP, or give a previous one back to DHCP.
-
-    Only a network that configured a static IP changes the interface, so the
-    DHCP networks behave exactly as before."""
+    """Apply this network's static IP, or DHCP. Once any network has a
+    static IP, a DHCP network always asks for DHCP: the interface may keep
+    a static address the RAM flag no longer knows of (a soft reset)."""
     cfg = net.get("ip")
     try:
         if cfg:
             w.ifconfig(cfg)
             wifi["static"] = True
-        elif wifi.get("static"):
+        elif wifi.get("static") or any(n.get("ip") for n in
+                                       wifi.get("nets") or []):
             w.ifconfig("dhcp")
             wifi["static"] = False
     except (OSError, ValueError, TypeError) as e:
@@ -1516,6 +1525,7 @@ def _wifi_got_ip(w):
     wifi["backoff"] = WIFI_RETRY
     wifi["roam_at"] = time.ticks_ms()
     wifi["roaming"] = False
+    wifi["seen_wait"] = SEEN_WAIT
     if wifi["home"]:
         wifi["roam_backoff"] = ROAM_CHECK
     print("wifi ok", wifi.get("ssid") or "")
@@ -1589,12 +1599,31 @@ def _wifi_off(w, state):
     print("wifi", state, "home" if wifi["sleep_home"] else "")
 
 def _upload_wait(now):
-    """ms until the next upload attempt is due, 0 when it is (or nothing
-    waits): the time an upload error (server down, 401, 5xx) backed off."""
-    if not str(up.get("state") or "").startswith("err"):
-        return 0
+    """ms until upload_tick will next send something, 0 when it is due (or
+    nothing waits): the time an upload error (server down, 401, 5xx), a
+    flash or memory error backed off, or, with every waiting track held
+    back (bad payloads), until the first hold ends. Before, "idle" with
+    all tracks held kept the radio on for good."""
+    state = str(up.get("state") or "")
     d = time.ticks_diff(up["next_at"], now)
-    return d if 0 < d <= UP_WAIT_MAX else 0
+    wait = d if 0 < d <= UP_WAIT_MAX else 0
+    if state.startswith("err") or state in ("fs err", "low mem", "bad full"):
+        return wait
+    held = up.get("hold") or {}
+    if not held:
+        return 0
+    first = None
+    for p in pending():
+        t = held.get(p)
+        if t is None:
+            return 0                     # one is due
+        h = time.ticks_diff(t, now)
+        if h <= 0:
+            return 0
+        first = h if first is None or h < first else first
+    if first is None:
+        return 0
+    return max(wait, min(first, UP_WAIT_MAX))
 
 def _wifi_off_backoff(w, now):
     """Uploads back off for a while (WIFI_OFF_WAIT or more): the radio
@@ -1623,6 +1652,16 @@ def _wifi_begin_round(w):
         _wifi_round_failed(w)
         return False
     return _wifi_connect(w, wifi["cand"][0])
+
+def _radio_idle_ok():
+    """The radio may sleep: everything is uploaded, or only an away stay's
+    open anchor file (and its RAM) waits. That file is closed every
+    STILL_FILE while connected and wakes the hourly round (_all_uploaded),
+    so the radio and a phone hotspot do not idle on for the whole stay."""
+    if _all_uploaded():
+        return True
+    sl = log["still"]
+    return bool(sl["active"] and not sl["home"] and not pending())
 
 def _all_uploaded():
     """Nothing left for the network: no finished track waiting, nothing in
@@ -1729,8 +1768,9 @@ def _gps_model_env(env):
 def _keepalive_env(env):
     """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
     5-600 s between pulses; anything else keeps the default. KEEPALIVE_MODE
-    picks the pulse (scan / radio / gpio), KEEPALIVE_PIN the gpio."""
-    global PB_KEEPALIVE, PB_MODE, PB_PIN
+    picks the pulse (scan / radio / gpio), KEEPALIVE_PIN the gpio,
+    KEEPALIVE_CONNECTED=1 pulses while connected and idle too."""
+    global PB_KEEPALIVE, PB_MODE, PB_PIN, PB_CONNECTED
     v = _plain(env.get("KEEPALIVE"))
     if v:
         try:
@@ -1757,6 +1797,14 @@ def _keepalive_env(env):
             PB_PIN = int(v)
         except ValueError:
             print("KEEPALIVE_PIN invalid, using", PB_PIN)
+    v = _plain(env.get("KEEPALIVE_CONNECTED"))
+    if v:
+        t = _truthy(v)
+        if t is None:
+            print("KEEPALIVE_CONNECTED not 1/0, using",
+                  1 if PB_CONNECTED else 0)
+        else:
+            PB_CONNECTED = t
 
 _pb_pin = None
 
@@ -1787,7 +1835,9 @@ def _pb_pulse_radio(w, scan):
     try:
         w.active(True)
         if scan:
-            _stay_scan(w.scan())
+            aps = w.scan()
+            _stay_scan(aps)
+            _home_seen(aps)
     except OSError:
         pass
     finally:
@@ -1806,23 +1856,85 @@ def keepalive_tick(now):
     lost). GPS seconds published during a pulse are queued, not lost."""
     global PB_MODE
     w = wifi.get("wlan")
-    if (not PB_KEEPALIVE or w is None
-            or wifi["state"] not in ("sleep", "not found")):
+    state = wifi["state"]
+    # radio idle: asleep, nothing found, or no WiFi at all (no .env, an
+    # error): a logging-only board needs the pulses most
+    idle = state in ("sleep", "not found", "no .env", "error", "off")
+    conn = (PB_CONNECTED and state == "connected" and PB_MODE != "radio"
+            and not str(up.get("state") or "").startswith("send"))
+    if not PB_KEEPALIVE or not (idle or conn):
         wifi["pb_at"] = now
         return
     if _age(now, wifi["pb_at"]) < PB_KEEPALIVE:
         return
     wifi["pb_at"] = now
     feed()
-    if PB_MODE == "gpio":
-        if not _pb_pulse_gpio():
+    if PB_MODE == "gpio" and _pb_pulse_gpio():
+        pass
+    else:
+        if PB_MODE == "gpio":
             PB_MODE = "scan"             # no such pin: fall back for good
             print("keepalive mode scan")
-            _pb_pulse_radio(w, True)
-    else:
-        _pb_pulse_radio(w, PB_MODE == "scan")
+        if w is None:
+            w = _pb_wlan()
+        if w is None:
+            return
+        if conn:
+            try:
+                _stay_scan(w.scan())     # connected: scan, keep the link
+            except OSError:
+                pass
+        else:
+            _pb_pulse_radio(w, PB_MODE == "scan")
     wifi["pb_scans"] += 1
     feed()
+
+_pb_w = None
+
+def _pb_wlan():
+    """A station interface only for the pulses when WiFi is not set up (no
+    .env or no SSID): created once, None if the chip refuses."""
+    global _pb_w
+    if _pb_w is None:
+        try:
+            _pb_w = network.WLAN(network.STA_IF)
+        except OSError:
+            return None
+    return _pb_w
+
+def _home_seen(aps):
+    """With the status page on (WEB), a keep-alive scan that sees a home
+    network at >= ROAM_MIN_RSSI while the radio sleeps or found nothing
+    starts a round now. Before, a router restart (or a board booting
+    faster than the router) left the page down for WIFI_SLEEP (1 h) while
+    every scan saw home. At most every seen_wait ms, doubling while those
+    rounds fail (wrong password, weak link)."""
+    state = wifi["state"]
+    if not WEB or state not in ("sleep", "not found"):
+        return
+    homes = [n["ssid"].encode() for n in wifi.get("nets") or []
+             if n.get("home")]
+    if not homes:
+        return
+    for rec in aps:
+        raw = rec[0]
+        if not isinstance(raw, bytes):
+            raw = raw.encode()
+        if raw in homes and rec[3] >= ROAM_MIN_RSSI:
+            break
+    else:
+        return
+    now = time.ticks_ms()
+    at = wifi.get("seen_at")
+    if at is not None and _age(now, at) < wifi["seen_wait"]:
+        return
+    wifi["seen_at"] = now
+    wifi["seen_wait"] = min(wifi["seen_wait"] * 2, WIFI_BACKOFF_MAX)
+    if state == "sleep":
+        wifi["wake"] = True
+    else:
+        wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
+    print("wifi home in range")
 
 def wifi_start():
     global DEVICE_ID, HOSTNAME, CPU_MHZ, CPU_MHZ_UPLOAD
@@ -1906,7 +2018,7 @@ def wifi_tick():
                 wifi["idle_at"] = now
                 if WEB and (wifi.get("home") or WEB_AWAY):
                     pass                 # the status page keeps it on
-                elif _all_uploaded():
+                elif _radio_idle_ok():
                     _wifi_off(w, "sleep")
                 else:
                     _wifi_off_backoff(w, now)
@@ -1930,6 +2042,8 @@ def wifi_tick():
                 return
         wifi["state"] = "offline"
         wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
+        _radio_off(w)                    # the IDF still reconnects: a scan
+                                         # then fails (wifi still connecting)
         # fall through to a fresh round
     if wifi["state"] == "connecting":
         _wifi_poll(w)
@@ -1945,7 +2059,8 @@ def wifi_tick():
             if _age(now, wifi["idle_at"]) < WIFI_IDLE:
                 return
             wifi["idle_at"] = now
-            if _all_uploaded() and not WEB:
+            if _all_uploaded() and not (WEB and (WEB_AWAY or any(
+                    n.get("home") for n in wifi.get("nets") or []))):
                 wifi["wake_at"] = None
                 return
         wifi["wake"] = False
@@ -2446,51 +2561,56 @@ def _still_enter(now, anchor, since_tc, n):
 
 def _stay_scan(aps):
     """One WiFi scan during an away stay. The first STAY_WIFI_LEARN scans
-    note the access points around (our own networks left out: a phone
-    hotspot travels along). When none of them shows up in STAY_WIFI_MISS
-    scans in a row over STAY_WIFI_GONE ms, the board has left, fix or not,
-    and the stay ends: no more heartbeats stamped with the old anchor
-    (without a fix on the way, e.g. inside a train, they went on until
-    home). Without access points around, nothing changes."""
+    note the access points around; later scans that see one of them add
+    the others seen with it (a walk into another wing of a big building),
+    the STAY_WIFI_MAX most recently seen kept. Left out: our own networks
+    and locally administered BSSIDs (phone hotspots, a train's WiFi), as
+    they travel along. When none of them shows up in STAY_WIFI_MISS scans
+    in a row over STAY_WIFI_GONE ms, the board has left, fix or not, and
+    the stay ends: no more heartbeats stamped with the old anchor (without
+    a fix on the way, e.g. inside a train, they went on until home).
+    Without access points around, nothing changes."""
     sl = log["still"]
     if not STAY_WIFI or not sl["active"] or sl["home"]:
         return
-    own = [n.get("ssid") for n in wifi.get("nets") or []]
+    own = [n["ssid"].encode() for n in wifi.get("nets") or []]
     seen = []
     for rec in aps:
         raw = rec[0]
-        ssid = raw.decode() if isinstance(raw, bytes) else raw
-        if ssid and ssid in own:
-            continue
-        seen.append((rec[3], bytes(rec[1])))
-    aps_known = sl["aps"]
-    if sl["ap_scans"] < STAY_WIFI_LEARN:
-        sl["ap_scans"] += 1
-        for r, b in seen:
-            if b not in aps_known:
-                aps_known[b] = r
-            elif r > aps_known[b]:
-                aps_known[b] = r
-        if len(aps_known) > STAY_WIFI_MAX:
-            keep = sorted(aps_known.items(), key=lambda x: -x[1])
-            sl["aps"] = dict(keep[:STAY_WIFI_MAX])
-        return
-    if not aps_known:
-        return
-    now = time.ticks_ms()
-    if any(b in aps_known for r, b in seen):
+        if not isinstance(raw, bytes):
+            raw = raw.encode()
+        b = bytes(rec[1])
+        if (raw and raw in own) or not b or b[0] & 0x02:
+            continue                     # (SSIDs compared as bytes: a
+        seen.append((rec[3], b))         # Latin-1 one broke decode())
+    known = sl["aps"]
+    sl["ap_scans"] += 1
+    n = sl["ap_scans"]
+    learning = n <= STAY_WIFI_LEARN
+    if not learning:
+        if not known:
+            return
+        now = time.ticks_ms()
+        if not any(b in known for r, b in seen):
+            sl["ap_miss"] += 1
+            if sl["ap_miss_at"] is None:
+                sl["ap_miss_at"] = now
+            if (sl["ap_miss"] >= STAY_WIFI_MISS
+                    and _age(now, sl["ap_miss_at"]) >= STAY_WIFI_GONE):
+                print("stay left, wifi: none of %d access points in %d scans"
+                      % (len(known), sl["ap_miss"]))
+                _diag_write("stay left wifi aps %d scans %d"
+                            % (len(known), sl["ap_miss"]))
+                _still_leave()
+            return
         sl["ap_miss"], sl["ap_miss_at"] = 0, None
-        return
-    sl["ap_miss"] += 1
-    if sl["ap_miss_at"] is None:
-        sl["ap_miss_at"] = now
-    if (sl["ap_miss"] >= STAY_WIFI_MISS
-            and _age(now, sl["ap_miss_at"]) >= STAY_WIFI_GONE):
-        print("stay left, wifi: none of %d access points in %d scans"
-              % (len(aps_known), sl["ap_miss"]))
-        _diag_write("stay left wifi aps %d scans %d"
-                    % (len(aps_known), sl["ap_miss"]))
-        _still_leave()
+    for r, b in seen:                    # recency first, then signal
+        v = n * 256 + r + 128
+        if known.get(b, -1) < v:
+            known[b] = v
+    if len(known) > STAY_WIFI_MAX:
+        keep = sorted(known.items(), key=lambda x: -x[1])
+        sl["aps"] = dict(keep[:STAY_WIFI_MAX])
 
 def _still_leave():
     """End the stay and write the way out: the trailing run of recent
@@ -3213,6 +3333,8 @@ def upload_tick():
     if not files:
         if _bad_full_left():
             up["state"] = "bad full"
+        elif up["files"] and held:
+            up["state"] = "held"         # every waiting track held back
         else:
             up["state"] = "idle"
         up["next_at"] = time.ticks_add(now, BACKOFF_START)

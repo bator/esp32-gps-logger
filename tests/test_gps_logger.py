@@ -1133,7 +1133,7 @@ try:
             if gl.wifi["state"] in ("connected", "not found", "error",
                                     "off", "no .env"):
                 return
-            _clock[0] += max(gl.CONNECT_TIMEOUT, gl.IGNORE_STALE_MS)
+            _clock[0] += gl.CONNECT_TIMEOUT
             gl.wifi_tick()
 
     def start_wifi(env_text, aps, ok):
@@ -1143,11 +1143,8 @@ try:
         write_env(tmpdir, env_text)
         gl.wifi_reset()
         gl.up_reset()
-        stale = gl.IGNORE_STALE_MS
-        gl.IGNORE_STALE_MS = 0
         gl.wifi_start()
         drain_wifi()
-        gl.IGNORE_STALE_MS = stale
         return gl.wifi
 
     single = "SSID=home\nWPA2=secret1\nGEO_URL=https://d.example\nAPI_KEY=k\n"
@@ -1244,7 +1241,6 @@ try:
     write_env(tmpdir, triple)
     gl.wifi_reset()
     gl.up_reset()
-    gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
     drain_wifi()
     home_tries = [c for c in WLAN.connects if c[0] == "home"]
@@ -1288,7 +1284,6 @@ try:
     gl.wifi_tick()
     check("wifi loss first leaves LOG (not blocking connect)",
           gl.wifi["state"] != "connected" and gl.at_home() is False)
-    gl.IGNORE_STALE_MS = 0
     drain_wifi()
     check("wifi failover after disconnect uses the other known net",
           gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "phone",
@@ -1302,7 +1297,6 @@ try:
     write_env(tmpdir, triple)
     gl.wifi_reset()
     gl.up_reset()
-    gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
     drain_wifi()
     check("wifi scan fail: config order reaches #2",
@@ -1803,7 +1797,6 @@ try:
     write_env(tmpdir, env_hot)
     gl.wifi_reset()
     gl.up_reset()
-    gl.IGNORE_STALE_MS = 0
     t_before = _clock[0]
     gl.wifi_start()
     dt = _clock[0] - t_before
@@ -1914,7 +1907,6 @@ try:
     write_env(tmpdir, env_hid)
     gl.wifi_reset()
     gl.up_reset()
-    gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
     drain_wifi()
     check("K6 W3: hidden #2 tried after visible #1 fails",
@@ -1927,7 +1919,6 @@ try:
     write_env(tmpdir, env_hid)
     gl.wifi_reset()
     gl.up_reset()
-    gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
     drain_wifi()
     check("K6: empty scan falls back through configured networks",
@@ -1936,7 +1927,7 @@ try:
     check("K6: hidden net connects when not in the scan",
           gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot")
 
-    # --- K7: leftover fail reason is ignored for IGNORE_STALE_MS -----------
+    # --- K7: a leftover fail reason does not fail a good net at once --------
     reset_wlan()
     WLAN.scan_aps = [("home", -30), ("PhoneHotspot", -50)]
     WLAN.ok = set(["PhoneHotspot"])
@@ -1945,7 +1936,6 @@ try:
     write_env(tmpdir, env_hot)
     gl.wifi_reset()
     gl.up_reset()
-    # keep IGNORE_STALE_MS so leftover is ignored
     gl.wifi_start()
     # first poll may still be leftover; advance a little but not the timeout
     for _ in range(6):
@@ -2325,7 +2315,6 @@ try:
     WLAN.connects = []
     gl.wifi_tick()
     _clock[0] += gl.LOST_GRACE
-    gl.IGNORE_STALE_MS = 0
     drain_wifi()
     check("LL1 long drop: after grace, failover does not use stale try_at",
           gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "PhoneHotspot",
@@ -2362,7 +2351,6 @@ try:
     write_env(tmpdir, env_hot)
     gl.wifi_reset()
     gl.up_reset()
-    gl.IGNORE_STALE_MS = 0
     gl.wifi_start()
     drain_wifi()
     check("K3-1: connect() OSError fails over to the next SSID",
@@ -3987,7 +3975,7 @@ try:
         return len([l for l in sv_lines() if l.split(",")[2] == ""])
 
     office = ("office", -60, b"\x01" * 6)
-    cafe = ("cafe", -85, b"\x02" * 6)
+    cafe = ("cafe", -85, b"\x04" * 6)
     phone = ("phone", -40, b"\x09" * 6)
     train = ("MAVSTART-WIFI", -70, b"\x03" * 6)
     saved_aps, saved_mode = WLAN.scan_aps, gl.PB_MODE
@@ -5665,6 +5653,213 @@ _uart_rx.extend(ban[12:])
 gl.read_uart()
 check("GPS: a start-up banner split across two reads is counted",
       gl.st["banners"] == 1, gl.st["banners"])
+
+
+# WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
+rv_td = tempfile.mkdtemp(prefix="rev29-")
+
+
+def rv_nets(home_ip=None):
+    return [{"ssid": "home", "pw": "x", "home": True, "hidden": False,
+             "bssid": None, "ip": home_ip},
+            {"ssid": "hot", "pw": "y", "home": False, "hidden": False,
+             "bssid": None, "ip": None}]
+
+
+def rv_connect(ok, aps, nets=None):
+    online(rv_td)
+    gl.wifi["nets"] = nets or rv_nets()
+    WLAN.ok = set(ok)
+    WLAN.scan_aps = aps
+    gl.wifi["wlan"] = w = WLAN(0)
+    w.active(True)
+    gl._wifi_begin_round(w)
+    for _ in range(30):
+        _clock[0] += 500
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            break
+    return w
+
+
+saved_rv = (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, set(WLAN.ok), gl.PB_MODE,
+            gl.PB_CONNECTED)
+try:
+    # W-1: a Latin-1 / cut-off UTF-8 SSID in a scan does not crash
+    latin = ("K\xe1v\xe9z\xf3", -60, b"\x04" * 6)
+    w = rv_connect([], [])
+    w.active(True)
+    WLAN.scan_aps = []
+    real_scan = WLAN.scan
+    WLAN.scan = lambda self: [(b"K\xe1v\xe9z\xf3", b"\x04" * 6, 1, -60, 4,
+                               False), (b"hot", b"\x05" * 6, 1, -50, 4, False)]
+    try:
+        crash = None
+        gl.log["still"] = sl = gl._still_state()
+        sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=100)
+        try:
+            found = gl._scan_known(w)
+            for _ in range(8):
+                gl._stay_scan(w.scan())
+        except Exception as e:
+            crash = e
+    finally:
+        WLAN.scan = real_scan
+    check("W-1: a non-UTF-8 SSID in a scan neither crashes nor matches",
+          crash is None and found is not None
+          and [n["ssid"] for n in found] == ["hot"]
+          and b"\x04" * 6 in gl.log["still"]["aps"], repr(crash))
+
+    # W-3: an away stay on a hotspot lets the radio sleep once uploaded
+    gl.WEB, gl.WEB_AWAY = True, False
+    w = rv_connect(["hot"], [("hot", -50), ("cafe", -60, b"\x04" * 6)])
+    conn = gl.wifi["state"] == "connected" and not gl.wifi["home"]
+    gl.log["clock"] = (800000000, _clock[0])
+    gl.log["still"] = sl = gl._still_state()
+    sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=100)
+    states = []
+    for _ in range(20 * 60):
+        _clock[0] += 1000
+        gl.log_tick()
+        gl.wifi_tick()
+        gl.upload_tick()
+        if not states or states[-1] != gl.wifi["state"]:
+            states.append(gl.wifi["state"])
+    check("W-3: an away stay on a hotspot: the radio sleeps once idle",
+          conn and "sleep" in states and gl.log["file"] is not None,
+          repr(states))
+
+    # W-8: WEB at home: a keep-alive scan seeing home starts a round
+    gl.WEB = True
+    w = rv_connect(["home"], [("home", -50)])
+    WLAN.ok, WLAN.scan_aps = set(), []
+    gl._wifi_off(w, "sleep")             # as after a failed round
+    WLAN.ok, WLAN.scan_aps = {"home"}, [("home", -50)]
+    t0 = _clock[0]
+    back = None
+    for _ in range(5 * 60):
+        _clock[0] += 1000
+        gl.keepalive_tick(_clock[0])
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            back = (_clock[0] - t0) // 1000
+            break
+    check("W-8: WEB, radio asleep, home seen by a keep-alive scan -> back",
+          back is not None and back <= 60, "back after %r s" % back)
+
+    # W-9: every waiting track held back -> the radio may sleep until then
+    gl.WEB = False
+    w = rv_connect(["hot"], [("hot", -50)])
+    trk = os.path.join(rv_td, "20261029_100000.trk")
+    make_trk(trk, 3)
+    now = _clock[0]
+    gl.up["hold"] = {trk: now + 1800000}
+    gl.up["state"] = "held"
+    wait = gl._upload_wait(now)
+    gl.up["hold"] = {trk: now - 1}
+    due = gl._upload_wait(now)
+    gl.up["hold"] = {}
+    os.remove(trk)
+    check("W-9: all tracks held -> wait until the first hold ends",
+          1790000 <= wait <= 1800000 and due == 0, "%r %r" % (wait, due))
+
+    # W-22: lost -> offline stops the IDF reconnect before the round
+    w = rv_connect(["hot"], [("hot", -50)])
+    gl.wifi["state"] = "lost"
+    gl.wifi["try_at"] = _clock[0] - 10 * gl.LOST_GRACE
+    w._status = 5
+    w._requested = True
+    WLAN.ok = set()
+    calls = []
+    real_disc = getattr(WLAN, "disconnect", None)
+    WLAN.disconnect = lambda self: (calls.append("disc"),
+                                    real_disc(self) if real_disc else None)
+    try:
+        gl.wifi_tick()
+    finally:
+        if real_disc:
+            WLAN.disconnect = real_disc
+    check("W-22: lost -> offline disconnects before the next round",
+          "disc" in calls, repr(calls))
+
+    # W-23: no .env: gpio pulses still go out; scan pulses get a WLAN
+    gl.wifi_reset()
+    gl.wifi["state"] = "no .env"
+    gl.PB_MODE = "gpio"
+    pins = []
+    real_gpio = gl._pb_pulse_gpio
+    gl._pb_pulse_gpio = lambda: pins.append(1) or True
+    try:
+        for _ in range(4):
+            _clock[0] += gl.PB_KEEPALIVE
+            gl.keepalive_tick(_clock[0])
+    finally:
+        gl._pb_pulse_gpio = real_gpio
+    gl.PB_MODE = "scan"
+    gl._pb_w = None
+    n0 = gl.wifi["pb_scans"]
+    _clock[0] += gl.PB_KEEPALIVE
+    gl.keepalive_tick(_clock[0])
+    check("W-23: without .env the keep-alive still pulses (gpio and scan)",
+          len(pins) == 4 and gl.wifi["pb_scans"] == n0 + 1
+          and gl._pb_w is not None, "%d %d" % (len(pins), gl.wifi["pb_scans"]))
+
+    # KEEPALIVE_CONNECTED: pulses while connected and idle, opt-in
+    w = rv_connect(["home"], [("home", -50)])
+    gl.PB_CONNECTED = False
+    n0 = gl.wifi["pb_scans"]
+    for _ in range(3):
+        _clock[0] += gl.PB_KEEPALIVE
+        gl.keepalive_tick(_clock[0])
+    off_n = gl.wifi["pb_scans"] - n0
+    gl._keepalive_env({"KEEPALIVE_CONNECTED": "1"})
+    for _ in range(3):
+        _clock[0] += gl.PB_KEEPALIVE
+        gl.keepalive_tick(_clock[0])
+    on_n = gl.wifi["pb_scans"] - n0
+    check("KEEPALIVE_CONNECTED: off by default; on, scans keep the link",
+          off_n == 0 and on_n == 3 and gl.wifi["state"] == "connected"
+          and w.active(), "%d %d %s" % (off_n, on_n, gl.wifi["state"]))
+
+    # DHCP after a static network: always asked for once any net is static
+    gl.PB_CONNECTED = False
+    cfgs = []
+    real_ifc = getattr(WLAN, "ifconfig", None)
+
+    def rec_ifc(self, *a):
+        if a:
+            cfgs.append(a[0])
+            return None
+        return ("192.168.1.99", "255.255.255.0", "192.168.1.1", "1.1.1.1")
+    WLAN.ifconfig = rec_ifc
+    try:
+        gl.wifi["static"] = False        # a soft reset forgot the flag
+        gl.wifi["nets"] = rv_nets(("192.168.1.60", "255.255.255.0",
+                                   "192.168.1.1", "192.168.1.1"))
+        gl._wifi_ip(w, gl.wifi["nets"][1])
+    finally:
+        if real_ifc:
+            WLAN.ifconfig = real_ifc
+    check("IP: a DHCP network asks for DHCP when another one is static",
+          cfgs == ["dhcp"], repr(cfgs))
+
+    # hidden home: a failed try on a neighbour's blank AP is not repeated
+    gl.wifi_reset()
+    gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                        "hidden": True, "bssid": None, "ip": None}]
+    gl.wifi.update(blank_rssi=-40, blank_bssid=b"\x10" * 6, roaming=True)
+    ok_before = gl._blank_home_ok()
+    gl._mark_failed("home", "test")
+    ok_after = gl._blank_home_ok()
+    gl.wifi["blank_bssid"] = b"\x11" * 6
+    ok_other = gl._blank_home_ok()
+    check("HIDDEN: a blank AP whose home try failed is not tried again",
+          ok_before and not ok_after and ok_other,
+          "%r %r %r" % (ok_before, ok_after, ok_other))
+finally:
+    (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, WLAN.ok, gl.PB_MODE,
+     gl.PB_CONNECTED) = saved_rv
+    gl.wifi_reset()
 
 print()
 print("%d passed, %d failed" % (passed, failed))
