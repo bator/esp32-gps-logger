@@ -29,6 +29,8 @@ _hostnames = []
 _oled_inits = []
 _reset_cause = [1]
 _uart_sv = [None]                       # NAV-SVINFO answer to a poll
+_uart_sat = [None]                      # NAV-SAT answer to a poll (M10)
+_uart_ver = [None]                      # MON-VER answer to a poll
 _uart_tx = []
 _uart_rx = bytearray()
 _uart_ack = [True]
@@ -89,6 +91,10 @@ class UART(object):
         _uart_tx.append(data)
         if data[:4] == b"\xb5\x62\x01\x30" and _uart_sv[0]:
             _uart_rx.extend(_uart_sv[0])
+        if data[:4] == b"\xb5\x62\x01\x35" and _uart_sat[0]:
+            _uart_rx.extend(_uart_sat[0])
+        if data[:4] == b"\xb5\x62\x0a\x04" and _uart_ver[0]:
+            _uart_rx.extend(_uart_ver[0])
         # a u-blox acknowledges a UBX-CFG frame (unless told to drop it)
         if _uart_ack[0] and data[:3] == b"\xb5\x62\x06":
             if _uart_drop[0]:
@@ -4722,7 +4728,7 @@ try:
     check("SATS: NAV-SVINFO is read out of the NMEA stream, 0x0A and all",
           b"\n" in frame[6:-2] and gl.st["svs"] is not None
           and [v[0] for v in gl.st["svs"]] == [12, 5, 25, 123]
-          and gl.st["svs"][0] == (12, 38, 54, 10, True, False)
+          and gl.st["svs"][0] == (12, 38, 54, 10, True, False, 0)
           and gl.st["svs"][3][5] is True
           and gl.st["ok"] == 2 and gl.st["err"] == 0,
           "svs=%r ok=%d err=%d" % (gl.st["svs"], gl.st["ok"], gl.st["err"]))
@@ -4798,14 +4804,107 @@ try:
           page[page.find("Satellites"):page.find("Satellites") + 400])
     check("SATS: a list younger than SV_FRESH is not asked for again; JSON",
           p_again == 1 and jd["satellites"][0]["name"] == "GPS 5"
-          and jd["satellites"][1] == {"name": "GPS 12", "svid": 12,
-                                      "cno": 38, "elev": 54, "azim": 10,
-                                      "used": True, "unhealthy": False}
+          and jd["satellites"][1] == {"name": "GPS 12", "system": "GPS",
+                                      "svid": 12, "cno": 38, "elev": 54,
+                                      "azim": 10, "used": True,
+                                      "unhealthy": False}
           and len(jd["satellites"]) == 4, repr(jd.get("satellites"))[:300])
     check("SATS: a silent receiver costs at most SV_WAIT, the page says so",
           waited <= gl.SV_WAIT + 100
           and b"No satellite list from the receiver yet" in c3.sent,
           "waited=%d" % waited)
+
+    # M10: no NAV-SVINFO on a u-blox M10 (seen 2026-10-29: SPG 5.10 does
+    # not answer it, the page kept the old receiver's list); NAV-SAT instead,
+    # names per system, the receiver model from MON-VER
+    def navsat(svs):
+        pl = struct.pack("<IBBH", 2000, 1, len(svs), 0)
+        for gnss, svid, cno, el, az, flags in svs:
+            pl += struct.pack("<BBBbhhI", gnss, svid, cno, el, az, 0, flags)
+        return gl._ubx(0x01, 0x35, pl)
+
+    def monver(sw, hw, ext):
+        pl = sw.ljust(30, b"\0") + hw.ljust(10, b"\0")
+        for e in ext:
+            pl += e.ljust(30, b"\0")
+        return gl._ubx(0x0A, 0x04, pl)
+
+    m10 = [(0, 7, 41, 60, 270, 0x1F),       # GPS, used (bit 3), healthy
+           (2, 11, 37, 45, 120, 0x1F),      # Galileo, used
+           (3, 22, 30, 20, 10, 0x2C),       # BeiDou, used, unhealthy
+           (6, 3, 0, 5, 300, 0x10),         # GLONASS, no signal
+           (3, 33, 0, -91, 0, 0x10)]        # BeiDou, position not known
+    sat_frame = navsat(m10)
+    ver_frame = monver(b"ROM SPG 5.10 (7b202e)", b"000A0000",
+                       [b"FWVER=SPG 5.10", b"PROTVER=34.10",
+                        b"GPS;GLO;GAL;BDS", b"SBAS;QZSS"])
+
+    def polls_of(mid):
+        return len([f for f in _uart_tx if f[:4] == b"\xb5\x62" + mid])
+
+    gl.reset()
+    gl.st["setup_ok"] = True
+    _uart_rx[:] = []
+    _uart_tx[:] = []
+    _uart_sat[0], _uart_ver[0] = sat_frame, ver_frame
+    try:
+        c = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
+        gl._web_reply(c, c.req)
+        page = c.sent.decode()
+        for _ in range(3):                  # the answers after SV_WAIT too
+            gl.read_uart()
+        first = (polls_of(b"\x01\x30"), polls_of(b"\x01\x35"),
+                 polls_of(b"\x0a\x04"))
+        _uart_tx[:] = []
+        _clock[0] += gl.SV_POLL
+        gl.gps_check(_clock[0])
+        later = (polls_of(b"\x01\x30"), polls_of(b"\x01\x35"),
+                 polls_of(b"\x0a\x04"))
+        gl.read_uart()
+        c2 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
+        _clock[0] += gl.SV_FRESH
+        gl._web_reply(c2, c2.req)
+        jd = json.loads(c2.sent.partition(b"\r\n\r\n")[2])
+        m10_svs = gl.st["svs"]
+        seen_m10 = gl.sv_seen()
+        try:
+            with open(gl.DIAG_FILE) as f:
+                diag_m10 = f.read()
+        except OSError:
+            diag_m10 = ""
+        # a receiver restart (or swap) forgets the list and the model
+        gl.handle(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
+        after_boot = (gl.st["svs"], gl.st.get("sv_msg", "-"),
+                      gl.st.get("gps_ver", "-"))
+    finally:
+        _uart_sat[0] = _uart_ver[0] = None
+    check("M10: no SVINFO answer -> NAV-SAT is read; per-system satellites",
+          m10_svs is not None and [(v[6], v[0]) for v in m10_svs]
+          == [(0, 7), (2, 11), (3, 22), (6, 3), (3, 33)]
+          and m10_svs[4][2] is None
+          and m10_svs[2][4] is True and m10_svs[2][5] is True
+          and m10_svs[3][4] is False and m10_svs[0][5] is False
+          and seen_m10 == 3, "%r seen=%r" % (m10_svs, seen_m10))
+    check("M10: page lists GPS/Galileo/BeiDou/GLONASS names",
+          "<td>GPS 7</td><td>41</td>" in page and "Galileo 11" in page
+          and "BeiDou 22 (unhealthy)" in page and "GLONASS 3" in page
+          and page.index("GPS 7") < page.index("Galileo 11")
+              < page.index("BeiDou 22") < page.index("GLONASS 3")
+          and "<td>BeiDou 33</td><td>-</td><td>-</td><td>-</td>" in page
+          and "-91" not in page,
+          page[page.find("<h2>Satellites"):page.find("<h2>Satellites") + 500])
+    check("M10: the receiver model from MON-VER is on the page and in JSON",
+          "u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10" in page
+          and jd.get("receiver") == "u-blox M10, ROM SPG 5.10 (7b202e), "
+                                    "PROTVER=34.10"
+          and jd["satellites"][1]["system"] == "Galileo"
+          and "gps u-blox M10, ROM SPG 5.10" in diag_m10,
+          repr(jd.get("receiver")))
+    check("M10: first both list polls and MON-VER, then NAV-SAT only",
+          first == (1, 1, 1) and later == (0, 1, 0),
+          "first=%r later=%r" % (first, later))
+    check("M10: a receiver restart forgets the list and the model",
+          after_boot == (None, None, None), repr(after_boot))
 
     # OFF: while uploads back off for WIFI_OFF_WAIT or more (server down,
     # 401) the radio goes off until the retry is due, then a round

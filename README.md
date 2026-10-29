@@ -45,7 +45,7 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
 | Part | Notes |
 |------|-------|
 | ESP32 or ESP32-C6 board | ESP32: a **WROOM** module (on WROVER, GPIO16/17 belong to the PSRAM). Flash MicroPython **1.29** with **LittleFS** (the default image; on FAT the upload progress is not crash-safe). |
-| GPS module | u-blox NEO-6M / 7M / 8M, UART, 9600 baud |
+| GPS module | u-blox NEO-6M / 7M / M8 / M10, UART, 9600 baud (on the board now: a u-blox M10, ROM SPG 5.10) |
 | OLED display | SSD1306, 128×64, I²C (0x3C). Optional. |
 | Push button | Boot bypass, e.g. the centre press of a 5-way joystick. Optional. |
 
@@ -238,6 +238,11 @@ the board is on a power bank, so the logger also appends to `/diag.log` on
 flash: a `boot cause N` line at every start, one status line a minute, a
 `stay left wifi` line when an away stay ends without a fix (see
 [Stays](#stays)), and a `crash` line before a crash reset. Past 32 KB the file becomes `/diag.1`
+flash: a `boot cause N` line at every start, a `gps <model>` line once
+the receiver says what it is (UBX-MON-VER, e.g. `gps u-blox M10, ROM SPG
+5.10 (7b202e), PROTVER=34.10`; again after a receiver restart), one status
+line a minute, and a
+`crash` line before a crash reset. Past 32 KB the file becomes `/diag.1`
 (the older one is dropped), so the two hold about 7 hours at one line a
 minute. After a walk, plug the board in and read it:
 
@@ -262,9 +267,10 @@ minute. After a walk, plug the board in and read it:
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
 `http://192.168.1.60/`, reloads every 15 s) and the same data as JSON at
-`/status.json`: fix, satellites seen/used and the satellite list (GPS or
-SBAS number, signal in dBHz, elevation, azimuth, used), HDOP, GPS time, position, NMEA
-counts, receiver restarts; points logged, waiting and uploaded, upload
+`/status.json`: fix, satellites seen/used and the satellite list (system
+and number, e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`, `SBAS
+123`; signal in dBHz, elevation, azimuth, used), HDOP, GPS time, position,
+NMEA counts, the receiver model, receiver restarts; points logged, waiting and uploaded, upload
 state, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON), boot cause, chip temperature, free heap and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. It is
@@ -296,11 +302,17 @@ console line.
   receiver's position masks stay as they are. A receiver that refuses NAV5
   (`gps nav5 refused`) still gets the 5 Hz setup.
 - **Satellite list without GSV.** `GSV` does not fit next to 5 Hz, so the
-  logger polls UBX-NAV-SVINFO once a minute (`SV_POLL`, ~210 bytes) and
-  when a status page is opened and the list is older than 5 s (waiting up
-  to 0.7 s for it). The binary answer is cut out of the NMEA stream by its
-  length. The receiver only gives numbers: GPS 1–32, SBAS (e.g. EGNOS)
-  120–158.
+  logger polls the satellite list once a minute (`SV_POLL`) and when a
+  status page is opened and the list is older than 5 s (waiting up to 0.7 s
+  for it). Until the receiver answered one of them it asks for both
+  UBX-NAV-SVINFO (u-blox 6/7/M8, ~210 bytes; numbers only: GPS 1–32, SBAS
+  e.g. EGNOS 120–158) and UBX-NAV-SAT (M8 and later, with the system of
+  each satellite; an M10 knows only this one; elevation `-` while its
+  position is not known yet), then only the one that
+  answered. The binary answer is cut out of the NMEA stream by its length.
+  UBX-MON-VER is asked for with it until the receiver names its model. A
+  receiver restart (also a module swapped while running) forgets the list,
+  the message and the model, so a new receiver is asked anew.
 - **Reliable setup.** Every frame is sent until the receiver acknowledges it
   (UBX-ACK, up to 4 tries). It starts with a switch to 1 Hz, and 5 Hz is
   asked only once every message frame was acknowledged. Reason: at 5 Hz with

@@ -55,8 +55,8 @@ WEB_REFRESH = 15                         # s between page reloads
 WEB_DIAG = 15                            # diag.log lines on the page
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
                                          # for the page on the other networks too
-SV_POLL = 60000                          # ms between UBX-NAV-SVINFO polls (the
-SV_FRESH = 5000                          # satellite list); a page view asks
+SV_POLL = 60000                          # ms between satellite-list polls (NAV-
+SV_FRESH = 5000                          # SVINFO or NAV-SAT); a page view asks
 SV_WAIT = 700                            # again if older than SV_FRESH and
                                          # waits SV_WAIT ms for the answer
 GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
@@ -249,7 +249,8 @@ def reset():
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
-              svs=None, svs_at=None, sv_poll_at=None)
+              svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
+              gps_ver=None)
     _ep_new(None)
 
 def _ep_new(t):
@@ -415,6 +416,8 @@ def txt(talker, f):
         st["gps_boots"] += 1
         st["extra"] += 1                 # back at its defaults: set it up
         st["setup_wait"] = GPS_RETRY     # again within GPS_RETRY, not 5 min
+        # maybe another receiver (swapped while running): ask anew
+        st.update(svs=None, svs_at=None, sv_msg=None, gps_ver=None)
         print("gps restarted")
         _gps_flap(time.ticks_ms())
 
@@ -446,19 +449,51 @@ def _ubx(cls, mid, payload):
         b = (b + a) & 255
     return b"\xb5\x62" + m + bytes((a, b))
 
+SV_SVINFO = b"\xb5\x62\x01\x30\x00\x00\x31\x94"   # NAV-SVINFO poll
+SV_SAT = b"\xb5\x62\x01\x35\x00\x00\x36\xa3"      # NAV-SAT poll
+MON_VER = b"\xb5\x62\x0a\x04\x00\x00\x0e\x34"     # MON-VER poll
+GNSS = {0: "GPS", 1: "SBAS", 2: "Galileo", 3: "BeiDou", 5: "QZSS",
+        6: "GLONASS"}
+UBLOX_HW = {"00040007": "u-blox 6", "00070000": "u-blox 7",
+            "00080000": "u-blox M8", "00190000": "u-blox F9",
+            "000A0000": "u-blox M10"}
+
 def sv_poll(now):
-    """Ask for UBX-NAV-SVINFO (the satellite list). No GSV at 9600 baud
-    (see GPS_MSGS): one ~210-byte answer a minute, or per page view."""
+    """Ask for the satellite list. No GSV at 9600 baud (see GPS_MSGS): one
+    answer a minute, or per page view. NAV-SVINFO (u-blox 6/7/M8) or
+    NAV-SAT (M8 and later; an M10 knows only that); until one answered,
+    both. Also asks for MON-VER (the receiver model) until it answers."""
     st["sv_poll_at"] = now
+    m = st["sv_msg"]
     try:
-        uart.write(b"\xb5\x62\x01\x30\x00\x00\x31\x94")
+        if m != "sat":
+            uart.write(SV_SVINFO)
+        if m != "svinfo":
+            uart.write(SV_SAT)
+        if st["gps_ver"] is None:
+            uart.write(MON_VER)
     except OSError:
         pass
 
+def _gps_ver(p):
+    """MON-VER payload -> "u-blox M10, ROM SPG 5.10, PROTVER=34.10, ..."."""
+    def z(b):
+        b = bytes(b)
+        i = b.find(b"\0")
+        return (b if i < 0 else b[:i]).decode()
+    hw = z(p[30:40])
+    out = [UBLOX_HW.get(hw, "hw " + hw), z(p[0:30])]
+    for k in range(40, len(p) - 29, 30):
+        e = z(p[k:k + 30])
+        if e.startswith("PROTVER") or e.startswith("MOD="):
+            out.append(e)
+    return ", ".join(out)
+
 def _ubx_frame(fr):
-    """A whole UBX frame read from the stream (read_uart). NAV-SVINFO fills
-    st["svs"]: (svid, cno dBHz, elevation, azimuth, used, unhealthy) per
-    channel; svid 1-32 GPS, 120-158 SBAS. Others (late ACKs) are dropped."""
+    """A whole UBX frame read from the stream (read_uart). NAV-SVINFO and
+    NAV-SAT fill st["svs"]: (svid, cno dBHz, elevation, azimuth, used,
+    unhealthy, gnssId) per satellite; MON-VER fills st["gps_ver"]. Others
+    (late ACKs) are dropped."""
     a = b = 0
     for x in fr[2:-2]:
         a = (a + x) & 255
@@ -466,21 +501,50 @@ def _ubx_frame(fr):
     if a != fr[-2] or b != fr[-1]:
         st["err"] += 1
         return
-    if fr[2] != 0x01 or fr[3] != 0x30 or len(fr) < 16:
+    cls, mid = fr[2], fr[3]
+    if cls == 0x0A and mid == 0x04 and len(fr) >= 48:
+        try:
+            st["gps_ver"] = _gps_ver(fr[6:-2])
+        except (UnicodeError, ValueError):
+            st["gps_ver"] = "?"
+        print("gps", st["gps_ver"])
+        _diag_write("gps " + st["gps_ver"])
         return
-    n = fr[10]
+    if cls != 0x01 or len(fr) < 16:
+        return
     svs = []
-    for k in range(n):
-        o = 14 + 12 * k
-        if o + 12 > len(fr) - 2:
-            break
-        el = fr[o + 5] - 256 if fr[o + 5] > 127 else fr[o + 5]
-        svs.append((fr[o + 1], fr[o + 4], el, fr[o + 6] | fr[o + 7] << 8,
-                    bool(fr[o + 2] & 1), bool(fr[o + 2] & 16)))
+    if mid == 0x30:
+        # svid 1-32 GPS, 120-158 SBAS; flags bit 0 used, bit 4 unhealthy
+        for k in range(fr[10]):
+            o = 14 + 12 * k
+            if o + 12 > len(fr) - 2:
+                break
+            sv = fr[o + 1]
+            el = fr[o + 5] - 256 if fr[o + 5] > 127 else fr[o + 5]
+            svs.append((sv, fr[o + 4], el, fr[o + 6] | fr[o + 7] << 8,
+                        bool(fr[o + 2] & 1), bool(fr[o + 2] & 16),
+                        0 if sv <= 32 else (1 if 120 <= sv <= 158 else None)))
+        st["sv_msg"] = "svinfo"
+    elif mid == 0x35:
+        # gnssId, svId, cno, elev, azim; flags bit 3 used, bits 4-5 health
+        # (2 = unhealthy)
+        for k in range(fr[11]):
+            o = 14 + 12 * k
+            if o + 12 > len(fr) - 2:
+                break
+            el = fr[o + 3] - 256 if fr[o + 3] > 127 else fr[o + 3]
+            if el < -90:
+                el = None                # -91: position not known yet
+            svs.append((fr[o + 1], fr[o + 2], el, fr[o + 4] | fr[o + 5] << 8,
+                        bool(fr[o + 8] & 8), (fr[o + 8] >> 4) & 3 == 2,
+                        fr[o]))
+        st["sv_msg"] = "sat"
+    else:
+        return
     st["svs"], st["svs_at"] = svs, time.ticks_ms()
 
 def sv_seen():
-    """Satellites with a signal: from the last NAV-SVINFO, else the GSV
+    """Satellites with a signal: from the last satellite list, else the GSV
     count (before the setup turns GSV off)."""
     if st["svs"] is not None:
         return len([v for v in st["svs"] if v[1] > 0])
@@ -3302,6 +3366,7 @@ def _web_rows():
         ("GPS", "NMEA ok / bad", "nmea", "%d / %d" % (st["ok"], st["err"])),
         ("GPS", "Receiver restarts", "gps_boots", st["gps_boots"]),
         ("GPS", "Reset-loop warnings", "gps_loops", st["loops"]),
+        ("GPS", "Receiver", "receiver", st["gps_ver"]),
         ("GPS", "Setup acknowledged", "setup_ok", st["setup_ok"]),
         ("Points", "Logged since boot", "points", log["points"]),
         ("Points", "Waiting for upload", "left", up["left"]),
@@ -3342,21 +3407,22 @@ def _sv_fresh():
             return
         time.sleep_ms(20)
 
-def _sv_name(svid):
-    return ("GPS %d" % svid) if svid <= 32 else (
-        "SBAS %d" % svid if 120 <= svid <= 158 else "SV %d" % svid)
+def _sv_name(v):
+    return "%s %d" % (GNSS.get(v[6], "SV"), v[0])
 
 def _sv_list():
     """The satellite list for the page, used first, then by signal."""
     if st["svs"] is None:
         return []
-    return sorted(st["svs"], key=lambda v: (not v[4], -v[1], v[0]))
+    return sorted(st["svs"], key=lambda v: (not v[4], -v[1], v[6] or 0,
+                                            v[0]))
 
 def _web_json():
     d = {"device": DEVICE_ID, "diag": _web_diag(),
-         "satellites": [{"name": _sv_name(v[0]), "svid": v[0], "cno": v[1],
-                         "elev": v[2], "azim": v[3], "used": v[4],
-                         "unhealthy": v[5]} for v in _sv_list()],
+         "satellites": [{"name": _sv_name(v), "system": GNSS.get(v[6]),
+                         "svid": v[0], "cno": v[1], "elev": v[2],
+                         "azim": v[3], "used": v[4], "unhealthy": v[5]}
+                        for v in _sv_list()],
          "satellites_age_s": None if st["svs_at"] is None else
          _age(time.ticks_ms(), st["svs_at"]) // 1000}
     for _sec, _label, key, v in _web_rows():
@@ -3396,10 +3462,12 @@ def _web_html():
         out.append("<table><tr><td>Satellite</td><td>Signal (dBHz)</td>"
                    "<td>Elevation</td><td>Azimuth</td><td>Used</td></tr>")
         for v in svs:
-            out.append("<tr><td>%s%s</td><td>%s</td><td>%d&deg;</td>"
-                       "<td>%d&deg;</td><td>%s</td></tr>" % (
-                           _sv_name(v[0]), " (unhealthy)" if v[5] else "",
-                           v[1] if v[1] else "-", v[2], v[3],
+            out.append("<tr><td>%s%s</td><td>%s</td><td>%s</td>"
+                       "<td>%s</td><td>%s</td></tr>" % (
+                           _sv_name(v), " (unhealthy)" if v[5] else "",
+                           v[1] if v[1] else "-",
+                           "-" if v[2] is None else "%d&deg;" % v[2],
+                           "-" if v[2] is None else "%d&deg;" % v[3],
                            "yes" if v[4] else ""))
         out.append("</table>")
     else:
