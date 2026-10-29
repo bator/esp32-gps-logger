@@ -137,6 +137,8 @@ STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
 MIN_FREE = 32768                         # bytes of flash kept free
 MAX_BATCH = 240                          # RAM cap while flash writes fail
+HOLD_RELEASE = 600000                    # ms without a fix after which what a
+                                         # stay being proven holds is written
 HOLD_MAX = 150                           # lines a stay being proven keeps in
                                          # RAM (two windows and some; a FLUSH
                                          # more still fits under MAX_BATCH)
@@ -2139,8 +2141,16 @@ def _still_hold():
     if sl["active"]:
         return None
     h = sl["hold_tc"]                    # a window restarted after a gap
-    if sl["prev"]:
-        t = sl["prev"][1]
+    c = None
+    if sl["win_at"] is not None and sl["sum"][2]:
+        r, sm = sl["ref"], sl["sum"]
+        c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
+    p = sl["prev"]
+    if p and c is not None and _dist(p[0][0], p[0][1], c[0], c[1]) > STILL_EXIT:
+        p = None                         # moving on (a drive): the previous
+                                         # window cannot pair, it is track
+    if p:
+        t = p[1]
     elif sl["win_at"] is not None:
         t = sl["win_tc"]
     else:
@@ -2202,8 +2212,9 @@ def flush(hold=None):
         k = max(k, len(batch) - HOLD_MAX)
         if not k:
             return
-    if path is None or (log["created"] and not k):
-        return
+    if path is None or not k:
+        return                           # (nothing to write: no empty file,
+                                         # e.g. after the flash was full)
     room = free()
     if room is not None and room < MIN_FREE:
         log["full"] = True
@@ -2333,7 +2344,7 @@ def _sample_line(now, prev, last_t):
     hdop = _fresh_hdop(now)
     lat, lon = st["lat"], st["lon"]
     t = st["date"] + "T" + st["time"] + "Z"
-    if t == last_t or (prev is not None and _dist(
+    if (last_t is not None and t <= last_t) or (prev is not None and _dist(
             prev[0], prev[1], lat, lon) <= MIN_MOVE):
         return None
     ele = ""
@@ -2482,6 +2493,14 @@ def _still_beat(now):
         return
     if at_home():
         _still_close(now)                # also after a WiFi drop, fix or not
+        if not sl["home"] and (sl["last_at"] is None
+                               or _age(now, sl["last_at"]) >= STILL_GAP):
+            # an away stay, home now, no usable fix for STILL_GAP: the way
+            # home had no fix (a train) and no WiFi verdict (no access
+            # points at that place). Left running, it stamped the old place
+            # next morning and swallowed a trip that did not recede from it
+            print("stay end: home without a fix")
+            log["still"] = _still_state()
         return
     # Rotate the anchor file so the stay uploads while it lasts (the usual
     # age-close is off during a stay: it would open a file per heartbeat).
@@ -2549,6 +2568,8 @@ def _still_enter(now, anchor, since_tc, n):
         i += 1
     del b[i:]
     _still_close()                       # the arrival uploads during the stay
+    if log["file"] is not None:
+        sl["file_at"] = now              # close failed: rotate it later
     if at_home():
         sl["home"] = True
     elif wifi_wake():
@@ -2725,17 +2746,26 @@ def log_tick():
         if room is None or room < MIN_FREE:
             return
         log["full"] = False
-    _still_beat(now)
     if not has_fix(now):
         if log["fix"]:
             _drain_q()                   # valid seconds just before the loss
         else:
             st["q"] = []                 # stale
+        # the heartbeat after the queued seconds: a departure in them comes
+        # first, and nothing is stamped before lines already written
+        _still_beat(now)
         if log["fix"]:
             log["fix"], log["lost_at"] = False, now
             flush(_still_hold())
         elif log["batch"] and _age(now, log["last_flush"]) >= FLUSH:
-            flush(_still_hold())         # anchor points written without a fix
+            # anchor points written without a fix; and HOLD_RELEASE after
+            # the fix was lost the drift hold is let go: without a new fix
+            # the end of a trip would stay in RAM only (lost on power-off)
+            hold = _still_hold()
+            if (hold is not None and log.get("lost_at") is not None
+                    and _age(now, log["lost_at"]) >= HOLD_RELEASE):
+                hold = None
+            flush(hold)
         return
     if not log["fix"]:
         log["fix"] = True
@@ -2758,6 +2788,7 @@ def log_tick():
           or _age(now, log["last_sample"]) >= SAMPLE):
         log["last_sample"] = now
         _sample(now)
+    _still_beat(now)                     # after the seconds (see above)
     if _age(now, log["last_flush"]) >= FLUSH:
         flush(_still_hold())
 
@@ -2781,8 +2812,9 @@ def _sample(now):
     secs = _fix_secs()
     if secs is not None:
         log["clock"] = (secs, now)       # GPS time for the heartbeat
-    if not _usable(now):
-        return
+    if not st["date"] or not _usable(now):
+        return                           # (a second with GGA only, e.g. the
+                                         # first one after a warm boot)
     pos = (st["lat"], st["lon"])
     if log["still"]["active"]:
         _still_active(now, pos)

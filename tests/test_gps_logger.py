@@ -5861,6 +5861,109 @@ finally:
      gl.PB_CONNECTED) = saved_rv
     gl.wifi_reset()
 
+
+# Logger / stays: findings 4, 5, 6, 12, 24 and the empty-file flush
+rv_dir = tempfile.mkdtemp(prefix="gpxlog-rv29-")
+gl.LOG_DIR = rv_dir
+gl.WEB = False
+
+
+def rv_gga(t):
+    return rv_nmea("GNGGA,%s.00,4730.0000,N,01900.0000,E,1,12,0.9,100.0,M,"
+                   "40.0,M,," % t) + b"\r\n"
+
+
+def rv_rmc(t):
+    return rv_nmea("GNRMC,%s.00,A,4730.0000,N,01900.0000,E,0.1,,181026,,,A"
+                   % t) + b"\r\n"
+
+
+# L-4: a second without a date (GGA only, a warm boot) is skipped
+sv_reset()
+_uart_rx[:] = []
+data = rv_gga("080000")
+for t in ("080001", "080002"):
+    for _ in range(5):
+        data += rv_rmc(t) + rv_gga(t)
+data += rv_rmc("080003")
+_uart_rx.extend(data)
+gl.read_uart()
+crash = None
+try:
+    gl.log_tick()
+except Exception as e:
+    crash = e
+check("L-4: a queued second without a date is skipped, no crash",
+      crash is None and all(l.split(",")[4].strip()[:8] == "20261018"
+                            for l in sv_lines()), repr(crash))
+
+# L-5: an away stay, home WiFi, no fix for STILL_GAP -> the stay ends
+sv_reset()
+sv_drift(150)
+active0 = sv_active()
+for _ in range(40 * 60):
+    hb_fix(0, 0, nofix=True)
+gl.wifi.update(state="connected", home=True)
+for _ in range(60):
+    hb_fix(0, 0, nofix=True)
+check("L-5: away stay, home without a fix -> the stay ends",
+      active0 and not sv_active(), "active=%s" % sv_active())
+gl.wifi.update(state="offline", home=False)
+
+# L-6: a drive whose fix is lost: little stays in RAM, and it is written
+sv_reset()
+for i in range(10 * 60):
+    sv_fix(i * 15.0, 0, 54.0)
+for _ in range(60):
+    hb_fix(0, 0, nofix=True)
+in_ram = len(gl.log["batch"])
+for _ in range(gl.HOLD_RELEASE // 1000 + 30):
+    hb_fix(0, 0, nofix=True)
+check("L-6: after a drive at most a window waits in RAM; later written",
+      in_ram <= 70 and len(gl.log["batch"]) == 0, "ram=%d then %d"
+      % (in_ram, len(gl.log["batch"])))
+
+# L-12: the heartbeat comes after the queued seconds, in time order
+sv_reset()
+sv_drift(150)
+gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT
+_uart_rx[:] = []
+base = 8 * 3600 + rv_sec[0] + 5
+for k in range(6):
+    sec = base + k
+    t = "%02d%02d%02d" % (sec // 3600, sec // 60 % 60, sec % 60)
+    for _ in range(5):
+        _uart_rx.extend(rv_nmea(
+            "GNRMC,%s.00,A,4730.%04d,N,01900.0000,E,30.0,,181026,,,A"
+            % (t, 100 + k * 100)) + b"\r\n" + rv_nmea(
+            "GNGGA,%s.00,4730.%04d,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,,"
+            % (t, 100 + k * 100)) + b"\r\n")
+_clock[0] += 12000                       # a 12 s blocking call
+gl.read_uart()
+gl.log_tick()
+times = [l.split(",")[4].strip() for l in sv_lines()]
+check("L-12: lines stay in time order after a blocking call",
+      times == sorted(times), repr(times[-8:]))
+
+# L-24: the arrival file could not be closed: the stay still rotates it
+sv_reset()
+real_close = gl._close_file
+gl._close_file = lambda: False
+try:
+    sv_drift(150)
+finally:
+    gl._close_file = real_close
+check("L-24: a stay whose arrival close failed gets a file_at",
+      sv_active() and gl.log["file"] is not None
+      and gl.log["still"]["file_at"] is not None)
+
+# no empty file from a flush with nothing to write
+sv_reset()
+gl.start_file("20261018_090000")
+gl.flush()
+check("FLUSH: nothing to write creates no file",
+      not os.path.exists(os.path.join(rv_dir, "20261018_090000.trk")))
+
 print()
 print("%d passed, %d failed" % (passed, failed))
 if failures:
