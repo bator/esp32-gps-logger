@@ -194,7 +194,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
 | `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring |
-| `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring |
+| `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds |
 | `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
@@ -247,8 +247,10 @@ flash: a `boot cause N` line at every start, a `gps <model>` line once
 the receiver says what it is (UBX-MON-VER, e.g. `gps u-blox M10, ROM SPG
 5.10 (7b202e), PROTVER=34.10`; again after a receiver restart), one status
 line a minute, a `stay left wifi` line when an away stay ends without a fix
-(see [Stays](#stays)), a `reboot tls memory` line before a TLS memory
-reboot, and a `crash` line before a crash reset. Past 32 KB the file
+(see [Stays](#stays)), `gps reset loop …` lines (when the receiver keeps
+restarting, so they can be set against where you were), `upload err …`
+and `upload aborted …` lines, a `reboot tls memory` line before a TLS
+memory reboot, and a `crash` line before a crash reset. Past 32 KB the file
 becomes `/diag.1` (the older one is dropped), so the two hold about 7 hours
 at one line a minute; below the 32 KB flash reserve nothing is written.
 minute. After a walk, plug the board in and read it:
@@ -540,6 +542,13 @@ a false attempt, and switching to a hidden home can be slower.
   `HTTP_WAIT`) polls, both reading the UART meanwhile, so a slow server
   costs no NMEA (the 4 KB UART buffer holds ~5 s). The upload line on the
   console ends with the POST time.
+- **POST guard:** a hardware timer feeds the watchdog during a POST (it
+  also runs while a socket or TLS call blocks) and closes the socket after
+  60 s (`HTTP_MAX`, `upload aborted after 60 s` in the diagnostic log), so a
+  hung call fails instead of the watchdog resetting the board (seen three
+  times on 2026-10-30). A write that keeps saying "would block" ends after
+  `HTTP_TIMEOUT`. Each new kind of upload error goes to the diagnostic log
+  (`upload err OSError(116)`).
 - **No redirects:** a 3xx is an error (`GEO_URL redirects (301)`): put the
   final https origin in `GEO_URL`. (micropython-lib `requests` followed one
   as a GET with the old Content-Length and the Bearer header, without the
@@ -576,6 +585,7 @@ with a NEO-6M; most never need changing.
 | `GPS_MIN_ELEV` / `GPS_STATIC_HOLD` | 10° / 50 cm/s | NAV5 elevation mask and static hold threshold (0 = off) |
 | `GPS_LOOP_WINDOW` / `GPS_LOOP_BANNERS` | 10 s / 3 | Banner starts with no NMEA in this window = `gps reset loop?` |
 | `GPS_FLAP_WINDOW` / `GPS_FLAP_RESTARTS` | 10 min / 5 | Full restarts within this window, NMEA or not = `gps reset loop?` |
+| `GPS_STORM_WAIT` | 30 s | Least time between setups while the receiver keeps restarting |
 | `AVG_MAX_SPEED` | 10 km/h | Faster than this a second's point is its first fix, not the mean |
 | `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
 | `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling only while it does not answer) |
@@ -640,6 +650,7 @@ with a NEO-6M; most never need changing.
 | `AUTH_BACKOFF` | 30 min | Wait after HTTP 401 |
 | `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (connect, TLS) |
 | `HTTP_WAIT` / `HTTP_CHUNK` | 30 s / 1 KB | Wait for the server's answer, body piece; the UART is read between |
+| `HTTP_MAX` | 60 s | Wall clock for one POST: the guard timer feeds the WDT, then closes the socket |
 | `CA_FILE` | `/ca.der` | DER root certificate; if present, the server is verified |
 | `TLS_REBOOT_N` | 5 | TLS allocation failures in a row (at home) before a clean reboot |
 | `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err` |
