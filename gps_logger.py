@@ -68,6 +68,8 @@ GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
 GPS_FLAP_WINDOW = 600000                 # within this many ms = a reset loop
 GPS_STORM_WAIT = 30000                   # ms between setups while it loops:
                                          # each setup blocks the loop seconds
+GPS_STORM_QUIET = 10000                  # ms without a restart: the storm is
+                                         # over, set it up within GPS_RETRY
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
 # GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
@@ -279,7 +281,7 @@ def reset():
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
-              storm_at=None,
+              storm_at=None, boot_at=None,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
               gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0)
     _ep_new(None)
@@ -460,6 +462,7 @@ def txt(talker, f):
         # reset loop in the last GPS_FLAP_WINDOW), every GPS_STORM_WAIT:
         # 2026-10-30 had 541 restarts, each setup blocking the loop
         now = time.ticks_ms()
+        st["boot_at"] = now
         storm = (st["storm_at"] is not None
                  and _age(now, st["storm_at"]) < GPS_FLAP_WINDOW)
         st["setup_wait"] = GPS_STORM_WAIT if storm else GPS_RETRY
@@ -740,6 +743,14 @@ def gps_check(now):
     # also when the setup went out but was not acknowledged (an ACK lost,
     # a silent receiver that took the blind burst): it may sit at 1 Hz
     at = st["setup_at"]
+    b = st["boot_at"]
+    if (st["setup_wait"] > GPS_RETRY and b is not None and st["extra"]
+            and _age(now, b) >= GPS_STORM_QUIET):
+        # quiet for GPS_STORM_QUIET since the last restart: the storm (or a
+        # long backoff) is over, the receiver sits at 1 Hz with every
+        # sentence on: set it up now (measured: over a minute at 1 Hz)
+        st["setup_wait"] = GPS_RETRY
+        st["boot_at"] = None
     if (at is None or (not st["extra"] and st["setup_ok"] is True)
             or _age(now, at) < st["setup_wait"]):
         return

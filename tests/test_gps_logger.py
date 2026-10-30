@@ -6448,6 +6448,22 @@ finally:
 check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home it reboots",
       away == (0, "low idf", 0) and home == (0, 1), "%r %r" % (away, home))
 
+
+# GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon
+gl.reset()
+banner = rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+for _ in range(gl.GPS_FLAP_RESTARTS + 1):
+    _clock[0] += 3000
+    gl.handle(banner)
+gl.st["setup_at"] = _clock[0]
+storm_wait = gl.st["setup_wait"]
+_uart_tx[:] = []
+_clock[0] += gl.GPS_STORM_QUIET + gl.GPS_RETRY + 500
+gl.gps_check(_clock[0])
+sent = len([f for f in _uart_tx if f[2:3] == b"\x06"]) > 0
+check("GPS-STORM-END: after the storm the setup comes within ~15 s, not 30-60",
+      storm_wait == gl.GPS_STORM_WAIT and sent, "%r %r" % (storm_wait, sent))
+
 print()
 print("%d passed, %d failed" % (passed, failed))
 if failures:
