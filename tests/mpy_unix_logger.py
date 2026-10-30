@@ -76,6 +76,8 @@ if not hasattr(time, "ticks_ms"):       # CPython
     time.sleep_ms = lambda ms: None
 if not hasattr(gc, "threshold"):
     gc.threshold = lambda *a: None
+if not hasattr(gc, "mem_alloc"):
+    gc.mem_alloc = lambda: 50000
 if not hasattr(gc, "mem_free"):
     gc.mem_free = lambda: 100000
 

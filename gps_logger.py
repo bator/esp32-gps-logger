@@ -964,17 +964,19 @@ def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
     HDOP, points logged/sent, WiFi state, keep-alive pulses, free heap,
-    IDF heap free/largest block (KB)."""
+    IDF heap free/largest block (KB), Python heap size (KB: it grows into
+    the IDF heap)."""
     view = sv_seen()
     fr, big = idf_heap()
     _diag_write(
         "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
-        "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s" % (
+        "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s "
+        "heap %d" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
             st["loops"], view, sv_used(), status().replace(" ", "_"),
             st["hdop"], log["points"], up["sent"],
             wifi["state"].replace(" ", "_"), wifi["pb_scans"],
-            gc.mem_free(), fr, big))
+            gc.mem_free(), fr, big, (gc.mem_alloc() + gc.mem_free()) // 1024))
 
 def checksum_ok(line):
     star = line.rfind(b"*")
