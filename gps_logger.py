@@ -213,6 +213,10 @@ HTTP_MAX = 60000                         # ms wall clock for one POST: a timer
                                          # closes the socket (a hung TLS call
                                          # reset the board by the WDT)
 CA_FILE = "/ca.der"                      # if present: verify the server
+TLS_MIN_KB = 48                          # largest IDF heap block a TLS POST
+                                         # needs (measured: at 20 KB every
+                                         # handshake failed); below it no
+                                         # try, and at home a clean reboot
 TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
                                          # home): a clean reboot, the IDF heap
                                          # stays fragmented otherwise
@@ -1658,7 +1662,8 @@ def _upload_wait(now):
     state = str(up.get("state") or "")
     d = time.ticks_diff(up["next_at"], now)
     wait = d if 0 < d <= UP_WAIT_MAX else 0
-    if state.startswith("err") or state in ("fs err", "low mem", "bad full"):
+    if state.startswith("err") or state in ("fs err", "low mem", "bad full",
+                                            "low idf"):
         return wait
     held = up.get("hold") or {}
     if not held:
@@ -3659,6 +3664,19 @@ def upload_tick():
     except MemoryError:
         up["skip"] = path
         _low_mem(now)
+        return
+    big = idf_heap()[1]
+    if big is not None and big < TLS_MIN_KB:
+        # TLS cannot get its block: every try would time out or fail to
+        # allocate (seen as "err net" until a reboot on 2026-10-30)
+        up["err"] += 1
+        up["state"] = "low idf"
+        up["enomem"] = max(up.get("enomem", 0), TLS_REBOOT_N)
+        if up.get("last_err") != "low idf":
+            up["last_err"] = "low idf"
+            _diag_write("upload low idf %d KB" % big)
+        if not _tls_reboot():
+            _schedule(now)
         return
     if not _bad_full_left():
         up["state"] = "sending"

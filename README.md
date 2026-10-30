@@ -271,7 +271,8 @@ minute. After a walk, plug the board in and read it:
 | `sats seen/used` | Satellites with a signal (from the receiver's satellite list, polled once a minute) and used in the fix |
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
-| `wifi`, `pulses`, `mem` | WiFi state, keep-alive pulses so far, free heap |
+| `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free heap |
+| `idf F/L` | ESP-IDF heap free and its largest block, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`), and at home the board reboots cleanly |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
@@ -653,6 +654,7 @@ with a NEO-6M; most never need changing.
 | `HTTP_MAX` | 60 s | Wall clock for one POST: the guard timer feeds the WDT, then closes the socket |
 | `CA_FILE` | `/ca.der` | DER root certificate; if present, the server is verified |
 | `TLS_REBOOT_N` | 5 | TLS allocation failures in a row (at home) before a clean reboot |
+| `TLS_MIN_KB` | 48 KB | Largest IDF heap block a POST needs; below it no try (at home: reboot) |
 | `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err` |
 | `MAX_BAD_BYTES` | 64 kB | Cap on a `.bad` file |
 | `MAX_GLOBAL_PAYLOAD` | 3 | Payload errors in a row that stop quarantining |

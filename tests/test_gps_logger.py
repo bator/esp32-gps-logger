@@ -6423,6 +6423,31 @@ check("GPS-STORM: setups GPS_STORM_WAIT apart while the receiver loops",
 gl.DIAG = 0
 diag_clear()
 
+
+# LOWIDF: no TLS try below TLS_MIN_KB; at home a clean reboot instead
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+real_idf = gl.idf_heap
+gl.idf_heap = lambda: (30, 20)
+_posts[:] = []
+_resets[:] = []
+try:
+    gl.wifi["home"] = False
+    pump()
+    away = (len(_posts), gl.up["state"], len(_resets))
+    gl.wifi["home"] = True
+    try:
+        pump()
+    except SystemExit:
+        pass
+    home = (len(_posts), len(_resets))
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home it reboots",
+      away == (0, "low idf", 0) and home == (0, 1), "%r %r" % (away, home))
+
 print()
 print("%d passed, %d failed" % (passed, failed))
 if failures:
