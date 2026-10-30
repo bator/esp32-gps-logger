@@ -6307,6 +6307,163 @@ check("trk2gpx: a non-digit time is not a time",
       and trk2gpx._iso("20261029T101501Z") == "2026-10-29T10:15:01Z")
 shutil.rmtree(t_td, ignore_errors=True)
 
+
+# 2026-10-30: three WDT resets during uploads; GPS restart storms
+class RvDog:
+    def __init__(self):
+        self.n = 0
+
+    def feed(self):
+        self.n += 1
+
+
+saved_wdt = gl._wdt
+dog = gl._wdt = RvDog()
+try:
+    # POST-1: a write that keeps saying "would block" times out, fed
+    class RvNone:
+        def __init__(self):
+            self.calls = 0
+
+        def write(self, b):
+            self.calls += 1
+            return None
+    rn = RvNone()
+    t0 = _clock[0]
+    try:
+        gl._io_write(rn, b"x" * 100)
+        res = None
+    except OSError as e:
+        res = e.args[0]
+    check("POST-1: a write stuck at 'would block' ends with ETIMEDOUT",
+          res == 110 and _clock[0] - t0 >= gl.HTTP_TIMEOUT * 1000
+          and dog.n > 10 and rn.calls < 5000, "%r %d %d" % (res, dog.n,
+                                                             rn.calls))
+
+    # POST-2: the guard feeds the dog until the deadline, then closes
+    class RvClose:
+        closed = 0
+
+        def close(self):
+            RvClose.closed += 1
+    gl._guard["t"] = None
+    sock = RvClose()
+    gl._guard_start(sock, gl.HTTP_MAX)
+    timer_ok = gl._guard["t"] is not None
+    n0, h0 = dog.n, gl._guard["hits"]
+    for _ in range(gl.HTTP_MAX // 1000 - 1):
+        _clock[0] += 1000
+        gl._guard_cb(None)
+    fed_meanwhile = dog.n - n0
+    closed_early = RvClose.closed
+    _clock[0] += 2000
+    gl._guard_cb(None)
+    check("POST-2: the guard feeds the WDT, then closes a POST over HTTP_MAX",
+          timer_ok and fed_meanwhile >= gl.HTTP_MAX // 1000 - 2
+          and closed_early == 0 and RvClose.closed == 1
+          and gl._guard["hits"] == h0 + 1 and gl._guard["until"] is None,
+          "%d %d %d" % (fed_meanwhile, closed_early, RvClose.closed))
+
+    # POST-3: _raw_post arms the guard and always disarms it
+    rv_sock[0] = RvSock(b"", polls=0)
+    gl.socket, gl.select = fake_sockmod, fake_sel
+    sys.modules["tls"] = RvTls
+    armed = []
+    real_gs = gl._guard_start
+    gl._guard_start = lambda s_, ms: (armed.append(ms), real_gs(s_, ms))
+    try:
+        try:
+            gl._raw_post("https://d.example", b"{}", {}, 15)
+        except Exception:
+            pass
+    finally:
+        gl._guard_start = real_gs
+        gl.socket, gl.select = real_mods[0], real_mods[1]
+        sys.modules.pop("tls", None)
+    check("POST-3: each POST is guarded and the guard is off afterwards",
+          armed == [gl.HTTP_MAX] and gl._guard["until"] is None, repr(armed))
+finally:
+    gl._wdt = saved_wdt
+
+# POST-4: an upload error goes to the diag log once per kind
+diag_clear()
+gl.DIAG = 60000
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+for _ in range(3):
+    _post_raise[0] = OSError(116)
+    gl._http_post(10)
+_post_raise[0] = OSError(113)
+gl._http_post(10)
+gl._http_post(10)                        # a success clears it
+_post_raise[0] = OSError(113)
+gl._http_post(10)
+errs = [l for l in diag_lines() if l.startswith("upload err")]
+check("POST-4: upload errors in the diag log, one line per kind",
+      errs == ["upload err OSError(116)", "upload err OSError(113)",
+               "upload err OSError(113)"], repr(errs))
+_post_raise[0] = None
+
+# GPS-STORM: while it loops, setups are GPS_STORM_WAIT apart; diag lines
+diag_clear()
+gl.reset()
+banner = rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+gl.handle(banner)
+calm = gl.st["setup_wait"]
+for _ in range(gl.GPS_FLAP_RESTARTS):
+    _clock[0] += 5000
+    gl.handle(banner)
+gl.handle(banner)
+storm = gl.st["setup_wait"]
+lines = diag_lines()
+check("GPS-STORM: setups GPS_STORM_WAIT apart while the receiver loops",
+      calm == gl.GPS_RETRY and storm == gl.GPS_STORM_WAIT
+      and any(l.startswith("gps reset loop ") for l in lines),
+      "%r %r %r" % (calm, storm, lines[-2:]))
+gl.DIAG = 0
+diag_clear()
+
+
+# LOWIDF: no TLS try below TLS_MIN_KB; at home a clean reboot instead
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+real_idf = gl.idf_heap
+gl.idf_heap = lambda: (30, 20)
+_posts[:] = []
+_resets[:] = []
+try:
+    gl.wifi["home"] = False
+    pump()
+    away = (len(_posts), gl.up["state"], len(_resets))
+    gl.wifi["home"] = True
+    try:
+        pump()
+    except SystemExit:
+        pass
+    home = (len(_posts), len(_resets))
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home it reboots",
+      away == (0, "low idf", 0) and home == (0, 1), "%r %r" % (away, home))
+
+
+# GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon
+gl.reset()
+banner = rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+for _ in range(gl.GPS_FLAP_RESTARTS + 1):
+    _clock[0] += 3000
+    gl.handle(banner)
+gl.st["setup_at"] = _clock[0]
+storm_wait = gl.st["setup_wait"]
+_uart_tx[:] = []
+_clock[0] += gl.GPS_STORM_QUIET + gl.GPS_RETRY + 500
+gl.gps_check(_clock[0])
+sent = len([f for f in _uart_tx if f[2:3] == b"\x06"]) > 0
+check("GPS-STORM-END: after the storm the setup comes within ~15 s, not 30-60",
+      storm_wait == gl.GPS_STORM_WAIT and sent, "%r %r" % (storm_wait, sent))
+
 print()
 print("%d passed, %d failed" % (passed, failed))
 if failures:

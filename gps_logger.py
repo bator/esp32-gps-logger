@@ -66,6 +66,10 @@ GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
 GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
 GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
 GPS_FLAP_WINDOW = 600000                 # within this many ms = a reset loop
+GPS_STORM_WAIT = 30000                   # ms between setups while it loops:
+                                         # each setup blocks the loop seconds
+GPS_STORM_QUIET = 10000                  # ms without a restart: the storm is
+                                         # over, set it up within GPS_RETRY
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
 # GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
@@ -206,7 +210,15 @@ HTTP_WAIT = 30000                        # ms for the server's answer, the
                                          # UART read meanwhile (a 4 KB buffer
                                          # holds ~5 s of NMEA)
 HTTP_CHUNK = 1024                        # body bytes per write, UART between
+HTTP_MAX = 60000                         # ms wall clock for one POST: a timer
+                                         # feeds the WDT meanwhile and then
+                                         # closes the socket (a hung TLS call
+                                         # reset the board by the WDT)
 CA_FILE = "/ca.der"                      # if present: verify the server
+TLS_MIN_KB = 48                          # largest IDF heap block a TLS POST
+                                         # needs (measured: at 20 KB every
+                                         # handshake failed); below it no
+                                         # try, and at home a clean reboot
 TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
                                          # home): a clean reboot, the IDF heap
                                          # stays fragmented otherwise
@@ -269,6 +281,7 @@ def reset():
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
+              storm_at=None, boot_at=None,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
               gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0)
     _ep_new(None)
@@ -445,7 +458,14 @@ def txt(talker, f):
     if "u-blox" in ",".join(f[4:]):
         st["gps_boots"] += 1
         st["extra"] += 1                 # back at its defaults: set it up
-        st["setup_wait"] = GPS_RETRY     # again within GPS_RETRY, not 5 min
+        # again within GPS_RETRY, not 5 min; while it keeps restarting (a
+        # reset loop in the last GPS_FLAP_WINDOW), every GPS_STORM_WAIT:
+        # 2026-10-30 had 541 restarts, each setup blocking the loop
+        now = time.ticks_ms()
+        st["boot_at"] = now
+        storm = (st["storm_at"] is not None
+                 and _age(now, st["storm_at"]) < GPS_FLAP_WINDOW)
+        st["setup_wait"] = GPS_STORM_WAIT if storm else GPS_RETRY
         # maybe another receiver (swapped while running): ask anew
         st.update(svs=None, svs_at=None, sv_msg=None, gps_ver=None)
         print("gps restarted")
@@ -463,8 +483,11 @@ def _gps_flap(now):
         t.pop(0)
     if len(t) == GPS_FLAP_RESTARTS and _age(now, t[0]) <= GPS_FLAP_WINDOW:
         st["loops"] += 1
+        st["storm_at"] = now
         print("gps reset loop?", len(t), "restarts in",
               _age(now, t[0]) // 1000, "s: check the GPS power")
+        _diag_write("gps reset loop %d restarts in %d s" % (
+            len(t), _age(now, t[0]) // 1000))
         del t[:]
 
 HANDLERS = {"RMC": rmc, "GGA": gga, "GSA": gsa, "GSV": gsv, "GST": gst,
@@ -720,6 +743,14 @@ def gps_check(now):
     # also when the setup went out but was not acknowledged (an ACK lost,
     # a silent receiver that took the blind burst): it may sit at 1 Hz
     at = st["setup_at"]
+    b = st["boot_at"]
+    if (st["setup_wait"] > GPS_RETRY and b is not None and st["extra"]
+            and _age(now, b) >= GPS_STORM_QUIET):
+        # quiet for GPS_STORM_QUIET since the last restart: the storm (or a
+        # long backoff) is over, the receiver sits at 1 Hz with every
+        # sentence on: set it up now (measured: over a minute at 1 Hz)
+        st["setup_wait"] = GPS_RETRY
+        st["boot_at"] = None
     if (at is None or (not st["extra"] and st["setup_ok"] is True)
             or _age(now, at) < st["setup_wait"]):
         return
@@ -739,8 +770,10 @@ def _gps_loop_check(now):
     ok = st["ok"] - st["loop_ok"]
     if b >= GPS_LOOP_BANNERS and ok == 0:
         st["loops"] += 1
+        st["storm_at"] = now
         print("gps reset loop?", b, "banners, no NMEA in",
               GPS_LOOP_WINDOW // 1000, "s: check the GPS power")
+        _diag_write("gps reset loop %d banners, no NMEA" % b)
     st.update(loop_at=now, loop_b=st["banners"], loop_ok=st["ok"])
 
 def _temp():
@@ -913,18 +946,35 @@ def _diag_boot():
         cause, "-" if prev_run["up"] is None else prev_run["up"],
         machine.freq() // 1000000, gc.mem_free()))
 
+def idf_heap():
+    """(free KB, largest free block KB) of the ESP-IDF heap, or (None,
+    None). TLS needs ~40 KB in one block from it; the Python heap grows
+    into it (and keeps it) when a big allocation does not fit."""
+    try:
+        fr = big = 0
+        for h in esp32.idf_heap_info(esp32.HEAP_DATA):
+            fr += h[1]
+            if h[2] > big:
+                big = h[2]
+        return fr // 1024, big // 1024
+    except Exception:
+        return None, None
+
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
-    HDOP, points logged/sent, WiFi state, keep-alive pulses, free heap."""
+    HDOP, points logged/sent, WiFi state, keep-alive pulses, free heap,
+    IDF heap free/largest block (KB)."""
     view = sv_seen()
+    fr, big = idf_heap()
     _diag_write(
         "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
-        "hdop %s points %d sent %d wifi %s pulses %d mem %d" % (
+        "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
             st["loops"], view, sv_used(), status().replace(" ", "_"),
-            st["hdop"], log["points"], up["sent"], wifi["state"],
-            wifi["pb_scans"], gc.mem_free()))
+            st["hdop"], log["points"], up["sent"],
+            wifi["state"].replace(" ", "_"), wifi["pb_scans"],
+            gc.mem_free(), fr, big))
 
 def checksum_ok(line):
     star = line.rfind(b"*")
@@ -1623,7 +1673,8 @@ def _upload_wait(now):
     state = str(up.get("state") or "")
     d = time.ticks_diff(up["next_at"], now)
     wait = d if 0 < d <= UP_WAIT_MAX else 0
-    if state.startswith("err") or state in ("fs err", "low mem", "bad full"):
+    if state.startswith("err") or state in ("fs err", "low mem", "bad full",
+                                            "low idf"):
         return wait
     held = up.get("hold") or {}
     if not held:
@@ -2939,7 +2990,8 @@ def up_reset():
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
               bad_try={}, skip=None, hold={}, bad_full={}, read_err={},
-              enomem=0, next_at=time.ticks_ms())
+              enomem=0, last_err=None, guard_hits=_guard["hits"],
+              next_at=time.ticks_ms())
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -3344,11 +3396,20 @@ def _io_write(s, b):
         return
     mv = memoryview(b)
     i = 0
+    t0 = time.ticks_ms()
     while i < len(mv):
         n = w(mv[i:])
-        if n is None:
-            n = 0                        # would block: try again
+        if not n:
+            # would block: wait a little, with the dog fed and the UART
+            # read, but not for ever (this spun without a feed before)
+            if _age(time.ticks_ms(), t0) >= HTTP_TIMEOUT * 1000:
+                raise OSError(110)       # ETIMEDOUT
+            feed()
+            read_uart()
+            time.sleep_ms(10)
+            continue
         i += n
+        t0 = time.ticks_ms()
 
 def _tls_wrap(s, host):
     """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
@@ -3371,6 +3432,41 @@ def _tls_wrap(s, host):
         ctx.verify_mode = tls.CERT_NONE
     return ctx.wrap_socket(s, server_hostname=host)
 
+_guard = {"t": None, "until": None, "sock": None, "hits": 0}
+
+def _guard_cb(timer):
+    """Runs during blocking socket calls too (they handle pending events):
+    feeds the WDT until the POST's deadline, then closes its socket so the
+    call returns with an error instead of the WDT resetting the board."""
+    until = _guard["until"]
+    if until is None:
+        return
+    if time.ticks_diff(time.ticks_ms(), until) < 0:
+        feed()
+        return
+    s = _guard["sock"]
+    _guard["until"] = _guard["sock"] = None
+    _guard["hits"] += 1
+    if s is not None:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+def _guard_start(sock, ms):
+    _guard["sock"] = sock
+    _guard["until"] = time.ticks_add(time.ticks_ms(), ms)
+    if _guard["t"] is None:
+        try:
+            t = machine.Timer(1)
+            t.init(period=1000, mode=machine.Timer.PERIODIC, callback=_guard_cb)
+            _guard["t"] = t
+        except Exception as e:
+            print("post guard", repr(e))
+
+def _guard_stop():
+    _guard["until"] = _guard["sock"] = None
+
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
     followed one as a GET with the old Content-Length (the server then
@@ -3386,7 +3482,8 @@ def _raw_post(url, data, headers, timeout):
         port = int(p)
     ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
     s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
-    try:
+    _guard_start(s, HTTP_MAX)            # the raw socket: closing it fails
+    try:                                 # a TLS call stuck on it
         s.settimeout(timeout)
         s.connect(ai[-1])
         if proto == "https":
@@ -3421,6 +3518,7 @@ def _raw_post(url, data, headers, timeout):
                 retry = v.strip().decode()
         return _Resp(code, retry)
     finally:
+        _guard_stop()
         try:
             s.close()
         except OSError:
@@ -3449,6 +3547,7 @@ def _http_post(size):
         code = r.status_code
         retry = _retry_after_ms(r)
         up["enomem"] = 0
+        up["last_err"] = None
     except MemoryError:
         up["enomem"] = up.get("enomem", 0) + 1
         raise
@@ -3456,6 +3555,14 @@ def _http_post(size):
         if _enomem(e):
             up["enomem"] = up.get("enomem", 0) + 1
         print("upload", repr(e))
+        if _guard["hits"] != up.get("guard_hits"):
+            up["guard_hits"] = _guard["hits"]
+            print("upload: POST over %d s, aborted" % (HTTP_MAX // 1000))
+            _diag_write("upload aborted after %d s" % (HTTP_MAX // 1000))
+        err = repr(e)[:60]
+        if err != up.get("last_err"):    # one line per kind of error
+            up["last_err"] = err
+            _diag_write("upload err %s" % err)
     finally:
         if r is not None:
             try:
@@ -3568,6 +3675,19 @@ def upload_tick():
     except MemoryError:
         up["skip"] = path
         _low_mem(now)
+        return
+    big = idf_heap()[1]
+    if big is not None and big < TLS_MIN_KB:
+        # TLS cannot get its block: every try would time out or fail to
+        # allocate (seen as "err net" until a reboot on 2026-10-30)
+        up["err"] += 1
+        up["state"] = "low idf"
+        up["enomem"] = max(up.get("enomem", 0), TLS_REBOOT_N)
+        if up.get("last_err") != "low idf":
+            up["last_err"] = "low idf"
+            _diag_write("upload low idf %d KB" % big)
+        if not _tls_reboot():
+            _schedule(now)
         return
     if not _bad_full_left():
         up["state"] = "sending"
@@ -3754,6 +3874,8 @@ def _web_rows():
         ("Device", "Chip temperature (C)", "temp", _temp()),
         ("Device", "CPU (MHz)", "mhz", machine.freq() // 1000000),
         ("Device", "Free heap (B)", "mem", gc.mem_free()),
+        ("Device", "IDF heap free / largest block (KB)", "idf",
+         "%s / %s" % idf_heap()),
         ("Device", "Free flash (KB)", "flash_kb", flash),
         ("Device", "WiFi", "wifi", "%s %s" % (wifi["state"],
                                              wifi.get("ssid") or "")),
