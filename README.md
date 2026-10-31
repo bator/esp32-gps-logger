@@ -58,8 +58,8 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
 
 | Function | ESP32 | ESP32-C6 |
 |----------|-------|----------|
-| GPS TX → ESP RX (NMEA in) | GPIO16 (UART2 RX) | GPIO5 (UART1 RX) |
-| ESP TX → GPS RX (setup) | GPIO17 (UART2 TX) | GPIO4 (UART1 TX) |
+| GPS TX → ESP RX (NMEA in) | GPIO16 (UART2 RX) | GPIO19 (UART1 RX) |
+| ESP TX → GPS RX (setup) | GPIO17 (UART2 TX) | GPIO18 (UART1 TX) |
 | OLED SDA / SCL | GPIO21 / GPIO22 | GPIO6 / GPIO7 |
 | Boot bypass button → GND | GPIO25 | GPIO10 |
 | Keep-alive load (optional, `KEEPALIVE_MODE=gpio`) | GPIO26 | GPIO2 |
@@ -67,6 +67,9 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
 
 - The firmware detects the C6 by itself (it has no UART2, and GPIO16/17 are
   its console). `deploy.sh` detects it too and compiles for `rv32imc`.
+- On the C6 the GPS used GPIO4/5 before; those are strapping (JTAG) pins, so
+  it moved to GPIO18/19. A board still wired to 4/5 needs the two data wires
+  moved (or an older firmware).
 - The ESP TX → GPS RX wire is needed for the 5 Hz setup. Without it the
   receiver stays at 1 Hz and everything else still works.
 - Most GPS and OLED breakouts have their own regulator and I²C pull-ups;
