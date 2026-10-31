@@ -3831,13 +3831,16 @@ def upload_tick():
         up["next_at"] = time.ticks_add(now, gap)
     elif code in PAYLOAD_ERR:
         up["err"] += 1
-        up["fail4"] = up.get("fail4", 0) + 1
         if from_bad:
             # count the rejections of a .bad, not its successes: it used to
-            # stop after MAX_BAD_RETRY good batches until the next boot
+            # stop after MAX_BAD_RETRY good batches until the next boot.
+            # Not in fail4: rejected .bad batches kept a normal track's
+            # bad batch from quarantine until the next 2xx
             bt = up.get("bad_try") or {}
             bt[path] = bt.get(path, 0) + 1
             up["bad_try"] = bt
+        else:
+            up["fail4"] = up.get("fail4", 0) + 1
         if path.endswith(".bad") or up["fail4"] >= MAX_GLOBAL_PAYLOAD:
             up["state"] = "err payload"
             _hold_file(path, now, retry if retry else BACKOFF_MAX)

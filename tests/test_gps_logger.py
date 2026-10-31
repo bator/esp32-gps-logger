@@ -6094,6 +6094,33 @@ check("U-15: a .bad keeps draining after MAX_BAD_RETRY good batches",
       len(_posts) >= gl.MAX_BAD_RETRY + 3 and not os.path.exists(b_p),
       "posts=%d" % len(_posts))
 
+# FAIL4-BAD: rejected .bad batches are not in fail4 (reset only by a 2xx):
+# a normal track's 422 batch afterwards still goes to quarantine
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+fb_p = os.path.join(up_td, "20261004_110000.trk.bad")
+make_trk(fb_p, 3)
+_post_code[0] = 422
+for _ in range(gl.MAX_GLOBAL_PAYLOAD + 1):
+    gl.up["hold"] = {}
+    pump()
+    _clock[0] += 1000
+bad_posts = len(_posts)
+fn_p = os.path.join(up_td, "20261004_120000.trk")
+make_trk(fn_p, 3)
+pump()
+_post_code[0] = 201
+check("FAIL4-BAD: after rejected .bad batches a normal 422 is quarantined",
+      bad_posts == gl.MAX_GLOBAL_PAYLOAD + 1
+      and gl.up["state"] == "quarantine" and not os.path.exists(fn_p)
+      and pts_in(fn_p + ".bad") == 3,
+      "bad posts %d state %s fail4 %r" % (bad_posts, gl.up["state"],
+                                          gl.up.get("fail4")))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
 # U-16: at EOF the track goes without writing a .pos first (full flash)
 e_p = os.path.join(up_td, "20261005_100000.trk")
 make_trk(e_p, 3)
