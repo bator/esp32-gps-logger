@@ -124,7 +124,7 @@ var GNSS = {GPS: 0, SBAS: 1, Galileo: 2, BeiDou: 3, QZSS: 5, GLONASS: 6};
 // 2 also machine.reset() and a panic, 0 a USB/JTAG or unknown reset
 var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", 3: "watchdog", 4: "deep sleep", 5: "soft reset"};
 var TLS_KB = 48;                        // TLS_MIN_KB in gps_logger.py
-var POINT_B = 46;                       // bytes per .trk point
+var POINT_B = 51;                       // bytes per .trk point (TRK2; TRK1 ~46)
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
 var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
