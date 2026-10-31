@@ -3861,6 +3861,7 @@ def _web_rows():
     except Exception:
         cause = None
     flash = _flash_kb()
+    heap = py_heap()
     still = log.get("still") or {}
     return [
         ("fix", status()),
@@ -3887,7 +3888,8 @@ def _web_rows():
         ("boot_cause", cause),
         ("temp", _temp()),
         ("mhz", machine.freq() // 1000000),
-        ("mem", py_heap()[0]),
+        ("mem", heap[0]),
+        ("heap_kb", heap[1]),
         ("idf", "%s / %s" % idf_heap()),
         ("flash_kb", flash),
         ("wifi", "%s %s" % (wifi["state"], wifi.get("ssid") or "")),
