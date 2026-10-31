@@ -191,6 +191,42 @@ The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, and
 HTTPS uploads then fail with `ENOMEM`.
 
+### 4. Custom firmware (recommended)
+
+Even precompiled, the logger's bytecode sits in the Python heap. On stock
+MicroPython 1.29 the heap starts at 64 KB, grows once at import to about
+124 KB, and any later growth takes the whole ~124 KB block of the IDF heap
+that TLS needs. `tools/build_firmware.sh` builds MicroPython with
+`gps_logger` frozen into the firmware, so the bytecode runs from flash.
+Measured on the C6 board (2026-10-31):
+
+| | Stock firmware + `.mpy` | Frozen firmware |
+|---|---|---|
+| Python heap | 124 KB, 97–116 KB live | 64 KB, 38 KB live |
+| Largest free block in it | 2–20 KB | 12 KB |
+| IDF heap free / largest block | 159 / 144 KB, 31 / 16 KB after a growth | 223 / 212 KB |
+
+It needs ESP-IDF v5.5.2 and a MicroPython v1.29.0 tree (by default
+`~/esp/esp-idf` and `~/esp/micropython`; see MicroPython's
+`ports/esp32/README.md`):
+
+```bash
+tools/build_firmware.sh                          # build only
+PORT=/dev/ttyACM0 tools/build_firmware.sh --flash
+PORT=/dev/ttyACM0 ./deploy.sh                    # main.py and web.html
+```
+
+`--flash` refuses to flash when the board's partition table differs from
+the build's. Otherwise it backs up the app partition to `firmware/`,
+removes the `gps_logger.mpy` that would shadow the frozen module, and
+writes only the app at 0x10000: the bootloader, the partition table and the
+file system (`.env`, tracks) stay as they are. The firmware also carries a
+small `gps_frozen` module. When `deploy.sh` finds it, it copies only
+`main.py` and `web.html` and removes a stray `gps_logger.mpy`. A logger
+change then means building and flashing the firmware again. To roll back,
+write the backup with the `esptool.py` command `--flash` prints, then run
+`./deploy.sh`.
+
 ## Using it
 
 Power it on: the logger starts by itself, sets up the GPS, connects to WiFi

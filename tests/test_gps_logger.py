@@ -6010,6 +6010,9 @@ def deploy_run(env_extra):
                  ("web.html.new", b"left from a failed deploy")):
         with open(os.path.join(dev, n), "wb") as f:
             f.write(b)
+    if env_extra.get("FAKE_FROZEN"):             # firmware with the logger in
+        with open(os.path.join(dev, "gps_frozen.py"), "w") as f:
+            f.write('COMMIT = "abc1234"\n')
     env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
@@ -6061,6 +6064,15 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [n for n in os.listdir(dev) if n.endswith(".new")]
           and "Copy check FAILED" in err
           and "Deployed" not in out, "rc=%d %r" % (rc, err[-300:]))
+    rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": "1"})
+    cps = [c for call in calls for c in call if c[0] == "cp"]
+    check("DEPLOY: frozen firmware -> main.py and web.html only, the .mpy goes",
+          rc == 0 and dev_file(dev, "gps_logger.mpy") is None
+          and dev_file(dev, "web.html") == new_page
+          and sorted(c[1] for c in cps) == ["main.py", "web.html"]
+          and "frozen in (abc1234)" in out
+          and "Deployed to /dev/fakeACM0" in out,
+          "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
 else:
     print("SKIP  DEPLOY: no bash/sha256sum")
 shutil.rmtree(dp_td, ignore_errors=True)
