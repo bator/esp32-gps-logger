@@ -292,12 +292,22 @@ HDOP, satellites used/seen, points waiting for upload with the upload
 state, WiFi signal), a sky plot of the satellites (centre = overhead, edge
 = horizon, north up; colour = system: GPS blue, Galileo teal, BeiDou amber,
 GLONASS pink; filled = in the fix, hollow = not used, bigger = stronger)
-and one bar per satellite (height = signal, a full bar is 45 dBHz). The
-full list, the satellite table and the diagnostic log are folded under
-*Details*, *Satellites* and *Diagnostic log*. The page is a file on the
-board (`/web.html`, copied by `deploy.sh`) and loads once; then it asks
-for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
-only the boxes, so open sections stay open. When the board does not answer
+and one bar per satellite (height = signal, lines at 15/30/45 dBHz; on a
+phone the sky plot and the bars share a row). Below, three tabs:
+*Details* has one row per subsystem (receiver, position, upload, memory,
+storage, WiFi, device) with an icon in the status colour (green / amber /
+red), a headline and a number; a tap opens the row's line of figures (NMEA
+counts, IDF and Python heap with a bar marking the 48 KB TLS needs, room
+for points, previous run...). *Satellites* groups them by system with a
+signal bar each; the ones without a signal are listed in one line. *Log*
+shows the diagnostic log as a timeline, newest on top: the minute status
+lines as a quiet row (local time, fix, satellites, points, IDF block, red
+below 48 KB) and boots, upload errors and receiver changes as events. Text
+uses Inter from Google Fonts when the phone is online, the system font
+otherwise. The page is a file on the board (`/web.html`, copied by
+`deploy.sh`) and loads once; then it asks for `/status.json` every 15 s
+(`WEB_REFRESH`, sent in the JSON) and redraws only the boxes, so the open
+tab and rows stay open. When the board does not answer
 (asleep, out of range) the boxes fade and the line under the name says
 `offline · last update 2 min 10 s ago`. It follows the phone's dark mode;
 the page rounds HDOP to two decimals, the JSON keeps the receiver's value.

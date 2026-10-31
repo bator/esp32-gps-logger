@@ -6528,7 +6528,11 @@ gl.st["svs_at"] = _clock[0]
 gl.up["left"] = 120
 gl.wifi.update(state="connected", ssid="<x>", rssi=-75)
 _diag_saved = gl._web_diag
-gl._web_diag = lambda: ["up 60 <b>"]
+gl._web_diag = lambda: ["up 60 utc 20261031T053014Z nmea 9/1 gpsboots 0 "
+                         "loops 0 sats 21/13 fix 3D_fix hdop 0.9 points 4 "
+                         "sent 0 wifi connected pulses 0 mem 27000 idf "
+                         "157/20 heap 124", "boot cause 3 prev_up 600 mhz 80",
+                         "up 60 <b>"]
 page_json = gl._web_json()
 gl.st["valid"] = False
 gl.wifi.update(state="off", ssid=None, rssi=None)
@@ -6558,13 +6562,14 @@ else:
     check("PAGE: tiles - fix with a green dot and HDOP, sats, queue, WiFi",
           v.get("k0") == '<span class="d2">3D fix</span>'
           and v.get("s0") == "HDOP 0.88" and v.get("k1") == "1 / 2"
-          and v.get("k2") == "120" and v.get("s2") == "to upload, idle"
+          and v.get("k2") == "120" and v.get("s2") == "waiting &middot; idle"
           and v.get("k3") == "-75 dBm" and v.get("s3") == "&lt;x&gt;"
           and v.get("sub", "").endswith("&middot; 47.10000, 18.40000"),
           repr(v)[:400])
     check("PAGE: no fix amber, WiFi off shows the state, no list says so",
           v2.get("k0") == '<span class="d1">Waiting fix</span>'
-          and v2.get("k3") == "off" and v2.get("s3") == "WiFi"
+          and v2.get("k3") == "off" and v2.get("s3") == "no network"
+          and v2.get("k1") == "- / 0"
           and "&middot;" not in v2.get("sub", "-")
           and "No satellite list" in v2.get("bars", ""), repr(v2)[:400])
     check("PAGE: sky plot - horizon east at x 90, zenith centre, hollow unused",
@@ -6578,13 +6583,31 @@ else:
           and '<i class="g3 u" style="height:26%"' in v.get("bars", "")
           and '<i class="g1 u" style="height:0%" title="SBAS 5 - dBHz">'
           in v.get("bars", ""), v.get("bars", "")[:300])
-    check("PAGE: every JSON row has a label; HDOP rounded; text escaped",
-          v.get("unlabeled") == [] and "<td>HDOP</td><td>0.88</td>"
-          in v.get("rows", "") and "<td>Previous run</td>" in v.get("rows", "")
-          and v.get("sh") == "Satellites (1 used of 3)"
-          and v.get("log") == "up 60 &lt;b&gt;"
-          and "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>"
-          in v.get("svt", ""), repr(v.get("unlabeled")))
+    pd, ps, pl = v.get("pd", ""), v.get("ps", ""), v.get("pl", "")
+    check("PAGE: Details - one row per subsystem, every JSON key shown",
+          v.get("unlabeled") == [] and [t for t in ("Receiver", "Position",
+              "Upload", "Memory", "Storage", "WiFi", "Device")
+              if "<small>%s</small>" % t not in pd] == []
+          and "HDOP 0.88" in pd and "1 of 2 satellites" in pd
+          and "<small>WiFi</small><strong>&lt;x&gt;</strong>" in pd
+          and "120 points waiting in 0 files" in pd
+          and '<div class="hr" data-r="Position"><svg class="ic ok"><use '
+              'href="#i-pin"/></svg>' in pd,
+          repr(v.get("unlabeled")) + pd[:300])
+    check("PAGE: Satellites by system with a bar each; no signal in one line",
+          "1 used of 3 listed" in ps
+          and ps.index('class="sg g0"') < ps.index('class="sg g3"')
+          and '<div class="sr g0" title="GPS 16 26 dBHz"><span>16</span>'
+          '<div class="sb"><i style="width:57%">' in ps
+          and 'class="sg g1"' not in ps
+          and "No signal: <b>SBAS / other</b> 5" in ps, ps[-400:])
+    check("PAGE: Log - newest first, status rows quiet, events highlighted",
+          pl.startswith('<ol class="tl"><li class="e "><time></time><p>up 60 '
+                        '&lt;b&gt;')
+          and pl.index("Boot &middot; watchdog") < pl.index('class="st f2"')
+          and "previous run 10 min 00 s" in pl
+          and "3D fix &middot; 13/21 sats &middot; 4 pts" in pl
+          and '<span class="bad">IDF&nbsp;20&nbsp;KB</span>' in pl, pl[:500])
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "web.html")) as f:
     page_src = f.read()
