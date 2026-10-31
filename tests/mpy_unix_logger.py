@@ -188,6 +188,27 @@ check("read_batch .trk in place", (n, n_ok, eof) == (4, 2, True)
       and locs[1]["properties"]["timestamp"] == "2026-10-29T10:15:01Z"
       and "altitude" not in locs[1]["properties"])
 
+# the hidden home's learned BSSIDs survive a reboot (/home_aps: hex lines,
+# bytes.find and a bytearray parse, no binascii); garbage lines are skipped
+gl.HOME_APS_FILE = "/tmp/gps-logger-smoke-aps-%d" % time.ticks_ms()
+gl.free = lambda: None
+try:
+    gl.wifi["home_aps"] = [b"\x01\x02\x03\xaa\xbb\xcc", b"\xff" * 6]
+    gl._home_aps_save()
+    with open(gl.HOME_APS_FILE, "ab") as f:
+        f.write(b"zz\n\xff\xfe\nABCDEF012345\n")
+    gl._home_aps_load()
+    aps = gl.wifi["home_aps"]
+finally:
+    import os
+    try:
+        os.remove(gl.HOME_APS_FILE)
+    except OSError:
+        pass
+check("home_aps file round trip", aps == [b"\x01\x02\x03\xaa\xbb\xcc",
+                                          b"\xff" * 6,
+                                          b"\xab\xcd\xef\x01\x23\x45"])
+
 if fails:
     raise SystemExit("mpy logger smoke FAILED: %s" % ", ".join(fails))
 print("mpy logger smoke passed")
