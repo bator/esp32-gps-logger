@@ -428,6 +428,7 @@ def _reload_logger():
     m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
     m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
     m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf")
+    m.HOME_APS_FILE = None               # tests that keep BSSIDs set a path
     m.WEB = False                        # radio-sleep tests; WEB has its own
     m.HTTP_POST = lambda url, data, headers, timeout: _post(
         url, data=data, headers=headers, timeout=timeout)
@@ -3904,13 +3905,31 @@ try:
           calls == ["home", "phone"] and w["ssid"] == "phone",
           "calls=%s" % calls)
     # WR-30: a hidden home behind a strong blank AP gets that RSSI, so its
-    # failed first association (the C6 cold-boot 202) is retried at once
-    w, calls, out = rv_start_wifi(
-        rv_env + "SSID_HIDDEN=1\n", [("", -55, b"\x31" * 6), ("phone", -40)],
-        ["home", "phone"], fail_first=("home",))
-    check("WR-30: a hidden home behind a strong blank AP is retried at once",
-          calls == ["home", "home"] and w["ssid"] == "home"
-          and w["state"] == "connected", "calls=%s" % calls)
+    # failed first association (the C6 cold-boot 202) is retried at once;
+    # R2-c: only behind one of its learned BSSIDs (here from HOME_APS_FILE,
+    # as after a reboot): a stranger's blank AP cost 2 x 12 s every round
+    saved_haf = gl.HOME_APS_FILE
+    gl.HOME_APS_FILE = os.path.join(rv_dir, "home_aps")
+    try:
+        with open(gl.HOME_APS_FILE, "w") as f:
+            f.write("313131313131\n")
+        w, calls, out = rv_start_wifi(
+            rv_env + "SSID_HIDDEN=1\n",
+            [("", -55, b"\x31" * 6), ("phone", -40)],
+            ["home", "phone"], fail_first=("home",))
+        check("WR-30: a hidden home behind a strong blank AP is retried at "
+              "once", calls == ["home", "home"] and w["ssid"] == "home"
+              and w["state"] == "connected", "calls=%s" % calls)
+        os.remove(gl.HOME_APS_FILE)
+        w, calls, out = rv_start_wifi(
+            rv_env + "SSID_HIDDEN=1\n",
+            [("", -55, b"\x32" * 6), ("phone", -40)],
+            ["home", "phone"], fail_first=("home",))
+        check("R2-c: behind an unlearned blank AP the hidden home is tried "
+              "first but not retried at once", calls == ["home", "phone"]
+              and w["ssid"] == "phone", "calls=%s" % calls)
+    finally:
+        gl.HOME_APS_FILE = saved_haf
     gl.wifi_reset()
 
     # STAY: position-based stationary filter. Indoors the GPS speed is noise
@@ -5499,6 +5518,29 @@ try:
         gl._freq_bad[:] = []
     check("WR-d: a failed clock change is retried, refused ones capped",
           dropped and capped, "%s %s %r" % (dropped, capped, _freqs[-3:]))
+    # R2-d: a clock refused FREQ_TRIES times (a passing failure of the
+    # drop-back after a POST) is tried again after FREQ_RETRY: it stayed
+    # blacklisted until reboot, the board pinned at the upload clock
+    fails = [0]
+    mach.freq = flaky_freq
+    try:
+        gl._freq_bad[:] = []
+        real_freq(160000000)
+        fails[0] = gl.FREQ_TRIES
+        gl._set_freq(80)
+        stuck = _freqs[-1] == 160000000 and 80 in gl._freq_bad
+        _clock[0] += 60000
+        gl._set_freq(80)                 # within the hold: left alone
+        held = _freqs[-1] == 160000000
+        _clock[0] += getattr(gl, "FREQ_RETRY", 1800000)
+        gl._set_freq(80)
+        back = _freqs[-1] == 80000000 and 80 not in gl._freq_bad
+    finally:
+        mach.freq = real_freq
+        gl._freq_bad[:] = []
+    check("R2-d: a refused clock is tried again after FREQ_RETRY",
+          stuck and held and back, "%s %s %s %r" % (stuck, held, back,
+                                                     _freqs[-3:]))
 
     # a round that finds no network: nothing to upload -> sleep; with a
     # track waiting -> the usual backoff, 15 s doubling to 10 min, until a
@@ -5760,6 +5802,38 @@ try:
             gl.IS_C6 = saved_c6
         check("WR-b: KEEPALIVE_PIN on a GPS/I2C/boot/USB pin keeps the default",
               kept == [26] * 5 + [2] * 3 and free == 3, "%r %r" % (kept, free))
+        # R2-12: pins the chip itself needs: ESP32 strapping GPIO0 (download
+        # mode), UART0 1/3, SPI flash 6-11 (driving one crashes the board);
+        # C6 strapping 8/9, UART0 16/17, SPI flash 24-30
+        saved_c6, saved_pin = gl.IS_C6, gl.PB_PIN
+        bad_ok, good = [], []
+        try:
+            gl.IS_C6 = False
+            for v in (0, 1, 3, 6, 7, 8, 9, 10, 11):
+                gl.PB_PIN = 26
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                if gl.PB_PIN != 26:
+                    bad_ok.append(("esp32", v))
+            for v in (2, 4, 27, 32):
+                gl.PB_PIN = 26
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                good.append(gl.PB_PIN)
+            gl.IS_C6 = True
+            for v in (8, 9, 16, 17, 24, 27, 30):
+                gl.PB_PIN = 2
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                if gl.PB_PIN != 2:
+                    bad_ok.append(("c6", v))
+            for v in (3, 11, 18, 23):
+                gl.PB_PIN = 2
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                good.append(gl.PB_PIN)
+        finally:
+            gl.IS_C6, gl.PB_PIN = saved_c6, saved_pin
+        check("R2-12: KEEPALIVE_PIN on a strapping/flash/UART0 pin is refused "
+              "per chip", bad_ok == []
+              and good == [2, 4, 27, 32, 3, 11, 18, 23],
+              "%r %r" % (bad_ok, good))
         saved = gl.PB_KEEPALIVE
         try:
             gl._keepalive_env({"KEEPALIVE": "0"})
@@ -7036,6 +7110,278 @@ try:
         gl._pb_w = None
     check("WR-3: a RuntimeError from any WLAN call does not escape",
           crashed == [] and gl.wifi["state"] == "error", repr(crashed))
+
+    # R2: WiFi review 2 (hidden home, unlisted networks, "no .env")
+    R2_OURS, R2_NEIGH, R2_MESH = b"\x51" * 6, b"\x52" * 6, b"\x53" * 6
+    r2_saved = (WLAN.assoc_channel, gl.PB_KEEPALIVE, gl.HOME_APS_FILE,
+                gl.free)
+    r2_haf = os.path.join(rv_td, "home_aps")
+    r2_env = ("SSID=home\nWPA2=pw\nSSID_HIDDEN=1\nSSID2=phone\nWPA2_2=pw2\n"
+              "GEO_URL=https://d.example\nAPI_KEY=k\n")
+
+    def r2_boot(env_text, aps, ok):
+        reset_wlan()
+        WLAN.scan_aps = aps
+        WLAN.ok = set(ok)
+        write_env(rv_td, env_text)
+        gl.LOG_DIR = rv_td
+        gl.log_reset()
+        gl.wifi_reset()
+        gl.up_reset()
+        gl.wifi_start()
+        return gl.wifi["wlan"]
+
+    def r2_until(cond, secs, step=1000, pulse=False):
+        for _ in range(secs * 1000 // step):
+            _clock[0] += step
+            if pulse:
+                gl.keepalive_tick(_clock[0])
+            gl.wifi_tick()
+            if cond():
+                return True
+        return False
+
+    try:
+        gl.WEB = False
+        # R2-1: the link drops between GOT_IP and the next wifi_tick (the
+        # first POST), then a hotspot connects: its tick learned a
+        # neighbour's blank AP on the hotspot's channel as the hidden home
+        w = r2_boot(r2_env, [("", -55, R2_OURS, 6)], ["home"])
+        first = (gl.wifi["state"], gl.wifi["ssid"])
+        w._status = 0
+        w._requested = False
+        WLAN.ok = {"phone"}
+        WLAN.scan_aps = [("phone", -60, b"\x06" * 6, 11),
+                         ("", -62, R2_NEIGH, 11)]
+        WLAN.assoc_channel = 11
+        _clock[0] += 1000
+        gl.wifi_tick()                   # connected -> lost
+        lost_learn = gl.wifi.get("learn")
+        r2_until(lambda: gl.wifi["state"] == "connected", 120)
+        gl.wifi_tick()
+        gl.wifi_tick()
+        check("R2-1: a drop before the learning tick and a hotspot connect "
+              "learn no neighbour's blank AP", first == ("connected", "home")
+              and not lost_learn and gl.wifi["ssid"] == "phone"
+              and gl.wifi["home_aps"] == [] and not gl.wifi.get("learn"),
+              "%r %r %s %r" % (first, lost_learn, gl.wifi["ssid"],
+                               gl.wifi["home_aps"]))
+        WLAN.assoc_channel = 1
+
+        # R2-1: a wrong BSSID in the list (learned once, or from the file)
+        # goes after HOME_AP_MISS hidden-home connects through another one;
+        # one the scan shows with a visible SSID goes at once. It stayed in
+        # the MRU list (veto, wake) for good
+        hid = [{"ssid": "home", "pw": "x", "home": True, "hidden": True,
+                "bssid": None, "ip": None},
+               {"ssid": "hot", "pw": "y", "home": False, "hidden": False,
+                "bssid": None, "ip": None}]
+        aps, miss = [R2_NEIGH], {}
+        n_miss = getattr(gl, "HOME_AP_MISS", 5)
+        hist = []
+        for _ in range(n_miss):
+            rv_connect(["home"], [("", -50, R2_OURS)],
+                       nets=[dict(n) for n in hid])
+            gl.wifi["home_aps"], gl.wifi["home_miss"] = aps, miss
+            gl.wifi_tick()               # the learning scan
+            aps = list(gl.wifi["home_aps"])
+            miss = gl.wifi.get("home_miss") or {}
+            hist.append(R2_NEIGH in aps)
+        rv_connect(["home"], [("", -50, R2_OURS), ("cafe", -70, R2_MESH)],
+                   nets=[dict(n) for n in hid])
+        gl.wifi["home_aps"] = [R2_OURS, R2_MESH]
+        gl.wifi_tick()
+        vis = list(gl.wifi["home_aps"])
+        check("R2-1: a wrongly learned BSSID does not stick",
+              hist == [True] * (n_miss - 1) + [False]
+              and aps == [R2_OURS] and vis == [R2_OURS],
+              "%r %r %r" % (hist, aps, vis))
+
+        # R2-7: the hidden home's other node (mesh) is not learned yet:
+        # still enough to roam home from a hotspot (it was filtered out once
+        # one BSSID was learned), not for "home in range"; connected through
+        # it, it is learned too. An AP the IDF names with the hidden SSID
+        # while connected is taken over a blank one that only fits
+        w = rv_connect(["hot"], [("hot", -40)], nets=[dict(n) for n in hid])
+        on_hot = gl.wifi["ssid"] == "hot"
+        gl.wifi["home_aps"] = [R2_OURS]
+        WLAN.scan_aps = [("", -52, R2_MESH), ("hot", -40)]
+        WLAN.ok = {"home", "hot"}
+        WLAN.connects = []
+        gl.st["speed"] = None
+        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        gl.wifi_tick()
+        roamed = [c[0] for c in WLAN.connects][:1] == ["home"]
+        r2_until(lambda: gl.wifi["state"] == "connected", 30, step=500)
+        gl.wifi_tick()                   # learning scan through the mesh node
+        via = list(gl.wifi["home_aps"])
+        gl._wifi_off(w, "sleep")
+        WLAN.scan_aps = [("", -45, R2_NEIGH)]
+        stranger = gl.home_in_range()
+        rv_connect(["home"], [("", -50, R2_OURS)],
+                   nets=[dict(n) for n in hid])
+        WLAN.scan_aps = [("home", -50, R2_MESH), ("", -48, R2_NEIGH)]
+        gl.wifi_tick()
+        named = list(gl.wifi["home_aps"])
+        check("R2-7: an unlearned node of the hidden home is enough to roam "
+              "and is learned through its link", on_hot and roamed
+              and via == [R2_MESH, R2_OURS] and stranger is False
+              and named == [R2_MESH], "%s %s %r %r %r" % (
+                  on_hot, roamed, via, stranger, named))
+
+        # R2-14: a failed hidden roam never blames a learned BSSID of ours
+        # (one failed try shut our own router out for an hour)
+        gl.wifi_reset()
+        gl.wifi["nets"] = [dict(n) for n in hid]
+        gl.wifi.update(home_aps=[R2_OURS], blank_rssi=-50,
+                       blank_bssid=R2_OURS, roaming=True)
+        gl._mark_failed("home", "test")
+        ours_ok = gl.wifi["blank_bad"] == [] and gl._blank_home_ok()
+        check("R2-14: a failed hidden roam does not blame a learned BSSID",
+              ours_ok, repr(gl.wifi["blank_bad"]))
+
+        # R2-b: a blamed stranger's blank AP is skipped when the scan picks
+        # the strongest one (it hid a weaker AP that may be ours)
+        gl.wifi_reset()
+        gl.wifi["nets"] = [dict(n) for n in hid]
+        gl.wifi["blank_bad"] = [(R2_NEIGH, _clock[0])]
+        WLAN.scan_aps = [("", -40, R2_NEIGH), ("", -60, R2_MESH)]
+        gl._scan_known(WLAN(0))
+        skip = (gl.wifi["blank_bssid"], gl._blank_home_ok())
+        check("R2-b: a blamed blank AP is skipped for the strongest one",
+              skip == (R2_MESH, True), repr(skip))
+
+        # R2-10: a network the scans do not list (a hotspot that does not
+        # beacon yet, a hidden SSID without *_HIDDEN=1) is tried in the first
+        # round after a link loss, a wake or an arrival: the round count ran
+        # on, so it waited for every UNLISTED_EVERY-th round (~38 min)
+        w = rv_connect(["home"], [("home", -50)])
+        r0 = gl.wifi["rounds"]
+        w._status = 0
+        w._requested = False
+        WLAN.ok = {"hot"}
+        WLAN.scan_aps = [("neighbour", -60, b"\x09" * 6)]
+        WLAN.connects = []
+        got = r2_until(lambda: gl.wifi["state"] == "connected", 60)
+        tried = [c[0] for c in WLAN.connects]
+        gl.wifi.update(state="not found", rounds=3)
+        gl.wifi_wake()
+        woke = gl.wifi["rounds"]
+        gl._wifi_off(w, "sleep")
+        gl.wifi.update(rounds=3, wake=True)
+        gl.wifi_tick()
+        slept = gl.wifi["rounds"]
+        check("R2-10: the first round after a link loss / wake tries the "
+              "unlisted networks", r0 % gl.UNLISTED_EVERY != 0 and got
+              and gl.wifi["ssid"] == "hot" and "hot" in tried and woke == 0
+              and slept == 1, "%d %s %r %r %r" % (r0, got, tried, woke, slept))
+
+        # R2-13: no GEO_URL/API_KEY ("no .env") with tracks waiting: away,
+        # nothing in range, it searched every backoff / hour (34 rounds in
+        # 6 h) for an upload that never happens
+        gl.PB_KEEPALIVE = 0
+        make_trk(os.path.join(rv_td, "20261031_110000.trk"), 3)
+        w = r2_boot("SSID=home\nWPA2=pw\n", [("home", -50)], ["home"])
+        for _ in range(30):
+            _clock[0] += 1000
+            gl.wifi_tick()
+            gl.upload_tick()
+        idle = (gl.up["state"], gl.wifi["state"])
+        WLAN.ok, WLAN.scan_aps = set(), []
+        r0 = gl.wifi["rounds"]
+        for _ in range(6 * 360):
+            _clock[0] += 10000
+            gl.wifi_tick()
+            gl.upload_tick()
+        rounds = gl.wifi["rounds"] - r0
+        os.remove(os.path.join(rv_td, "20261031_110000.trk"))
+        check("R2-13: 'no .env' with tracks waiting: no rounds while away",
+              idle == ("no .env", "sleep") and rounds <= 1,
+              "%r rounds=%d" % (idle, rounds))
+
+        # R2-6 / R2-e: a hidden home that boots after the board, default
+        # scan keep-alive, WEB on: a keep-alive scan cannot see a hidden
+        # home whose BSSIDs are not known, so the failed boot round sleeps
+        # WIFI_SLEEP (status page down ~1 h). Now it searches on
+        gl.WEB, gl.PB_KEEPALIVE, gl.PB_MODE = True, 5000, "scan"
+
+        def r2_late_router(env_text, blank):
+            r2_boot(env_text, [], [])
+            gl.WEB, gl.PB_KEEPALIVE, gl.PB_MODE = True, 5000, "scan"
+            r2_until(lambda: gl.wifi["state"] != "connecting", 60)
+            boot = gl.wifi["state"]
+            _clock[0] += 60000
+            t0 = _clock[0]
+            WLAN.ok = {"home"}
+            WLAN.scan_aps = [("" if blank else "home", -50, R2_OURS)]
+            ok = r2_until(lambda: gl.wifi["state"] == "connected", 900,
+                          pulse=True)
+            return boot, ((_clock[0] - t0) // 1000 if ok else None)
+        hid_env = "SSID=home\nWPA2=pw\nSSID_HIDDEN=1\n"
+        boot_h, back_h = r2_late_router(hid_env, True)
+        boot_v, back_v = r2_late_router("SSID=home\nWPA2=pw\n", False)
+        check("R2-6: a hidden home up after the board is found within "
+              "minutes (scan keep-alive, WEB)", boot_h == "not found"
+              and back_h is not None and back_h <= 300
+              and boot_v == "sleep" and back_v is not None and back_v <= 120,
+              "%s %r %s %r" % (boot_h, back_h, boot_v, back_v))
+
+        # R2-a: the learned BSSIDs are kept in HOME_APS_FILE (written when
+        # the list changes, not into MIN_FREE) and read at boot, so the
+        # keep-alive wake knows the hidden home before it connected once;
+        # a damaged file is no error
+        gl.HOME_APS_FILE = r2_haf
+        if os.path.exists(r2_haf):
+            os.remove(r2_haf)
+        gl.WEB = False
+        rv_connect(["home"], [("", -50, R2_OURS)],
+                   nets=[dict(n) for n in hid])
+        gl.wifi_tick()
+        try:
+            with open(r2_haf) as f:
+                saved = f.read()
+        except OSError:
+            saved = None
+        rv_connect(["home"], [("", -50, R2_MESH)],
+                   nets=[dict(n) for n in hid])
+        gl.free = lambda: gl.MIN_FREE - 1
+        gl.wifi_tick()
+        gl.free = r2_saved[3]
+        try:
+            with open(r2_haf) as f:
+                low = f.read()
+        except OSError:
+            low = None
+        with open(r2_haf, "wb") as f:
+            f.write(b"zz\n515151\n\xff\xfe\xfd\nABCDEFabcdef\n515151515151\n"
+                    b"515151515151\n")
+        r2_boot(hid_env, [], [])
+        loaded = list(gl.wifi["home_aps"])
+        r2_boot("SSID=home\nWPA2=pw\n", [], [])
+        visible = list(gl.wifi["home_aps"])
+        os.remove(r2_haf)
+        r2_boot(hid_env, [], [])
+        none = list(gl.wifi["home_aps"])
+        check("R2-a: learned BSSIDs are kept in a file and read at boot",
+              saved == "515151515151\n" and low == saved
+              and loaded == [b"\xab\xcd\xef\xab\xcd\xef", R2_OURS]
+              and visible == [] and none == [],
+              "%r %r %r %r %r" % (saved, low, loaded, visible, none))
+
+        # R2-6 / R2-a / R2-e: rebooted with the hidden home's BSSID on file,
+        # router up after the board: a keep-alive scan seeing it wakes the
+        # radio at once
+        with open(r2_haf, "w") as f:
+            f.write("515151515151\n")
+        boot_f, back_f = r2_late_router(hid_env, True)
+        check("R2-6: with the hidden home's BSSID on file a keep-alive scan "
+              "wakes the radio", boot_f == "sleep" and back_f is not None
+              and back_f <= 60, "%s %r" % (boot_f, back_f))
+    finally:
+        (WLAN.assoc_channel, gl.PB_KEEPALIVE, gl.HOME_APS_FILE,
+         gl.free) = r2_saved
+        if os.path.exists(r2_haf):
+            os.remove(r2_haf)
 finally:
     (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, WLAN.ok, gl.PB_MODE,
      gl.PB_CONNECTED) = saved_rv
