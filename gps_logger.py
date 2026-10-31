@@ -3168,7 +3168,7 @@ def _stay_scan(aps):
     sl = log["still"]
     if not STAY_WIFI or not sl["active"] or sl["home"]:
         return
-    own = [n["ssid"].encode() for n in wifi.get("nets") or []]
+    own = [_ssid_b(n) for n in wifi.get("nets") or []]
     seen = []
     for rec in aps:
         raw = rec[0]
