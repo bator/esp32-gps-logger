@@ -240,10 +240,11 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | Line | Meaning |
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
-| `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup the receiver still sends one fix a second, or no `GST`: it is set up again |
+| `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
+| `gps setup unverified: no fix` | 30 minutes after an acknowledged setup still no fix to check it by: no verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
 | `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring. The diagnostic log gets the first one, then `gps reset loop N more windows` every 5 minutes and when it ends |
-| `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds |
+| `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds. It counts as over after a quiet of twice its last gap between restarts (10-30 s) |
 | `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
@@ -307,10 +308,12 @@ To queue a `.bad` again:
 the board is on a power bank, so the logger also appends to `/diag.log` on
 flash: a `boot cause N` line at every start, a `gps <model>` line once
 the receiver says what it is (UBX-MON-VER, e.g. `gps u-blox M10, ROM SPG
-5.10 (7b202e), PROTVER=34.10`; again after a receiver restart), one status
-line a minute, a `stay left wifi` line when an away stay ends without a fix
-(see [Stays](#stays)), `gps reset loop …` lines (when the receiver keeps
-restarting, so they can be set against where you were), `upload err …`
+5.10 (7b202e), PROTVER=34.10`; after a receiver restart only if the model
+changed), one status line a minute, a `stay left wifi` line when an away
+stay ends without a fix (see [Stays](#stays)), `gps reset loop …` lines
+(when the receiver keeps restarting, so they can be set against where you
+were), `gps setup not taken: …` (at most one per 10 minutes,
+`GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `heap grew in <step> to N KB` when the
 Python heap grew during an upload step (`read_batch`, `tls_wrap`,
@@ -428,6 +431,10 @@ console line.
   often. 10 s after an acknowledged setup (`GPS_VERIFY`) it is checked: valid
   seconds still at one fix each, or NMEA but no `GST` (without it the
   `GPS_MAX_STD` filter is off), count as not taken, and it is sent again.
+  Only valid seconds tell: before the first fix (a setup at boot, indoors,
+  where an M10 may send no `GST` either) the check waits for 3 of them, up
+  to 30 minutes (`GPS_VERIFY_MAX`). It counts as taken only with 5 fixes a
+  second and `GST`.
 - **Receiver filter** (UBX-CFG-NAV5, sent right after the 1 Hz frame):
   portable dynamic model (`GPS_DYN_MODEL`, `.env` `GPS_MODEL`: 3
   pedestrian, 4 automotive, …), 3D fixes only
@@ -787,12 +794,13 @@ with a NEO-6M; most never need changing.
 | `GPS_MIN_ELEV` / `GPS_STATIC_HOLD` | 10° / 50 cm/s | NAV5 elevation mask and static hold threshold (0 = off) |
 | `GPS_LOOP_WINDOW` / `GPS_LOOP_BANNERS` | 10 s / 3 | Banner starts with no NMEA in this window = `gps reset loop?` |
 | `GPS_FLAP_WINDOW` / `GPS_FLAP_RESTARTS` | 10 min / 5 | Full restarts within this window, NMEA or not = `gps reset loop?` |
-| `GPS_STORM_WAIT` / `GPS_STORM_QUIET` | 30 s / 10 s | Least time between setups while the receiver keeps restarting; quiet this long after a restart and it is set up within `GPS_RETRY` |
+| `GPS_STORM_WAIT` / `GPS_STORM_QUIET` | 30 s / 10 s | Least time between setups while the receiver keeps restarting; quiet this long after a restart (in a storm twice its last gap, up to `GPS_STORM_WAIT`) and it is set up within `GPS_RETRY` |
 | `AVG_MAX_SPEED` | 10 km/h | Faster than this a second's point is its first fix, not the mean |
 | `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
 | `GPS_SETUP_MAX` | 4 s | Longest a setup blocks the loop; frames not acknowledged by then go out once without waiting |
 | `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling while it does not answer) |
 | `GPS_IGNORED_MAX` / `GPS_VERIFY` | 60 s / 10 s | Cap on the doubling wait for a receiver that acknowledges but ignores the setup; when an acknowledged setup is checked (still 1 fix/s or no `GST` = not taken) |
+| `GPS_VERIFY_MAX` / `GPS_NOT_TAKEN_SAY` | 30 min / 10 min | Longest the check waits for 3 valid seconds; least time between `gps setup not taken` lines in the diagnostic log |
 | `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP |

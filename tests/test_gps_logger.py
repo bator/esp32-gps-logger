@@ -5373,6 +5373,32 @@ try:
     check("M10: a receiver restart forgets the list and the model",
           after_boot == (None, None, None), repr(after_boot))
 
+    # M10-VER: MON-VER is asked for again after every receiver restart, and
+    # each answer wrote a diag line (a reset storm: one per restart); now
+    # one only when the model changed
+    def ver_diag():
+        try:
+            with open(gl.DIAG_FILE) as f:
+                return [ln for ln in f.read().splitlines()
+                        if ln.startswith("gps u-blox") or ln.startswith("gps hw")]
+        except OSError:
+            return []
+
+    saved_d = gl.DIAG
+    gl.DIAG = 60000
+    gl.reset()
+    v0 = len(ver_diag())
+    other = monver(b"ROM SPG 5.10 (7b202e)", b"00190000", [b"PROTVER=18.00"])
+    for fr in (ver_frame, ver_frame, ver_frame, other, ver_frame):
+        gl._ubx_frame(fr)
+        gl.handle(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
+    ver_lines = ver_diag()[v0:]
+    gl.DIAG = saved_d
+    check("M10-VER: a diag line for MON-VER only when the model changed",
+          len(ver_lines) == 3 and ver_lines[0] == ver_lines[2]
+          and ver_lines[0].startswith("gps u-blox M10, ROM SPG 5.10")
+          and ver_lines[1] != ver_lines[0], repr(ver_lines))
+
     # OFF: while uploads back off for WIFI_OFF_WAIT or more (server down,
     # 401) the radio goes off until the retry is due, then a round
     # reconnects and the upload goes on; a short backoff keeps it on
@@ -6448,6 +6474,92 @@ check("SETUP-CHECK: acknowledged but still 1 fix/s, or no GST -> set up again",
       v_slow > 0 and v_nogst > 0 and v_good == 0,
       "slow=%d nogst=%d good=%d" % (v_slow, v_nogst, v_good))
 
+# SETUP-NOFIX: a setup before the first fix (at boot, indoors) got its one
+# verdict GPS_VERIFY later with no valid second to tell by: "taken", the
+# backoff reset, and a receiver left at 1 Hz (a stale RATE ACK) was never
+# set up again. Now no verdict before 3 valid seconds (up to
+# GPS_VERIFY_MAX), and taken only with GPS_HZ fixes and GST
+
+
+def nofix_setup():
+    gl.reset()
+    _uart_rx[:] = []
+    gl.gps_setup()
+    gl.st["ack_n"] = 2                   # a backoff that is running
+    _uart_tx[:] = []
+
+
+def nofix_secs(k0, n, fix=False, gst_every=0, step=1):
+    for k in range(k0, k0 + n, step):
+        t = "12%02d%02d.00" % (k // 60 % 60, k % 60)
+        if fix:
+            gl.handle(rv_nmea("GPGGA,%s,4730.000,N,01900.000,E,1,08,1.0,"
+                              "100.0,M,40.0,M,," % t))
+            gl.handle(rv_nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,90.0,"
+                              "171026,,,A" % t))
+        else:
+            gl.handle(rv_nmea("GPRMC,%s,V,,,,,,,171026,,,N" % t))
+            gl.handle(rv_nmea("GPGGA,%s,,,,,0,00,99.99,,,,,," % t))
+        if gst_every and k % gst_every == 0:
+            gl.handle(rv_nmea("GPGST,%s,,,,,,," % t))
+        _clock[0] += 1000 * step
+        gl.gps_check(_clock[0])
+
+
+def cfgs():
+    return len([f for f in _uart_tx if f[2:3] == b"\x06"])
+
+
+nofix_setup()
+nofix_secs(0, 12, gst_every=5)
+nf_wait = (gl.st["checked"], gl.st["ack_n"], cfgs())
+nofix_secs(12, 30, fix=True)
+nf_again = (cfgs(), gl.st["ack_n"])
+check("SETUP-NOFIX: no verdict before a fix, then 1 fix/s -> set up again",
+      nf_wait == (False, 2, 0) and nf_again[0] > 0 and nf_again[1] >= 2,
+      "wait=%r again=%r" % (nf_wait, nf_again))
+nofix_setup()
+nofix_secs(0, getattr(gl, "GPS_VERIFY_MAX", 1800000) // 1000 + 20,
+           gst_every=5, step=10)
+check("SETUP-NOFIX: no fix for GPS_VERIFY_MAX -> the wait ends, no verdict",
+      gl.st["checked"] is True and gl.st["ack_n"] == 2 and cfgs() == 0
+      and not gl.st["extra"], "%r %r %d" % (gl.st["checked"],
+                                          gl.st["ack_n"], cfgs()))
+
+# NO-GST-NOFIX: an M10 without a fix (indoors) may send no GST: that was a
+# "no GST" verdict, so indoor stretches were set up again and again
+nofix_setup()
+nofix_secs(0, 70)
+check("NO-GST-NOFIX: no fix and no GST -> no verdict, not set up again",
+      cfgs() == 0 and gl.st["checked"] is False and not gl.st["extra"],
+      "cfg=%d checked=%r extra=%r" % (cfgs(), gl.st["checked"],
+                                      gl.st["extra"]))
+
+# SETUP-NOT-TAKEN: a session left at 1 Hz was silent in diag.log; now a
+# line per GPS_NOT_TAKEN_SAY, the verdicts between counted
+saved_d = gl.DIAG
+gl.DIAG = 60000
+try:
+    os.remove(gl.DIAG_FILE)
+except OSError:
+    pass
+gl.reset()
+for k in range(12):                      # a verdict every 70 s
+    gl.st.update(checked=False, setup_at=_clock[0] - gl.GPS_VERIFY, hz1=3,
+                 hz5=0)
+    gl._setup_check(_clock[0])
+    _clock[0] += 70000
+try:
+    with open(gl.DIAG_FILE) as f:
+        nt = [ln for ln in f.read().splitlines()
+              if ln.startswith("gps setup not taken")]
+except OSError:
+    nt = []
+gl.DIAG = saved_d
+check("SETUP-NOT-TAKEN: a diag line per GPS_NOT_TAKEN_SAY, the rest counted",
+      nt == ["gps setup not taken: 1 fix/s",
+             "gps setup not taken: 1 fix/s (8 more)"], repr(nt))
+
 # SETUP-BACKOFF: a receiver that acknowledges every setup but keeps sending
 # the sentences it turns off: GPS_RETRY, then doubling up to a cap
 gl.reset()
@@ -6561,6 +6673,48 @@ check("DIAG-TAIL: just after a rotation the page fills up from diag.1",
       len(page) == gl.WEB_DIAG and page[-1].startswith("gps u-blox M10")
       and page[0] == st_line(26) and page[-2] == st_line(39),
       "%d %r" % (len(page), page[:1]))
+
+# DIAG-TAIL-EDGE: a window that starts right at a line start dropped that
+# whole line as a partial one (lines of DIAG_LINE - 1 B: 7 of 8); every
+# line wholly in the window is kept
+
+
+def tail_ref(data, n):
+    start = max(len(data) - gl.DIAG_LINE * n, 0)
+    out, off = [], 0
+    for ln in data.split(b"\n"):
+        if off >= start and ln:
+            try:
+                out.append(ln.decode())
+            except UnicodeError:
+                pass
+        off += len(ln) + 1
+    return out[-n:]
+
+
+with open(gl.DIAG_FILE, "w") as f:
+    f.write("".join("%03d" % k + "x" * (gl.DIAG_LINE - 4) + "\n"
+                    for k in range(20)))
+edge = gl._diag_tail(gl.DIAG_FILE, 8)
+import random
+t_rnd = random.Random(5)
+t_bad = 0
+for _ in range(300):
+    t_data = b"\n".join(
+        bytes(t_rnd.choice(b"ab \xff") for _ in range(t_rnd.choice(
+            (0, 1, 50, 179, 219, 220, 221, 511, 512, 513))))
+        for _ in range(t_rnd.randrange(0, 30)))
+    if t_rnd.random() < 0.8:
+        t_data += b"\n"
+    with open(gl.DIAG_FILE, "wb") as f:
+        f.write(t_data)
+    t_n = t_rnd.choice((1, 8, 15))
+    if gl._diag_tail(gl.DIAG_FILE, t_n) != tail_ref(t_data, t_n):
+        t_bad += 1
+check("DIAG-TAIL-EDGE: a line starting right at the window is not dropped",
+      len(edge) == 8 and edge[0].startswith("012") and t_bad == 0,
+      "%d lines, first %r, %d of 300 random files differ" % (
+          len(edge), edge[:1] and edge[0][:3], t_bad))
 diag_clear()
 
 # GPS-20: a cut-off sentence glued to a whole one keeps the whole one
@@ -6639,6 +6793,106 @@ check("RXBUF: a preallocated buffer, frames and lines across 7-byte reads",
       isinstance(getattr(gl, "_rx", None), bytearray)
       and rx_ok == (6, 0, True) and gl.st["ok"] == 9,
       "%r ok=%d" % (rx_ok, gl.st["ok"]))
+
+# RXBUF-BANNER: a reset loop's banner start cut off right at the RX_LINE
+# junk reset ("$GPTXT,01,01,02," last, its "u" in the next read) went with
+# the junk, and the reset loops came up short (125 of 3000 fuzz runs); a
+# banner start at the end of the junk stays now
+gl.reset()
+_uart_rx[:] = []
+_uart_rx.extend(b"\xff" * (gl.RX_LINE + 40 - 16) + b"$GPTXT,01,01,02,")
+gl.read_uart()
+_uart_rx.extend(b"u" + b"\xff" * 30)
+gl.read_uart()
+cut_ban = gl.st["banners"]
+import random
+b_rnd = random.Random(3)
+b_bad = 0
+for _ in range(400):
+    gl.reset()
+    _uart_rx[:] = []
+    b_data, b_n = b"", 0
+    for _ in range(b_rnd.randrange(1, 30)):
+        if b_rnd.random() < 0.4:
+            b_data += b"$GPTXT,01,01,02,u" + b"\xff" * b_rnd.randrange(400)
+            b_n += 1
+        else:
+            b_data += rv_nmea("GNRMC,120000.00,V,,,,,,,311026,,,N") + b"\r\n"
+    k = 0
+    while k < len(b_data):
+        step = b_rnd.choice((1, 3, 13, 14, 64, 256, 300))
+        _uart_rx.extend(b_data[k:k + step])
+        k += step
+        if b_rnd.random() < 0.5:
+            gl.read_uart()
+    gl.read_uart()
+    if gl.st["banners"] != b_n:
+        b_bad += 1
+check("RXBUF-BANNER: a banner start cut off by the junk reset is counted",
+      cut_ban == 1 and b_bad == 0,
+      "cut=%d, %d of 400 random streams miscounted" % (cut_ban, b_bad))
+
+
+# RXBUF-FIND: line ends, UBX sync and banners are found with bytearray.find
+# (C), not a Python loop over every byte (~0.17 us/B on the unix port)
+class IdxCount(bytearray):
+    n = 0
+
+    def __getitem__(self, k):
+        IdxCount.n += 1
+        return bytearray.__getitem__(self, k)
+
+
+saved_rx = (gl._rx, gl._rxv)
+ic = IdxCount(len(gl._rx))
+gl._rx, gl._rxv = ic, memoryview(ic)
+gl._rx_n = gl._rx_s = 0
+try:
+    gl.reset()
+    _uart_rx[:] = []
+    f_data = (b"".join(rv_nmea("GPRMC,1210%02d.00,V,,,,,,,171026,,,N" % k)
+                       + b"\r\n" for k in range(40))
+              + (rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+                 + b"\r\n") * 2)
+    _uart_rx.extend(f_data)
+    gl.read_uart()
+finally:
+    gl._rx, gl._rxv = saved_rx
+    gl._rx_n = gl._rx_s = 0
+check("RXBUF-FIND: no per-byte Python loop over what the UART delivers",
+      IdxCount.n < len(f_data) // 20 and gl.st["ok"] == 42
+      and gl.st["banners"] == 2,
+      "%d indexings for %d B, ok=%d banners=%d" % (
+          IdxCount.n, len(f_data), gl.st["ok"], gl.st["banners"]))
+
+
+# RXBUF-DROP: the rest moves to the front in one slice store (MicroPython
+# copies it with memmove), not in non-overlapping pieces
+class SetCount(object):
+    def __init__(self, mv):
+        self.mv, self.sets = mv, 0
+
+    def __getitem__(self, k):
+        return self.mv[k]
+
+    def __setitem__(self, k, v):
+        self.sets += 1
+        self.mv[k] = v
+
+
+saved_rxv = gl._rxv
+gl._rx[:600] = bytes(range(256)) * 2 + bytes(range(88))
+d_want = bytes(gl._rx[100:600])
+sc = SetCount(memoryview(gl._rx))
+gl._rxv, gl._rx_n = sc, 600
+try:
+    gl._rx_drop(100)
+    dropped = (bytes(gl._rx[:500]) == d_want, gl._rx_n, sc.sets)
+finally:
+    gl._rxv = saved_rxv
+    gl._rx_n = gl._rx_s = 0
+check("RXBUF-DROP: the rest moves to the front in one slice store",
+      dropped == (True, 500, 1), repr(dropped))
 
 
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
@@ -8296,6 +8550,47 @@ for _ in range(gl.GPS_FLAP_RESTARTS):
 check("STORM-FIRST: the restart that declares the storm waits GPS_STORM_WAIT",
       gl.st["loops"] == 1 and gl.st["setup_wait"] == gl.GPS_STORM_WAIT,
       "loops=%d wait=%d" % (gl.st["loops"], gl.st["setup_wait"]))
+
+# STORM-SPACED: restarts further apart than GPS_STORM_QUIET (12 s) each got
+# a setup of their own: 50 restarts, 50 setups in 10 min, a third of the
+# loop blocked. In a storm quiet is twice the last gap (up to
+# GPS_STORM_WAIT): setups GPS_STORM_WAIT apart; restarts further apart
+# than that are still each set up
+
+
+def storm_run(gap):
+    gl.reset()
+    calls = []
+    real = gl.gps_setup
+
+    def fake():
+        calls.append(_clock[0])
+        gl.st.update(setup_at=_clock[0], extra=0, setup_ok=True, checked=True)
+
+    gl.gps_setup = fake
+    try:
+        gl.st.update(setup_at=_clock[0], setup_ok=True, extra=0, checked=True)
+        end = _clock[0] + 600000
+        nxt = _clock[0]
+        k = 0
+        while _clock[0] < end:
+            if _clock[0] >= nxt:
+                gl.handle(banner)
+                nxt += gap
+            k += 1
+            if k % 5 == 0:
+                gl.handle(rv_nmea("GPRMC,120000.00,V,,,,,,,311026,,,N"))
+            gl.gps_check(_clock[0])
+            _clock[0] += 200
+    finally:
+        gl.gps_setup = real
+    return len(calls)
+
+
+s12, s40 = storm_run(12000), storm_run(40000)
+check("STORM-SPACED: restarts 12 s apart: setups GPS_STORM_WAIT apart",
+      s12 <= 600000 // gl.GPS_STORM_WAIT + 3 and s40 == 15,
+      "12 s: %d setups for 50 restarts, 40 s: %d for 15" % (s12, s40))
 
 # WRAP-GPS: ticks_ms wraps every 2**30 ms; the storm mark, old restart
 # times and a satellite list must not read as fresh again 12.4 days later
