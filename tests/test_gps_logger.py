@@ -3958,6 +3958,9 @@ try:
         f = line.split(",")
         return gl._dist(47.5, 19.0, float(f[0]), float(f[1]))
 
+    def sv_m_ok(line):
+        return line.count(",") == 4
+
     def sv_drift(seconds, box=40.0, step=8.0, speed=NOISE):
         """Indoor drift: a random walk within +-box m (p90 ~ box)."""
         e = n = 0.0
@@ -4044,6 +4047,76 @@ try:
           and new[0].split(",")[2:4] == ["100.0", "1.0"]
           and len(new[0].split(",")[4]) == 17 and new[0].endswith("Z\n"),
           repr(new[:2]))
+    # RING: the rebuilt way out is the very line _sample_line writes for
+    # the fix: an elevation of 123.45 m kept as a single float came back as
+    # 123.4 where the line said 123.5 (HDOP 1.25 likewise). (On the board's
+    # single-precision floats: MICROPYTHON_F32, tests/mpy_unix_logger.py.)
+    def ring_lines(alt, hdop, lat0, lon0, date="2026-10-18"):
+        gl.log_reset()
+        gl.log["still"] = sl = gl._still_state()
+        sl.update(active=True, anchor=(lat0, lon0), aref=(lat0, lon0), n=10)
+        want = []
+        for k in range(gl.STILL_DEP_MAX + 10):
+            gl.st.update(valid=True, date=date, alt=alt, hdop=hdop,
+                         hdop_at=_clock[0], fixtype=3, std=None,
+                         time="09:%02d:%02d" % (k // 60, k % 60),
+                         lat=lat0 + k * 0.0000271828,
+                         lon=lon0 + k * 0.0000314159)
+            want.append(gl._sample_line(_clock[0], None, None)[1])
+            gl._ring_add(sl, _clock[0], (gl.st["lat"], gl.st["lon"]),
+                         10.0 + k)
+        gl._still_leave()
+        return want[-gl.STILL_DEP_MAX:], list(gl.log["batch"])
+
+    want, got = ring_lines(123.45, 1.25, 47.49791234567, 19.04024561234)
+    bad = [(w, g) for w, g in zip(want, got) if w != g]
+    check("RING: the way out is the line _sample_line writes (123.45 m, "
+          "HDOP 1.25)", len(got) == len(want) and not bad, repr(bad[:2]))
+    want, got = ring_lines(-0.04, 2.35, 51.47781234567, -0.00213141593)
+    bad = [(w, g) for w, g in zip(want, got) if w != g]
+    check("RING: ... also across the prime meridian (-0.0 m, HDOP 2.35)",
+          len(got) == len(want) and not bad, repr(bad[:2]))
+    # times in the ring count from its first sample: from 2088 on seconds
+    # since 2020 overflowed its 32-bit array (CPython raised, the board
+    # stamped the way out 1951)
+    try:
+        want, got = ring_lines(100.0, 1.0, 47.5, 19.0, date="2088-01-19")
+        err = None
+    except OverflowError as e:
+        want, got, err = [1], [], e
+    check("RING: ring times after 2088 do not overflow", err is None
+          and got == want and got[0].endswith("20880119T090010Z\n"),
+          "err=%r first=%r" % (err, got[:1]))
+    # the way out is the whole ring: _ring_add starts it over at a sample
+    # that falls back, so the walk back for the receding run (removed)
+    # always reached its start
+    frnd = random.Random(23)
+    bad = 0
+    for _ in range(200):
+        gl.log_reset()
+        gl.log["still"] = sl = gl._still_state()
+        sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
+        gl.st.update(valid=True, date="2026-10-18", alt=None, hdop=None,
+                     fixtype=3)
+        dd, ref = frnd.uniform(0, 300), []
+        for k in range(frnd.randint(1, 300)):
+            dd = max(0.0, dd + frnd.choice((-7, -5.01, -4.99, 0, 2, 6)))
+            gl.st["time"] = "%02d:%02d:%02d" % (10 + k // 3600, k // 60 % 60,
+                                                k % 60)
+            gl._ring_add(sl, _clock[0], (47.5 + k * 1e-4, 19.0), dd)
+            ref.append((k, dd))
+        ref = ref[-gl.STILL_DEP_MAX:]
+        i = len(ref) - 1
+        while i > 0 and ref[i - 1][1] <= ref[i][1] + gl.STILL_TOL:
+            i -= 1
+        gl._still_leave()
+        tcs = [l.split(",")[4] for l in gl.log["batch"]]
+        got = [int(t[9:11]) * 3600 + int(t[11:13]) * 60 + int(t[13:15])
+               - 36000 for t in tcs]
+        bad += [k for k, _ in ref[i:]] != got
+    check("RING: the way out is the whole ring, a run that kept receding",
+          bad == 0, "mismatches=%d" % bad)
+    gl.log_reset()
 
     # walking (1.4 m/s) is never a stay, even with the speed reading low
     sv_reset()
@@ -4211,6 +4284,38 @@ try:
           and gl._stamp_s(s20)[0] == "2026-10-18T08:00:00Z"
           and gl._fix_secs() == calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0)),
           "s20=%s" % s20)
+    # a receiver past a GPS week rollover says 1999 (read as 2099) or 2000:
+    # such a fix is not used, moving or in a stay. (From 2088 on its
+    # seconds overflowed the departure ring: CPython raised, the board
+    # stamped the way out 1951; the README's week-rollover note.)
+    def hb_dated(date, n, east=0.0):
+        errs = []
+        for k in range(n):
+            _clock[0] += gl.SAMPLE
+            gl.st.update(valid=True, date=date, time="08:00:%02d" % k,
+                         lat=47.5, lon=19.0 + (east + k * 6.0) * M_LON,
+                         alt=100.0, pos_at=_clock[0], hdop=1.0,
+                         hdop_at=_clock[0], status="A", quality=1,
+                         fixtype=3, speed=22.0)
+            try:
+                gl.log_tick()
+            except Exception as e:
+                errs.append(e)
+        return errs
+
+    sv_reset()
+    errs = hb_dated("2099-08-22", 20) + hb_dated("2000-01-01", 20)
+    check("HB: a fix dated 2099 or 2000 (GPS week rollover) is not used",
+          not errs and not sv_lines() and gl.log["clock"] is None,
+          "errs=%r lines=%s" % (errs[:1], sv_lines()[:1]))
+    sv_reset()
+    sv_drift(150)
+    ok0, n0 = sv_active(), len(sv_lines())
+    errs = hb_dated("2099-08-22", 40, east=200.0)
+    check("HB: ... nor in a stay (no overflow, no way out stamped wrong)",
+          ok0 and not errs and sv_active() and len(sv_lines()) == n0,
+          "errs=%r active=%s new=%s" % (errs[:1], sv_active(),
+                                        sv_lines()[n0:n0 + 1]))
 
     # HDOP too dilute for 30 min after entering: anchor points keep coming
     sv_reset()
@@ -4316,6 +4421,30 @@ try:
           stayed and stayed_beats >= 1, "beats=%d" % stayed_beats)
     check("STAYWIFI: no access points while learning -> the stay goes on",
           no_aps)
+    # STAYWIFI: the access points gone write a way out only when the last
+    # sample was out past STILL_NEAR; otherwise the ring is the stay's
+    # drift (its last receding run, within metres of the anchor) and the
+    # stay just ends
+    gl.PB_MODE = "scan"
+    res = []
+    try:
+        for last in ((1, 3, 6, 10), (60, 80, 100, 120)):
+            ka_setup([office, cafe])
+            ka_run(60)
+            n0 = len(sv_lines())
+            for m in last:
+                hb_fix(m, 0, speed=0.0)
+            WLAN.scan_aps = []
+            ka_run(3 * 60)
+            res.append((not gl.log["still"]["active"], sv_lines()[n0:]))
+    finally:
+        WLAN.scan_aps, gl.PB_MODE = saved_aps, saved_mode
+        gl.wifi.update(wlan=None, state="offline", nets=[])
+    check("STAYWIFI: left near the anchor: the stay ends, no drift written",
+          res[0][0] and res[0][1] == [], repr(res[0]))
+    check("STAYWIFI: left out past STILL_NEAR: the way out is written",
+          res[1][0] and len(res[1][1]) >= 3
+          and sv_m(res[1][1][-1]) > 110, repr(res[1]))
 
     # GAP: a minute at A, fix lost for an hour, back 1.5 km away
     sv_reset()
@@ -4374,17 +4503,85 @@ try:
           and len(there) >= 1, "active=%s there=%d" % (sv_active(), len(there)))
     check("GAPFAR: ... the new place starts from the first fix there",
           bool(there) and there[0] == sv_lines()[n0], repr(there[:1]))
-    # 200 m out (no clear jump): STILL_EXIT_N samples in a row out there
-    sv_reset()
-    g_drift(150)
-    for _ in range(120):
-        hb_fix(0, 0, nofix=True, speed=0.0)
+    # 200 m out, sitting still (no clear jump): STILL_MIN_FIXES fixes there
+    # over STILL_GAP_STAY end it, the way out from the first of them.
+    # (STILL_EXIT_N samples out there did: a jump frozen for 3 s too.)
+    def g_gap():
+        sv_reset()
+        g_drift(150)
+        ok = sv_active()
+        for _ in range(120):
+            hb_fix(0, 0, nofix=True, speed=0.0)
+        return ok, len(sv_lines())
+
+    gap_stay = getattr(gl, "STILL_GAP_STAY", 60000)    # (getattr: the
+    gap_jump = getattr(gl, "STILL_GAP_JUMP", 1000)     # old code runs too)
+    ok0, n0 = g_gap()
     states = []
-    for k in range(gl.STILL_EXIT_N):
-        sv_fix(200.0 + k * 0.3, 0, 0.0)
+    first = None
+    for k in range(gap_stay // 1000 + 5):
+        sv_fix(200.0 + grnd.uniform(-1, 1), grnd.uniform(-1, 1), 0.0)
+        first = first or gl._tc()
         states.append(sv_active())
-    check("GAPFAR: 200 m out after a gap: leaves after STILL_EXIT_N samples",
-          states == [True] * (gl.STILL_EXIT_N - 1) + [False], repr(states))
+    left = states.index(False) if False in states else None
+    new = sv_lines()[n0:]
+    check("GAPFAR: 200 m out after a gap, sitting still: leaves after "
+          "STILL_GAP_STAY", ok0 and left is not None
+          and gap_stay // 1000 <= left
+          <= gap_stay // 1000 + 1, "left at %s" % left)
+    check("GAPFAR: ... the way out starts at the first fix there",
+          bool(new) and abs(sv_m(new[0]) - 200) < 3
+          and new[0].endswith(first + "\n"), "%r %s" % (new[:1], first))
+    # the false departures the review found: one 320 m outlier, a jump
+    # frozen 200 m out for 3 s, a cold start walking in from 230 m
+    ok0, n0 = g_gap()
+    sv_fix(320.0, 0, 0.0)
+    g_drift(30)
+    out = [l for l in sv_lines()[n0:] if sv_m(l) > gl.STILL_EXIT]
+    check("GAPFAR: one 320 m outlier after a gap keeps the stay, no spike",
+          ok0 and sv_active() and not out, "active=%s out=%s" % (
+              sv_active(), out))
+    ok0, n0 = g_gap()
+    for _ in range(3):
+        sv_fix(200.0, 0, 0.0)
+    g_drift(30)
+    out = [l for l in sv_lines()[n0:] if sv_m(l) > gl.STILL_EXIT]
+    check("GAPFAR: a jump frozen 200 m out for 3 s after a gap keeps the stay",
+          ok0 and sv_active() and not out, "active=%s out=%s" % (
+              sv_active(), out))
+    ok0, n0 = g_gap()
+    for m in range(230, 0, -15):                  # converging, 15 m a fix
+        sv_fix(float(m), 0, 0.0)
+    g_drift(30)
+    out = [l for l in sv_lines()[n0:] if sv_m(l) > gl.STILL_EXIT]
+    check("GAPFAR: a cold start walking in from 230 m keeps the stay",
+          ok0 and sv_active() and not out, "active=%s out=%s" % (
+              sv_active(), out))
+    # ... and what still leaves after a gap: walking on away (a receding
+    # run), indoor drift at a new place 400 m away (fixes coming closer
+    # every other second are not counted, nor do they start over)
+    ok0, n0 = g_gap()
+    left = None
+    for k in range(60):
+        sv_fix(160.0 + k * 1.4, 0, 5.0)
+        if left is None and not sv_active():
+            left = k + 1
+    check("GAPFAR: walking on away after a gap leaves (receding run)",
+          ok0 and left is not None and left <= gl.STILL_EXIT_SLOW + 1,
+          "left after %s" % left)
+    ok0, n0 = g_gap()
+    states = []
+    for k in range(3 * 60):
+        sv_fix(400.0 + grnd.uniform(-35, 35), grnd.uniform(-35, 35), 0.0)
+        states.append(sv_active())
+    left = states.index(False) if False in states else None
+    check("GAPFAR: indoor drift 400 m away after a gap ends the stay",
+          ok0 and left is not None and left <= 2 * gap_stay // 1000,
+          "left at %s" % left)
+    ok0, n0 = g_gap()
+    sv_fix(gap_jump + 50.0, 0, 0.0)
+    check("GAPFAR: one fix past STILL_GAP_JUMP after a gap ends it at once",
+          ok0 and not sv_active())
     # a gap with the fix back at the stay keeps it
     sv_reset()
     g_drift(150)
@@ -4768,6 +4965,41 @@ try:
     marks = [i for i, l in enumerate(body) if l == "-\n"]
     check("SEG2: two short losses within held lines give two breaks",
           held >= 40 and marks == [30, 41], "held=%d marks=%s" % (held, marks))
+    # SEGCAP: breaks queued while writes fail (or lines are held) with a
+    # flapping fix: a cap of 16 dropped the oldest, 18 losses wrote 16
+    # breaks. Breaks whose lines the MAX_BATCH cap dropped go before the
+    # oldest line left, one for all, so the queue stays within the batch.
+    def seg_run(losses):
+        sv_reset()
+        gl.start_file("20261029_060000")
+        top = 0
+
+        def rec(k):
+            gl._record(("x", "47.500000,%.6f,,,20261029T%02d%02d%02dZ\n"
+                        % (19.0 + k * 1e-4, 6 + k // 3600, k // 60 % 60,
+                           k % 60)), (47.5, 19.0))
+        rec(0)
+        for k in range(1, losses + 1):
+            gl._seg_break()
+            rec(k)
+            top = max(top, len(gl.log["seg_tc"]))
+        gl.flush()
+        with open(gl.log["file"]) as fh:
+            body = [l for l in fh if not l.startswith("#")]
+        return body, top
+
+    body, top = seg_run(18)
+    marks = [i for i, l in enumerate(body) if l == "-\n"]
+    check("SEGCAP: 18 losses before a write give 18 breaks",
+          len(marks) == 18 and all(body[m + 1] != "-\n" for m in marks)
+          and marks[0] == 1, "marks=%s" % marks)
+    body, top = seg_run(gl.MAX_BATCH + 60)
+    marks = [i for i, l in enumerate(body) if l == "-\n"]
+    check("SEGCAP: breaks of lines the batch cap dropped merge into one",
+          len(body) - len(marks) == gl.MAX_BATCH
+          and len(marks) == gl.MAX_BATCH - 1 and body[0] != "-\n"
+          and top <= gl.MAX_BATCH + 1, "lines=%d marks=%d top=%d" % (
+              len(body) - len(marks), len(marks), top))
 
     # FIXGAP: a fix back after a long gap closes the track; what a stay
     # still being proven holds moves on, nothing of it is written
@@ -4800,6 +5032,40 @@ try:
     check("FIXGAP: the new trip goes after a break, not on the moved lines",
           body.count("-\n") == 1 and body[-1] == first_new
           and body[-2] == "-\n", repr(body[-3:]))
+    # FIXGAP: the gap is judged once. The fix back after NEW_FILE_GAP ran
+    # _still_gap before the old track closed, and again from _sample with
+    # last_at unchanged: the first verdict (from the open window, 95 m off)
+    # held the previous window over to the new file, the second (from that
+    # window, 185 m off) released it there. The old place's drift belongs
+    # to the old track.
+    sv_reset()
+    gl.wifi.update(state="offline")
+    crnd = random.Random(5)
+    for i in range(30):
+        sv_fix(-300 + i * 10.0, 0, 20.0)            # arriving
+    for _ in range(92):                             # two windows here
+        sv_fix(crnd.uniform(-5, 5), crnd.uniform(-5, 5), 1.0)
+    w3 = gl.log["still"]["win_at"]
+    for _ in range(30):                             # the third 90 m off
+        sv_fix(90 + crnd.uniform(-5, 5), crnd.uniform(-5, 5), 1.0)
+    trip = gl.log["file"]
+    before = [l for l in gl.log["batch"] if sv_m(l) < 30]
+    for _ in range(gl.NEW_FILE_GAP + 10):
+        hb_fix(0, 0, nofix=True, speed=0.0)
+    for _ in range(70):
+        sv_fix(185 + crnd.uniform(-1, 1), 0, 1.0)
+    gl.flush()
+    with open(trip) as fh:
+        trip_body = fh.read()
+    later = [l for n in sorted(os.listdir(rv_dir))
+             if n.endswith(".trk") and os.path.join(rv_dir, n) != trip
+             for l in open(os.path.join(rv_dir, n)) if sv_m_ok(l)
+             and sv_m(l) < 30]
+    check("FIXGAP: the old place's drift before the gap stays in its track",
+          w3 is None and not sv_active() and before
+          and all(l in trip_body for l in before) and not later,
+          "held=%d in trip=%d in later files=%d" % (
+              len(before), sum(l in trip_body for l in before), len(later)))
     # a fix back elsewhere right after a flush: the drive held by its open
     # window kept the batch non-empty, so the new trip went into the old
     # file after a "-"; a loss over NEW_FILE_GAP is a new file
@@ -4822,6 +5088,20 @@ try:
           and gl.log["prev"] is not None,
           "file=%s pts=%d new_seg=%s" % (gl.log["file"], len(trip_pts),
                                          gl.log["new_seg"]))
+    # WFAIL: a write failure belongs to the batch and file it hit: a track
+    # closed with nothing left to write (the batch dropped by a stay or a
+    # full flash) or a new track starts clean, so a fix back after
+    # NEW_FILE_GAP within FLUSH still closes the next one
+    sv_reset()
+    gl.start_file("20261018_090000")
+    gl.log["wfail"] = True
+    closed = gl._close_file()
+    w_close = gl.log["wfail"]
+    gl.log["wfail"] = True
+    gl.start_file("20261018_090100")
+    check("WFAIL: a closed or a new track clears the old write failure",
+          closed and w_close is False and gl.log["wfail"] is False,
+          "close=%s new=%s" % (w_close, gl.log["wfail"]))
 
     sv_reset()
     sparse(20, 3, east_of=lambda s: s * 1.4)
@@ -5900,6 +6180,34 @@ if mpy_bin:
 
 else:
     print("SKIP  mpy-unix (no micropython binary)")
+
+# Optional: a single-precision unix build, floats as on the board (ESP32:
+# MICROPY_FLOAT_IMPL_FLOAT). The smoke's departure ring checks then see what
+# the board writes, which a double build cannot show. Build it with
+#   make -C ports/unix BUILD=build-f32 PROG=micropython-f32 \
+#     CFLAGS_EXTRA=-DMICROPY_FLOAT_IMPL=MICROPY_FLOAT_IMPL_FLOAT
+mpy_f32 = os.environ.get("MICROPYTHON_F32")
+if mpy_f32:
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            [mpy_f32, "-c", "print(1.0 + 1e-12 == 1.0)"],
+            stderr=subprocess.STDOUT, timeout=20)
+        single = out.decode().strip() == "True"
+        out = subprocess.check_output(
+            [mpy_f32, os.path.join(ROOT, "tests", "mpy_unix_logger.py")],
+            stderr=subprocess.STDOUT, timeout=60)
+        text = out.decode()
+        print(text.rstrip())
+        check("mpy-unix-f32: gps_logger smoke on single-precision floats",
+              single and "mpy logger smoke passed" in text,
+              "single=%s %s" % (single, text[-300:]))
+    except Exception as e:
+        out = getattr(e, "output", b"") or b""
+        check("mpy-unix-f32: gps_logger smoke", False, repr(e) + " "
+              + out.decode(errors="replace")[-400:])
+else:
+    print("SKIP  mpy-unix-f32 (MICROPYTHON_F32 not set)")
 
 # The same smoke under CPython (keeps the script itself working)
 import subprocess
