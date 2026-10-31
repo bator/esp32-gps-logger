@@ -605,6 +605,26 @@ try:
 except Exception as e:
     check("draw() talks to OLED when present", False, repr(e))
 
+# OLED-FLASH: the free flash on the screen comes through _flash_kb's 30 s
+# cache; draw() runs every REFRESH (500 ms) and statvfs walks the LittleFS
+_sv_calls = []
+_real_statvfs = os.statvfs
+os.statvfs = lambda p: _sv_calls.append(p) or _real_statvfs("/")
+gl._fl[:] = [None, None]
+gl.oled.ops[:] = []
+try:
+    for _ in range(6):
+        gl.draw()
+        _clock[0] += gl.REFRESH
+finally:
+    os.statvfs = _real_statvfs
+_flash_txt = [op[1][0] for op in gl.oled.ops
+              if op[0] == "text" and str(op[1][0]).startswith("Flash ")]
+check("OLED-FLASH: draw() every REFRESH reads statvfs once per 30 s, in kB",
+      len(_sv_calls) == 1 and len(_flash_txt) == 6
+      and _flash_txt[0] == "Flash %d kB" % gl._fl[0],
+      "%r %r" % (_sv_calls, _flash_txt[:2]))
+
 check("default DEVICE_ID is Dawarich-GPS-tracker",
       gl.DEVICE_ID == "Dawarich-GPS-tracker")
 check("default HOSTNAME is Dawarich-GPS-tracker",
@@ -2988,6 +3008,34 @@ try:
           "seen=%s rtc=%s" % (seen, RTC.mem))
     _reset_cause[0] = 1
 
+    # BOOT-DOC: README, the diag docstring and the page say what main.py /
+    # run() do and what machine.reset_cause() means on MicroPython 1.29
+    # (ports/esp32/modmachine.c: 1 PWRON incl. brownout, 2 HARD incl.
+    # panic and machine.reset(), 3 WDT, 4 DEEPSLEEP, 5 SOFT; there is no 6)
+    with open(os.path.join(ROOT, "README.md")) as f:
+        readme = f.read()
+    with open(os.path.join(ROOT, "web.html")) as f:
+        page_boot = f.read()
+    guard = readme[readme.index("**Boot loop guard:**"):]
+    guard = " ".join(guard[:guard.index("\n\n**")].split())
+    import inspect
+    run_src = inspect.getsource(gl.run)
+    check("BOOT-DOC: boot loop guard text matches main.py and run()",
+          "time.sleep(1)" in run_src and "_boot_fail_bump()" in run_src
+          and boot_ns["BOOT_FAIL_MAX"] == 5 and "at 5" in guard
+          and [boot_ns["_boot_fail_delay"](n) for n in (1, 2, 7)]
+          == [5, 10, 30] and "5 s, 10 s" in guard and "30 s" in guard
+          and "after 1 s (no growing delay)" in guard
+          and "counted at the next boot, no delay" in guard
+          and gl.BOOT_OK_MS == 60000 and "60 s (`BOOT_OK_MS`)" in guard
+          and "panic" in guard, guard[:300])
+    check("BOOT-DOC: boot causes as MicroPython 1.29 numbers them (no 6)",
+          "6 crash" not in readme and "6 crash" not in gl._diag_boot.__doc__
+          and "2 hard reset" in readme and "5 soft reset" in readme
+          and "2 hard reset" in gl._diag_boot.__doc__
+          and 'var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", '
+              '3: "watchdog", 4: "deep sleep", 5: "soft reset"};' in page_boot)
+
     # K2-6: BOOT_OK_MS is counted from the first _loop iteration, not run()
     src = open(os.path.join(ROOT, "gps_logger.py")).read()
     check("K2-6: _loop measures BOOT_OK from loop_start",
@@ -4831,7 +4879,7 @@ try:
         lst = FakeSocketMod.made[-1]
         opened = (lst.bound == ("0.0.0.0", 80) and lst.blocking is False
                   and gl._web_sock is lst)
-        reqs = [FakeConn(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+        reqs = [FakeConn(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"),
                 FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n"),
                 FakeConn(b"GET /nope HTTP/1.1\r\n\r\n"),
                 FakeConn(b"", fail=True)]
@@ -4905,6 +4953,96 @@ try:
     check("WEB: _loop serves the page; wifi_stop closes it",
           "web_tick()" in inspect.getsource(gl._loop)
           and "_web_close()" in inspect.getsource(gl.wifi_stop))
+
+    # WEB-DEADLINE: one wall-clock limit per request (a client that sends
+    # or reads a byte at a time held the loop ~50 s: 2 s per recv/send);
+    # WEB-GET: only a GET is answered (an empty request got the 21 KB page);
+    # WEB-HOST: DNS rebinding guard on the Host header
+    class SlowConn(FakeConn):
+        def __init__(self, req, slow_recv=False, slow_send=False):
+            FakeConn.__init__(self, req)
+            self.slow_recv, self.slow_send, self.timeouts = (
+                slow_recv, slow_send, [])
+
+        def settimeout(self, t):
+            self.timeouts.append(t)
+
+        def recv(self, n):
+            if self.slow_recv:           # one byte a second
+                _clock[0] += 1000
+                n = 1
+            b, self.req = self.req[:n], self.req[n:]
+            return b
+
+        def sendall(self, b):
+            if self.slow_send:           # every send waits its whole timeout
+                _clock[0] += int(self.timeouts[-1] * 1000)
+            self.sent += bytes(b)
+
+    gl.socket = FakeSocketMod
+    gl.WEB = True
+    gl.WEB_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "web.html")
+    gl.wifi.update(state="connected", ip="192.168.1.60")
+    good = b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"
+
+    def serve(c):
+        lst = gl._web_sock or (gl.web_tick() or gl._web_sock)
+        lst.waiting.append(c)
+        t0 = _clock[0]
+        gl.web_tick()
+        return _clock[0] - t0
+
+    try:
+        gl._web_close()
+        slow_in = SlowConn(good, slow_recv=True)
+        t_in = serve(slow_in)
+        slow_out = SlowConn(good, slow_send=True)
+        t_out = serve(slow_out)
+        empty, post = FakeConn(b""), FakeConn(b"POST / HTTP/1.1\r\n\r\n")
+        serve(empty)
+        serve(post)
+        hosts = {}
+        for h in (b"evil.example", b"192.168.1.60:80", b"192.168.1.60",
+                  b"dawarich-gps-tracker.local", b"Dawarich-GPS-tracker",
+                  b"DAWARICH-GPS-TRACKER.LOCAL.", b"192.168.1.60.evil.example",
+                  b"evil.example:80", None):
+            c = FakeConn(b"GET /status.json HTTP/1.1\r\n"
+                         + (b"Host: " + h + b"\r\n" if h else b"")
+                         + b"Accept: */*\r\n\r\n")
+            serve(c)
+            hosts[h] = c.sent.split(b"\r\n", 1)[0]
+        low = FakeConn(b"GET / HTTP/1.1\r\nhost: evil.example\r\n\r\n")
+        serve(low)
+    finally:
+        gl._web_close()
+        gl.socket = real_socket
+        gl.WEB_PAGE = saved_page
+        gl.WEB = False
+        gl.wifi["state"] = "sleep"
+    check("WEB-DEADLINE: a client sending a byte a second is dropped at "
+          "WEB_DEADLINE, unanswered",
+          t_in <= gl.WEB_DEADLINE * 1000 and slow_in.sent == b""
+          and slow_in.closed, "%d ms %r" % (t_in, slow_in.sent[:60]))
+    check("WEB-DEADLINE: a slow reader gets at most WEB_DEADLINE s of sends, "
+          "timeouts cut to what is left",
+          t_out <= gl.WEB_DEADLINE * 1000
+          and 0 < len(slow_out.sent) < len(page_file)
+          and max(slow_out.timeouts) <= gl.WEB_TIMEOUT
+          and min(slow_out.timeouts) < gl.WEB_TIMEOUT and slow_out.closed,
+          "%d ms %d B %r" % (t_out, len(slow_out.sent), slow_out.timeouts))
+    check("WEB-GET: an empty or non-GET request is closed without a reply",
+          empty.sent == b"" and empty.closed and post.sent == b""
+          and post.closed, repr((empty.sent[:60], post.sent[:60])))
+    ok200, no = b"HTTP/1.0 200 OK", b"HTTP/1.0 403 Forbidden"
+    check("WEB-HOST: Host must be the board's IP, HOSTNAME[.local] or none",
+          hosts[b"evil.example"] == no and hosts[b"evil.example:80"] == no
+          and hosts[b"192.168.1.60.evil.example"] == no
+          and low.sent.startswith(no) and b"192.168.1.60" in low.sent
+          and all(hosts[h] == ok200 for h in (
+              b"192.168.1.60:80", b"192.168.1.60", None,
+              b"dawarich-gps-tracker.local", b"Dawarich-GPS-tracker",
+              b"DAWARICH-GPS-TRACKER.LOCAL.")), repr(hosts))
 
     # SATS: the satellite list from UBX-NAV-SVINFO, read out of the stream
     import struct
@@ -5642,6 +5780,159 @@ except subprocess.CalledProcessError as e:
     smoke = e.output.decode(errors="replace")
 check("SMOKE: tests/mpy_unix_logger.py passes under CPython",
       "mpy logger smoke passed" in smoke, smoke[-300:])
+
+# WEB-LOOPBACK: the status page over real loopback sockets (slow, stalled,
+# empty, oversized, reset and deadline clients) on the unix port and CPython
+for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
+    if not interp:
+        print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
+        continue
+    try:
+        out = subprocess.check_output(
+            [interp, os.path.join(ROOT, "tests", "web_loopback.py")],
+            stderr=subprocess.STDOUT, timeout=60)
+        loop_out = out.decode()
+    except subprocess.CalledProcessError as e:
+        loop_out = e.output.decode(errors="replace")
+    except Exception as e:
+        loop_out = repr(e)
+    check("WEB-LOOPBACK: tests/web_loopback.py passes on " + tag,
+          "web loopback passed" in loop_out, loop_out[-600:])
+
+# DEPLOY: deploy.sh against a fake board (mpremote runs the board-side code
+# under CPython in a directory): files go to <name>.new, are checked by size
+# and SHA-256, then renamed over the old ones; low flash or a bad copy stops
+# it with the old files untouched (a cut copy left an unimportable module)
+FAKE_PY = r"""#!/usr/bin/env python3
+import sys
+a = sys.argv[1:]
+if a[:1] == ["-c"]:
+    sys.exit(0)
+out = a[a.index("-o") + 1]
+with open(a[-1], "rb") as f, open(out, "wb") as g:
+    g.write(b"MPY" + f.read())
+"""
+FAKE_SHIM = r"""
+import sys, os, types
+sys.implementation._machine = "Generic ESP32C6 module with ESP32C6"
+m = types.ModuleType("machine")
+class RTC:
+    def memory(self, b=None):
+        open(".rtc", "wb").write(b)
+m.RTC = RTC
+sys.modules["machine"] = m
+if os.environ.get("FAKE_FREE_BLOCKS"):
+    _blocks = int(os.environ["FAKE_FREE_BLOCKS"])
+    os.statvfs = lambda p: (4096, 4096, 512, _blocks, _blocks, 0, 0, 0, 0,
+                            255)
+"""
+FAKE_MPREMOTE = r"""#!/usr/bin/env python3
+import os, sys, json, subprocess
+dev, log = os.environ["FAKE_DEV"], os.environ["FAKE_LOG"]
+a = sys.argv[1:]
+assert a[0] == "connect", a
+cmds = [[]]
+for x in a[2:]:
+    if x == "+":
+        cmds.append([])
+    else:
+        cmds[-1].append(x)
+with open(log, "a") as f:
+    f.write(json.dumps(cmds) + "\n")
+shim = open(os.environ["FAKE_SHIM"]).read()
+for c in cmds:
+    if c[0] == "exec":
+        r = subprocess.run([sys.executable, "-c", shim + c[1]], cwd=dev)
+        if r.returncode:
+            sys.exit(1)
+    elif c[0] == "cp":
+        with open(c[1], "rb") as f:
+            data = f.read()
+        if os.environ.get("FAKE_TRUNC") == c[1]:
+            data = data[:len(data) // 2]
+        with open(os.path.join(dev, c[2].lstrip(":")), "wb") as f:
+            f.write(data)
+    elif c[0] == "ls":
+        print(sorted(os.listdir(dev)))
+"""
+dp_td = tempfile.mkdtemp(prefix="deploy-")
+
+
+def deploy_run(env_extra):
+    """deploy.sh in a fresh copy of the repo files against a fake board
+    that holds an older install: (rc, stdout, stderr, board dir, calls)."""
+    work = tempfile.mkdtemp(dir=dp_td)
+    for n in ("deploy.sh", "gps_logger.py", "main.py", "web.html"):
+        shutil.copy(os.path.join(ROOT, n), work)
+    os.makedirs(os.path.join(work, ".venv", "bin"))
+    for n, src in (("python", FAKE_PY), ("mpremote", FAKE_MPREMOTE),
+                   ("shim.py", FAKE_SHIM)):
+        path = os.path.join(work, ".venv", "bin", n)
+        with open(path, "w") as f:
+            f.write(src)
+        os.chmod(path, 0o755)
+    dev = os.path.join(work, "dev")
+    os.makedirs(dev)
+    for n, b in (("gps_logger.mpy", b"OLD MODULE"), ("main.py", b"old main"),
+                 ("web.html", b"old page"), ("gps_logger.py", b"stray"),
+                 ("web.html.new", b"left from a failed deploy")):
+        with open(os.path.join(dev, n), "wb") as f:
+            f.write(b)
+    env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
+               FAKE_LOG=os.path.join(work, "log"),
+               FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
+    env.update(env_extra)
+    r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
+                       capture_output=True, text=True, timeout=60)
+    try:
+        with open(env["FAKE_LOG"]) as f:
+            calls = [json.loads(line) for line in f]
+    except OSError:
+        calls = []
+    return r.returncode, r.stdout, r.stderr, dev, calls
+
+
+def dev_file(dev, n):
+    try:
+        with open(os.path.join(dev, n), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+if shutil.which("bash") and shutil.which("sha256sum"):
+    with open(os.path.join(ROOT, "gps_logger.py"), "rb") as f:
+        new_mpy = b"MPY" + f.read()
+    with open(os.path.join(ROOT, "web.html"), "rb") as f:
+        new_page = f.read()
+    rc, out, err, dev, calls = deploy_run({})
+    cps = [c for call in calls for c in call if c[0] == "cp"]
+    check("DEPLOY: copies to .new, checks, renames; old .new and stray .py go",
+          rc == 0 and dev_file(dev, "gps_logger.mpy") == new_mpy
+          and dev_file(dev, "web.html") == new_page
+          and dev_file(dev, "gps_logger.py") is None
+          and not [n for n in os.listdir(dev) if n.endswith(".new")]
+          and dev_file(dev, ".rtc") == b"0"
+          and len(cps) == 3 and all(c[2].endswith(".new") for c in cps)
+          and "Board: Generic ESP32C6" in out and "(rv32imc)" in out
+          and "Deployed to /dev/fakeACM0" in out,
+          "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
+    rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
+    check("DEPLOY: too little free flash -> stops before copying, old kept",
+          rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
+          and not [c for call in calls for c in call if c[0] == "cp"]
+          and "Not enough free flash" in err, "rc=%d %r" % (rc, err[-300:]))
+    rc, out, err, dev, calls = deploy_run({"FAKE_TRUNC": "gps_logger.mpy"})
+    check("DEPLOY: a cut copy fails the check -> old files kept, .new removed",
+          rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
+          and dev_file(dev, "main.py") == b"old main"
+          and not [n for n in os.listdir(dev) if n.endswith(".new")]
+          and "Copy check FAILED" in err
+          and "Deployed" not in out, "rc=%d %r" % (rc, err[-300:]))
+else:
+    print("SKIP  DEPLOY: no bash/sha256sum")
+shutil.rmtree(dp_td, ignore_errors=True)
+
 
 # --- tools/trk2gpx.py: .trk -> GPX 1.1 ------------------------------------
 import xml.etree.ElementTree as ET
@@ -7031,6 +7322,101 @@ finally:
 check("WEB: free flash is read at most every 30 s", len(calls) == 2,
       repr(calls))
 
+# WEB-PIECES: no multi-KB piece or buffer on the web path (the Python heap's
+# largest free block can be ~2 KB): the diag tail goes out a line a piece,
+# read line by line, and a piece over WEB_CHUNK is sent in slices of itself
+wd_td = tempfile.mkdtemp(prefix="webdiag-")
+saved_diag_file = gl.DIAG_FILE
+gl.DIAG_FILE = os.path.join(wd_td, "diag.log")
+with open(gl.DIAG_FILE, "w") as f:
+    for i in range(60):
+        f.write("up %d utc - nmea 1/0 %s\n" % (i, "x" * 140))
+whole_reads = []
+
+
+class LinesOnly(object):
+    def __init__(self, f):
+        self.f = f
+
+    def seek(self, *a):
+        return self.f.seek(*a)
+
+    def readline(self):
+        return self.f.readline()
+
+    def read(self, *a):
+        whole_reads.append(a)
+        return self.f.read(*a)
+
+    def close(self):
+        self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.f.close()
+
+
+real_open = open
+gl.open = lambda p, *a, **k: LinesOnly(real_open(p, *a, **k))
+try:
+    pieces = list(gl._web_json_parts())
+finally:
+    del gl.open
+    gl.DIAG_FILE = saved_diag_file
+wd = json.loads("".join(pieces))
+check("WEB-PIECES: diag lines are pieces of their own, read in small blocks",
+      wd["diag"] == ["up %d utc - nmea 1/0 %s" % (i, "x" * 140)
+                     for i in range(45, 60)]
+      and max(len(p) for p in pieces) < 400
+      and all(r and r[0] <= 1024 for r in whole_reads),
+      "%d %r" % (max(len(p) for p in pieces), whole_reads))
+sends = []
+kinds = []
+
+
+class RvConnK(RvConnN):
+    def sendall(self, b):
+        kinds.append(type(b).__name__)
+        RvConnN.sendall(self, b)
+c = RvConnK(b"")
+gl._web_send(c, "200 OK", "text/plain", ("a" * 10, "b" * 3000, "c" * 10))
+check("WEB-PIECES: a piece over WEB_CHUNK goes out in WEB_CHUNK memoryview "
+      "slices; nothing over WEB_CHUNK is sent",
+      c.sent.partition(b"\r\n\r\n")[2] == b"a" * 10 + b"b" * 3000 + b"c" * 10
+      and sends[1:] == [10, 1024, 1024, 952, 10]
+      and set(kinds[1:]) == {"memoryview"}, "%r %r" % (sends, kinds))
+
+# WEB-FILES: the file counts of the page are listed at most every 10 s
+# (pending() and pending_bad() listed, sorted and built paths twice a poll)
+fc_td = tempfile.mkdtemp(prefix="webfiles-")
+for n in ("20261001_100000.trk", "20261001_110000.gpx",
+          "20261001_090000.trk.bad", "20261001_100000.trk.pos",
+          "20261001_120000.trk"):
+    open(os.path.join(fc_td, n), "w").close()
+saved_log_dir, saved_log_file = gl.LOG_DIR, gl.log["file"]
+gl.LOG_DIR = fc_td
+gl.log["file"] = fc_td + "/20261001_120000.trk"   # being written
+gl._fc[2] = None
+listings = []
+real_listdir = os.listdir
+os.listdir = lambda p: listings.append(p) or real_listdir(p)
+try:
+    r1 = dict(gl._web_rows())
+    r2 = dict(gl._web_rows())
+    open(os.path.join(fc_td, "20261001_130000.trk"), "w").close()
+    _clock[0] += 11000
+    r3 = dict(gl._web_rows())
+finally:
+    os.listdir = real_listdir
+    gl.LOG_DIR, gl.log["file"] = saved_log_dir, saved_log_file
+check("WEB-FILES: files / bad files counted at most every 10 s",
+      len(listings) == 2 and (r1["files"], r1["bad_files"]) == (2, 1)
+      and (r2["files"], r3["files"], r3["bad_files"]) == (2, 3, 1),
+      "%r %r %r %r" % (listings, (r1["files"], r1["bad_files"]),
+                       r2["files"], r3["files"]))
+
 
 # trk2gpx: .bad/.err files, damaged bytes, non-digit times
 t_td = tempfile.mkdtemp(prefix="rev29t-")
@@ -7378,7 +7764,10 @@ check("PAGE: JSON is generated piece by piece (no list in RAM)",
 import shutil
 import subprocess
 node = shutil.which("node")
-if node is None:
+if node is None and os.environ.get("CI") == "true":
+    check("PAGE: node is installed (CI runs the page checks, never skips)",
+          False)
+elif node is None:
     print("SKIP  PAGE: node not installed")
 else:
     here = os.path.dirname(os.path.abspath(__file__))
@@ -7398,10 +7787,10 @@ else:
           and "<small>SATS</small><b>1<em>/2</em>" in tm
           and "<small>HDOP</small><b>0.88</b>" in tm
           and "<small>UPLINK</small><b>120<em>pts</em>" in tm
-          and '<div class="warn wf"><small>WIFI</small><b><span class="wb"><i class="on" '
-              'style="height:25%"></i><i class="on" style="height:50%"></i><i class="" '
-              'style="height:75%"></i><i class="" style="height:100%"></i></span>'
-              'FAIR<em>-75 dBm</em>' in tm
+          and '<div class="warn"><small>WIFI</small><b><svg class="wi" viewBox="0 0 24 18">'
+              '<circle cx="12" cy="15.5" r="2"/><path class="on" d="M8.5 12.5A5 5 0 0 1 15.5 12.5"/>'
+              '<path d="M5.6 9.6A9 9 0 0 1 18.4 9.6"/><path d="M2.8 6.8A13 13 0 0 1 21.2 6.8"/>'
+              '</svg>50<em>%</em><em class="db">-75 dBm</em></b></div>' in tm
           and "<small>NMEA BAD</small>" in tm, tm[:400])
     check("PAGE: no fix amber, WiFi off shows the state, map says NO FIX",
           '<div class="warn"><small>FIX</small><b>WAITING</b>' in tm2
@@ -7436,10 +7825,51 @@ else:
           and lg.index("BOOT &middot; WATCHDOG &middot; PREVIOUS RUN 10 MIN 00 S")
               < lg.index("3D FIX &middot; 13/21 SATS &middot; 4 PTS")
           and '<span class="err">IDF 20 KB</span>' in lg, lg[:500])
-    check("PAGE: WiFi quality words from RSSI; favicon; map fills wide screens",
-          v.get("wq") == [[4, "EXCELLENT", ""], [3, "GOOD", ""], [2, "FAIR", "warn"],
-                          [1, "WEAK", "bad"], [0, "NO SIGNAL", "bad"], None],
+    # PAGE-WIFI: an arc icon (0-3 arcs lit) and the quality in per cent,
+    # 2 x (RSSI + 100) clamped; amber below -67 dBm, red below -80; no words
+    check("PAGE-WIFI: arcs, quality % and tone from RSSI",
+          v.get("wq") == [[3, 100, ""], [3, 80, ""], [2, 74, ""], [2, 66, ""],
+                          [1, 64, "warn"], [1, 40, "warn"], [0, 38, "bad"],
+                          [0, 0, "bad"], [0, 0, "bad"], None],
           repr(v.get("wq")))
+    check("PAGE-WIFI: Systems line 'ssid · 50% (-75 dBm)', no quality words",
+          "&lt;x&gt; &middot; 50% (-75 dBm)<em>" in sy
+          and not any(w in tm + sy for w in ("GOOD", "FAIR", "WEAK",
+                                             "EXCELLENT", "NO SIGNAL")),
+          sy[:600])
+    # PAGE-NULL: south/west coordinates, Python None in diag lines, quotes
+    check("PAGE-NULL: S/W coordinates as absolute values",
+          v.get("coordSW", "").startswith("33.85678&deg; S  151.21530&deg; W")
+          and v.get("coordNE", "") == "47.10000&deg; N  18.40000&deg; E",
+          repr((v.get("coordSW"), v.get("coordNE"))))
+    check("PAGE-NULL: diag 'sats 0/None' reads -/0, 'idf None' and 'cause "
+          "None' read -",
+          "-/0 SATS" in v.get("logNone", "") and "IDF - KB" in v.get("logNone", "")
+          and "None" not in v.get("logNone", "") + v.get("bootNone", "")
+          and "CAUSE -" in v.get("bootNone", ""),
+          repr((v.get("logNone"), v.get("bootNone"))))
+    check("PAGE-NULL: an empty status.json shows - (no None/null/NaN)",
+          'PY HEAP FREE<span class="">- / - KB</span>' in v.get("nullSys", "")
+          and 'WIFI<span class="">-<em>' in v.get("nullSys", "")
+          and not any(w in v.get("nullSys", "") for w in (
+              "None", "null", "NaN", "undefined")),
+          v.get("nullSys", "")[:600])
+    check("PAGE-NULL: esc() also escapes \" and '",
+          v.get("esc") == "&lt;a href=&quot;x&quot; title=&#39;y&#39;&gt;"
+                          "&amp;&lt;/a&gt;", repr(v.get("esc")))
+    dom = v.get("dom", {})
+    check("PAGE-DOM: tick/paint/placeMap/stale on a stub document",
+          dom.get("first") and dom.get("painted") and dom.get("mapClass") == "map"
+          and dom.get("tilesWide") == 55 and dom.get("tilesNarrow") == 25
+          and dom.get("kept") and dom.get("live") == "LIVE"
+          and dom.get("body") == "" and dom.get("timer") == 15000
+          and dom.get("acc") == "36px"
+          and dom.get("transform", "").startswith("translate(-")
+          and dom.get("staleBody") == "off"
+          and dom.get("staleLive") == "OFFLINE &middot; 0 S AGO"
+          and dom.get("nofix") == "map nofix" and dom.get("timer2") == 30000
+          and dom.get("brokenBody") == "off" and dom.get("never") == "NO ANSWER",
+          repr(dom))
     check("PAGE: satellite table and map tile maths",
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"

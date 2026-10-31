@@ -61,7 +61,10 @@ def _boot_handle_error():
     return True
 
 def _boot_note_wdt():
-    """A WDT reset never hits the Python except path; count it here."""
+    """A WDT reset never hits the Python except path; count it here.
+    A panic is not counted: MicroPython 1.29 reports it as HARD_RESET, the
+    same as machine.reset() (gps_logger's own crash reset, which counted
+    already, its TLS memory reboot, mpremote reset)."""
     try:
         if machine.reset_cause() == machine.WDT_RESET:
             n = _boot_fail_get() + 1
