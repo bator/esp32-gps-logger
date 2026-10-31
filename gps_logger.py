@@ -3512,6 +3512,8 @@ def _guard_start(sock, ms):
 def _guard_stop():
     _guard["until"] = _guard["sock"] = None
 
+_post_phase = [None]                     # "connect", "tls", "http" in a POST
+
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
     followed one as a GET with the old Content-Length (the server then
@@ -3525,6 +3527,7 @@ def _raw_post(url, data, headers, timeout):
     if ":" in host:
         host, _, p = host.rpartition(":")
         port = int(p)
+    _post_phase[0] = "connect"
     ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
     s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
     _guard_start(s, HTTP_MAX)            # the raw socket: closing it fails
@@ -3532,7 +3535,9 @@ def _raw_post(url, data, headers, timeout):
         s.settimeout(timeout)
         s.connect(ai[-1])
         if proto == "https":
+            _post_phase[0] = "tls"       # the handshake
             s = _tls_wrap(s, host)
+        _post_phase[0] = "http"
         hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (path, host)
         for k in headers:
             hdr += "%s: %s\r\n" % (k, headers[k])
@@ -3571,18 +3576,39 @@ def _raw_post(url, data, headers, timeout):
 
 HTTP_POST = _raw_post                    # (tests swap it)
 
+# mbedTLS *_ALLOC_FAILED codes: high-level (SSL, ECP, PK, X509, CIPHER, MD,
+# DHM, PEM, PKCS7) and low-level (MPI, ASN1). An error code can be a
+# high-level and a low-level one added together.
+TLS_ALLOC_HI = (0x7F00, 0x4D80, 0x3F80, 0x2880, 0x6180, 0x5180, 0x3400,
+                0x1180, 0x5780)
+TLS_ALLOC_LO = (0x10, 0x6A)
+
 def _enomem(e):
-    """TLS out of memory: MemoryError, ENOMEM or mbedTLS ALLOC_FAILED."""
+    """TLS out of memory: MemoryError, ENOMEM (modtls raises SSL_ALLOC_FAILED
+    as it) or an mbedTLS ALLOC_FAILED code. modtls turns -1..-255 into a
+    positive errno, so MPI (-0x10) arrives as 16, which is also EBUSY, and
+    ASN1 (-0x6A) as 106: those count only from the TLS handshake."""
     if isinstance(e, MemoryError):
         return True
     a = getattr(e, "args", None) or (None,)
-    return a[0] in (12, -0x7F00, -0x10)
+    n = a[0]
+    if not isinstance(n, int):
+        return False
+    if n == 12:                          # ENOMEM
+        return True
+    if n in TLS_ALLOC_LO:
+        return _post_phase[0] == "tls"
+    if n < 0:
+        n = -n
+        return (n & 0xFF80) in TLS_ALLOC_HI or (n & 0x7F) in TLS_ALLOC_LO
+    return False
 
 def _http_post(size):
     """POST _body[:size]. Returns (status_code or None, retry_after_ms or None)."""
     feed()
     r = None
     code, retry = None, None
+    _post_phase[0] = None
     try:
         r = HTTP_POST("%s/api/v1/overland/batches" % up["url"],
                       memoryview(_body)[:size],
@@ -3597,8 +3623,8 @@ def _http_post(size):
         up["enomem"] = up.get("enomem", 0) + 1
         raise
     except Exception as e:
-        if _enomem(e):
-            up["enomem"] = up.get("enomem", 0) + 1
+        # "in a row": any other failure ends a run of out-of-memory ones
+        up["enomem"] = up.get("enomem", 0) + 1 if _enomem(e) else 0
         print("upload", repr(e))
         if _guard["hits"] != up.get("guard_hits"):
             up["guard_hits"] = _guard["hits"]
@@ -3632,6 +3658,20 @@ def _tls_reboot():
     except Exception:
         pass
     _diag_write("reboot tls memory %d" % up["enomem"])
+    machine.reset()
+    return True
+
+def _lowidf_reboot(big):
+    """At home, the largest IDF heap block too small for TLS: write what is
+    in RAM and restart (its own reason, not the ENOMEM run)."""
+    if not at_home():
+        return False
+    print("upload: IDF heap block %d KB, reboot" % big)
+    try:
+        flush(_still_hold())
+    except Exception:
+        pass
+    _diag_write("reboot low idf %d KB" % big)
     machine.reset()
     return True
 
@@ -3728,11 +3768,10 @@ def upload_tick():
         # allocate (seen as "err net" until a reboot on 2026-10-30)
         up["err"] += 1
         up["state"] = "low idf"
-        up["enomem"] = max(up.get("enomem", 0), TLS_REBOOT_N)
         if up.get("last_err") != "low idf":
             up["last_err"] = "low idf"
             _diag_write("upload low idf %d KB" % big)
-        if not _tls_reboot():
+        if not _lowidf_reboot(big):
             _schedule(now)
         return
     if not _bad_full_left():

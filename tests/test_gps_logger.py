@@ -6301,6 +6301,108 @@ check("TLS: ENOMEM TLS_REBOOT_N times at home -> one controlled reboot",
 _post_raise[0] = None
 gl.wifi["home"] = False
 
+# ENOMEM-RUN: "in a row" means consecutive: another failure ends the run
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.wifi["home"] = True
+make_trk(os.path.join(up_td, "20261006_110000.trk"), 3)
+_resets[:] = []
+seq = ([OSError(12)] * (gl.TLS_REBOOT_N - 1) + [OSError(113)]
+       + [OSError(12)] * (gl.TLS_REBOOT_N - 1))
+try:
+    for e_ in seq:
+        _post_raise[0] = e_
+        try:
+            pump()
+        except SystemExit:
+            break
+        _clock[0] += 1000
+finally:
+    _post_raise[0] = None
+    gl.wifi["home"] = False
+check("ENOMEM-RUN: ENOMEMs split by a network error never reboot",
+      not _resets and gl.up["enomem"] == gl.TLS_REBOOT_N - 1,
+      "resets=%d enomem=%d" % (len(_resets), gl.up["enomem"]))
+
+# ENOMEM-LOWIDF: a low-idf episode away does not arm the ENOMEM reboot:
+# the first ordinary network error at home is just a retry
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261006_120000.trk"), 3)
+real_idf_ = gl.idf_heap
+_resets[:] = []
+try:
+    gl.wifi["home"] = False
+    gl.idf_heap = lambda: (30, 20)
+    pump()
+    lowidf_away = gl.up["state"]
+    gl.idf_heap = lambda: (157, 126)
+    gl.wifi["home"] = True
+    _post_raise[0] = OSError(113)
+    try:
+        pump()
+    except SystemExit:
+        pass
+finally:
+    gl.idf_heap = real_idf_
+    _post_raise[0] = None
+    gl.wifi["home"] = False
+check("ENOMEM-LOWIDF: low idf away, then a net error at home: no reboot",
+      lowidf_away == "low idf" and not _resets
+      and gl.up["state"] == "err net", "resets=%d state=%s" % (
+          len(_resets), gl.up["state"]))
+
+# ENOMEM-CODES: mbedTLS ALLOC_FAILED as modtls raises them
+gl._post_phase = getattr(gl, "_post_phase", [None])
+gl._post_phase[0] = "http"
+codes_ok = all(gl._enomem(OSError(c)) for c in (
+    12, -0x7F00, -0x2880, -0x4D80, -0x3F80, -0x3D10, -(0x2180 + 0x6A)))
+codes_no = not any(gl._enomem(OSError(c)) for c in (
+    16, 106, 113, 104, 110, -0x7200, -0x2700))
+check("ENOMEM-CODES: X509/ECP/PK and high+low ALLOC_FAILED codes count",
+      codes_ok and codes_no)
+gl._post_phase[0] = None
+# ... and 16 (MPI_ALLOC_FAILED after modtls, also EBUSY) only from the
+# TLS handshake
+class RvTls16(RvTls):
+    class SSLContext(RvTls.SSLContext):
+        def wrap_socket(self, s, server_hostname=None):
+            raise OSError(16)
+
+
+class RvSock16(RvSock):
+    def connect(self, addr):
+        raise OSError(16)
+
+
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.socket, gl.select = fake_sockmod, fake_sel
+real_hp = gl.HTTP_POST
+gl.HTTP_POST = gl._raw_post
+saved_tls = sys.modules.get("tls")
+try:
+    sys.modules["tls"] = RvTls16
+    tls_ctx_reset()
+    rv_sock[0] = RvSock(b"", polls=0)
+    gl._http_post(10)
+    in_tls = gl.up["enomem"]
+    rv_sock[0] = RvSock16(b"", polls=0)
+    gl._http_post(10)
+    in_connect = gl.up["enomem"]
+finally:
+    gl.HTTP_POST = real_hp
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if saved_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = saved_tls
+    tls_ctx_reset()
+check("ENOMEM-CODES: 16 counts from the TLS handshake, not from connect",
+      in_tls == 1 and in_connect == 0, "%r %r" % (in_tls, in_connect))
+
 # U-13: a request head over 512 B is read whole before the reply
 class RvConn:
     def __init__(self, req):
