@@ -495,6 +495,15 @@ console line.
   asked anew). The satellite list (UBX-NAV-SAT) and MON-VER polls work the
   same. Each frame is read with one `struct.unpack_from` on the receive
   buffer.
+- **The NMEA setup turns NAV-PVT off.** A VALSET to RAM outlives an ESP
+  reset (the receiver keeps its power), so after a NAV-PVT boot a boot with
+  `GPS_PVT=0` (or one that gave NAV-PVT up) found it still coming beside the
+  NMEA, and both overran 9600 baud. Every NMEA setup now ends with a
+  UBX-CFG-MSG for NAV-PVT at rate 0 (legacy CFG-MSG, as the model is not
+  known yet at the first setup; the M8 and the M10 acknowledge it). A NAK of
+  that frame alone (a u-blox 6 has no NAV-PVT) does not fail the setup. A
+  NAV-PVT frame that still comes in the NMEA mode is not used and counts as
+  a message the setup turned off, so the setup is sent again.
 - **Setup retries.** It is sent again while the receiver still sends the
   sentences it turns off, and also while the setup is not acknowledged (an
   ACK lost, a silent receiver that took the blind burst), less and less
