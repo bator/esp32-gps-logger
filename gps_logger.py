@@ -16,10 +16,18 @@ GPS_HZ = 5                               # fixes a second (NEO-6M max 5);
 SECONDS_Q = 8                            # published seconds kept for log_tick
 GPS_ACK_WAIT = 1000                      # ms to wait for a UBX-ACK per send
 GPS_ACK_TRIES = 4                        # sends of one frame before giving up
+GPS_SETUP_MAX = 4000                     # ms a setup may block the loop: the
+                                         # frames left then go out once,
+                                         # without waiting for an ACK
 GPS_MAX_STD = 20                         # m: receiver's own error estimate
                                          # (GST) above this = not usable
 GPS_RETRY = 5000                         # ms: setup sent again if 1 Hz
 GPS_RETRY_MAX = 300000                   # sentences still come this long after
+GPS_IGNORED_MAX = 60000                  # ms cap between setups a receiver
+                                         # acknowledges but does not take
+GPS_VERIFY = 10000                       # ms after an acknowledged setup:
+                                         # still one fix a second, or no GST
+                                         # = not taken, set up again
 # UBX-CFG-NAV5: how the receiver's own filter is tuned (sent with the setup)
 GPS_DYN_MODEL = 0                        # 0 portable (car and foot alike),
                                          # 2 stationary, 3 pedestrian,
@@ -48,6 +56,9 @@ DIAG = 60000                             # ms between diagnostic log lines
 DIAG_FILE = "/diag.log"                  # survives power-off: what happened
 DIAG_OLD = "/diag.1"                     # on a walk, read it back over USB
 DIAG_MAX = 32768                         # bytes, then DIAG_FILE -> DIAG_OLD
+DIAG_LINE = 220                          # bytes read back per line wanted
+                                         # (status lines are ~180)
+DIAG_BLOCK = 512                         # bytes per read of the tail
 WEB = True                               # status page on port WEB_PORT; the
 WEB_PORT = 80                            # radio stays on at home for it
 WEB_TIMEOUT = 2                          # s a client may take (.env WEB=0)
@@ -66,6 +77,8 @@ SV_WAIT = 700                            # again if older than SV_FRESH and
 SV_MISS = 2                              # unanswered polls: no more waiting
 GPS_LOOP_WINDOW = 10000                  # ms: start-up banners and no NMEA
 GPS_LOOP_BANNERS = 3                     # in this window = a reset loop
+GPS_LOOP_SAY = 300000                    # ms between its diag lines (the
+                                         # windows between are counted)
 GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
 GPS_FLAP_WINDOW = 600000                 # within this many ms = a reset loop
 GPS_STORM_WAIT = 30000                   # ms between setups while it loops:
@@ -248,6 +261,9 @@ UP_WAIT_MAX = max(BACKOFF_MAX, AUTH_BACKOFF)  # longest upload/hold deadline
 
 TICKS_OLD = 1 << 29                      # "very old" for a wrapped age
 TICKS_SKEW = 1000                        # ms a timestamp may be "ahead"
+TICKS_CAP = 86400000                     # ms after which gps_check forgets
+                                         # a receiver timestamp (it would
+                                         # read as fresh again after 2**30)
 
 def _age(now, t):
     """ms since ticks t. A timestamp taken just after now (say read_uart()
@@ -287,7 +303,9 @@ def reset():
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
               storm_at=None, boot_at=None,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
-              gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0)
+              gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0,
+              ack_id=None, ack=None, ack_n=0, checked=True, hz1=0, hz5=0,
+              set_ok=0, gst_at=None, loop_more=0, loop_said=None)
     _ep_new(None)
 
 def _ep_new(t):
@@ -355,6 +373,11 @@ def _publish():
     if a is None:
         return
     n = a[4]
+    if not st["checked"]:                # _setup_check: did GPS_HZ take?
+        if n > 1:
+            st["hz5"] += 1
+        else:
+            st["hz1"] += 1
     spd = ep["spd"]
     if n > 1 and spd is not None and spd > AVG_MAX_SPEED:
         # moving: the mean of the second lies ~0.4 s along the track but is
@@ -452,6 +475,7 @@ def gst(talker, f):
     position: the larger of latitude and longitude. A cold start converging
     shows here while its HDOP already looks good."""
     _second(f[1])
+    st["gst_at"] = time.ticks_ms()       # it comes (_setup_check)
     sl, sn = _num(f[6]), _num(f[7])
     if sl is not None and sn is not None:
         ep["std"] = sl if sl > sn else sn
@@ -467,13 +491,14 @@ def txt(talker, f):
         # 2026-10-30 had 541 restarts, each setup blocking the loop
         now = time.ticks_ms()
         st["boot_at"] = now
-        storm = (st["storm_at"] is not None
+        print("gps restarted")
+        _gps_flap(now)                   # first: the restart that makes
+        storm = (st["storm_at"] is not None     # it a storm waits too
                  and _age(now, st["storm_at"]) < GPS_FLAP_WINDOW)
         st["setup_wait"] = GPS_STORM_WAIT if storm else GPS_RETRY
+        st["ack_n"] = 0                  # at its defaults: a fresh start
         # maybe another receiver (swapped while running): ask anew
         st.update(svs=None, svs_at=None, sv_msg=None, gps_ver=None)
-        print("gps restarted")
-        _gps_flap(time.ticks_ms())
 
 def _gps_flap(now):
     """A receiver that restarts every few seconds but sends NMEA in between
@@ -549,19 +574,27 @@ def _gps_ver(p):
             out.append(e)
     return ", ".join(out)
 
+def _ubx_ck(fr, a, b):
+    """Fletcher checksum (ck_a, ck_b) of fr[a:b], in place (no copy)."""
+    ca = cb = 0
+    for k in range(a, b):
+        ca = (ca + fr[k]) & 255
+        cb = (cb + ca) & 255
+    return ca, cb
+
 def _ubx_frame(fr):
-    """A whole UBX frame read from the stream (read_uart). NAV-SVINFO and
+    """A whole UBX frame with a good checksum, read from the stream
+    (read_uart; a memoryview into its buffer, not kept). NAV-SVINFO and
     NAV-SAT fill st["svs"]: (svid, cno dBHz, elevation, azimuth, used,
-    unhealthy, gnssId) per satellite; MON-VER fills st["gps_ver"]. Others
-    (late ACKs) are dropped."""
-    a = b = 0
-    for x in fr[2:-2]:
-        a = (a + x) & 255
-        b = (b + a) & 255
-    if a != fr[-2] or b != fr[-1]:
-        st["err"] += 1
-        return
+    unhealthy, gnssId) per satellite; MON-VER fills st["gps_ver"]; an
+    ACK-ACK / ACK-NAK for the frame _ubx_ack waits for (st["ack_id"]) sets
+    st["ack"] to 1 / 0. Others (late ACKs) are dropped."""
     cls, mid = fr[2], fr[3]
+    if cls == 0x05:
+        if (mid < 2 and len(fr) == 10 and st["ack"] != 1
+                and (fr[6] << 8 | fr[7]) == st["ack_id"]):
+            st["ack"] = mid
+        return
     if cls == 0x0A and mid == 0x04 and len(fr) >= 48:
         try:
             st["gps_ver"] = _gps_ver(fr[6:-2])
@@ -652,34 +685,38 @@ def _nav5():
     p[22] = min(max(GPS_STATIC_HOLD, 0), 255)   # staticHoldThresh cm/s
     return _ubx(0x06, 0x24, bytes(p))
 
-def _ubx_ack(frame):
+def _ubx_ack(frame, t0):
     """Send a UBX-CFG frame until the receiver acknowledges it (UBX-ACK-ACK
-    for its class and id), at most GPS_ACK_TRIES times: True, None for a
-    UBX-ACK-NAK (it answers, but refuses the frame), False for silence. An overrun receiver
-    sends the ACK seconds late, so one that comes during a later try counts
-    too; what was read before the first send (an older ACK for the same
-    id) does not. The NMEA read meanwhile is dropped (a few seconds)."""
-    want = b"\xb5\x62\x05\x01\x02\x00" + frame[2:4]
-    nak = b"\xb5\x62\x05\x00\x02\x00" + frame[2:4]
-    t0 = time.ticks_ms()
-    while uart.any() and time.ticks_diff(time.ticks_ms(), t0) < 200:
-        uart.readinto(_chunk)            # a streaming receiver never empties
-                                         # (small reads: see _chunk)
-    raw = b""
-    for _ in range(GPS_ACK_TRIES):
-        uart.write(frame)
-        t0 = time.ticks_ms()
-        while time.ticks_diff(time.ticks_ms(), t0) < GPS_ACK_WAIT:
-            n = uart.any()
-            if n:
-                raw = raw[-16:] + uart.read(n)
-                if want in raw:
-                    return True
-                if nak in raw:
-                    return None          # answered, but refused
-            time.sleep_ms(5)
-        feed()
-    return False
+    for its class and id), at most GPS_ACK_TRIES times, and after the first
+    send only until GPS_SETUP_MAX after t0 (the setup's start): True, None
+    for a UBX-ACK-NAK (it answers, but refuses the frame), False for
+    silence. What is read meanwhile goes through read_uart() as always: the
+    NMEA is handled (a start-up banner counts) and _ubx_frame notes the
+    answer. An overrun receiver sends the ACK seconds late, so one that
+    comes during a later try counts too; what was read before the first
+    send (an older ACK for the same id) does not."""
+    read_uart()
+    st["ack_id"], st["ack"] = frame[2] << 8 | frame[3], None
+    try:
+        for k in range(GPS_ACK_TRIES):
+            if k and _age(time.ticks_ms(), t0) >= GPS_SETUP_MAX:
+                break
+            uart.write(frame)
+            t1 = time.ticks_ms()
+            while True:
+                read_uart()
+                a = st["ack"]
+                if a is not None:
+                    return True if a else None   # None: answered, refused
+                now = time.ticks_ms()
+                if (_age(now, t1) >= GPS_ACK_WAIT
+                        or _age(now, t0) >= GPS_SETUP_MAX):
+                    break
+                time.sleep_ms(5)
+            feed()
+        return False
+    finally:
+        st["ack_id"] = None
 
 def gps_setup():
     """Ask the receiver for GPS_HZ fixes a second (and the NAV5 filter
@@ -692,8 +729,13 @@ def gps_setup():
     TX, not a u-blox), the message frames are sent once without waiting and
     the rate is left alone; gps_check sends the setup again while the
     receiver still sends the sentences it turns off, and until then each
-    second's average is that one fix."""
-    st["setup_at"], st["extra"] = time.ticks_ms(), 0
+    second's average is that one fix. The whole setup blocks the loop
+    GPS_SETUP_MAX at most (late ACKs took 10-30 s): what is not
+    acknowledged by then is sent once without waiting, as if silent."""
+    read_uart()                          # a banner in it came before
+    t0 = time.ticks_ms()
+    boots = st["gps_boots"]
+    st["setup_at"], st["extra"] = t0, 0
     ok = False
     msgs = [_ubx(0x06, 0x01, bytes((0xF0, mid, rate)))
             for mid, rate in GPS_MSGS]
@@ -703,22 +745,22 @@ def gps_setup():
         # unanswered the other message frames are sent without waiting (a
         # receiver that stops answering blocks the loop ~4 s, not ~4 s per
         # frame) and the receiver stays at 1 Hz until gps_check retries.
-        if _ubx_ack(_rate(1000)):
+        if _ubx_ack(_rate(1000), t0):
             # NAV5 is a filter tuning, not part of the 5 Hz setup: a receiver
             # that refuses it (another model, a NAK) still gets the rest
-            r = _ubx_ack(_nav5())
+            r = _ubx_ack(_nav5(), t0)
             st["nav5_ok"] = r is True
             ok = r is not False          # silent: it stopped answering
             if r is None:
                 print("gps nav5 refused")
             for fr in msgs:
                 if ok:
-                    ok = _ubx_ack(fr) is True
+                    ok = _ubx_ack(fr, t0) is True
                 else:
                     uart.write(fr)
                     time.sleep_ms(30)
             if ok:
-                ok = _ubx_ack(_rate(1000 // GPS_HZ)) is True
+                ok = _ubx_ack(_rate(1000 // GPS_HZ), t0) is True
         else:
             # no answer: an overrun receiver ignores single frames but takes
             # a burst (measured): the message frames at once cut its output
@@ -728,56 +770,136 @@ def gps_setup():
                 time.sleep_ms(30)
     except Exception as e:
         print("gps setup", repr(e))
-    # sentences sent while the setup ran are not a receiver that ignored it
-    st["setup_at"], st["extra"] = time.ticks_ms(), 0
-    st["setup_ok"] = ok
+    # sentences sent while the setup ran are not a receiver that ignored
+    # it; a restart meanwhile (its banner was read) is: set up again
+    st.update(setup_at=time.ticks_ms(),
+              extra=0 if st["gps_boots"] == boots else 1, setup_ok=ok,
+              checked=not ok, hz1=0, hz5=0, set_ok=st["ok"])
     if ok:
-        st["setup_wait"] = GPS_RETRY     # it listens: a later revert is quick
+        # it listens: a later revert is quick. One that acknowledges but
+        # keeps sending what it turned off (gps_check counts ack_n) less
+        # and less often: the first retry after GPS_RETRY (that ACK may
+        # have been a late one of another frame), then doubling
+        n = st["ack_n"]
+        st["setup_wait"] = min(GPS_RETRY << (n - 1 if n > 1 else 0),
+                               GPS_IGNORED_MAX)
         st["view"] = {}                  # GSV is off now: no frozen count
     print("gps setup", "ok" if ok else "no ack")
+
+def _setup_check(now):
+    """GPS_VERIFY after an acknowledged setup: did it take? An ACK may be a
+    late one of another frame, and a receiver may acknowledge and ignore.
+    Valid seconds all at one fix (GPS_HZ not taken), or NMEA coming but no
+    GST (the GPS_MAX_STD filter would be off without a word): counted as
+    a sentence it should not send, so gps_check sets it up again. Without
+    a fix or without NMEA there is nothing to tell (no verdict)."""
+    if st["checked"] or _age(now, st["setup_at"]) < GPS_VERIFY:
+        return
+    st["checked"] = True
+    slow = GPS_HZ > 1 and st["hz1"] >= 3 and not st["hz5"]
+    g = st["gst_at"]
+    no_gst = (st["ok"] - st["set_ok"] >= 10
+              and (g is None or time.ticks_diff(g, st["setup_at"]) < 0))
+    if slow or no_gst:
+        st["extra"] += 1
+        print("gps setup not taken:", "1 fix/s" if slow else "no GST")
+    elif not st["extra"]:
+        st["ack_n"] = 0                  # it took this one
+
+_STAMPS = ("rx", "pos_at", "hdop_at", "std_at", "gsa_at", "gst_at",
+           "boot_at", "loop_said")
+
+def _stamps_old(now):
+    """ticks_ms wraps every 2**30 ms, so a timestamp left alone for 12.4
+    days reads as fresh again (and from 6.2 days as TICKS_OLD). Every
+    GPS_LOOP_WINDOW: the storm mark and the restart times end with
+    GPS_FLAP_WINDOW, the receiver's other stamps (and a satellite list)
+    with TICKS_CAP; setup_at (None = never set up) stays TICKS_CAP old."""
+    t = st["storm_at"]
+    if t is not None and _age(now, t) >= GPS_FLAP_WINDOW:
+        st["storm_at"] = None
+    t = st["boot_t"]
+    while t and _age(now, t[0]) > GPS_FLAP_WINDOW:
+        t.pop(0)
+    for k in _STAMPS:
+        t = st[k]
+        if t is not None and _age(now, t) >= TICKS_CAP:
+            st[k] = None
+    t = st["svs_at"]
+    if t is not None and _age(now, t) >= TICKS_CAP:
+        st["svs"] = st["svs_at"] = None
+    t = st["setup_at"]
+    if t is not None and _age(now, t) > TICKS_CAP:
+        st["setup_at"] = time.ticks_add(now, -TICKS_CAP)
 
 def gps_check(now):
     """Send the setup again while the receiver still sends the sentences it
     turns off: a receiver powered up with the board is still booting when
     run() sends it, and stays at 1 Hz. Less and less often, so a receiver
     that never takes it (or an unwired ESP TX) costs next to nothing."""
-    _gps_loop_check(now)
-    if st["sv_poll_at"] is None or _age(now, st["sv_poll_at"]) >= SV_POLL:
-        sv_poll(now)
+    if _age(now, st["loop_at"]) >= GPS_LOOP_WINDOW:
+        _stamps_old(now)
+        _gps_loop_check(now)
+    _setup_check(now)
     # also when the setup went out but was not acknowledged (an ACK lost,
     # a silent receiver that took the blind burst): it may sit at 1 Hz
     at = st["setup_at"]
     b = st["boot_at"]
-    if (st["setup_wait"] > GPS_RETRY and b is not None and st["extra"]
+    if (st["setup_wait"] > GPS_RETRY and b is not None
+            and (st["extra"] or st["setup_ok"] is not True)
             and _age(now, b) >= GPS_STORM_QUIET):
         # quiet for GPS_STORM_QUIET since the last restart: the storm (or a
         # long backoff) is over, the receiver sits at 1 Hz with every
-        # sentence on: set it up now (measured: over a minute at 1 Hz)
+        # sentence on (or took only the blind burst, unacknowledged): set
+        # it up now (measured: over a minute at 1 Hz)
         st["setup_wait"] = GPS_RETRY
         st["boot_at"] = None
-    if (at is None or (not st["extra"] and st["setup_ok"] is True)
+    # the satellite poll after a setup that is due, not before it: the
+    # receiver is busy with the frames and the answer would be a miss
+    poll = st["sv_poll_at"] is None or _age(now, st["sv_poll_at"]) >= SV_POLL
+    if not (at is None or (not st["extra"] and st["setup_ok"] is True)
             or _age(now, at) < st["setup_wait"]):
-        return
-    st["setup_wait"] = min(st["setup_wait"] * 2, GPS_RETRY_MAX)
-    print("gps setup again")
-    gps_setup()
+        if st["setup_ok"] is True and st["extra"]:
+            st["ack_n"] += 1             # acknowledged, but not taken
+        st["setup_wait"] = min(st["setup_wait"] * 2, GPS_RETRY_MAX)
+        print("gps setup again")
+        gps_setup()
+        now = time.ticks_ms()
+    if poll:
+        sv_poll(now)
+
+def _loop_diag(now, line):
+    st["loop_more"], st["loop_said"] = 0, now
+    _diag_write(line)
 
 def _gps_loop_check(now):
     """A receiver in a reset loop (supply dips, a bad module) sends only the
     start of its banner over and over, cut off before the newline, and no
     NMEA (seen on the board: "$GPTXT,01,01,02,u" + 0xFF junk, nothing else,
     no UBX answer). Every GPS_LOOP_WINDOW: GPS_LOOP_BANNERS or more banner
-    starts and not one valid sentence -> a console warning, counted."""
+    starts and not one valid sentence -> a console warning, counted. The
+    diag log gets the first warning, then (the windows in between counted
+    in RAM) one "N more windows" line per GPS_LOOP_SAY and one when it
+    ends: a line every window was 12.6 KB an hour."""
     if _age(now, st["loop_at"]) < GPS_LOOP_WINDOW:
         return
     b = st["banners"] - st["loop_b"]
     ok = st["ok"] - st["loop_ok"]
+    more = st["loop_more"]
     if b >= GPS_LOOP_BANNERS and ok == 0:
         st["loops"] += 1
         st["storm_at"] = now
         print("gps reset loop?", b, "banners, no NMEA in",
               GPS_LOOP_WINDOW // 1000, "s: check the GPS power")
-        _diag_write("gps reset loop %d banners, no NMEA" % b)
+        said = st["loop_said"]
+        if said is not None and _age(now, said) < GPS_LOOP_SAY:
+            st["loop_more"] = more + 1
+        elif more:
+            _loop_diag(now, "gps reset loop %d more windows" % (more + 1))
+        else:
+            _loop_diag(now, "gps reset loop %d banners, no NMEA" % b)
+    elif more:
+        _loop_diag(now, "gps reset loop %d more windows" % more)
     st.update(loop_at=now, loop_b=st["banners"], loop_ok=st["ok"])
 
 def _temp():
@@ -870,17 +992,44 @@ def _diag_utc():
     return "-" if t is None else _stamp_at(t)[1]
 
 def _diag_tail(path, n):
-    """The last n lines of a diag file (reads only its tail), [] if none."""
+    """The last n lines of a diag file, [] if none. Reads only its last
+    DIAG_LINE * n bytes (status lines are ~180 B), in DIAG_BLOCK pieces:
+    one 3 KB read needs a free block that big, and the heap may not have
+    one (it then grows into the IDF heap TLS needs). A line that is not
+    UTF-8 is left out."""
+    out = []
     try:
         size = _file_size(path) or 0
-        with open(path) as f:
-            if size > 160 * n:
-                f.seek(size - 160 * n)
-                f.readline()             # a partial line
-            lines = f.read().splitlines()
-        return lines[-n:]
-    except (OSError, ValueError):
-        return []
+        start = size - DIAG_LINE * n
+        with open(path, "rb") as f:
+            if start > 0:
+                f.seek(start)
+            part = b""
+            cut = start > 0              # the first line is a partial one
+            while True:
+                b = f.read(DIAG_BLOCK)
+                if not b:
+                    break
+                lines = (part + b).split(b"\n")
+                part = lines.pop()
+                for line in lines:
+                    if cut:
+                        cut = False
+                    elif line:
+                        try:
+                            out.append(line.decode())
+                        except UnicodeError:
+                            continue
+                        if len(out) > n:
+                            out.pop(0)
+        if part and not cut:
+            try:
+                out.append(part.decode())
+            except UnicodeError:
+                pass
+        return out[-n:]
+    except OSError:
+        return out[-n:]
 
 _up = [time.ticks_ms(), time.ticks_ms()]  # ms since boot, ticks then
 
@@ -996,7 +1145,7 @@ def checksum_ok(line):
     if not line.startswith(b"$") or star < 0:
         return False
     c = 0
-    for b in line[1:star]:
+    for b in memoryview(line)[1:star]:   # no copy of the line
         c ^= b
     try:
         return c == int(line[star + 1:star + 3], 16)
@@ -1023,48 +1172,103 @@ def handle(line):
     except (ValueError, IndexError, UnicodeError):
         st["err"] += 1
 
-_buf = b""
-_chunk = bytearray(256)                  # read in small pieces: one big
-                                         # allocation grows the heap (see
-                                         # Upload) and starves TLS
+# What the UART delivers goes into one preallocated buffer, read in place
+# and compacted: growing a bytes object by each read and slicing it at each
+# line made a new copy of everything left (up to ~1.3 KB) several times a
+# second, and one big allocation grows the heap (see Upload) and starves
+# TLS. The scan for line ends and UBX sync bytes is a plain loop
+# (bytearray.find is not something to count on in MicroPython).
+RX_READ = 256                            # bytes per readinto: small pieces
+RX_LINE = 256                            # no newline after this many bytes
+RX_FRAME = 1100                          # (or a UBX frame this long): junk
+_rx = bytearray(RX_FRAME + RX_READ)
+_rxv = memoryview(_rx)
+_rx_n = 0                                # bytes in _rx
+_rx_s = 0                                # scanned up to here: no line end,
+                                         # no UBX sync before it
+_BANNER = b"TXT,01,01,02,"               # + "u": a u-blox start-up banner
+
+def _rx_drop(r):
+    """Drop the first r bytes of _rx, the rest moved to the front in pieces
+    that do not overlap (MicroPython copies a slice with memcpy)."""
+    global _rx_n
+    n = _rx_n - r
+    k = 0
+    while k < n:
+        m = n - k if n - k < r else r
+        _rxv[k:k + m] = _rxv[r + k:r + k + m]
+        k += m
+    _rx_n = n
 
 def read_uart():
-    global _buf
+    global _rx_n, _rx_s
+    b = _rx
     while uart.any():
-        k = uart.readinto(_chunk)
+        n = _rx_n
+        k = uart.readinto(_rxv[n:n + RX_READ])
         if not k:
             return
         st["rx"] = time.ticks_ms()
         st["spin"] += 1
-        old = len(_buf)
-        _buf += memoryview(_chunk)[:k]
         # a start-up banner (or its start), also when split across reads
-        if _buf.find(b"TXT,01,01,02,u", old - 13 if old > 13 else 0) >= 0:
-            st["banners"] += 1
+        for j in range(n if n > 13 else 13, n + k):
+            if b[j] == 0x75 and bytes(_rxv[j - 13:j]) == _BANNER:
+                st["banners"] += 1
+        n += k
+        _rx_n = n
+        r = 0                            # bytes before r are done with
+        s = _rx_s
         while True:
-            i = _buf.find(b"\n")
-            u = _buf.find(b"\xb5\x62")      # never in NMEA (ASCII)
-            if u >= 0 and (i < 0 or u < i):
-                # a binary UBX answer: whole, by its length (it may hold
-                # 0x0A bytes); what came before it is a cut-off line
-                if len(_buf) < u + 6:
+            j = s
+            while j < n:
+                c = b[j]
+                if c == 10 or c == 0xB5:
                     break
-                need = u + 8 + (_buf[u + 4] | _buf[u + 5] << 8)
-                if need - u > 1024:      # not a frame: skip the sync bytes
-                    _buf = _buf[u + 2:]
-                    continue
-                if len(_buf) < need:
-                    break
-                fr, _buf = _buf[u:need], _buf[need:]
-                _ubx_frame(fr)
-                continue
-            if i < 0:
+                j += 1
+            if j == n:
+                s = n
                 break
-            line, _buf = _buf[:i], _buf[i + 1:]
-            handle(line)
-        u = _buf.find(b"\xb5\x62")
-        if len(_buf) > (1100 if u >= 0 else 256):
-            _buf = b""                   # no newline in sight: garbage/baud
+            if b[j] == 10:
+                e = j - 1 if j > r and b[j - 1] == 13 else j
+                handle(bytes(_rxv[r:e]))
+                r = s = j + 1
+                continue
+            if j + 1 == n:
+                s = j                    # 0xB5 last: a sync byte maybe
+                break
+            if b[j + 1] != 0x62:         # never in NMEA (ASCII)
+                s = j + 1
+                continue
+            # a binary UBX answer: whole, by its length (it may hold 0x0A
+            # bytes); what came before it is a cut-off line
+            r = s = j
+            if n < j + 6:
+                break
+            need = j + 8 + (b[j + 4] | b[j + 5] << 8)
+            if need - j > 1024:          # not a frame: skip the sync bytes
+                r = s = j + 2
+                continue
+            if n < need:
+                break
+            ca, cb = _ubx_ck(b, j + 2, need - 2)
+            if ca == b[need - 2] and cb == b[need - 1]:
+                _ubx_frame(_rxv[j:need])
+                r = s = need
+                continue
+            # a broken frame, or sync bytes in junk with a plausible length:
+            # only they are skipped, the NMEA behind is read (from its $)
+            st["err"] += 1
+            s = j + 2
+            while s < n and b[s] != 0x24 and b[s] != 0xB5:
+                s += 1
+            r = s
+        if r:
+            _rx_drop(r)
+        _rx_s = s - r
+        n = _rx_n
+        frame = n > 1 and b[0] == 0xB5 and b[1] == 0x62
+        if n > (RX_FRAME if frame else RX_LINE):
+            _rx_n = _rx_s = 0            # no newline in sight: garbage/baud
 
 # --- Watchdog ---------------------------------------------------------------
 # Created only from run()/_loop(), so the GPIO25 boot-bypass REPL is not
@@ -3855,7 +4059,12 @@ def _web_close():
         _web_sock = None
 
 def _web_diag():
-    return _diag_tail(DIAG_FILE, WEB_DIAG)
+    """The last WEB_DIAG diag lines; just after a rotation the rest from
+    DIAG_OLD (the new file holds one line then)."""
+    lines = _diag_tail(DIAG_FILE, WEB_DIAG)
+    if len(lines) < WEB_DIAG:
+        lines = _diag_tail(DIAG_OLD, WEB_DIAG - len(lines)) + lines
+    return lines
 
 def _prev_text():
     if prev_run["up"] is None:
