@@ -137,6 +137,23 @@ except Exception as e:
     crash = e
 check("non-UTF-8 SSID scan", crash is None and len(sl["aps"]) == 1)
 
+# the departure ring (array module, single-precision offsets) rebuilds the
+# way out as regular track lines
+gl.log["still"] = sl = gl._still_state()
+sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
+gl.st.update(valid=True, date="2026-10-29", alt=123.4, hdop=1.2,
+             hdop_at=time.ticks_ms(), fixtype=3)
+for k in range(5):
+    gl.st["time"] = "06:41:%02d" % (15 + k)
+    gl._ring_add(sl, time.ticks_ms(), (47.5, 19.0 + k * 0.0002), k * 15.0)
+check("seconds since 2020 are small ints", 0 < gl._fix_s() < 2 ** 30)
+gl._still_leave()
+b = gl.log["batch"]
+check("departure ring way out", len(b) == 5 and b[0]
+      == "47.500000,19.000000,123.4,1.2,20261029T064115Z\n"
+      and b[4] == "47.500000,19.000800,123.4,1.2,20261029T064119Z\n")
+gl.log_reset()
+
 try:
     jd = json.loads("".join(gl._web_json_parts()))
 except Exception as e:

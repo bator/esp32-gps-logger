@@ -411,9 +411,14 @@ console line.
   on close, so a power cut leaves the old or the new version. A line cut off
   by a power loss is skipped on read.
 - **Segments and files.** A short fix loss starts a new segment (the `-`
-  goes before the first point after it). A loss over 5 minutes starts a new
-  file. On WiFi a file open for 5 minutes is closed so it can upload; driving
-  offline stays one file, and parking does not open empty files.
+  goes before the first point after it; every loss gets its own, also while
+  the points before it are still held in RAM). A loss over 5 minutes starts
+  a new file: the old track is closed so it uploads. Only while flash writes
+  keep failing does the new trip go on in the same file, after a `-`. Lines
+  a stay still being proven held from before the loss move on to the new
+  file, and the trip follows them after a `-`. On WiFi a file open for 5
+  minutes is closed so it can upload; driving offline stays one file, and
+  parking does not open empty files.
 - **Flash.** 32 kB are kept free. Logging stops when full and resumes when
   space is freed.
 
@@ -449,7 +454,14 @@ tell a stay from a drive, so the stay filter works on positions.
   2 m (a vehicle), or 10 samples out there that gain at least 5 m in all (a
   walk). A multipath jump that freezes 200 m away does neither, however long
   it lasts, and an excursion that turns back does not count. The way out is
-  written from near the anchor, from the last 90 samples, in time order.
+  written from near the anchor, from the last 90 samples, in time order
+  (kept in preallocated arrays, 24 bytes a sample: as line tuples they took
+  ~20 kB of the heap and broke uploads).
+- **Leaving after a fix gap** (over 30 s; a metro or a garage, then sitting
+  still elsewhere): a fix more than 300 m from the anchor, or 3 in a row
+  beyond 150 m, ends the stay without waiting for them to recede, and the
+  way out starts there. Before, nothing receded, so the stay went on and
+  nothing was written at the new place. Leaving home keeps its check below.
 - **Leaving without a fix** (away from home). The first 3 WiFi scans of the
   stay (keep-alive pulses, roam and connect rounds) note the access points
   around; later scans that see one of them add the others seen with it (a
@@ -462,13 +474,19 @@ tell a stay from a drive, so the stay filter works on positions.
   is around while learning, or with no scans (keep-alive `gpio`/`radio` or
   off, the radio connected), only a fix ends the stay, or:
 - **Home without a fix.** An away stay ends once the home WiFi is up and no
-  usable fix came for 30 s (`stay end: home without a fix`). Left running,
-  it stamped the old place next morning and swallowed a trip that did not
-  recede from it.
+  usable fix came for 30 s (`stay end: home without a fix`), counted from
+  the fix that began the stay at the earliest: the home WiFi connecting
+  just after arriving no longer ended a stay proven seconds before. Left
+  running, it stamped the old place next morning and swallowed a trip that
+  did not recede from it.
 - **Drift hold.** What a stay still being proven holds in RAM is not the
   previous window when the open one is already 150 m beyond it (a drive),
-  and it is written 10 minutes after the fix was lost (`HOLD_RELEASE`): the
-  end of a trip into a garage or a house no longer waits in RAM only.
+  nor an open window that has spread out (its centroid over 100 m from both
+  its first and its latest fix: a drive, which used to wait up to two
+  minutes in RAM), and it is written 10 minutes after the fix was lost
+  (`HOLD_RELEASE`): the end of a trip into a garage or a house no longer
+  waits in RAM only. A fix back after 5 minutes more than 150 m away writes
+  what was held to the old track before it closes.
 - **Leaving home** is accepted only once the home network is out of range
   (below −75 dBm: the RSSI when connected, else a ~2 s scan). While it is in
   range the departure is a GPS jump (measured: a 194 m jump at a desk) and
