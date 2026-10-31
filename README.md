@@ -172,7 +172,8 @@ PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 ```
 
 The script asks the board which chip it is, compiles `gps_logger.py` to
-`gps_logger.mpy` for it, copies it with `main.py`, removes a stray
+`gps_logger.mpy` for it, copies it with `main.py` and the status page
+`web.html`, removes a stray
 `gps_logger.py`, clears the boot-fail counter and resets the board.
 
 The module must run precompiled: compiling on the device grows the Python
@@ -271,19 +272,20 @@ minute. After a walk, plug the board in and read it:
 | `sats seen/used` | Satellites with a signal (from the receiver's satellite list, polled once a minute) and used in the fix |
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
-| `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free heap |
-| `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB (it grows into the IDF heap). TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`), and at home the board reboots cleanly |
+| `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
+| `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`), and at home the board reboots cleanly |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
-`http://192.168.1.60/`, reloads every 15 s) and the same data as JSON at
+`http://192.168.1.60/`) and the same data as JSON at
 `/status.json`: fix, satellites seen/used ("used" from the satellite list:
 GGA stops at 12) and the satellite list with its age (system and number,
 e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`, `SBAS 123`; signal in
 dBHz, elevation, azimuth, used), HDOP, GPS time, position, NMEA counts, the
 receiver model, receiver restarts; points logged, waiting and uploaded,
 quarantined `.bad` files, upload state, stay; uptime and how long the previous run lasted (e.g. `58 min
-14 s`; seconds in the JSON), boot cause, chip temperature, free heap and flash,
+14 s`; seconds in the JSON), boot cause, chip temperature, free Python heap
+and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
 page fits one phone screen: four tiles (fix with a green/amber/red dot and
 HDOP, satellites used/seen, points waiting for upload with the upload
@@ -292,9 +294,16 @@ state, WiFi signal), a sky plot of the satellites (centre = overhead, edge
 GLONASS pink; filled = in the fix, hollow = not used, bigger = stronger)
 and one bar per satellite (height = signal, a full bar is 45 dBHz). The
 full list, the satellite table and the diagnostic log are folded under
-*Details*, *Satellites* and *Diagnostic log*; what you open stays open
-across the 15 s reloads. It follows the phone's dark mode; the page rounds
-HDOP to two decimals, the JSON keeps the receiver's value. It is
+*Details*, *Satellites* and *Diagnostic log*. The page is a file on the
+board (`/web.html`, copied by `deploy.sh`) and loads once; then it asks
+for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
+only the boxes, so open sections stay open. When the board does not answer
+(asleep, out of range) the boxes fade and the line under the name says
+`offline · last update 2 min 10 s ago`. It follows the phone's dark mode;
+the page rounds HDOP to two decimals, the JSON keeps the receiver's value.
+The board sends the file in 1 KB reads and the JSON piece by piece, so a
+page view needs ~2 KB of Python heap (building the whole page used to need
+~20 KB, enough to double the Python heap into the IDF heap TLS needs). It is
 plain HTTP without a password: keep it on your own network. The request
 head is read whole (up to 2 KB), the reply goes out in small pieces with
 the GPS read in between, and the free flash is measured at most every 30 s. For the page
@@ -572,6 +581,17 @@ a false attempt, and switching to a hidden home can be slower.
 - **TLS memory:** five TLS allocation failures in a row at home
   (`TLS_REBOOT_N`) restart the board cleanly (`reboot tls memory` in the
   diagnostic log): the IDF heap stays fragmented otherwise.
+- **Python heap vs IDF heap.** MicroPython 1.29 starts the Python heap
+  small and, when an allocation does not fit even after a collection,
+  adds an area at least as big as the whole heap so far, taken from the
+  largest free IDF block. Measured overnight on 2026-10-31: the heap sat at
+  124 KB with 3–8 KB free; each doubling to 248 KB took the 124 KB IDF block
+  (IDF free 159 → 31 KB, largest 148 → 16 KB) and TLS could not start until
+  the area emptied and was freed again. So the page streams its replies,
+  and before giving up on TLS (`TLS_MIN_KB`) the upload runs `gc.collect()`,
+  which returns an empty grown area, and measures again. `gc.mem_free()`
+  counts that largest IDF block as free Python heap, so the diag and the
+  page subtract it (`mem`, `heap`).
 
 ### Watchdog and recovery
 
@@ -680,6 +700,7 @@ with a NEO-6M; most never need changing.
 | `STATUS` | 10 min | Console `status` line interval |
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` / `WEB_TIMEOUT` | on / 80 / 2 s | Status page (`.env` `WEB`), its port, how long one client may take |
+| `WEB_PAGE` / `WEB_REFRESH` | `/web.html` / 15 s | The page file on the board; how often it polls `/status.json` |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |

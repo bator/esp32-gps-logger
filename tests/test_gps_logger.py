@@ -4612,6 +4612,11 @@ try:
     real_socket = gl.socket
     gl.socket = FakeSocketMod
     gl.WEB = True
+    saved_page = gl.WEB_PAGE
+    gl.WEB_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "web.html")
+    with open(gl.WEB_PAGE, "rb") as f:
+        page_file = f.read()
     try:
         gl._web_close()
         gl.wifi.update(state="connected", ip="192.168.1.60", ssid="<b>home",
@@ -4629,6 +4634,11 @@ try:
                 FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n"),
                 FakeConn(b"GET /nope HTTP/1.1\r\n\r\n"),
                 FakeConn(b"", fail=True)]
+        gl.WEB_PAGE = gl.WEB_PAGE + ".missing"
+        nopage = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
+        lst.waiting.append(nopage)
+        gl.web_tick()
+        gl.WEB_PAGE = gl.WEB_PAGE[:-len(".missing")]
         for c in reqs:
             lst.waiting.append(c)
             gl.web_tick()
@@ -4661,24 +4671,25 @@ try:
     finally:
         gl._web_close()
         gl.socket = real_socket
+        gl.WEB_PAGE = saved_page
         gl.WEB = False
         gl.WEB_AWAY = False
         gl.wifi["state"] = "sleep"
     check("WEB: listens on port 80, non-blocking, while connected", opened)
-    check("WEB: GET / is the HTML page with points, upload and diag lines",
+    check("WEB: GET / sends web.html from flash with its Content-Length",
           head.startswith(b"HTTP/1.0 200 OK") and b"text/html" in head
-          and (b"Content-Length: %d" % len(html)) in head
-          and b"Logged since boot</td><td>42<" in html
-          and b"Waiting for upload</td><td>7<" in html
-          and b"boot cause 1" in html and reqs[0].closed
-          and reqs[0].timeout == gl.WEB_TIMEOUT, reqs[0].sent[:300])
-    check("WEB: SSID and diag text are HTML-escaped",
-          b"&lt;b&gt;home" in html and b"&lt;x&gt;" in html
-          and b"<b>home" not in html)
+          and (b"Content-Length: %d" % len(page_file)) in head
+          and html == page_file and reqs[0].closed
+          and reqs[0].timeout == gl.WEB_TIMEOUT, repr(reqs[0].sent[:300]))
+    check("WEB: no web.html on the board -> 404 naming deploy.sh and the JSON",
+          nopage.sent.startswith(b"HTTP/1.0 404") and b"deploy.sh" in
+          nopage.sent and b"/status.json" in nopage.sent,
+          repr(nopage.sent[:200]))
     check("WEB: /status.json has the same values and the diag tail",
           jhead.startswith(b"HTTP/1.0 200 OK") and jd.get("points") == 42
           and jd.get("left") == 7 and jd.get("sent") == 35
-          and "fix" in jd and "sats" in jd
+          and "fix" in jd and "sats" in jd and jd.get("refresh_s") == 15
+          and jd.get("wifi") == "connected <b>home"
           and jd.get("diag", [""])[-1].startswith("up 60"), repr(jd)[:300])
     check("WEB: unknown path 404, a failing client is closed, no raise",
           reqs[2].sent.startswith(b"HTTP/1.0 404") and reqs[3].closed
@@ -4770,9 +4781,9 @@ try:
     _uart_tx[:] = []
     _uart_sv[0] = frame
     try:
-        c = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
+        c = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
         gl._web_reply(c, c.req)
-        page = c.sent.decode()
+        jd0 = json.loads(c.sent.partition(b"\r\n\r\n")[2])
         p_page = polls()
         c2 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
         gl._web_reply(c2, c2.req)
@@ -4781,21 +4792,17 @@ try:
         _uart_sv[0] = None
         gl.reset()
         t0 = _clock[0]
-        c3 = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
+        c3 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
         gl._web_reply(c3, c3.req)
         waited = _clock[0] - t0
+        jd3 = json.loads(c3.sent.partition(b"\r\n\r\n")[2])
     finally:
         _uart_sv[0] = None
-    sv_tbl = page[page.find("<summary>Satellites"):]
-    check("SATS: a page view asks the receiver and lists the satellites",
-          p_page == 1 and ", list 0 s old</small>" in page
-          and "<summary>Satellites (" in page
-          and "<td>GPS 12</td><td>38</td><td>54&deg;</td><td>10&deg;</td>"
-              "<td>yes</td>" in page
-          and "SBAS 123 (unhealthy)" in page
-          and sv_tbl.index("GPS 5") < sv_tbl.index("GPS 12")
-              < sv_tbl.index("SBAS 123") < sv_tbl.index("GPS 25"),
-          sv_tbl[:400])
+    names = [v["name"] for v in jd0["satellites"]]
+    check("SATS: a page poll asks the receiver and lists the satellites",
+          p_page == 1 and jd0["satellites_age_s"] == 0
+          and names == ["GPS 5", "GPS 12", "SBAS 123", "GPS 25"]
+          and jd0["satellites"][2]["unhealthy"] is True, repr(names))
     check("SATS: a list younger than SV_FRESH is not asked for again; JSON",
           p_again == 1 and jd["satellites"][0]["name"] == "GPS 5"
           and jd["satellites"][1] == {"name": "GPS 12", "system": "GPS",
@@ -4803,10 +4810,9 @@ try:
                                       "azim": 10, "used": True,
                                       "unhealthy": False}
           and len(jd["satellites"]) == 4, repr(jd.get("satellites"))[:300])
-    check("SATS: a silent receiver costs at most SV_WAIT, the page says so",
-          waited <= gl.SV_WAIT + 100
-          and b"No satellite list from the receiver yet" in c3.sent,
-          "waited=%d" % waited)
+    check("SATS: a silent receiver costs at most SV_WAIT, the list is empty",
+          waited <= gl.SV_WAIT + 100 and jd3["satellites"] == []
+          and jd3["satellites_age_s"] is None, "waited=%d" % waited)
 
     # M10: no NAV-SVINFO on a u-blox M10 (seen 2026-10-29: SPG 5.10 does
     # not answer it, the page kept the old receiver's list); NAV-SAT instead,
@@ -4842,9 +4848,8 @@ try:
     _uart_tx[:] = []
     _uart_sat[0], _uart_ver[0] = sat_frame, ver_frame
     try:
-        c = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
+        c = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
         gl._web_reply(c, c.req)
-        page = c.sent.decode()
         for _ in range(3):                  # the answers after SV_WAIT too
             gl.read_uart()
         first = (polls_of(b"\x01\x30"), polls_of(b"\x01\x35"),
@@ -4879,18 +4884,14 @@ try:
           and m10_svs[2][4] is True and m10_svs[2][5] is True
           and m10_svs[3][4] is False and m10_svs[0][5] is False
           and seen_m10 == 3, "%r seen=%r" % (m10_svs, seen_m10))
-    sv_tbl = page[page.find("<summary>Satellites"):]
-    check("M10: page lists GPS/Galileo/BeiDou/GLONASS names",
-          "<td>GPS 7</td><td>41</td>" in sv_tbl and "Galileo 11" in sv_tbl
-          and "BeiDou 22 (unhealthy)" in sv_tbl and "GLONASS 3" in sv_tbl
-          and sv_tbl.index("GPS 7") < sv_tbl.index("Galileo 11")
-              < sv_tbl.index("BeiDou 22") < sv_tbl.index("GLONASS 3")
-          and "<td>BeiDou 33</td><td>-</td><td>-</td><td>-</td>" in sv_tbl
-          and "-91" not in page,
-          sv_tbl[:500])
-    check("M10: the receiver model from MON-VER is on the page and in JSON",
-          "u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10" in page
-          and jd.get("receiver") == "u-blox M10, ROM SPG 5.10 (7b202e), "
+    m10_names = [(v["name"], v["unhealthy"], v["elev"])
+                 for v in jd["satellites"]]
+    check("M10: JSON lists GPS/Galileo/BeiDou/GLONASS names",
+          m10_names == [("GPS 7", False, 60), ("Galileo 11", False, 45),
+                        ("BeiDou 22", True, 20), ("BeiDou 33", False, None),
+                        ("GLONASS 3", False, 5)], repr(m10_names))
+    check("M10: the receiver model from MON-VER is in the JSON",
+          jd.get("receiver") == "u-blox M10, ROM SPG 5.10 (7b202e), "
                                     "PROTVER=34.10"
           and jd["satellites"][1]["system"] == "Galileo"
           and "gps u-blox M10, ROM SPG 5.10" in diag_m10,
@@ -5555,14 +5556,11 @@ try:
           p5["up"] == 3494 and p6["up"] is None and t6 is None
           and " prev_up - " in boot6, "%r %r %r" % (p5, p6, boot6))
     prev_after(st_lines)
-    rows = {r[2]: r[3] for r in gl._web_rows()}
-    page = gl._web_html()
-    check("UPTIME: page shows readable times, the JSON keeps seconds",
+    rows = dict(gl._web_rows())
+    check("UPTIME: the JSON keeps seconds and gives the previous run as text",
           isinstance(rows["uptime"], int) and rows["prev_uptime"] == 3494
-          and "<td>Previous run</td><td>58 min 14 s (last line "
-              "2026-10-28 12:59:42Z)</td>" in page
-          and "<td>Uptime</td><td>" in page and "Uptime (s)" not in page,
-          page[page.find("Uptime"):page.find("Uptime") + 200])
+          and rows["prev_run"] == "58 min 14 s (last line "
+                                  "2026-10-28 12:59:42Z)", repr(rows))
 
     import inspect
     loop_src = inspect.getsource(gl._loop)
@@ -6258,9 +6256,10 @@ try:
     jd = json.loads(jb)
 except ValueError:
     jd = None
-check("WEB: the streamed JSON is valid and its Content-Length right",
-      jd is not None and b"Content-Length: %d" % len(jb) in head
-      and "bad_files" in jd and "satellites" in jd, head[:120])
+check("WEB: the streamed JSON is valid; the closed connection ends it",
+      jd is not None and b"Content-Length" not in head
+      and b"Connection: close" in head
+      and "bad_files" in jd and "satellites" in jd, repr(head[:200]))
 sends = []
 
 
@@ -6451,6 +6450,54 @@ finally:
 check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home it reboots",
       away == (0, "low idf", 0) and home == (0, 1), "%r %r" % (away, home))
 
+# LOWIDF-GC: a grown, now empty Python heap area goes back on gc.collect()
+# (MicroPython 1.29 frees empty split-heap areas in the sweep): check again
+# after a collect before giving up on TLS
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_110000.trk"), 3)
+collected = [0]
+real_collect = gl.gc.collect
+
+
+def _collect():
+    collected[0] += 1
+    return real_collect()
+
+
+gl.idf_heap = lambda: (157, 126) if collected[0] else (30, 20)
+gl.gc.collect = _collect
+_posts[:] = []
+_resets[:] = []
+try:
+    gl.wifi["home"] = True
+    pump()
+finally:
+    gl.idf_heap = real_idf
+    gl.gc.collect = real_collect
+    gl.wifi["home"] = False
+check("LOWIDF-GC: low IDF heap -> gc.collect() first, then the upload goes",
+      len(_posts) >= 1 and not _resets and gl.up["state"] != "low idf",
+      "%d posts %d resets %r" % (len(_posts), len(_resets), gl.up["state"]))
+
+# HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
+# diag showed a flat "mem" while the heap doubled into the IDF heap
+gl.idf_heap = lambda: (157, 100)
+lines = []
+real_dw = gl._diag_write
+gl._diag_write = lines.append
+try:
+    ph = gl.py_heap()
+    gl._diag(_clock[0])
+    st_mem = dict(gl._web_rows())["mem"]
+finally:
+    gl.idf_heap = real_idf
+    gl._diag_write = real_dw
+check("HEAP: free and size of the Python heap without the IDF block",
+      ph == (123456 - 102400, (65432 + 123456 - 102400) // 1024)
+      and " mem 21056 " in lines[0] and lines[0].endswith(" heap 84")
+      and st_mem == 21056, "%r %r" % (ph, lines))
+
 
 # GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon
 gl.reset()
@@ -6468,7 +6515,7 @@ check("GPS-STORM-END: after the storm the setup comes within ~15 s, not 30-60",
       storm_wait == gl.GPS_STORM_WAIT and sent, "%r %r" % (storm_wait, sent))
 
 
-# STYLE: status page - tiles, sky plot, signal bars, folded details
+# PAGE: web.html draws the boxes from /status.json (node runs its view())
 gl.reset()
 gl.up_reset()
 gl.wifi_reset()
@@ -6480,45 +6527,72 @@ gl.st["svs"] = [(16, 26, 0, 90, True, False, 0),
 gl.st["svs_at"] = _clock[0]
 gl.up["left"] = 120
 gl.wifi.update(state="connected", ssid="<x>", rssi=-75)
-page = gl._web_html()
-jd = json.loads(gl._web_json())
-tiles = page[page.find('<div class="k">'):page.find('<div class="c s">')]
+_diag_saved = gl._web_diag
+gl._web_diag = lambda: ["up 60 <b>"]
+page_json = gl._web_json()
 gl.st["valid"] = False
 gl.wifi.update(state="off", ssid=None, rssi=None)
-tiles2 = gl._web_html()
-gl.st["rx"] = None
-tiles3 = gl._web_html()
-check("STYLE: four tiles - fix with a green dot and HDOP, sats, queue, WiFi",
-      '<b><span class="d2">3D fix</span></b><small>HDOP 0.88</small>' in tiles
-      and "<b>1 / 2</b><small>satellites used / seen</small>" in tiles
-      and "<b>120</b><small>to upload, idle</small>" in tiles
-      and "<b>-75 dBm</b><small>&lt;x&gt;</small>" in tiles
-      and tiles.count("<div><b>") == 4
-      and '<div class="m">up ' in page and "&middot; 47.10000, 18.40000"
-      in page, tiles)
-check("STYLE: waiting fix is amber, no data red; WiFi off shows the state",
-      '<span class="d1">Waiting fix</span>' in tiles2
-      and "<b>off</b><small>WiFi</small>" in tiles2
-      and "&middot; 47.1" not in tiles2
-      and '<span class="d0">No data!</span>' in tiles3, tiles2[:1500])
-check("STYLE: sky plot - horizon at r 90 east, zenith centre, hollow unused",
-      '<circle class="g0" cx="90" cy="0" r="5"><title>GPS 16 26 dBHz'
-      in page and '<circle class="g3 u" cx="0" cy="0" r="4">' in page
-      and "SBAS 5 - dBHz</title></circle>" not in page,
-      page[page.find("<svg"):page.find("</svg>")])
-check("STYLE: one bar per satellite (45 dBHz full, stub for none)",
-      '<i class="g0" style="height:57%" title="GPS 16 26 dBHz">' in page
-      and '<i class="g3 u" style="height:26%"' in page
-      and '<i class="g1 u" style="height:0%" title="SBAS 5 - dBHz">' in page,
-      page[page.find('class="r"'):page.find('class="r"') + 400])
-check("STYLE: details folded, HDOP rounded on the page only, JSON intact",
-      page.count("<details><summary>") == 3
-      and "<td>HDOP</td><td>0.88</td>" in page and jd["hdop"] == 0.88199996
-      and "<summary>Satellites (1 used of 3)</summary>" in page
-      and "sessionStorage" in page)
-check("STYLE: dark mode and phone layout in the stylesheet",
-      "prefers-color-scheme:dark" in page and "min-width:720px" in page
-      and 'name="viewport"' in page)
+gl.st["svs"] = None
+page_json2 = gl._web_json()
+gl._web_diag = _diag_saved
+check("PAGE: JSON is generated piece by piece (no list in RAM)",
+      not isinstance(gl._web_json_parts(), (list, tuple))
+      and json.loads(page_json)["hdop"] == 0.88199996)
+import shutil
+import subprocess
+node = shutil.which("node")
+if node is None:
+    print("SKIP  PAGE: node not installed")
+else:
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = []
+    for js in (page_json, page_json2):
+        r = subprocess.run([node, os.path.join(here, "web_page_test.js"),
+                            os.path.join(here, "..", "web.html")],
+                           input=js, capture_output=True, text=True)
+        try:
+            out.append(json.loads(r.stdout))
+        except ValueError:
+            out.append({"error": r.stdout + r.stderr})
+    v, v2 = out
+    check("PAGE: tiles - fix with a green dot and HDOP, sats, queue, WiFi",
+          v.get("k0") == '<span class="d2">3D fix</span>'
+          and v.get("s0") == "HDOP 0.88" and v.get("k1") == "1 / 2"
+          and v.get("k2") == "120" and v.get("s2") == "to upload, idle"
+          and v.get("k3") == "-75 dBm" and v.get("s3") == "&lt;x&gt;"
+          and v.get("sub", "").endswith("&middot; 47.10000, 18.40000"),
+          repr(v)[:400])
+    check("PAGE: no fix amber, WiFi off shows the state, no list says so",
+          v2.get("k0") == '<span class="d1">Waiting fix</span>'
+          and v2.get("k3") == "off" and v2.get("s3") == "WiFi"
+          and "&middot;" not in v2.get("sub", "-")
+          and "No satellite list" in v2.get("bars", ""), repr(v2)[:400])
+    check("PAGE: sky plot - horizon east at x 90, zenith centre, hollow unused",
+          '<circle class="g0" cx="90" cy="0" r="5"><title>GPS 16 26 dBHz'
+          in v.get("dots", "")
+          and '<circle class="g3 u" cx="0" cy="0" r="4">' in v.get("dots", "")
+          and "SBAS 5" not in v.get("dots", "-"), v.get("dots", "")[:300])
+    check("PAGE: one bar per satellite (45 dBHz full, stub for none)",
+          '<i class="g0" style="height:57%" title="GPS 16 26 dBHz">'
+          in v.get("bars", "")
+          and '<i class="g3 u" style="height:26%"' in v.get("bars", "")
+          and '<i class="g1 u" style="height:0%" title="SBAS 5 - dBHz">'
+          in v.get("bars", ""), v.get("bars", "")[:300])
+    check("PAGE: every JSON row has a label; HDOP rounded; text escaped",
+          v.get("unlabeled") == [] and "<td>HDOP</td><td>0.88</td>"
+          in v.get("rows", "") and "<td>Previous run</td>" in v.get("rows", "")
+          and v.get("sh") == "Satellites (1 used of 3)"
+          and v.get("log") == "up 60 &lt;b&gt;"
+          and "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>"
+          in v.get("svt", ""), repr(v.get("unlabeled")))
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "web.html")) as f:
+    page_src = f.read()
+check("PAGE: polls status.json at the board's refresh_s, no reload",
+      "/status.json" in page_src and "refresh_s" in page_src
+      and 'http-equiv="refresh"' not in page_src
+      and "prefers-color-scheme:dark" in page_src
+      and 'name="viewport"' in page_src)
 
 print()
 print("%d passed, %d failed" % (passed, failed))
