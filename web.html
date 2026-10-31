@@ -195,13 +195,14 @@ function clock(utc, up) {
   return two(t.getHours()) + ":" + two(t.getMinutes());
 }
 function logLine(l) {
-  var m = STATUS.exec(l), t = "--:--", kind = "", text;
+  var m = STATUS.exec(l), t = "--:--", kind = "", text, ha;
   if (m) {
     var fix = m[8].replace(/_/g, " "), sv = m[7].split("/"), big = nn(m[16]);
     t = clock(m[2], +m[1]);
     kind = fixTone(fix) === "ok" ? "ok" : "warn";
     text = esc(fix.toUpperCase()) + " &middot; " + esc(nn(sv[1])) + "/" + esc(nn(sv[0])) + " SATS" +
-      (+m[10] ? " &middot; " + num(m[10]) + " PTS" : "") + " &middot; " +
+      (+m[10] ? " &middot; " + num(m[10]) + " PTS" : "") +
+      ((ha = / hacc ([\d.]+)/.exec(l)) ? " &middot; &plusmn;" + esc(ha[1]) + " M" : "") + " &middot; " +
       (big !== null && +big < TLS_KB ? '<span class="err">IDF ' + esc(big) + " KB</span>" : "IDF " + esc(big) + " KB");
     return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";
   }
@@ -234,6 +235,7 @@ function view(d) {
   var acc = ha !== null ? ha : hd !== null ? hd * UERE : null;  // (else from HDOP)
   var src = d.fix_src === "pvt" ? "NAV-PVT" : d.fix_src === "nmea" ? "NMEA" : "-";
   var ub = String(d.ubx || "- / -").split(" / ");                 // UBX frames ok / bad
+  var ubp = +ub[0] + +ub[1] ? +ub[1] * 100 / (+ub[0] + +ub[1]) : 0;   // NAV-PVT path
   v.up = "UP " + esc(hms(d.uptime).toUpperCase());
   v.tm = cell("FIX", esc(fix.replace(" fix", "")).toUpperCase(), "", fixTone(fix)) +
     cell("SATS", esc(sats[1]), "/" + esc(sats[0])) +
@@ -242,7 +244,8 @@ function view(d) {
     cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 ? "warn" : "") +
     (q4 ? cell("WIFI", wifiIcon(q4[0]) + q4[1] + '<em>%</em><em class="db">' + d.rssi + " dBm</em>", "", q4[2]) :
       cell("WIFI", esc(ws[0]).toUpperCase())) +
-    cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : "");
+    (d.fix_src === "pvt" ? cell("UBX BAD", ubp.toFixed(2), "%", ubp > 1 ? "warn" : "") :
+      cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : ""));
   var dots = "", bars = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
   for (var i = 0; i < svs.length; i++) {
     var s = svs[i], up = s.elev !== null && s.elev >= 0;

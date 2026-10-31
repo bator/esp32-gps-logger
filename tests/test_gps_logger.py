@@ -10171,6 +10171,28 @@ check("HEAP: free and size of the Python heap without the IDF block",
       and " mem %d " % ph[0] in lines[0] and lines[0].endswith(" heap 83")
       and " idf 157/100 " in lines[0] and st_mem == ph[0],
       "%r %r" % (ph, lines))
+lines = []
+real_dw = gl._diag_write
+gl._diag_write = lines.append
+saved_pvt = (gl.st["mode"], gl.st["hacc"], gl.st["lat_i"], gl.st["ubx_ok"],
+             gl.st["ubx_bad"])
+try:
+    gl.st.update(mode="pvt", hacc=2.34, lat_i=471000000, ubx_ok=646,
+                 ubx_bad=1)
+    gl._diag(_clock[0])
+    gl.st["lat_i"] = None                # no fix this second
+    gl._diag(_clock[0])
+    gl.st["mode"] = "nmea"
+    gl._diag(_clock[0])
+finally:
+    (gl.st["mode"], gl.st["hacc"], gl.st["lat_i"], gl.st["ubx_ok"],
+     gl.st["ubx_bad"]) = saved_pvt
+    gl._diag_write = real_dw
+check("DIAG-PVT: on NAV-PVT the minute line adds ubx good/bad and hAcc",
+      lines[0].endswith(" ubx 646/1 hacc 2.3")
+      and lines[1].endswith(" ubx 646/1 hacc -")
+      and " ubx " not in lines[2] and " hacc " not in lines[2],
+      repr(lines))
 check("HEAP-B: the IDF block comes off to the byte, not KB-floored",
       ph[0] == 123456 - 103100, "%r" % (ph,))
 
@@ -10483,6 +10505,10 @@ page_json2 = gl._web_json()
 gl.st.update(valid=True, fixtype=3, quality=1, hdop=None, lat=47.1,
              lon=18.4, lat_i=471000000, lon_i=184000000, hacc=30.04,
              fix_src="pvt", ubx_ok=500, ubx_bad=2)
+gl._web_diag = lambda: ["up 120 utc 20261031T130241Z nmea 72/0 gpsboots 0 "
+                         "loops 0 sats 22/15 fix 3D_fix hdop None points 0 "
+                         "sent 0 wifi connected pulses 0 mem 19280 idf "
+                         "221/208 heap 62 ubx 646/0 hacc 2.3"]
 page_json3 = gl._web_json()
 gl._web_diag = _diag_saved
 jd1, jd3 = json.loads(page_json), json.loads(page_json3)
@@ -10530,6 +10556,12 @@ else:
           and v.get("coord", "").endswith("&plusmn;2.2 m"),
           repr((v3.get("dom", {}).get("acc"), v3.get("coord"),
                 v.get("coord"))))
+    check("PAGE-PVT: on NAV-PVT the strip shows UBX BAD, not the frozen "
+          "NMEA count; the log row shows +-hAcc",
+          "<small>UBX BAD</small><b>0.40<em>%</em>" in tm3
+          and "NMEA BAD" not in tm3 and "<small>NMEA BAD</small>" in tm
+          and "15/22 SATS &middot; &plusmn;2.3 M &middot; IDF 208 KB"
+          in v3.get("log", ""), tm3[-300:] + v3.get("log", "")[:300])
     check("PAGE-PVT: Systems shows the fix source and the UBX frame counts",
           '>FIX SOURCE<span class="">NAV-PVT<em>ubx 500 ok &middot; 2 bad'
           '</em>' in sy3 and v3.get("unlabeled") == []
