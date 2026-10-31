@@ -13,4 +13,5 @@ const v = ctx.view(d);
 const labeled = new Set(ctx.OTHER);
 for (const k of ctx.SHOWN) labeled.add(k);
 v.unlabeled = Object.keys(d).filter((k) => !labeled.has(k));
+v.tile = ctx.tile(47.1, 18.4, 17);
 process.stdout.write(JSON.stringify(v));
