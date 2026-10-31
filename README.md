@@ -272,7 +272,7 @@ minute. After a walk, plug the board in and read it:
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free heap |
-| `idf F/L` | ESP-IDF heap free and its largest block, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`), and at home the board reboots cleanly |
+| `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB (it grows into the IDF heap). TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`), and at home the board reboots cleanly |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.

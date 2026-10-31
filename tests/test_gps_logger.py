@@ -406,6 +406,7 @@ def _install_mocks():
     fake_gc.threshold = lambda *a, **k: None
     fake_gc.collect = lambda: real_gc.collect()
     fake_gc.mem_free = lambda: 123456
+    fake_gc.mem_alloc = lambda: 65432
     sys.modules["gc"] = fake_gc
 
     time.ticks_ms = lambda: _clock[0]
