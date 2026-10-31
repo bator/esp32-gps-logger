@@ -211,7 +211,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
-| `upload <file> <n> <ok> <http> <mem>` | One POST |
+| `upload <file> <n> <ok> <http> <mem>` | One POST; `mem` is the free Python heap in bytes (`gc.mem_free()` without the largest IDF block) |
 | `stay home\|away kept N` | A stay began; N points of the way in were kept |
 | `stay moved` / `stay kept: home in range` / `stay end D` | Anchor moved; a home departure refused; the stay ended D m out |
 | `stay end: home without a fix` | An away stay ended at home without a usable fix |
@@ -275,15 +275,18 @@ the receiver says what it is (UBX-MON-VER, e.g. `gps u-blox M10, ROM SPG
 line a minute, a `stay left wifi` line when an away stay ends without a fix
 (see [Stays](#stays)), `gps reset loop …` lines (when the receiver keeps
 restarting, so they can be set against where you were), `upload err …`
-and `upload aborted …` lines, a `reboot tls memory` line before a TLS
-memory reboot, and a `crash` line before a crash reset. A reset loop that
-goes on writes its first warning, then `gps reset loop N more windows`
-every 5 minutes (`GPS_LOOP_SAY`) and once when it ends, not a line every
-10 s. Past 32 KB the file becomes `/diag.1` (the older one is dropped), so
-the two hold about 7 hours at one line a minute; below the 32 KB flash
-reserve nothing is written. The status page shows the last 15 lines
-(`WEB_DIAG`), right after the switch to `/diag.1` from both files. After a
-walk, plug the board in and read it:
+and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
+when a POST waits for memory, `heap grew in <step> to N KB` when the
+Python heap grew during an upload step (`read_batch`, `tls_wrap`,
+`http_post`: the step that took IDF heap), a `reboot tls memory` or
+`reboot low idf N KB S s` line before such a reboot, and a `crash` line
+before a crash reset. A reset loop that goes on writes its first warning,
+then `gps reset loop N more windows` every 5 minutes (`GPS_LOOP_SAY`) and
+once when it ends, not a line every 10 s. Past 32 KB the file becomes
+`/diag.1` (the older one is dropped), so the two hold about 7 hours at one
+line a minute; below the 32 KB flash reserve nothing is written. The status
+page shows the last 15 lines (`WEB_DIAG`), right after the switch to
+`/diag.1` from both files. After a walk, plug the board in and read it:
 
 ```bash
 .venv/bin/mpremote resume fs cat :/diag.log
@@ -302,7 +305,7 @@ walk, plug the board in and read it:
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
-| `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`), and at home the board reboots cleanly |
+| `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`); at home, if it stays low for 5 minutes with tracks waiting, the board reboots cleanly (at most once per 30 minutes) |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
@@ -457,8 +460,10 @@ console line.
   catches it. 2D fixes omit altitude.
 - **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
   line (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop
-  empty when unknown), `-` for a new segment and an `#END` footer. Older
-  `.gpx` files are still uploaded.
+  empty when unknown), `-` for a new segment and an `#END` footer. Reading
+  stops at the footer: bytes after it are left over from a longer write
+  that failed (points the logger had dropped), and the file counts as
+  complete. Older `.gpx` files are still uploaded.
 - **Power-loss safe.** Points are written in batches every 60 s. Each write
   replaces the footer with the new points plus the footer; LittleFS commits
   on close, so a power cut leaves the old or the new version. A line cut off
@@ -654,7 +659,8 @@ check for a visible home.
   only after HTTP 2xx or a durable copy to `<file>.bad`, so an interrupted
   POST is resent (Dawarich deduplicates).
 - 400 / 413 / 422 quarantine the batch to `<file>.bad`. Three in a row
-  without a success count as a server problem: backoff, no more quarantine.
+  without a success count as a server problem: backoff, no more quarantine
+  (rejections of a `.bad` itself do not count here).
   A full `.bad` (64 kB) pauses that file (`BAD FULL`) instead of dropping
   points; pull or delete it, then reset.
 - Other errors back off from 15 s up to 30 minutes (`Retry-After` is
@@ -662,12 +668,20 @@ check for a visible home.
   elsewhere. Flash and memory errors back off too, and with every waiting
   track held back (state `held`) the radio sleeps until the first is due.
 - An unreadable track (`OSError` on read) is held back so the newer ones
-  still go; after three tries it is parked as `<file>.err`.
+  still go; after three tries it is parked as `<file>.err`. A `.pos` that
+  cannot be written is a flash error (`fs err`, retried), not a read error.
+- **Reading:** track lines are read with `readinto` into one 512-byte
+  buffer (`LINE_MAX`) and a `.trk` point is parsed there and written
+  straight into the JSON buffer, so a 50-point batch makes only small,
+  short-lived objects (the `float()` checks), no line copies.
 - **Own HTTP client:** a minimal HTTP/1.0 POST over the `tls` module. The
   body goes out in 1 KB pieces and the wait for the answer (up to 30 s,
   `HTTP_WAIT`) polls, both reading the UART meanwhile, so a slow server
   costs no NMEA (the 4 KB UART buffer holds ~5 s). The upload line on the
-  console ends with the POST time.
+  console ends with the POST time. Answer lines are read 256 bytes at a
+  time (`HTTP_LINE`); once the status line is in, an error while reading
+  the headers (reset, timeout, the guard closing the socket) keeps the
+  status, so an accepted batch is not sent twice.
 - **POST guard:** a hardware timer feeds the watchdog during a POST (it
   also runs while a socket or TLS call blocks) and closes the socket after
   60 s (`HTTP_MAX`, `upload aborted after 60 s` in the diagnostic log), so a
@@ -683,10 +697,21 @@ check for a visible home.
   `https://` encrypts, but a MITM can still see the key and the points. A
   DER root certificate at `/ca.der` (`CA_FILE`; the one your server's chain
   ends in) turns verification on. With an `http://` `GEO_URL` the logger
-  warns that everything goes in the clear.
+  warns that everything goes in the clear. The `SSLContext` (and the
+  certificate) is made once, on the first POST, and reused.
 - **TLS memory:** five TLS allocation failures in a row at home
-  (`TLS_REBOOT_N`) restart the board cleanly (`reboot tls memory` in the
-  diagnostic log): the IDF heap stays fragmented otherwise.
+  (`TLS_REBOOT_N`; any other error ends the run) restart the board cleanly
+  (`reboot tls memory` in the diagnostic log): the IDF heap stays
+  fragmented otherwise. Counted: `MemoryError`, `ENOMEM` and the mbedTLS
+  `*_ALLOC_FAILED` codes (SSL, X509, ECP, PK, …, also combined with a
+  low-level code); `OSError(16)`, which is how `MPI_ALLOC_FAILED` arrives
+  but also `EBUSY`, only from the TLS handshake.
+- **Low IDF heap:** below `TLS_MIN_KB` no POST is tried; the upload runs
+  `gc.collect()` and checks again every 30 s at home (`LOWIDF_RETRY`). Only
+  if it stays low for 5 minutes (`LOWIDF_WAIT`) with tracks waiting does
+  the board reboot (`reboot low idf` in the diagnostic log), and at most
+  once per 30 minutes (`LOWIDF_REBOOT_GAP`: the reboot leaves
+  `/lowidf`, which the next boot takes). Away it only waits.
 - **Python heap vs IDF heap.** MicroPython 1.29 starts the Python heap
   small and, when an allocation does not fit even after a collection,
   adds an area at least as big as the whole heap so far, taken from the
@@ -695,9 +720,13 @@ check for a visible home.
   (IDF free 159 → 31 KB, largest 148 → 16 KB) and TLS could not start until
   the area emptied and was freed again. So the page streams its replies,
   and before giving up on TLS (`TLS_MIN_KB`) the upload runs `gc.collect()`,
-  which returns an empty grown area, and measures again. `gc.mem_free()`
-  counts that largest IDF block as free Python heap, so the diag and the
-  page subtract it (`mem`, `heap`).
+  which returns an empty grown area, and measures again. It also wants
+  12 KB of free Python heap then (`TLS_MIN_PY_KB`; else `low mem` and a
+  retry): the socket and TLS objects must fit without growing the heap.
+  `gc.mem_free()` counts that largest IDF block (in bytes) as free Python
+  heap, so the diag, the page and the upload line subtract it to the byte
+  (`mem`, `heap`), and `heap grew in <step>` names the upload step during
+  which the heap grew.
 
 ### Watchdog and recovery
 
@@ -793,10 +822,14 @@ with a NEO-6M; most never need changing.
 | `AUTH_BACKOFF` | 30 min | Wait after HTTP 401 |
 | `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (connect, TLS) |
 | `HTTP_WAIT` / `HTTP_CHUNK` | 30 s / 1 KB | Wait for the server's answer, body piece; the UART is read between |
+| `HTTP_LINE` / `HTTP_LINES` | 256 B / 64 | Bytes per read of an answer line; reads of the answer's head at most |
 | `HTTP_MAX` | 60 s | Wall clock for one POST: the guard timer feeds the WDT, then closes the socket |
 | `CA_FILE` | `/ca.der` | DER root certificate; if present, the server is verified |
 | `TLS_REBOOT_N` | 5 | TLS allocation failures in a row (at home) before a clean reboot |
-| `TLS_MIN_KB` | 48 KB | Largest IDF heap block a POST needs; below it no try (at home: reboot) |
+| `TLS_MIN_KB` | 48 KB | Largest IDF heap block a POST needs; below it no try (`gc.collect()` and wait) |
+| `TLS_MIN_PY_KB` | 12 KB | Free Python heap a POST needs after `gc.collect()`; below it the POST waits |
+| `LOWIDF_RETRY` / `LOWIDF_WAIT` | 30 s / 5 min | Checks while the IDF block is low (at home); how long it may stay low with tracks waiting before a clean reboot |
+| `LOWIDF_REBOOT_GAP` / `LOWIDF_MARK` | 30 min / `/lowidf` | At most one low-idf reboot this often; the file that tells the next boot |
 | `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err` |
 | `MAX_BAD_BYTES` | 64 kB | Cap on a `.bad` file |
 | `MAX_GLOBAL_PAYLOAD` | 3 | Payload errors in a row that stop quarantining |

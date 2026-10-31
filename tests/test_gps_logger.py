@@ -2,6 +2,7 @@
 """CPython harness for gps_logger upload / crash / WiFi logic. Not deployed."""
 from __future__ import print_function
 
+import builtins
 import gc as real_gc
 import importlib
 import json
@@ -426,6 +427,7 @@ def _reload_logger():
         import gps_logger as m
     m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
     m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
+    m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf")
     m.WEB = False                        # radio-sleep tests; WEB has its own
     m.HTTP_POST = lambda url, data, headers, timeout: _post(
         url, data=data, headers=headers, timeout=timeout)
@@ -1469,13 +1471,14 @@ try:
     check("B2: count_points survives a 200 kB line",
           left == 2, "left=%s" % left)
     memerr = []
-    orig_rl = gl._readline
+    rl_name = "_rd_line" if hasattr(gl, "_rd_line") else "_readline"
+    orig_rl = getattr(gl, rl_name)
 
     def boom_line(f):
         memerr.append(1)
         raise MemoryError("heap")
 
-    gl._readline = boom_line
+    setattr(gl, rl_name, boom_line)
     try:
         gl.up_reset()
         check("B2: count_points/up_reset catch MemoryError (no reset)",
@@ -1483,12 +1486,12 @@ try:
     except MemoryError:
         check("B2: count_points/up_reset catch MemoryError (no reset)", False)
     finally:
-        gl._readline = orig_rl
+        setattr(gl, rl_name, orig_rl)
         gl.up["url"] = "https://dawarich.example.com"
         gl.up["key"] = "secret-key"
         gl.wifi["state"] = "connected"
 
-    gl._readline = boom_line
+    setattr(gl, rl_name, boom_line)
     try:
         pump()
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
@@ -1497,7 +1500,7 @@ try:
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
               False, "MemoryError escaped")
     finally:
-        gl._readline = orig_rl
+        setattr(gl, rl_name, orig_rl)
 
     # --- B3: hotspot (non-home) keeps logging + opportunistic upload ------
     def gps_fix(lat=52.5, speed=6.0):
@@ -1719,6 +1722,135 @@ try:
     check("TRK-7: quarantine copies only the point lines of a .trk",
           ok_bad and bad.count(b"\n") == 3 and b"#" not in bad,
           "ok=%s bad=%r" % (ok_bad, bad[:80]))
+
+    # TRK-END: the footer ends a .trk. A failed longer flush, then a shorter
+    # good one, leaves old point lines after "#END": dropped drift points
+    # that must not be uploaded; the file still counts as complete
+    end_dir = os.path.join(tmpdir, "trkend")
+    os.makedirs(end_dir)
+    gl.LOG_DIR = end_dir
+    te = os.path.join(end_dir, "20261005_130000.trk")
+    good = [trk_line(52.5 + i * 0.001, 13.4, "2026-10-05T13:00:%02dZ" % i)
+            for i in range(3)]
+    drift = [trk_line(53.9, 14.9, "2026-10-05T13:00:%02dZ" % (i + 10))
+             for i in range(4)]
+    with open(te, "wb") as f:
+        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+                 + "52.6,13.5,,,2026100").encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(te, 0)
+    te_left = gl.count_points()
+    online(end_dir)
+    with open(te, "wb") as f:
+        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+                 + gl.FOOTER).encode())
+    pump()
+    te_locs = locations()
+    check("TRK-END: reading stops at #END; what follows is not uploaded",
+          (n, n_ok, eof) == (3, 3, True) and te_left == 3
+          and len(te_locs) == 3 and not os.path.exists(te)
+          and all(loc["geometry"]["coordinates"][1] < 53 for loc in te_locs),
+          "n=%s n_ok=%s eof=%s left=%s posted=%d exists=%s" % (
+              n, n_ok, eof, te_left, len(te_locs), os.path.exists(te)))
+
+    # RB-INTO: a .trk is read with readinto into the one preallocated line
+    # buffer, not f.readline(LINE_MAX) (a new LINE_MAX bytes per line)
+    rb_p = os.path.join(end_dir, "20261005_140000.trk")
+    make_trk(rb_p, gl.UPLOAD_BATCH + 7)
+    io_calls = {"readline": 0, "readinto": 0, "foreign": 0}
+    rbuf = getattr(gl, "_rbuf", None)
+
+    class _CountFile(object):
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.f.close()
+
+        def readline(self, *a):
+            io_calls["readline"] += 1
+            return self.f.readline(*a)
+
+        def readinto(self, b):
+            io_calls["readinto"] += 1
+            if rbuf is None or (b is not rbuf
+                                and getattr(b, "obj", None) is not rbuf):
+                io_calls["foreign"] += 1
+            return self.f.readinto(b)
+
+        def __getattr__(self, k):
+            return getattr(self.f, k)
+    real_open_rb = builtins.open
+    builtins.open = lambda name, *a, **k: (
+        _CountFile(real_open_rb(name, *a, **k)) if name == rb_p
+        else real_open_rb(name, *a, **k))
+    try:
+        rb_res = gl.read_batch(rb_p, 0)
+        rb_res2 = gl.read_batch(rb_p, rb_res[3])
+    finally:
+        builtins.open = real_open_rb
+    check("RB-INTO: read_batch reads into the preallocated buffer, no readline",
+          io_calls["readline"] == 0 and io_calls["readinto"] > 0
+          and io_calls["foreign"] == 0
+          and rb_res[:2] == (gl.UPLOAD_BATCH, gl.UPLOAD_BATCH)
+          and rb_res2[:2] == (7, 7) and rb_res2[4], "%r %r %r" % (
+              io_calls, rb_res, rb_res2))
+
+    # RB-SAME: the .trk JSON is byte for byte what the old per-point
+    # "%.6f" / "%.1f" formatting gave (canonical bytes are copied as they
+    # are, anything else is formatted as before)
+    rows = [("52.512345", "13.400001", "10.0", "1.2", "20261005T120005Z"),
+            ("-33.800000", "-70.600000", "", "", "20261005T120006Z"),
+            ("47.5", "19", "123", "0.9", "20261005T120007Z"),
+            ("-0.000000", "0.000000", "-0.0", "", "20261005T120008Z"),
+            ("+47.100000", " 19.200000", "1e2", "inf", "20261005T120009Z"),
+            ("47.1234567", "019.123456", "8848.86", "2", "20261005T120010Z"),
+            ("90.000000", "-180.000000", "nan", "0.0", "20261005T120011Z"),
+            ("47.0", "19.0", "abc", "x", "20261005T120012Z")]
+    same_p = os.path.join(end_dir, "20261005_150000.trk")
+    with open(same_p, "wb") as f:
+        f.write((gl.HEADER + "".join(",".join(r) + "\n" for r in rows)
+                 + gl.FOOTER).encode())
+    want = []
+    for la, lo, el, hd, tc in rows:
+        ef = float(el) if el and el not in ("abc",) else None
+        if ef is not None and ef != ef or ef in (float("inf"),):
+            ef = None
+        hf = float(hd) if hd and hd != "x" else None
+        extra = ""
+        if ef is not None:
+            extra += '"altitude":%.1f,' % ef
+        if hf is not None and hf == hf and abs(hf) != float("inf"):
+            extra += '"horizontal_accuracy":%.1f,' % (hf * gl.HDOP_M)
+        iso = "%s-%s-%sT%s:%s:%sZ" % (tc[0:4], tc[4:6], tc[6:8], tc[9:11],
+                                      tc[11:13], tc[13:15])
+        want.append('{"type":"Feature","geometry":{"type":"Point",'
+                    '"coordinates":[%.6f,%.6f]},"properties":{'
+                    '"timestamp":"%s",%s"device_id":"%s"}}'
+                    % (float(lo), float(la), iso, extra, gl.DEVICE_ID))
+    want_b = ('{"locations":[' + ",".join(want) + "]}").encode()
+    n, n_ok, size, new_off, eof = gl.read_batch(same_p, 0)
+    got_b = bytes(gl._body[:size])
+    check("RB-SAME: .trk Overland JSON byte-identical to the old formatting",
+          (n, n_ok, eof) == (len(rows), len(rows), True) and got_b == want_b,
+          "%r\n%r" % (got_b[:300], want_b[:300]))
+
+    # RB-LONG: a point line of exactly LINE_MAX bytes is read, one byte
+    # longer is skipped whole, the points around it are kept
+    lm_p = os.path.join(end_dir, "20261005_160000.trk")
+    pt = trk_line(52.5, 13.4, "2026-10-05T16:00:00Z", hdop="1.0")
+    fit = " " * (gl.LINE_MAX - len(pt)) + pt
+    over = " " * (gl.LINE_MAX + 1 - len(pt)) + pt
+    with open(lm_p, "wb") as f:
+        f.write((gl.HEADER + pt + fit + over + "x" * 3000 + "\n" + pt
+                 + gl.FOOTER).encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(lm_p, 0)
+    check("RB-LONG: LINE_MAX line read, longer lines skipped, rest kept",
+          len(fit) == gl.LINE_MAX and (n, n_ok, eof) == (3, 3, True)
+          and new_off == os.path.getsize(lm_p), "n=%s n_ok=%s eof=%s %s" % (
+              n, n_ok, eof, new_off))
 
     gl.LOG_DIR = saved_dir
 
@@ -7072,6 +7204,31 @@ check("U-10: an unreadable track is held, the next uploads, then .err",
       "posts=%d %r" % (len(_posts), os.listdir(up_td)))
 os.remove(bad_p + ".err")
 
+# POS-ERR: a batch with nothing to send whose .pos write fails is a flash
+# error, not an unreadable track: READ_ERR_MAX of them must not park it
+pe_p = os.path.join(up_td, "20261002_100000.trk")
+make_trk(pe_p, gl.UPLOAD_BATCH + 10,
+         times=["2026-10-05T00:00:%02dX" % (i % 60)
+                for i in range(gl.UPLOAD_BATCH + 10)])
+real_wo = gl.write_offset
+gl.write_offset = lambda path, off: (_ for _ in ()).throw(OSError(28))
+_posts[:] = []
+try:
+    for _ in range(gl.READ_ERR_MAX + 2):
+        gl.up["next_at"] = _clock[0]
+        gl.up["hold"] = {}
+        gl.upload_tick()
+        _clock[0] += 1000
+finally:
+    gl.write_offset = real_wo
+check("POS-ERR: a failing .pos write is 'fs err', the track is not parked",
+      os.path.exists(pe_p) and not os.path.exists(pe_p + ".err")
+      and gl.up["state"] == "fs err" and not _posts,
+      "state %s %r" % (gl.up["state"], os.listdir(up_td)))
+for x_ in (pe_p, pe_p + ".err"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
 # U-14: the quarantine copy lands but the offset write fails: no crash
 q_p = os.path.join(up_td, "20261003_100000.trk")
 make_trk(q_p, gl.UPLOAD_BATCH + 5)      # not EOF: the .pos is written
@@ -7104,6 +7261,33 @@ check("U-15: a .bad keeps draining after MAX_BAD_RETRY good batches",
       len(_posts) >= gl.MAX_BAD_RETRY + 3 and not os.path.exists(b_p),
       "posts=%d" % len(_posts))
 
+# FAIL4-BAD: rejected .bad batches are not in fail4 (reset only by a 2xx):
+# a normal track's 422 batch afterwards still goes to quarantine
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+fb_p = os.path.join(up_td, "20261004_110000.trk.bad")
+make_trk(fb_p, 3)
+_post_code[0] = 422
+for _ in range(gl.MAX_GLOBAL_PAYLOAD + 1):
+    gl.up["hold"] = {}
+    pump()
+    _clock[0] += 1000
+bad_posts = len(_posts)
+fn_p = os.path.join(up_td, "20261004_120000.trk")
+make_trk(fn_p, 3)
+pump()
+_post_code[0] = 201
+check("FAIL4-BAD: after rejected .bad batches a normal 422 is quarantined",
+      bad_posts == gl.MAX_GLOBAL_PAYLOAD + 1
+      and gl.up["state"] == "quarantine" and not os.path.exists(fn_p)
+      and pts_in(fn_p + ".bad") == 3,
+      "bad posts %d state %s fail4 %r" % (bad_posts, gl.up["state"],
+                                          gl.up.get("fail4")))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
 # U-16: at EOF the track goes without writing a .pos first (full flash)
 e_p = os.path.join(up_td, "20261005_100000.trk")
 make_trk(e_p, 3)
@@ -7133,9 +7317,14 @@ class RvSock:
         self.out += b
         return len(b)
 
-    def readline(self):
+    def readline(self, n=-1):
+        self.limits = getattr(self, "limits", []) + [n]
+        if self.rd >= len(self.resp) and getattr(self, "fail", None):
+            raise self.fail                  # reset / closed after the head
         i = self.resp.find(b"\n", self.rd)
         i = len(self.resp) if i < 0 else i + 1
+        if n is not None and n >= 0:
+            i = min(i, self.rd + n)
         line, self.rd = self.resp[self.rd:i], i
         return line
 
@@ -7175,6 +7364,13 @@ class RvTls:
             return s
 
 
+def tls_ctx_reset():
+    """Forget the SSLContext made once a boot (tests swap tls and CA_FILE)."""
+    c = getattr(gl, "_tls_ctx", None)
+    if c:
+        c[0] = None
+
+
 rv_sock = [None]
 fake_sockmod = types.ModuleType("socket")
 fake_sockmod.SOCK_STREAM = 1
@@ -7211,9 +7407,49 @@ try:
     with open(ca_path, "wb") as f:
         f.write(b"\x30\x82der")
     gl.CA_FILE = ca_path
+    tls_ctx_reset()                      # the context is made once a boot
     rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
     gl._raw_post("https://d.example", b"{}", {}, 15)
     ca_ctx = RvTls.made[-1]
+    # TLS-CTX: later POSTs reuse that context, CA_FILE is not read again
+    made0 = len(RvTls.made)
+    ca_reads = []
+    real_open_ = builtins.open
+
+    def _ca_open(name, *a, **k):
+        if name == ca_path:
+            ca_reads.append(name)
+        return real_open_(name, *a, **k)
+    builtins.open = _ca_open
+    try:
+        for _ in range(3):
+            rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+            gl._raw_post("https://d.example", b"{}", {}, 15)
+    finally:
+        builtins.open = real_open_
+    ctx_reused = (len(RvTls.made) == made0 and not ca_reads
+                  and RvTls.made[-1] is ca_ctx)
+    # TLS-CTX: a context that failed to be made is made again next time
+    tls_ctx_reset()
+    real_ctx_cls = RvTls.SSLContext
+
+    class _NoMemCtx(object):
+        def __init__(self, proto):
+            raise MemoryError("ctx")
+    RvTls.SSLContext = _NoMemCtx
+    try:
+        rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+        try:
+            gl._raw_post("https://d.example", b"{}", {}, 15)
+            ctx_fail = None
+        except MemoryError as e:
+            ctx_fail = e
+    finally:
+        RvTls.SSLContext = real_ctx_cls
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    r_again = gl._raw_post("https://d.example", b"{}", {}, 15)
+    ctx_retry = (ctx_fail is not None and r_again.status_code == 201
+                 and getattr(gl, "_tls_ctx", [None])[0] is RvTls.made[-1])
     rv_sock[0] = RvSock(b"", polls=10 ** 6)
     t0 = _clock[0]
     try:
@@ -7229,14 +7465,57 @@ finally:
         sys.modules["tls"] = real_mods[2]
     gl.read_uart = real_ru
     gl.CA_FILE = "/ca.der"
+    tls_ctx_reset()
 check("U-11: POST body in chunks, UART read while writing and waiting",
       ok_post, repr(rv_sock[0].out[:80]))
 check("U-17: a 301 is returned, not followed (no GET, no Bearer elsewhere)",
       r301.status_code == 301 and one_req)
 check("TLS: with CA_FILE on flash the server is verified",
       ca_ctx.verify_mode == RvTls.CERT_REQUIRED and ca_ctx.ca == b"\x30\x82der")
+check("TLS-CTX: one SSLContext for every POST, CA_FILE read once",
+      ctx_reused, "made %d->%d reads %r" % (made0, len(RvTls.made), ca_reads))
+check("TLS-CTX: a context that failed to be made is made on the next POST",
+      ctx_retry, repr(ctx_fail))
 check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
       to is not None and _clock[0] - t0 >= gl.HTTP_WAIT, repr(to))
+
+# HEAD-ERR: once the status line is in, an error in the header loop keeps
+# the 2xx (a reset there resent the batch: a duplicate); bounded reads
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+try:
+    head_res = []
+    for fail_ in (OSError(104), OSError(110), OSError(9)):
+        rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\nServer: x\r\n",
+                            polls=0)
+        rv_sock[0].fail = fail_
+        try:
+            head_res.append(gl._raw_post("https://d.example", b"{}", {},
+                                         15).status_code)
+        except OSError as e:
+            head_res.append(e)
+    # a header longer than a read, then one cut right before its CRLF:
+    # the pieces are neither headers nor the end of the head
+    long_v = b"a" * 400
+    cut = b"X-Cut: " + b"b" * (256 - 7)
+    rv_sock[0] = RvSock(b"HTTP/1.1 429 Too Many\r\nX-Long: " + long_v
+                        + b"\r\n" + cut + b"\r\nRetry-After: 9\r\n\r\n",
+                        polls=0)
+    r_long = gl._raw_post("https://d.example", b"{}", {}, 15)
+    limits = rv_sock[0].limits
+finally:
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = real_mods[2]
+    tls_ctx_reset()
+check("HEAD-ERR: reset/timeout/close in the headers keeps the 201",
+      head_res == [201, 201, 201], repr(head_res))
+check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
+      r_long.status_code == 429 and r_long.headers.get("Retry-After") == "9"
+      and limits and all(0 < n_ <= 256 for n_ in limits),
+      "%r %r" % (r_long.headers, limits[:4]))
 
 # TLS out of memory TLS_REBOOT_N times in a row at home: a clean reboot
 for n_ in os.listdir(up_td):
@@ -7258,6 +7537,108 @@ check("TLS: ENOMEM TLS_REBOOT_N times at home -> one controlled reboot",
       "resets=%d enomem=%d" % (len(_resets), gl.up["enomem"]))
 _post_raise[0] = None
 gl.wifi["home"] = False
+
+# ENOMEM-RUN: "in a row" means consecutive: another failure ends the run
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.wifi["home"] = True
+make_trk(os.path.join(up_td, "20261006_110000.trk"), 3)
+_resets[:] = []
+seq = ([OSError(12)] * (gl.TLS_REBOOT_N - 1) + [OSError(113)]
+       + [OSError(12)] * (gl.TLS_REBOOT_N - 1))
+try:
+    for e_ in seq:
+        _post_raise[0] = e_
+        try:
+            pump()
+        except SystemExit:
+            break
+        _clock[0] += 1000
+finally:
+    _post_raise[0] = None
+    gl.wifi["home"] = False
+check("ENOMEM-RUN: ENOMEMs split by a network error never reboot",
+      not _resets and gl.up["enomem"] == gl.TLS_REBOOT_N - 1,
+      "resets=%d enomem=%d" % (len(_resets), gl.up["enomem"]))
+
+# ENOMEM-LOWIDF: a low-idf episode away does not arm the ENOMEM reboot:
+# the first ordinary network error at home is just a retry
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261006_120000.trk"), 3)
+real_idf_ = gl.idf_heap
+_resets[:] = []
+try:
+    gl.wifi["home"] = False
+    gl.idf_heap = lambda: (30, 20)
+    pump()
+    lowidf_away = gl.up["state"]
+    gl.idf_heap = lambda: (157, 126)
+    gl.wifi["home"] = True
+    _post_raise[0] = OSError(113)
+    try:
+        pump()
+    except SystemExit:
+        pass
+finally:
+    gl.idf_heap = real_idf_
+    _post_raise[0] = None
+    gl.wifi["home"] = False
+check("ENOMEM-LOWIDF: low idf away, then a net error at home: no reboot",
+      lowidf_away == "low idf" and not _resets
+      and gl.up["state"] == "err net", "resets=%d state=%s" % (
+          len(_resets), gl.up["state"]))
+
+# ENOMEM-CODES: mbedTLS ALLOC_FAILED as modtls raises them
+gl._post_phase = getattr(gl, "_post_phase", [None])
+gl._post_phase[0] = "http"
+codes_ok = all(gl._enomem(OSError(c)) for c in (
+    12, -0x7F00, -0x2880, -0x4D80, -0x3F80, -0x3D10, -(0x2180 + 0x6A)))
+codes_no = not any(gl._enomem(OSError(c)) for c in (
+    16, 106, 113, 104, 110, -0x7200, -0x2700))
+check("ENOMEM-CODES: X509/ECP/PK and high+low ALLOC_FAILED codes count",
+      codes_ok and codes_no)
+gl._post_phase[0] = None
+# ... and 16 (MPI_ALLOC_FAILED after modtls, also EBUSY) only from the
+# TLS handshake
+class RvTls16(RvTls):
+    class SSLContext(RvTls.SSLContext):
+        def wrap_socket(self, s, server_hostname=None):
+            raise OSError(16)
+
+
+class RvSock16(RvSock):
+    def connect(self, addr):
+        raise OSError(16)
+
+
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.socket, gl.select = fake_sockmod, fake_sel
+real_hp = gl.HTTP_POST
+gl.HTTP_POST = gl._raw_post
+saved_tls = sys.modules.get("tls")
+try:
+    sys.modules["tls"] = RvTls16
+    tls_ctx_reset()
+    rv_sock[0] = RvSock(b"", polls=0)
+    gl._http_post(10)
+    in_tls = gl.up["enomem"]
+    rv_sock[0] = RvSock16(b"", polls=0)
+    gl._http_post(10)
+    in_connect = gl.up["enomem"]
+finally:
+    gl.HTTP_POST = real_hp
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if saved_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = saved_tls
+    tls_ctx_reset()
+check("ENOMEM-CODES: 16 counts from the TLS handshake, not from connect",
+      in_tls == 1 and in_connect == 0, "%r %r" % (in_tls, in_connect))
 
 # U-13: a request head over 512 B is read whole before the reply
 class RvConn:
@@ -7557,7 +7938,7 @@ gl.DIAG = 0
 diag_clear()
 
 
-# LOWIDF: no TLS try below TLS_MIN_KB; at home a clean reboot instead
+# LOWIDF: no TLS try below TLS_MIN_KB; at home gc.collect() and wait first
 online(up_td)
 gl.up["url"], gl.up["key"] = "https://d.example", "k"
 make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
@@ -7574,12 +7955,105 @@ try:
         pump()
     except SystemExit:
         pass
-    home = (len(_posts), len(_resets))
+    home = (len(_posts), len(_resets), gl.up["state"],
+            gl.up["next_at"] - _clock[0])
 finally:
     gl.idf_heap = real_idf
     gl.wifi["home"] = False
-check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home it reboots",
-      away == (0, "low idf", 0) and home == (0, 1), "%r %r" % (away, home))
+check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home too at first",
+      away == (0, "low idf", 0)
+      and home == (0, 0, "low idf", getattr(gl, "LOWIDF_RETRY", -1)),
+      "%r %r" % (away, home))
+
+# LOWIDF-WAIT: at home the reboot comes only after LOWIDF_WAIT of low idf
+# with tracks waiting, and it tells the next boot (LOWIDF_MARK)
+wait_ms = getattr(gl, "LOWIDF_WAIT", 300000)
+mark = getattr(gl, "LOWIDF_MARK", os.path.join(diag_dir, "lowidf"))
+if os.path.exists(mark):
+    os.remove(mark)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+gl.idf_heap = lambda: (30, 20)
+gl.wifi["home"] = True
+_posts[:] = []
+_resets[:] = []
+steps = []
+try:
+    for dt in (0, wait_ms // 2, wait_ms // 2 - 1000, 2000):
+        _clock[0] += dt
+        try:
+            pump()
+        except SystemExit:
+            pass
+        steps.append(len(_resets))
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF-WAIT: at home a reboot only after LOWIDF_WAIT of low idf",
+      steps == [0, 0, 0, 1] and not _posts and os.path.exists(mark),
+      "%r posts %d mark %s" % (steps, len(_posts), os.path.exists(mark)))
+
+# LOWIDF-RATE: after a low-idf reboot the next one waits LOWIDF_REBOOT_GAP
+online(up_td)                            # up_reset at boot takes the mark
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+gap_ms = getattr(gl, "LOWIDF_REBOOT_GAP", 1800000)
+took = (gl.up.get("lowidf_boot"), os.path.exists(mark))
+saved_up = list(gl._up)
+gl._up[0], gl._up[1] = 0, _clock[0]      # just booted
+gl.idf_heap = lambda: (30, 20)
+gl.wifi["home"] = True
+_resets[:] = []
+t_boot = _clock[0]
+t_reboot = None
+retry_ms = getattr(gl, "LOWIDF_RETRY", 30000)
+try:
+    while _clock[0] - t_boot < gap_ms + 4 * retry_ms:
+        try:
+            pump()                       # low idf the whole time
+        except SystemExit:
+            t_reboot = _clock[0] - t_boot
+            break
+        _clock[0] += retry_ms
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+    gl._up[:] = saved_up
+check("LOWIDF-RATE: at most one low-idf reboot per LOWIDF_REBOOT_GAP",
+      took == (True, False) and t_reboot is not None
+      and gap_ms <= t_reboot <= gap_ms + retry_ms,
+      "%r %r" % (took, t_reboot))
+if os.path.exists(mark):
+    os.remove(mark)
+
+# LOWIDF-BACK: the IDF heap recovering ends the episode; a new one starts
+# its LOWIDF_WAIT again
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), gl.UPLOAD_BATCH * 3)
+low_now = [True]
+gl.idf_heap = lambda: (30, 20) if low_now[0] else (157, 126)
+gl.wifi["home"] = True
+_resets[:] = []
+_posts[:] = []
+try:
+    for dt, low_ in ((0, True),          # low: episode starts
+                     (wait_ms - 1000, False),    # back: a POST goes
+                     (2000, True),       # low again: a new episode
+                     (wait_ms - 1000, True)):
+        _clock[0] += dt
+        low_now[0] = low_
+        try:
+            pump()
+        except SystemExit:
+            pass
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF-BACK: a recovered IDF heap restarts the LOWIDF_WAIT",
+      not _resets and len(_posts) == 1, "resets %d posts %d" % (
+          len(_resets), len(_posts)))
 
 # LOWIDF-GC: a grown, now empty Python heap area goes back on gc.collect()
 # (MicroPython 1.29 frees empty split-heap areas in the sweep): check again
@@ -7611,8 +8085,46 @@ check("LOWIDF-GC: low IDF heap -> gc.collect() first, then the upload goes",
       len(_posts) >= 1 and not _resets and gl.up["state"] != "low idf",
       "%d posts %d resets %r" % (len(_posts), len(_resets), gl.up["state"]))
 
+# LOWPY: under TLS_MIN_PY_KB of free Python heap after the collect the POST
+# waits ("low mem"): its allocations would grow the heap into the IDF block
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+lp_p = os.path.join(up_td, "20261007_120000.trk")
+make_trk(lp_p, 3)
+real_idf_info = getattr(gl, "_idf_info", None)
+real_mem_free = gl.gc.mem_free
+gl._idf_info = lambda: (157 * 1024, 126 * 1024)
+gl.idf_heap = lambda: (157, 126)
+gl.gc.mem_free = lambda: 126 * 1024 + 8000
+_posts[:] = []
+diag_clear()
+gl.DIAG = 60000
+try:
+    pump()
+    low = (len(_posts), gl.up["state"], os.path.exists(lp_p))
+    gl.gc.mem_free = lambda: 126 * 1024 + 20000
+    pump()
+    ok_ = (len(_posts), os.path.exists(lp_p))
+finally:
+    gl.gc.mem_free = real_mem_free
+    gl.idf_heap = real_idf
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+lp_diag = [l for l in diag_lines() if l.startswith("upload low mem")]
+diag_clear()
+check("LOWPY: below TLS_MIN_PY_KB free Python heap the POST waits, then goes",
+      low == (0, "low mem", True) and ok_ == (1, False)
+      and lp_diag == ["upload low mem 8000 B"], "%r %r %r" % (low, ok_,
+                                                               lp_diag))
+
 # HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
-# diag showed a flat "mem" while the heap doubled into the IDF heap
+# diag showed a flat "mem" while the heap doubled into the IDF heap.
+# HEAP-B: to the byte, from esp32.idf_heap_info (not the KB-floored block)
+real_idf_info = getattr(gl, "_idf_info", None)
+gl._idf_info = lambda: (157 * 1024 + 300, 102400 + 700)
 gl.idf_heap = lambda: (157, 100)
 lines = []
 real_dw = gl._diag_write
@@ -7623,11 +8135,110 @@ try:
     st_mem = dict(gl._web_rows())["mem"]
 finally:
     gl.idf_heap = real_idf
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
     gl._diag_write = real_dw
 check("HEAP: free and size of the Python heap without the IDF block",
-      ph == (123456 - 102400, (65432 + 123456 - 102400) // 1024)
-      and " mem 21056 " in lines[0] and lines[0].endswith(" heap 84")
-      and st_mem == 21056, "%r %r" % (ph, lines))
+      ph[1] == (65432 + 123456 - 103100) // 1024
+      and " mem %d " % ph[0] in lines[0] and lines[0].endswith(" heap 83")
+      and " idf 157/100 " in lines[0] and st_mem == ph[0],
+      "%r %r" % (ph, lines))
+check("HEAP-B: the IDF block comes off to the byte, not KB-floored",
+      ph[0] == 123456 - 103100, "%r" % (ph,))
+
+# HEAP-LINE: the upload console line shows the Python heap's own free bytes
+# HEAP-GREW: a diag line names the upload step that grew the Python heap
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+hg_p = os.path.join(up_td, "20261008_100000.trk")
+make_trk(hg_p, 3)
+heap_kb = [124]
+real_mem_free, real_mem_alloc = gl.gc.mem_free, gl.gc.mem_alloc
+gl.gc.mem_free = lambda: 30000 + 102900
+gl.gc.mem_alloc = lambda: heap_kb[0] * 1024 - 30000
+gl._idf_info = lambda: (157 * 1024, 102900)
+real_rb_ = gl.read_batch
+
+
+def _rb_grows(path, off=0):
+    heap_kb[0] = 248                     # the read grew the heap
+    return real_rb_(path, off)
+
+
+gl.read_batch = _rb_grows
+printed = []
+real_print = (print if not isinstance(__builtins__, dict)
+              else __builtins__["print"])
+
+
+def _cap_print(*a, **k):
+    printed.append(" ".join(str(x) for x in a))
+
+
+diag_clear()
+gl.DIAG = 60000
+if isinstance(__builtins__, dict):
+    __builtins__["print"] = _cap_print
+else:
+    __builtins__.print = _cap_print
+try:
+    pump()
+finally:
+    if isinstance(__builtins__, dict):
+        __builtins__["print"] = real_print
+    else:
+        __builtins__.print = real_print
+    gl.read_batch = real_rb_
+up_lines = [l for l in printed if l.startswith("upload " + hg_p)]
+check("HEAP-LINE: the upload line prints py_heap()[0], not gc.mem_free()",
+      len(up_lines) == 1 and up_lines[0].split()[5] == "30000", repr(up_lines))
+grew = [l for l in diag_lines() if l.startswith("heap grew")]
+diag_clear()
+# ... and in the TLS handshake of the real POST
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
+
+class RvTlsGrow(RvTls):
+    class SSLContext(RvTls.SSLContext):
+        def wrap_socket(self, s, server_hostname=None):
+            heap_kb[0] = 300
+            return s
+
+
+heap_kb[0] = 248
+gl.socket, gl.select = fake_sockmod, fake_sel
+saved_tls = sys.modules.get("tls")
+sys.modules["tls"] = RvTlsGrow
+tls_ctx_reset()
+real_hp = gl.HTTP_POST
+gl.HTTP_POST = gl._raw_post
+try:
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    make_trk(hg_p, 3)
+    pump()
+finally:
+    gl.HTTP_POST = real_hp
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if saved_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = saved_tls
+    tls_ctx_reset()
+    gl.gc.mem_free, gl.gc.mem_alloc = real_mem_free, real_mem_alloc
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+grew = grew + [l for l in diag_lines() if l.startswith("heap grew")]
+diag_clear()
+check("HEAP-GREW: diag names the step that grew the heap (read, TLS)",
+      grew == ["heap grew in read_batch to 248 KB",
+               "heap grew in tls_wrap to 300 KB"]
+      and not os.path.exists(hg_p), repr(grew))
 
 
 # GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon

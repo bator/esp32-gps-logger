@@ -241,6 +241,8 @@ HTTP_WAIT = 30000                        # ms for the server's answer, the
                                          # UART read meanwhile (a 4 KB buffer
                                          # holds ~5 s of NMEA)
 HTTP_CHUNK = 1024                        # body bytes per write, UART between
+HTTP_LINE = 256                          # bytes per read of an answer line
+HTTP_LINES = 64                          # reads of the answer's head at most
 HTTP_MAX = 60000                         # ms wall clock for one POST: a timer
                                          # feeds the WDT meanwhile and then
                                          # closes the socket (a hung TLS call
@@ -249,7 +251,18 @@ CA_FILE = "/ca.der"                      # if present: verify the server
 TLS_MIN_KB = 48                          # largest IDF heap block a TLS POST
                                          # needs (measured: at 20 KB every
                                          # handshake failed); below it no
-                                         # try, and at home a clean reboot
+                                         # try (gc.collect() and wait)
+LOWIDF_RETRY = 30000                     # ms between checks while it is low
+LOWIDF_WAIT = 300000                     # ms low at home with tracks waiting:
+                                         # then a clean reboot
+LOWIDF_REBOOT_GAP = 1800000              # ms: at most one such reboot this
+                                         # often (LOWIDF_MARK spans the boot)
+LOWIDF_MARK = "/lowidf"                  # written just before that reboot
+TLS_MIN_PY_KB = 12                       # free Python heap a POST needs after
+                                         # gc.collect(); below it the POST
+                                         # waits: the socket and TLS objects
+                                         # would grow the heap into the IDF
+                                         # block TLS needs
 TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
                                          # home): a clean reboot, the IDF heap
                                          # stays fragmented otherwise
@@ -1121,27 +1134,55 @@ def _diag_boot():
         cause, "-" if prev_run["up"] is None else prev_run["up"],
         machine.freq() // 1000000, py_heap()[0]))
 
-def idf_heap():
-    """(free KB, largest free block KB) of the ESP-IDF heap, or (None,
-    None). TLS needs ~40 KB in one block from it; the Python heap grows
-    into it (and keeps it) when a big allocation does not fit."""
+def _idf_info():
+    """(free B, largest free block B) of the ESP-IDF heap, or (None,
+    None)."""
     try:
         fr = big = 0
         for h in esp32.idf_heap_info(esp32.HEAP_DATA):
             fr += h[1]
             if h[2] > big:
                 big = h[2]
-        return fr // 1024, big // 1024
+        return fr, big
     except Exception:
         return None, None
 
+def idf_heap():
+    """(free KB, largest free block KB) of the ESP-IDF heap, or (None,
+    None). TLS needs ~40 KB in one block from it; the Python heap grows
+    into it (and keeps it) when a big allocation does not fit."""
+    fr, big = _idf_info()
+    if fr is None:
+        return None, None
+    return fr // 1024, big // 1024
+
 def py_heap():
     """(free B, size KB) of the Python heap itself. gc.mem_free() adds
-    the largest free IDF block (room the heap could grow into: modgc.c in
-    MicroPython 1.29), which hid the heap doubling into the IDF heap."""
-    big = (idf_heap()[1] or 0) * 1024
+    the largest free IDF block in bytes (room the heap could grow into:
+    modgc.c in MicroPython 1.29), which hid the heap doubling into the
+    IDF heap; taken off to the byte (a KB figure left up to 1 KB)."""
+    big = _idf_info()[1] or 0
     free = max(gc.mem_free() - big, 0)
     return free, (gc.mem_alloc() + free) // 1024
+
+_heap_kb = [None]                        # Python heap KB at the last note
+
+def _heap_mark():
+    _heap_kb[0] = py_heap()[1]
+
+def _heap_note(phase):
+    """One diag line when the Python heap grew (by 2 KB or more: the two
+    gc figures and the IDF block are not read at one instant) since the
+    last mark or note: which step of an upload grows it into the IDF
+    heap."""
+    try:
+        k0, k = _heap_kb[0], py_heap()[1]
+        _heap_kb[0] = k
+        if k0 is not None and k >= k0 + 2:
+            print("heap grew in %s to %d KB" % (phase, k))
+            _diag_write("heap grew in %s to %d KB" % (phase, k))
+    except Exception:                    # MemoryError: a note never fails
+        pass                             # the upload
 
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
@@ -3564,13 +3605,23 @@ def _seek_footer(f, old):
         return
     f.seek(start + i + 1, 0)
 
+def _lowidf_mark_take():
+    """True once if the last boot was a low-idf reboot (LOWIDF_MARK)."""
+    try:
+        os.stat(LOWIDF_MARK)
+    except OSError:
+        return False
+    _rm(LOWIDF_MARK)
+    return True
+
 def up_reset():
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
               bad_try={}, skip=None, hold={}, bad_full={}, read_err={},
               enomem=0, last_err=None, guard_hits=_guard["hits"],
-              next_at=time.ticks_ms())
+              lowidf_at=None, lowidf_seen=None,
+              lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -3624,27 +3675,69 @@ def write_offset(path, off):
         f.write("%d\n" % off)
     os.rename(tmp, path + ".pos")
 
-def _readline(f):
-    """One track line, at most LINE_MAX bytes. Over-long lines are drained to
-    the next newline and returned as b'' (skip). None means true EOF."""
-    try:
-        line = f.readline(LINE_MAX)
-    except MemoryError:
-        gc.collect()
-        raise
-    if not line:
-        return None
-    if len(line) == LINE_MAX and not line.endswith(b"\n"):
-        while True:
-            try:
-                chunk = f.readline(LINE_MAX)
-            except MemoryError:
-                gc.collect()
-                break
-            if not chunk or chunk.endswith(b"\n"):
-                break
-        return b""
-    return line
+# Track files are read line by line into one buffer (readinto), never a
+# new bytes object per line: f.readline(LINE_MAX) allocated LINE_MAX bytes
+# for each line, and the upload reads at the worst moment for the heap.
+_rbuf = bytearray(LINE_MAX)
+_rmv = memoryview(_rbuf)
+_rd = [0, 0, 0, 0]                       # file offset of _rbuf[0], line start,
+                                         # line end, bytes in _rbuf
+
+def _rd_open(off):
+    _rd[0] = off
+    _rd[1] = _rd[2] = _rd[3] = 0
+
+def _rd_fill(f):
+    """Fill _rbuf from f's position: the bytes read (fewer only at EOF)."""
+    n = 0
+    while n < LINE_MAX:
+        k = f.readinto(_rmv[n:] if n else _rbuf)
+        if not k:
+            break
+        n += k
+    return n
+
+def _rd_line(f):
+    """Next line of f (opened with _rd_open) in _rbuf[_rd[1]:_rd[2]], its
+    newline included (none on a cut-off last line); it starts at file
+    offset _rd[0] + _rd[1]. False at EOF. A line over LINE_MAX bytes is
+    drained to its newline and comes back empty (_rd[1] == _rd[2])."""
+    a, n = _rd[2], _rd[3]
+    i = _rbuf.find(b"\n", a, n)
+    if i < 0:
+        _rd[0] += a                      # refill from this line's start
+        f.seek(_rd[0])
+        n = _rd_fill(f)
+        a = 0
+        i = _rbuf.find(b"\n", 0, n)
+        if i < 0 and n == LINE_MAX:
+            while True:                  # over-long: drain it, skip it
+                _rd[0] += n
+                n = _rd_fill(f)
+                i = _rbuf.find(b"\n", 0, n)
+                if i >= 0 or not n:
+                    break
+            _rd[3] = n
+            _rd[1] = _rd[2] = i + 1 if i >= 0 else 0
+            return True
+        _rd[3] = n
+        if i < 0:
+            _rd[1] = 0
+            _rd[2] = n
+            return n > 0                 # a cut-off last line, or EOF
+    _rd[1] = a
+    _rd[2] = i + 1
+    return True
+
+def _rd_point(a, b, gpx):
+    """_rbuf[a:b] is a point line (see _is_point)."""
+    if gpx:
+        return _rbuf.find(b"<trkpt", a, min(a + 6, b)) == a
+    return (_rbuf[b - 1] == 10 and _rbuf[a] != 35
+            and _rbuf.count(b",", a, b) == 4)
+
+def _rd_footer(a, b):
+    return b - a == len(_FOOT) and _rbuf.find(_FOOT, a, b) == a
 
 def count_points():
     """Points still to upload in all track files, the one being recorded
@@ -3664,16 +3757,17 @@ def count_points():
         try:
             off = read_offset(path)
             with open(path, "rb") as f:
-                if off:
-                    f.seek(off)
-                while True:
-                    line = _readline(f)
-                    if line is None:
+                _rd_open(off)
+                while _rd_line(f):
+                    a, b = _rd[1], _rd[2]
+                    if a == b:
+                        continue
+                    if not gpx and _rd_footer(a, b):
                         break
                     nlines += 1
                     if nlines & 63 == 0:
                         feed()
-                    if _is_point(line, gpx):
+                    if _rd_point(a, b, gpx):
                         total += 1
         except (OSError, MemoryError) as e:
             print("count", path, repr(e))
@@ -3773,72 +3867,232 @@ def _point(line, gpx):
                                 tc[9:11], tc[11:13], tc[13:15])
     return (f[0], f[1], t, f[2], f[3])
 
+_FOOT = FOOTER.encode()
+
+# Overland JSON of one point, written into _body piece by piece
+_J_START = b'{"locations":['
+_J_PT = b'{"type":"Feature","geometry":{"type":"Point","coordinates":['
+_J_TS = b']},"properties":{"timestamp":"'
+_J_ALT = b'"altitude":'
+_J_ACC = b'"horizontal_accuracy":'
+_J_FIX = len(_J_PT) + 1 + len(_J_TS) + 20 + 2   # "," time '",'
+_ISO = (0, 1, 2, 3, -45, 4, 5, -45, 6, 7, 8, 9, 10, -58, 11, 12, -58, 13,
+        14, 15)                          # YYYYMMDDTHHMMSSZ -> ISO (-c: chr c)
+_TDIG = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)
+_pt = [0] * 11                           # the parsed .trk point (_trk_point)
+_dev = [None, b""]                       # DEVICE_ID, its JSON tail
+
+def _tail():
+    if _dev[0] != DEVICE_ID:
+        _dev[0] = DEVICE_ID
+        _dev[1] = ('"device_id":"%s"}}' % DEVICE_ID).encode()
+    return _dev[1]
+
+def _fnum(a, b):
+    try:
+        return float(_rmv[a:b])
+    except ValueError:
+        return None
+
+def _canon(a, b, dec, imax):
+    """_rbuf[a:b] reads exactly as "%.<dec>f" prints it, with at most imax
+    integer digits (so the float round trip is exact)."""
+    if b - a < dec + 2:
+        return False
+    if _rbuf[a] == 45:                   # -
+        a += 1
+    d = b - dec - 1
+    k = d - a
+    if k < 1 or k > imax or _rbuf[d] != 46 or (k > 1 and _rbuf[a] == 48):
+        return False
+    for i in range(a, b):
+        if i != d and not 48 <= _rbuf[i] <= 57:
+            return False
+    return True
+
+def _ptnum(i, a, b, v, fmt, dec, imax):
+    """A number field of _pt: the file's own bytes when they already read
+    as fmt prints them, else fmt % v. -> its length."""
+    _pt[i] = a
+    _pt[i + 1] = b
+    if _canon(a, b, dec, imax):
+        _pt[i + 2] = None
+        return b - a
+    t = fmt % v
+    _pt[i + 2] = t
+    return len(t)
+
+def _utf8(a, b):
+    try:
+        bytes(_rmv[a:b]).decode()
+        return True
+    except UnicodeError:
+        return False
+
+def _trk_point(a, b):
+    """Parse the .trk line _rbuf[a:b] in place into _pt -> -1 (not a point
+    line), 0 (a point, not valid) or the length of its Overland JSON.
+    Same rules as _point and the checks in read_batch."""
+    rb = _rbuf
+    e = b - 1
+    if rb[e] != 10 or rb[a] == 35:
+        return -1
+    c1 = rb.find(b",", a, e)
+    c2 = rb.find(b",", c1 + 1, e) if c1 >= 0 else -1
+    c3 = rb.find(b",", c2 + 1, e) if c2 >= 0 else -1
+    c4 = rb.find(b",", c3 + 1, e) if c3 >= 0 else -1
+    if c4 < 0 or rb.find(b",", c4 + 1, e) >= 0:
+        return -1
+    t = c4 + 1
+    if e - t != 16 or rb[t + 8] != 84 or rb[t + 15] != 90:  # T Z
+        return 0
+    for k in _TDIG:
+        if not 48 <= rb[t + k] <= 57:
+            return 0
+    y = (rb[t] - 48) * 1000 + (rb[t + 1] - 48) * 100 + (rb[t + 2] - 48) * 10
+    if not 2020 <= y + rb[t + 3] - 48 <= 2099:
+        return 0
+    lat, lon = _fnum(a, c1), _fnum(c1 + 1, c2)
+    if (lat is None or lon is None or not _finite(lat) or not _finite(lon)
+            or abs(lat) > 90 or abs(lon) > 180):
+        return 0
+    _pt[6] = t
+    need = (_J_FIX + len(_tail()) + _ptnum(0, c1 + 1, c2, lon, b"%.6f", 6, 3)
+            + _ptnum(3, a, c1, lat, b"%.6f", 6, 3))
+    _pt[7] = _pt[10] = None
+    if c3 > c2 + 1:                      # ele
+        v = _fnum(c2 + 1, c3)
+        if v is None:
+            if not _utf8(c2 + 1, c3):    # as the old line.decode() did
+                return 0
+        elif _finite(v):
+            need += len(_J_ALT) + 1 + _ptnum(7, c2 + 1, c3, v, b"%.1f", 1, 6)
+    if c4 > c3 + 1:                      # hdop
+        v = _fnum(c3 + 1, c4)
+        if v is None:
+            if not _utf8(c3 + 1, c4):
+                return 0
+        elif _finite(v):
+            _pt[10] = b"%.1f" % (v * HDOP_M)
+            need += len(_J_ACC) + 1 + len(_pt[10])
+    return need
+
+def _span(pos, i):
+    t = _pt[i + 2]
+    if t is not None:
+        return _put(pos, t)
+    for k in range(_pt[i], _pt[i + 1]):  # byte by byte: no slice object
+        _body[pos] = _rbuf[k]
+        pos += 1
+    return pos
+
+def _trk_put(pos):
+    """Write the point in _pt (from _trk_point) to _body at pos."""
+    pos = _span(_put(pos, _J_PT), 0)     # lon
+    _body[pos] = 44                      # ,
+    pos = _put(_span(pos + 1, 3), _J_TS)  # lat
+    t = _pt[6]
+    for k in _ISO:
+        _body[pos] = _rbuf[t + k] if k >= 0 else -k
+        pos += 1
+    pos = _put(pos, b'",')
+    if _pt[7] is not None:
+        pos = _span(_put(pos, _J_ALT), 7)
+        _body[pos] = 44
+        pos += 1
+    if _pt[10] is not None:
+        pos = _put(_put(pos, _J_ACC), _pt[10])
+        _body[pos] = 44
+        pos += 1
+    return _put(pos, _tail())
+
+def _gpx_loc(line):
+    """Overland JSON of one legacy .gpx point line, or None if not valid."""
+    try:
+        p = _point(line, True)
+    except UnicodeError:
+        return None
+    lat_f = lon_f = None
+    if p is not None:
+        lat_f, lon_f = _float(p[0]), _float(p[1])
+    if not (p is not None and lat_f is not None and lon_f is not None
+            and _finite(lat_f) and _finite(lon_f)
+            and abs(lat_f) <= 90 and abs(lon_f) <= 180
+            and _valid_time(p[2])):
+        return None
+    ele_f = _float(p[3]) if p[3] else None
+    if ele_f is not None and not _finite(ele_f):
+        ele_f = None
+    hdop_f = _float(p[4]) if p[4] else None
+    extra = ""
+    if ele_f is not None:
+        extra += '"altitude":%.1f,' % ele_f
+    if hdop_f is not None and _finite(hdop_f):
+        extra += '"horizontal_accuracy":%.1f,' % (hdop_f * HDOP_M)
+    return ('{"type":"Feature","geometry":{"type":"Point",'
+            '"coordinates":[%.6f,%.6f]},"properties":{'
+            '"timestamp":"%s",%s"device_id":"%s"}}'
+            % (lon_f, lat_f, p[2], extra, DEVICE_ID)).encode()
+
 def read_batch(path, off=0):
     """Fill _body with up to UPLOAD_BATCH valid points from byte offset off
     as Overland JSON -> (n, n_ok, body_len, new_off, eof).
     Truncated / non-numeric / inf / over-long points are skipped.
-    A valid point that does not fit is left unread (seek back, eof=False)."""
+    A valid point that does not fit is left unread (eof=False). A .trk is
+    parsed in _rbuf and written straight into _body: a few small objects
+    per point (the float checks), not ~25 and a line buffer."""
     gpx = not _is_trk(path)
-    n, n_ok, pos, sep = 0, 0, _put(0, b'{"locations":['), b""
+    n, n_ok, pos, sep = 0, 0, _put(0, _J_START), 0
     nlines, eof = 0, False
     with open(path, "rb") as f:
-        if off:
-            f.seek(off)
+        _rd_open(off)
         while True:
-            line_start = f.tell()
-            line = _readline(f)
-            if line is None:
+            if not _rd_line(f):
                 eof = True
                 break
+            a, b = _rd[1], _rd[2]
             nlines += 1
             if nlines & 63 == 0:
                 feed()
-            if not line or not _is_point(line, gpx):
+            if a == b:
                 continue
-            n += 1
-            try:
-                p = _point(line, gpx)
-            except UnicodeError:
-                p = None
-            lat_f = lon_f = None
-            if p is not None:
-                lat_f, lon_f = _float(p[0]), _float(p[1])
-            ok = (p is not None and lat_f is not None and lon_f is not None
-                  and _finite(lat_f) and _finite(lon_f)
-                  and abs(lat_f) <= 90 and abs(lon_f) <= 180
-                  and _valid_time(p[2]))
             loc = None
-            if ok:
-                ele_f = _float(p[3]) if p[3] else None
-                if ele_f is not None and not _finite(ele_f):
-                    ele_f = None
-                hdop_f = _float(p[4]) if p[4] else None
-                extra = ""
-                if ele_f is not None:
-                    extra += '"altitude":%.1f,' % ele_f
-                if hdop_f is not None and _finite(hdop_f):
-                    extra += '"horizontal_accuracy":%.1f,' % (hdop_f * HDOP_M)
-                loc = ('{"type":"Feature","geometry":{"type":"Point",'
-                       '"coordinates":[%.6f,%.6f]},"properties":{'
-                       '"timestamp":"%s",%s"device_id":"%s"}}'
-                       % (lon_f, lat_f, p[2], extra, DEVICE_ID)).encode()
-                need = len(sep) + len(loc)
-                if pos + need + 2 > len(_body):
-                    if n_ok == 0:
-                        print("point too large", len(loc))
-                        loc = None
-                    else:
-                        f.seek(line_start)
-                        n -= 1
-                        eof = False
-                        break
-            if loc:
-                pos = _put(_put(pos, sep), loc)
-                sep = b","
+            if gpx:
+                line = bytes(_rmv[a:b])
+                if not _is_point(line, True):
+                    continue
+                loc = _gpx_loc(line)
+                need = len(loc) if loc else 0
+            elif _rd_footer(a, b):
+                # the footer ends a .trk: bytes after it are left over from
+                # a longer flush that failed (a later, shorter one wrote its
+                # footer before them), lines the logger dropped
+                eof = True
+                break
+            else:
+                need = _trk_point(a, b)
+                if need < 0:
+                    continue
+            n += 1
+            if need and pos + sep + need + 2 > len(_body):
+                if n_ok == 0:
+                    print("point too large", need)
+                    need = 0
+                else:
+                    _rd[2] = a           # leave it unread
+                    n -= 1
+                    eof = False
+                    break
+            if need:
+                if sep:
+                    _body[pos] = 44      # ,
+                    pos += 1
+                pos = _put(pos, loc) if gpx else _trk_put(pos)
+                sep = 1
                 n_ok += 1
             if n >= UPLOAD_BATCH:
                 break
-        new_off = f.tell()
+        new_off = _rd[0] + _rd[2]
     if not sep:
         return n, 0, 0, new_off, eof
     return n, n_ok, _put(pos, b"]}"), new_off, eof
@@ -3873,14 +4127,11 @@ def _append_bad(path, off, new_off):
     gpx = not _is_trk(path)
     try:
         with open(path, "rb") as src, open(bad, "ab") as dst:
-            if off:
-                src.seek(off)
-            while src.tell() < new_off:
-                line = _readline(src)
-                if line is None:
-                    break
-                if _is_point(line, gpx):
-                    dst.write(line)
+            _rd_open(off)
+            while _rd[0] + _rd[2] < new_off and _rd_line(src):
+                a, b = _rd[1], _rd[2]
+                if a < b and _rd_point(a, b, gpx):
+                    dst.write(_rmv[a:b])
     except (OSError, MemoryError) as e:
         print("quarantine", repr(e))
         gc.collect()
@@ -3990,9 +4241,17 @@ def _io_write(s, b):
         i += n
         t0 = time.ticks_ms()
 
-def _tls_wrap(s, host):
-    """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
-    with CA_FILE on flash (a DER root certificate), verifying the server."""
+_tls_ctx = [None]                        # the one SSLContext, made once
+
+def _tls_context():
+    """The SSLContext every POST wraps its socket with: made (and CA_FILE
+    read) on first use and kept. It is the biggest single Python heap
+    block of a POST; made per POST it came at the worst time (and could
+    grow the heap into the IDF block TLS needs). Not kept if making it
+    failed, so the next POST tries again."""
+    ctx = _tls_ctx[0]
+    if ctx is not None:
+        return ctx
     try:
         import tls
     except ImportError:
@@ -4009,7 +4268,13 @@ def _tls_wrap(s, host):
         ctx.load_verify_locations(cadata=ca)
     else:
         ctx.verify_mode = tls.CERT_NONE
-    return ctx.wrap_socket(s, server_hostname=host)
+    _tls_ctx[0] = ctx
+    return ctx
+
+def _tls_wrap(s, host):
+    """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
+    with CA_FILE on flash (a DER root certificate), verifying the server."""
+    return _tls_context().wrap_socket(s, server_hostname=host)
 
 _guard = {"t": None, "until": None, "sock": None, "hits": 0}
 
@@ -4046,6 +4311,8 @@ def _guard_start(sock, ms):
 def _guard_stop():
     _guard["until"] = _guard["sock"] = None
 
+_post_phase = [None]                     # "connect", "tls", "http" in a POST
+
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
     followed one as a GET with the old Content-Length (the server then
@@ -4059,6 +4326,7 @@ def _raw_post(url, data, headers, timeout):
     if ":" in host:
         host, _, p = host.rpartition(":")
         port = int(p)
+    _post_phase[0] = "connect"
     ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
     s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
     _guard_start(s, HTTP_MAX)            # the raw socket: closing it fails
@@ -4066,7 +4334,11 @@ def _raw_post(url, data, headers, timeout):
         s.settimeout(timeout)
         s.connect(ai[-1])
         if proto == "https":
+            _heap_note("http_post")
+            _post_phase[0] = "tls"       # the handshake
             s = _tls_wrap(s, host)
+            _heap_note("tls_wrap")
+        _post_phase[0] = "http"
         hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (path, host)
         for k in headers:
             hdr += "%s: %s\r\n" % (k, headers[k])
@@ -4085,16 +4357,26 @@ def _raw_post(url, data, headers, timeout):
             feed()
             if _age(time.ticks_ms(), t0) >= HTTP_WAIT:
                 raise OSError(110)       # ETIMEDOUT
-        line = s.readline()
+        line = s.readline(HTTP_LINE)
         code = int(line.split(None, 2)[1])
         retry = None
-        while True:
-            h = s.readline()
-            if not h or h == b"\r\n":
-                break
-            k, _, v = h.partition(b":")
-            if k.strip().lower() == b"retry-after":
-                retry = v.strip().decode()
+        try:
+            # the status is in: a reset, a timeout or the guard closing
+            # the socket in the headers must not turn a 2xx into a resend
+            # (a duplicate batch). Bounded reads: a long header comes in
+            # pieces, only a piece at a line start is a header or the end.
+            bol = True
+            for _ in range(HTTP_LINES):
+                h = s.readline(HTTP_LINE)
+                if not h or (bol and h in (b"\r\n", b"\n")):
+                    break
+                if bol:
+                    k, _, v = h.partition(b":")
+                    if k.strip().lower() == b"retry-after":
+                        retry = v.strip().decode()
+                bol = h[-1:] == b"\n"
+        except Exception as e:
+            print("upload head", code, repr(e))
         return _Resp(code, retry)
     finally:
         _guard_stop()
@@ -4105,18 +4387,39 @@ def _raw_post(url, data, headers, timeout):
 
 HTTP_POST = _raw_post                    # (tests swap it)
 
+# mbedTLS *_ALLOC_FAILED codes: high-level (SSL, ECP, PK, X509, CIPHER, MD,
+# DHM, PEM, PKCS7) and low-level (MPI, ASN1). An error code can be a
+# high-level and a low-level one added together.
+TLS_ALLOC_HI = (0x7F00, 0x4D80, 0x3F80, 0x2880, 0x6180, 0x5180, 0x3400,
+                0x1180, 0x5780)
+TLS_ALLOC_LO = (0x10, 0x6A)
+
 def _enomem(e):
-    """TLS out of memory: MemoryError, ENOMEM or mbedTLS ALLOC_FAILED."""
+    """TLS out of memory: MemoryError, ENOMEM (modtls raises SSL_ALLOC_FAILED
+    as it) or an mbedTLS ALLOC_FAILED code. modtls turns -1..-255 into a
+    positive errno, so MPI (-0x10) arrives as 16, which is also EBUSY, and
+    ASN1 (-0x6A) as 106: those count only from the TLS handshake."""
     if isinstance(e, MemoryError):
         return True
     a = getattr(e, "args", None) or (None,)
-    return a[0] in (12, -0x7F00, -0x10)
+    n = a[0]
+    if not isinstance(n, int):
+        return False
+    if n == 12:                          # ENOMEM
+        return True
+    if n in TLS_ALLOC_LO:
+        return _post_phase[0] == "tls"
+    if n < 0:
+        n = -n
+        return (n & 0xFF80) in TLS_ALLOC_HI or (n & 0x7F) in TLS_ALLOC_LO
+    return False
 
 def _http_post(size):
     """POST _body[:size]. Returns (status_code or None, retry_after_ms or None)."""
     feed()
     r = None
     code, retry = None, None
+    _post_phase[0] = None
     try:
         r = HTTP_POST("%s/api/v1/overland/batches" % up["url"],
                       memoryview(_body)[:size],
@@ -4131,8 +4434,8 @@ def _http_post(size):
         up["enomem"] = up.get("enomem", 0) + 1
         raise
     except Exception as e:
-        if _enomem(e):
-            up["enomem"] = up.get("enomem", 0) + 1
+        # "in a row": any other failure ends a run of out-of-memory ones
+        up["enomem"] = up.get("enomem", 0) + 1 if _enomem(e) else 0
         print("upload", repr(e))
         if _guard["hits"] != up.get("guard_hits"):
             up["guard_hits"] = _guard["hits"]
@@ -4166,6 +4469,30 @@ def _tls_reboot():
     except Exception:
         pass
     _diag_write("reboot tls memory %d" % up["enomem"])
+    machine.reset()
+    return True
+
+def _lowidf_reboot(big, low_ms):
+    """At home, the largest IDF heap block too small for TLS for
+    LOWIDF_WAIT with tracks waiting (gc.collect() did not bring it back):
+    write what is in RAM and restart. Its own reason, not the ENOMEM run;
+    at most one per LOWIDF_REBOOT_GAP (LOWIDF_MARK tells the next boot)."""
+    if not at_home() or low_ms < LOWIDF_WAIT:
+        return False
+    if up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP:
+        return False                     # rebooted for it a short while ago
+    print("upload: IDF heap block %d KB for %d s, reboot" % (
+        big, low_ms // 1000))
+    try:
+        flush(_still_hold())
+    except Exception:
+        pass
+    _diag_write("reboot low idf %d KB %d s" % (big, low_ms // 1000))
+    try:
+        with open(LOWIDF_MARK, "w") as f:
+            f.write("1")
+    except OSError:
+        pass
     machine.reset()
     return True
 
@@ -4214,23 +4541,11 @@ def upload_tick():
     path = files[0]
     off = read_offset(path)
     try:
+        _heap_mark()
         n, n_ok, size, new_off, eof = read_batch(path, off)
+        _heap_note("read_batch")
         feed()
         fsize = _file_size(path) or 0
-        if not n:
-            if eof or fsize == 0:
-                _rm(path)                # empty / EOF track and .bad
-                _rm(path + ".pos")
-                _clear_bad_full(path)
-            else:
-                print("pos skip", path, off, new_off, fsize)
-                write_offset(path, 0)
-            up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
-            return
-        if not size:
-            commit_offset(path, n, new_off, eof)
-            up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
-            return
     except OSError as e:
         # unreadable (corrupt LittleFS block, EIO): hold it back so the
         # newer tracks still go, and after READ_ERR_MAX tries park it as
@@ -4255,6 +4570,28 @@ def upload_tick():
         up["skip"] = path
         _low_mem(now)
         return
+    if not size:
+        # nothing to send: a write error here is a flash error, not an
+        # unreadable track (READ_ERR_MAX of them parked a good one as .err)
+        try:
+            if n:
+                commit_offset(path, n, new_off, eof)
+            elif eof or fsize == 0:
+                _rm(path)                # empty / EOF track and .bad
+                _rm(path + ".pos")
+                _clear_bad_full(path)
+            else:
+                print("pos skip", path, off, new_off, fsize)
+                write_offset(path, 0)
+        except OSError as e:
+            print("upload pos", path, repr(e))
+            _fs_err(now)
+            return
+        except MemoryError:
+            _low_mem(now)
+            return
+        up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
+        return
     gc.collect()                         # frees an empty grown heap area
     big = idf_heap()[1]
     if big is not None and big < TLS_MIN_KB:
@@ -4262,12 +4599,30 @@ def upload_tick():
         # allocate (seen as "err net" until a reboot on 2026-10-30)
         up["err"] += 1
         up["state"] = "low idf"
-        up["enomem"] = max(up.get("enomem", 0), TLS_REBOOT_N)
         if up.get("last_err") != "low idf":
             up["last_err"] = "low idf"
             _diag_write("upload low idf %d KB" % big)
-        if not _tls_reboot():
-            _schedule(now)
+        t0, seen = up.get("lowidf_at"), up.get("lowidf_seen")
+        if t0 is None or seen is None or _age(now, seen) > LOWIDF_WAIT:
+            t0 = up["lowidf_at"] = now   # a new episode (checks had a gap)
+        up["lowidf_seen"] = now
+        if not _lowidf_reboot(big, _age(now, t0)):
+            if at_home():
+                _schedule(now, LOWIDF_RETRY)
+            else:
+                _schedule(now)
+        return
+    up["lowidf_at"] = None
+    pf = py_heap()[0]
+    if pf < TLS_MIN_PY_KB * 1024:
+        # an allocation that does not fit after a GC grows the heap by up
+        # to its own size, out of the IDF block TLS needs: wait instead
+        up["err"] += 1
+        up["state"] = "low mem"
+        if up.get("last_err") != "low mem":
+            up["last_err"] = "low mem"
+            _diag_write("upload low mem %d B" % pf)
+        _schedule(now)
         return
     if not _bad_full_left():
         up["state"] = "sending"
@@ -4276,6 +4631,7 @@ def upload_tick():
         _set_freq(CPU_MHZ_UPLOAD)        # TLS handshake at full speed
     t_post = time.ticks_ms()
     try:
+        _heap_mark()
         code, retry = _http_post(size)
     except MemoryError:
         up["skip"] = path
@@ -4285,9 +4641,10 @@ def upload_tick():
     finally:
         if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
             _set_freq(CPU_MHZ)
+        _heap_note("http_post")
     read_uart()                          # catch up after a multi-second POST
     now = time.ticks_ms()
-    print("upload", path, n, n_ok, code, gc.mem_free(),
+    print("upload", path, n, n_ok, code, py_heap()[0],
           "%d ms" % time.ticks_diff(now, t_post))
     if code is None and _tls_reboot():
         return
@@ -4296,9 +4653,7 @@ def upload_tick():
         try:
             commit_offset(path, n, new_off, eof)
         except OSError:
-            up["err"] += 1
-            up["state"] = "fs err"
-            _schedule(now)
+            _fs_err(now)
             return
         up["sent"] += n_ok
         up["fail4"] = 0
@@ -4314,13 +4669,16 @@ def upload_tick():
         up["next_at"] = time.ticks_add(now, gap)
     elif code in PAYLOAD_ERR:
         up["err"] += 1
-        up["fail4"] = up.get("fail4", 0) + 1
         if from_bad:
             # count the rejections of a .bad, not its successes: it used to
-            # stop after MAX_BAD_RETRY good batches until the next boot
+            # stop after MAX_BAD_RETRY good batches until the next boot.
+            # Not in fail4: rejected .bad batches kept a normal track's
+            # bad batch from quarantine until the next 2xx
             bt = up.get("bad_try") or {}
             bt[path] = bt.get(path, 0) + 1
             up["bad_try"] = bt
+        else:
+            up["fail4"] = up.get("fail4", 0) + 1
         if path.endswith(".bad") or up["fail4"] >= MAX_GLOBAL_PAYLOAD:
             up["state"] = "err payload"
             _hold_file(path, now, retry if retry else BACKOFF_MAX)
@@ -4340,12 +4698,18 @@ def upload_tick():
         up["state"] = "err " + ("net" if code is None else str(code))
         _schedule(now, retry)
 
+def _fs_err(now):
+    """A .pos write (or delete) failed: retry later, the track stays."""
+    up["err"] += 1
+    up["state"] = "fs err"
+    _schedule(now)
+
 def _low_mem(now):
     gc.collect()
     up["err"] += 1
     up["state"] = "low mem"
     _schedule(now)
-    print("upload MemoryError, free", gc.mem_free())
+    print("upload MemoryError, free", py_heap()[0])
 
 # --- Status page ------------------------------------------------------------
 # A small HTTP page on the LAN while the radio is connected (at home, or
