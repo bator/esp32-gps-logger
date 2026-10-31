@@ -49,11 +49,15 @@ function page(width) {
   return {c, els, xhrs, timers, doc, map};
 }
 const imgs = (h) => (h.match(/<img /g) || []).length;
+// the status requests only (the day history has its own: /hist)
+const st = (p) => p.xhrs.filter((x) => x.url === "/status.json");
 const dom = {};
 let p = page(1600);
 dom.first = p.xhrs.length === 1 && p.xhrs[0].url === "/status.json";
 p.xhrs[0].responseText = text;
 p.xhrs[0].onload();
+const h0 = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
+dom.hist = h0.map((x) => x.url.replace(/d=\d{8}/, "d=D"));
 dom.mapClass = p.map.className;
 dom.tilesWide = imgs(p.doc.getElementById("tiles").innerHTML);
 dom.transform = p.doc.getElementById("tiles").style.transform;
@@ -69,20 +73,83 @@ const before = p.doc.getElementById("tiles").innerHTML;
 p.c.placeMap(d);                        // same tile: no rebuild
 dom.kept = p.doc.getElementById("tiles").innerHTML === before;
 p.c.tick();
-p.xhrs[1].onerror();
+st(p)[1].onerror();
 dom.staleBody = p.doc.body.className;
 dom.staleLive = p.doc.getElementById("live").innerHTML;
 p.c.tick();
-p.xhrs[2].responseText = JSON.stringify({refresh_s: 30, position: null});
-p.xhrs[2].onload();
+st(p)[2].responseText = JSON.stringify({refresh_s: 30, position: null});
+st(p)[2].onload();
 dom.nofix = p.map.className;
 dom.timer2 = p.timers[p.timers.length - 1];
 p.c.tick();
-p.xhrs[3].responseText = "{broken";
-p.xhrs[3].onload();
+st(p)[3].responseText = "{broken";
+st(p)[3].onload();
 dom.brokenBody = p.doc.body.className;
 p = page(1100);
 p.xhrs[0].ontimeout();
 dom.never = p.doc.getElementById("live").innerHTML;
 v.dom = dom;
+
+// The day history: lines since local midnight drawn as one path (a gap
+// over 5 min starts a new one), the zoom fitted, a full reply asked again
+// from where it got to, then only what is new
+function trkLine(ms, lat, lon) {
+  const s = new Date(ms).toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+  return lat.toFixed(6) + "," + lon.toFixed(6) + ",100.0,2,1.4," + s + "\n";
+}
+const hd = {};
+p = page(1600);
+const now = Date.now(), mid = new Date(now);
+mid.setHours(0, 0, 0, 0);
+p.c.Date = Date;
+p.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: "47.18536, 18.42730", hacc: 2});
+p.xhrs[0].onload();
+let hx = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
+hd.firstUrls = hx.map((x) => x.url);
+let body = "#TRK2\n" + trkLine(mid.getTime() - 60000, 47.0, 18.0);   // before midnight
+const t1 = Math.max(mid.getTime() + 1000, now - 3600000);
+for (let k = 0; k < 10; k++) body += trkLine(t1 + k * 1000, 47.18536 + k * 0.0003, 18.4273);
+body += trkLine(t1 + 20 * 60000, 47.1845, 18.4290);                   // after a gap
+hx[0].status = 200;
+hx[0].responseText = body.slice(0, body.length - 7);                 // a cut line
+hx[0].onload();
+// answer the history requests still open: re (url) -> the reply, else 404
+function answer(p, re, reply) {
+  for (let n = 0; n < 8; n++) {
+    const open = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done);
+    if (!open.length) break;
+    const x = open[0];
+    x.done = true;
+    x.status = re && re.test(x.url) ? 200 : 404;
+    x.responseText = x.status === 200 ? reply : "no such day";
+    x.onload();
+  }
+}
+hx[0].done = true;
+answer(p, null, "");
+hd.pts1 = p.c.hist.pts.length;
+hd.path1 = p.doc.getElementById("trk").innerHTML;
+hd.busy1 = p.c.hist.busy;
+const cut = body.length - 7;
+hd.cut = cut;
+p.c.histLoad();                         // a minute later: only what is new
+hd.urls2 = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done).map((x) => x.url.replace(/d=\d{8}/, "d=D"));
+answer(p, new RegExp("&o=" + cut + "$"), body.slice(cut));
+hd.pts = p.c.hist.pts.length;
+hd.km = p.c.hist.km;
+hd.path = p.doc.getElementById("trk").innerHTML;
+hd.day = p.doc.getElementById("day").innerHTML;
+hd.zoom = +(p.doc.getElementById("tiles").innerHTML.match(/openstreetmap\.org\/(\d+)\//) || [])[1];
+hd.trkT = p.doc.getElementById("trk").style.transform === p.doc.getElementById("tiles").style.transform;
+// a full reply (HIST_REPLY bytes) is asked again from its end
+p = page(1600);
+p.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: "47.18536, 18.42730"});
+p.xhrs[0].onload();
+hx = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
+hx[0].status = 200;
+hx[0].responseText = "x".repeat(16384);
+hx[0].onload();
+hx = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
+hd.again = hx.length > 1 && hx[1].url === hx[0].url.replace("&o=0", "&o=16384");
+v.hist = hd;
 process.stdout.write(JSON.stringify(v));

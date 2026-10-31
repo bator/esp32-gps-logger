@@ -85,6 +85,7 @@ import gps_logger as gl                 # noqa: E402
 
 gl.DIAG = 0                             # never write the host's /diag.log
 gl.LOG_DIR = "/nonexistent-gps-logger-smoke"
+gl.HIST_DIR = "/nonexistent-gps-logger-smoke-hist"
 gl.reset()
 gl.log_reset()
 gl.wifi_reset()
