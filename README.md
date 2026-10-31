@@ -995,8 +995,10 @@ every pull request:
   `machine`/`network`/UART (exits 1 on any FAIL), plus
   `tests/mpy_unix_check.py` and `tests/mpy_unix_logger.py` (imports
   `gps_logger.py` with stub `machine`/`network` modules and runs its pure
-  paths) on a cached MicroPython 1.29 unix build; the smoke also runs
-  under CPython. It also runs:
+  paths) on a cached MicroPython 1.29 unix build, and the smoke again on a
+  single-precision build (`MICROPY_FLOAT_IMPL_FLOAT`, like the board: the
+  departure ring must rebuild the lines `_sample_line` writes); the smoke
+  also runs under CPython. It also runs:
   - `tests/web_loopback.py` on the unix build and CPython: the status page
     over real loopback sockets (a normal request, a foreign `Host`, an
     empty, an oversized, a stalled and a trickling request, a client
@@ -1025,8 +1027,14 @@ The same locally:
 .venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
 shellcheck deploy.sh tools/build_firmware.sh
 .venv/bin/python -m mpy_cross -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
-MICROPYTHON=/path/to/micropython python3 tests/test_gps_logger.py
+MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \
+    python3 tests/test_gps_logger.py
 ```
+
+The single-precision unix build: `make -C ports/unix
+BUILD=build-f32 PROG=micropython-f32
+CFLAGS_EXTRA=-DMICROPY_FLOAT_IMPL=MICROPY_FLOAT_IMPL_FLOAT` in a
+MicroPython v1.29.0 tree.
 
 `tests/device_bench.py` is an optional on-device timing probe; nothing under
 `tests/` is copied to the board.
