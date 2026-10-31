@@ -6756,7 +6756,10 @@ check("LOWIDF-GC: low IDF heap -> gc.collect() first, then the upload goes",
       "%d posts %d resets %r" % (len(_posts), len(_resets), gl.up["state"]))
 
 # HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
-# diag showed a flat "mem" while the heap doubled into the IDF heap
+# diag showed a flat "mem" while the heap doubled into the IDF heap.
+# HEAP-B: to the byte, from esp32.idf_heap_info (not the KB-floored block)
+real_idf_info = getattr(gl, "_idf_info", None)
+gl._idf_info = lambda: (157 * 1024 + 300, 102400 + 700)
 gl.idf_heap = lambda: (157, 100)
 lines = []
 real_dw = gl._diag_write
@@ -6767,11 +6770,110 @@ try:
     st_mem = dict(gl._web_rows())["mem"]
 finally:
     gl.idf_heap = real_idf
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
     gl._diag_write = real_dw
 check("HEAP: free and size of the Python heap without the IDF block",
-      ph == (123456 - 102400, (65432 + 123456 - 102400) // 1024)
-      and " mem 21056 " in lines[0] and lines[0].endswith(" heap 84")
-      and st_mem == 21056, "%r %r" % (ph, lines))
+      ph[1] == (65432 + 123456 - 103100) // 1024
+      and " mem %d " % ph[0] in lines[0] and lines[0].endswith(" heap 83")
+      and " idf 157/100 " in lines[0] and st_mem == ph[0],
+      "%r %r" % (ph, lines))
+check("HEAP-B: the IDF block comes off to the byte, not KB-floored",
+      ph[0] == 123456 - 103100, "%r" % (ph,))
+
+# HEAP-LINE: the upload console line shows the Python heap's own free bytes
+# HEAP-GREW: a diag line names the upload step that grew the Python heap
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+hg_p = os.path.join(up_td, "20261008_100000.trk")
+make_trk(hg_p, 3)
+heap_kb = [124]
+real_mem_free, real_mem_alloc = gl.gc.mem_free, gl.gc.mem_alloc
+gl.gc.mem_free = lambda: 30000 + 102900
+gl.gc.mem_alloc = lambda: heap_kb[0] * 1024 - 30000
+gl._idf_info = lambda: (157 * 1024, 102900)
+real_rb_ = gl.read_batch
+
+
+def _rb_grows(path, off=0):
+    heap_kb[0] = 248                     # the read grew the heap
+    return real_rb_(path, off)
+
+
+gl.read_batch = _rb_grows
+printed = []
+real_print = (print if not isinstance(__builtins__, dict)
+              else __builtins__["print"])
+
+
+def _cap_print(*a, **k):
+    printed.append(" ".join(str(x) for x in a))
+
+
+diag_clear()
+gl.DIAG = 60000
+if isinstance(__builtins__, dict):
+    __builtins__["print"] = _cap_print
+else:
+    __builtins__.print = _cap_print
+try:
+    pump()
+finally:
+    if isinstance(__builtins__, dict):
+        __builtins__["print"] = real_print
+    else:
+        __builtins__.print = real_print
+    gl.read_batch = real_rb_
+up_lines = [l for l in printed if l.startswith("upload " + hg_p)]
+check("HEAP-LINE: the upload line prints py_heap()[0], not gc.mem_free()",
+      len(up_lines) == 1 and up_lines[0].split()[5] == "30000", repr(up_lines))
+grew = [l for l in diag_lines() if l.startswith("heap grew")]
+diag_clear()
+# ... and in the TLS handshake of the real POST
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
+
+class RvTlsGrow(RvTls):
+    class SSLContext(RvTls.SSLContext):
+        def wrap_socket(self, s, server_hostname=None):
+            heap_kb[0] = 300
+            return s
+
+
+heap_kb[0] = 248
+gl.socket, gl.select = fake_sockmod, fake_sel
+saved_tls = sys.modules.get("tls")
+sys.modules["tls"] = RvTlsGrow
+tls_ctx_reset()
+real_hp = gl.HTTP_POST
+gl.HTTP_POST = gl._raw_post
+try:
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    make_trk(hg_p, 3)
+    pump()
+finally:
+    gl.HTTP_POST = real_hp
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if saved_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = saved_tls
+    tls_ctx_reset()
+    gl.gc.mem_free, gl.gc.mem_alloc = real_mem_free, real_mem_alloc
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+grew = grew + [l for l in diag_lines() if l.startswith("heap grew")]
+diag_clear()
+check("HEAP-GREW: diag names the step that grew the heap (read, TLS)",
+      grew == ["heap grew in read_batch to 248 KB",
+               "heap grew in tls_wrap to 300 KB"]
+      and not os.path.exists(hg_p), repr(grew))
 
 
 # GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon

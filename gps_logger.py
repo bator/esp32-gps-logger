@@ -952,27 +952,55 @@ def _diag_boot():
         cause, "-" if prev_run["up"] is None else prev_run["up"],
         machine.freq() // 1000000, py_heap()[0]))
 
-def idf_heap():
-    """(free KB, largest free block KB) of the ESP-IDF heap, or (None,
-    None). TLS needs ~40 KB in one block from it; the Python heap grows
-    into it (and keeps it) when a big allocation does not fit."""
+def _idf_info():
+    """(free B, largest free block B) of the ESP-IDF heap, or (None,
+    None)."""
     try:
         fr = big = 0
         for h in esp32.idf_heap_info(esp32.HEAP_DATA):
             fr += h[1]
             if h[2] > big:
                 big = h[2]
-        return fr // 1024, big // 1024
+        return fr, big
     except Exception:
         return None, None
 
+def idf_heap():
+    """(free KB, largest free block KB) of the ESP-IDF heap, or (None,
+    None). TLS needs ~40 KB in one block from it; the Python heap grows
+    into it (and keeps it) when a big allocation does not fit."""
+    fr, big = _idf_info()
+    if fr is None:
+        return None, None
+    return fr // 1024, big // 1024
+
 def py_heap():
     """(free B, size KB) of the Python heap itself. gc.mem_free() adds
-    the largest free IDF block (room the heap could grow into: modgc.c in
-    MicroPython 1.29), which hid the heap doubling into the IDF heap."""
-    big = (idf_heap()[1] or 0) * 1024
+    the largest free IDF block in bytes (room the heap could grow into:
+    modgc.c in MicroPython 1.29), which hid the heap doubling into the
+    IDF heap; taken off to the byte (a KB figure left up to 1 KB)."""
+    big = _idf_info()[1] or 0
     free = max(gc.mem_free() - big, 0)
     return free, (gc.mem_alloc() + free) // 1024
+
+_heap_kb = [None]                        # Python heap KB at the last note
+
+def _heap_mark():
+    _heap_kb[0] = py_heap()[1]
+
+def _heap_note(phase):
+    """One diag line when the Python heap grew (by 2 KB or more: the two
+    gc figures and the IDF block are not read at one instant) since the
+    last mark or note: which step of an upload grows it into the IDF
+    heap."""
+    try:
+        k0, k = _heap_kb[0], py_heap()[1]
+        _heap_kb[0] = k
+        if k0 is not None and k >= k0 + 2:
+            print("heap grew in %s to %d KB" % (phase, k))
+            _diag_write("heap grew in %s to %d KB" % (phase, k))
+    except Exception:                    # MemoryError: a note never fails
+        pass                             # the upload
 
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
@@ -3537,8 +3565,10 @@ def _raw_post(url, data, headers, timeout):
         s.settimeout(timeout)
         s.connect(ai[-1])
         if proto == "https":
+            _heap_note("http_post")
             _post_phase[0] = "tls"       # the handshake
             s = _tls_wrap(s, host)
+            _heap_note("tls_wrap")
         _post_phase[0] = "http"
         hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (path, host)
         for k in headers:
@@ -3732,7 +3762,9 @@ def upload_tick():
     path = files[0]
     off = read_offset(path)
     try:
+        _heap_mark()
         n, n_ok, size, new_off, eof = read_batch(path, off)
+        _heap_note("read_batch")
         feed()
         fsize = _file_size(path) or 0
     except OSError as e:
@@ -3801,6 +3833,7 @@ def upload_tick():
         _set_freq(CPU_MHZ_UPLOAD)        # TLS handshake at full speed
     t_post = time.ticks_ms()
     try:
+        _heap_mark()
         code, retry = _http_post(size)
     except MemoryError:
         up["skip"] = path
@@ -3810,9 +3843,10 @@ def upload_tick():
     finally:
         if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
             _set_freq(CPU_MHZ)
+        _heap_note("http_post")
     read_uart()                          # catch up after a multi-second POST
     now = time.ticks_ms()
-    print("upload", path, n, n_ok, code, gc.mem_free(),
+    print("upload", path, n, n_ok, code, py_heap()[0],
           "%d ms" % time.ticks_diff(now, t_post))
     if code is None and _tls_reboot():
         return
@@ -3877,7 +3911,7 @@ def _low_mem(now):
     up["err"] += 1
     up["state"] = "low mem"
     _schedule(now)
-    print("upload MemoryError, free", gc.mem_free())
+    print("upload MemoryError, free", py_heap()[0])
 
 # --- Status page ------------------------------------------------------------
 # A small HTTP page on the LAN while the radio is connected (at home, or
