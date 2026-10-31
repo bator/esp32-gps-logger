@@ -426,6 +426,7 @@ def _reload_logger():
         import gps_logger as m
     m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
     m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
+    m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf")
     m.WEB = False                        # radio-sleep tests; WEB has its own
     m.HTTP_POST = lambda url, data, headers, timeout: _post(
         url, data=data, headers=headers, timeout=timeout)
@@ -6701,7 +6702,7 @@ gl.DIAG = 0
 diag_clear()
 
 
-# LOWIDF: no TLS try below TLS_MIN_KB; at home a clean reboot instead
+# LOWIDF: no TLS try below TLS_MIN_KB; at home gc.collect() and wait first
 online(up_td)
 gl.up["url"], gl.up["key"] = "https://d.example", "k"
 make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
@@ -6718,12 +6719,105 @@ try:
         pump()
     except SystemExit:
         pass
-    home = (len(_posts), len(_resets))
+    home = (len(_posts), len(_resets), gl.up["state"],
+            gl.up["next_at"] - _clock[0])
 finally:
     gl.idf_heap = real_idf
     gl.wifi["home"] = False
-check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home it reboots",
-      away == (0, "low idf", 0) and home == (0, 1), "%r %r" % (away, home))
+check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home too at first",
+      away == (0, "low idf", 0)
+      and home == (0, 0, "low idf", getattr(gl, "LOWIDF_RETRY", -1)),
+      "%r %r" % (away, home))
+
+# LOWIDF-WAIT: at home the reboot comes only after LOWIDF_WAIT of low idf
+# with tracks waiting, and it tells the next boot (LOWIDF_MARK)
+wait_ms = getattr(gl, "LOWIDF_WAIT", 300000)
+mark = getattr(gl, "LOWIDF_MARK", os.path.join(diag_dir, "lowidf"))
+if os.path.exists(mark):
+    os.remove(mark)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+gl.idf_heap = lambda: (30, 20)
+gl.wifi["home"] = True
+_posts[:] = []
+_resets[:] = []
+steps = []
+try:
+    for dt in (0, wait_ms // 2, wait_ms // 2 - 1000, 2000):
+        _clock[0] += dt
+        try:
+            pump()
+        except SystemExit:
+            pass
+        steps.append(len(_resets))
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF-WAIT: at home a reboot only after LOWIDF_WAIT of low idf",
+      steps == [0, 0, 0, 1] and not _posts and os.path.exists(mark),
+      "%r posts %d mark %s" % (steps, len(_posts), os.path.exists(mark)))
+
+# LOWIDF-RATE: after a low-idf reboot the next one waits LOWIDF_REBOOT_GAP
+online(up_td)                            # up_reset at boot takes the mark
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+gap_ms = getattr(gl, "LOWIDF_REBOOT_GAP", 1800000)
+took = (gl.up.get("lowidf_boot"), os.path.exists(mark))
+saved_up = list(gl._up)
+gl._up[0], gl._up[1] = 0, _clock[0]      # just booted
+gl.idf_heap = lambda: (30, 20)
+gl.wifi["home"] = True
+_resets[:] = []
+t_boot = _clock[0]
+t_reboot = None
+retry_ms = getattr(gl, "LOWIDF_RETRY", 30000)
+try:
+    while _clock[0] - t_boot < gap_ms + 4 * retry_ms:
+        try:
+            pump()                       # low idf the whole time
+        except SystemExit:
+            t_reboot = _clock[0] - t_boot
+            break
+        _clock[0] += retry_ms
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+    gl._up[:] = saved_up
+check("LOWIDF-RATE: at most one low-idf reboot per LOWIDF_REBOOT_GAP",
+      took == (True, False) and t_reboot is not None
+      and gap_ms <= t_reboot <= gap_ms + retry_ms,
+      "%r %r" % (took, t_reboot))
+if os.path.exists(mark):
+    os.remove(mark)
+
+# LOWIDF-BACK: the IDF heap recovering ends the episode; a new one starts
+# its LOWIDF_WAIT again
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), gl.UPLOAD_BATCH * 3)
+low_now = [True]
+gl.idf_heap = lambda: (30, 20) if low_now[0] else (157, 126)
+gl.wifi["home"] = True
+_resets[:] = []
+_posts[:] = []
+try:
+    for dt, low_ in ((0, True),          # low: episode starts
+                     (wait_ms - 1000, False),    # back: a POST goes
+                     (2000, True),       # low again: a new episode
+                     (wait_ms - 1000, True)):
+        _clock[0] += dt
+        low_now[0] = low_
+        try:
+            pump()
+        except SystemExit:
+            pass
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF-BACK: a recovered IDF heap restarts the LOWIDF_WAIT",
+      not _resets and len(_posts) == 1, "resets %d posts %d" % (
+          len(_resets), len(_posts)))
 
 # LOWIDF-GC: a grown, now empty Python heap area goes back on gc.collect()
 # (MicroPython 1.29 frees empty split-heap areas in the sweep): check again

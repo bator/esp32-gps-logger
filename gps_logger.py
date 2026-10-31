@@ -224,7 +224,13 @@ CA_FILE = "/ca.der"                      # if present: verify the server
 TLS_MIN_KB = 48                          # largest IDF heap block a TLS POST
                                          # needs (measured: at 20 KB every
                                          # handshake failed); below it no
-                                         # try, and at home a clean reboot
+                                         # try (gc.collect() and wait)
+LOWIDF_RETRY = 30000                     # ms between checks while it is low
+LOWIDF_WAIT = 300000                     # ms low at home with tracks waiting:
+                                         # then a clean reboot
+LOWIDF_REBOOT_GAP = 1800000              # ms: at most one such reboot this
+                                         # often (LOWIDF_MARK spans the boot)
+LOWIDF_MARK = "/lowidf"                  # written just before that reboot
 TLS_MIN_PY_KB = 12                       # free Python heap a POST needs after
                                          # gc.collect(); below it the POST
                                          # waits: the socket and TLS objects
@@ -3051,13 +3057,23 @@ def _seek_footer(f, old):
         return
     f.seek(start + i + 1, 0)
 
+def _lowidf_mark_take():
+    """True once if the last boot was a low-idf reboot (LOWIDF_MARK)."""
+    try:
+        os.stat(LOWIDF_MARK)
+    except OSError:
+        return False
+    _rm(LOWIDF_MARK)
+    return True
+
 def up_reset():
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
               bad_try={}, skip=None, hold={}, bad_full={}, read_err={},
               enomem=0, last_err=None, guard_hits=_guard["hits"],
-              next_at=time.ticks_ms())
+              lowidf_at=None, lowidf_seen=None,
+              lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -3708,17 +3724,27 @@ def _tls_reboot():
     machine.reset()
     return True
 
-def _lowidf_reboot(big):
-    """At home, the largest IDF heap block too small for TLS: write what is
-    in RAM and restart (its own reason, not the ENOMEM run)."""
-    if not at_home():
+def _lowidf_reboot(big, low_ms):
+    """At home, the largest IDF heap block too small for TLS for
+    LOWIDF_WAIT with tracks waiting (gc.collect() did not bring it back):
+    write what is in RAM and restart. Its own reason, not the ENOMEM run;
+    at most one per LOWIDF_REBOOT_GAP (LOWIDF_MARK tells the next boot)."""
+    if not at_home() or low_ms < LOWIDF_WAIT:
         return False
-    print("upload: IDF heap block %d KB, reboot" % big)
+    if up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP:
+        return False                     # rebooted for it a short while ago
+    print("upload: IDF heap block %d KB for %d s, reboot" % (
+        big, low_ms // 1000))
     try:
         flush(_still_hold())
     except Exception:
         pass
-    _diag_write("reboot low idf %d KB" % big)
+    _diag_write("reboot low idf %d KB %d s" % (big, low_ms // 1000))
+    try:
+        with open(LOWIDF_MARK, "w") as f:
+            f.write("1")
+    except OSError:
+        pass
     machine.reset()
     return True
 
@@ -3828,9 +3854,17 @@ def upload_tick():
         if up.get("last_err") != "low idf":
             up["last_err"] = "low idf"
             _diag_write("upload low idf %d KB" % big)
-        if not _lowidf_reboot(big):
-            _schedule(now)
+        t0, seen = up.get("lowidf_at"), up.get("lowidf_seen")
+        if t0 is None or seen is None or _age(now, seen) > LOWIDF_WAIT:
+            t0 = up["lowidf_at"] = now   # a new episode (checks had a gap)
+        up["lowidf_seen"] = now
+        if not _lowidf_reboot(big, _age(now, t0)):
+            if at_home():
+                _schedule(now, LOWIDF_RETRY)
+            else:
+                _schedule(now)
         return
+    up["lowidf_at"] = None
     pf = py_heap()[0]
     if pf < TLS_MIN_PY_KB * 1024:
         # an allocation that does not fit after a GC grows the heap by up
