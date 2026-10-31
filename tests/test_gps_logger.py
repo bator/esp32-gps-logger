@@ -464,6 +464,7 @@ def _reload_logger():
     m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
     m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
     m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf")
+    m.HIST_DIR = os.path.join(diag_dir, "hist")         # (day history)
     m.HOME_APS_FILE = None               # tests that keep BSSIDs set a path
     m.WEB = False                        # radio-sleep tests; WEB has its own
     m.HTTP_POST = lambda url, data, headers, timeout: _post(
@@ -7956,6 +7957,108 @@ check("TRK2-RING: the way out is the line _sample_line writes (TRK2 and "
       repr([(a, b) for a, b in zip(w2 + w1, g2 + g1) if a != b][:2]))
 gl.reset()
 
+# HIST: the day history the status page draws - each line flush wrote,
+# appended to HIST_DIR/<UTC day>.trk (the track file is deleted once
+# uploaded), the newest HIST_DAYS days kept, served by /hist?d=&o=
+import tempfile as _tf
+_hist_saved = (gl.HIST_DIR, gl.LOG_DIR, gl.HIST_REPLY)
+_hd = _tf.mkdtemp(prefix="hist-")
+gl.HIST_DIR = os.path.join(_hd, "hist")
+gl.LOG_DIR = _hd
+
+
+def _hl(day, hms, lat=47.185):
+    return "%.6f,18.427300,100.0,2,1.4,%sT%sZ\n" % (lat, day, hms)
+
+
+def _hread(day):
+    try:
+        with open(os.path.join(gl.HIST_DIR, day + ".trk")) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+try:
+    lines = [_hl("20261030", "235958"), _hl("20261030", "235959"),
+             _hl("20261031", "000000"), _hl("20261031", "000001")]
+    gl._hist_add(lines + ["not written\n"], 4)
+    gl._hist_add([_hl("20261031", "000002")], 1)
+    h30, h31 = _hread("20261030"), _hread("20261031")
+    check("HIST: lines go to their own UTC day's file, appended, only "
+          "lines[:k]",
+          h30 == "".join(lines[:2])
+          and h31 == "".join(lines[2:]) + _hl("20261031", "000002"),
+          repr((h30, h31)))
+    for d_ in range(1, 10):               # 9 old days, then a new one
+        with open(os.path.join(gl.HIST_DIR, "202610%02d.trk" % d_), "w") as f:
+            f.write(_hl("202610%02d" % d_, "120000"))
+    gl._hist_add([_hl("20261101", "080000")], 1)
+    kept = sorted(os.listdir(gl.HIST_DIR))
+    check("HIST: a new day's file drops the days beyond HIST_DAYS",
+          len(kept) == gl.HIST_DAYS and kept[-1] == "20261101.trk"
+          and kept[0] == "20261006.trk", repr(kept))
+    free_saved = gl.free
+    gl.free = lambda: gl.MIN_FREE
+    try:
+        gl._hist_add([_hl("20261101", "080001")], 1)
+    finally:
+        gl.free = free_saved
+    check("HIST: nothing written while the flash is nearly full",
+          _hread("20261101") == _hl("20261101", "080000"))
+    # flush: the lines that landed in the track file go to the history too
+    gl.log_reset()
+    gl.log["file"] = os.path.join(_hd, "t.trk")
+    gl.log["fmt"] = 2
+    fl = [_hl("20261101", "090000"), _hl("20261101", "090001", 47.186)]
+    gl.log["batch"] = list(fl)
+    gl.flush()
+    check("HIST: flush appends the lines it wrote to the day history",
+          _hread("20261101") == _hl("20261101", "080000") + "".join(fl)
+          and gl.log["batch"] == [] and gl.log["points"] == 2,
+          repr(_hread("20261101")))
+    gl.log_reset()
+
+    class _HConn:
+        def __init__(self):
+            self.sent = b""
+
+        def settimeout(self, t):
+            pass
+
+        def sendall(self, b):
+            self.sent += bytes(b)
+
+    def _hget(q):
+        c = _HConn()
+        gl._web_reply(c, b"GET /hist?" + q + b" HTTP/1.1\r\n\r\n")
+        head, _, body = c.sent.partition(b"\r\n\r\n")
+        return head.split(b"\r\n")[0], head, body
+
+    full = _hread("20261101").encode()
+    a = _hget(b"d=20261101&o=0")
+    b = _hget(b"d=20261101&o=%d" % len(_hl("20261101", "080000")))
+    gl.HIST_REPLY = 50
+    cap = _hget(b"d=20261101&o=10")
+    gl.HIST_REPLY = _hist_saved[2]
+    end = _hget(b"d=20261101&o=99999")
+    bad = [_hget(q)[0] for q in (b"d=2026110&o=0", b"d=../../x&o=0",
+                                 b"d=20261101&o=-1", b"d=20261101&o=x",
+                                 b"d=20250101&o=0")]
+    check("HIST-WEB: /hist?d=&o= sends the day from byte o (Content-"
+          "Length), HIST_REPLY at most, nothing past the end",
+          a[0] == b"HTTP/1.0 200 OK" and a[2] == full
+          and b"Content-Length: %d" % len(full) in a[1]
+          and b[2] == full[len(_hl("20261101", "080000")):]
+          and cap[2] == full[10:60] and end[0] == b"HTTP/1.0 200 OK"
+          and end[2] == b"", repr((a[0], len(a[2]), len(cap[2]), end[2])))
+    check("HIST-WEB: a bad day, offset or a missing day is a 404",
+          bad == [b"HTTP/1.0 404 Not Found"] * 5, repr(bad))
+finally:
+    gl.HIST_DIR, gl.LOG_DIR, gl.HIST_REPLY = _hist_saved
+    shutil.rmtree(_hd, ignore_errors=True)
+    gl.reset()
+
 # PVT-SETUP: the receiver's kind (MON-VER) picks the setup: M10 one
 # CFG-VALSET (RAM) with NAV-PVT on and every NMEA sentence off, M8 legacy
 # CFG-MSG, u-blox 6/7 NMEA as before
@@ -10712,6 +10815,26 @@ else:
           and dom.get("nofix") == "map nofix" and dom.get("timer2") == 30000
           and dom.get("brokenBody") == "off" and dom.get("never") == "NO ANSWER",
           repr(dom))
+    hd = v.get("hist", {})
+    p1 = hd.get("path1", "")
+    p2 = hd.get("path", "")
+    check("PAGE-HIST: the day history is asked after the first status, "
+          "from byte 0, then only from where it got to",
+          dom.get("hist") == ["/hist?d=D&o=0"]
+          and hd.get("urls2") == ["/hist?d=D&o=%s" % hd.get("cut")]
+          and not hd.get("busy1") and hd.get("again"), repr(hd)[:600])
+    check("PAGE-HIST: lines since local midnight, a cut line kept for the "
+          "next reply, a gap over 5 min breaks the path",
+          hd.get("pts1") == 10 and p1.count("M") == 1 and p1.count("L") == 9
+          and hd.get("pts") == 11 and p2.count("M") == 2
+          and p2.startswith('<svg width="1" height="1"><path d="M'),
+          repr((hd.get("pts1"), hd.get("pts"), p1[:80], p2[-80:])))
+    check("PAGE-HIST: zoom fitted to the track (15-17), layer moves with the "
+          "tiles, TODAY km in the HUD",
+          15 <= (hd.get("zoom") or 0) <= 16 and hd.get("trkT")
+          and hd.get("day") == "<em>TODAY </em>%.2f KM" % hd.get("km", -1)
+          and 0.28 < hd.get("km", 0) < 0.32, repr((hd.get("zoom"),
+                                                    hd.get("day"))))
     check("PAGE: satellite table and map tile maths",
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"

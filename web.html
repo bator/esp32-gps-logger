@@ -35,6 +35,10 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .live:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}
 .off .live{color:var(--warn)}
 .hud .up{margin-left:auto;color:var(--m);font-size:12px}
+.trk{position:absolute;left:50%;top:42%;z-index:1;pointer-events:none}
+.trk svg{position:absolute;overflow:visible}
+.trk path{fill:none;stroke:#22d3ee;stroke-width:3;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round;opacity:.9;filter:drop-shadow(0 0 4px rgba(34,211,238,.7))}
+.hud .day{color:var(--a);font-size:11px;font-weight:600;letter-spacing:.1em;white-space:nowrap}.hud .day em{font-style:normal}
 .attr{position:absolute;right:8px;bottom:6px;font-size:10px;color:var(--m);z-index:4}
 .attr a{color:inherit}
 /* panels */
@@ -86,14 +90,14 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .svt{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
 .svt td{padding:3px 6px;border-top:1px solid var(--l);text-align:right}
 .svt td:first-child{text-align:left}.svt .u td{color:var(--m)}
-@media(max-width:760px){.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+@media(max-width:760px){.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
 <div class="map nofix" id="map">
-  <div class="tiles" id="tiles"></div><div class="grid"></div>
-  <div class="acc" id="acc"></div><div class="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
-  <div class="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="up" id="up"></span></div>
+  <div class="tiles" id="tiles"></div><div class="grid"></div><div class="trk" id="trk"></div>
+  <div class="acc" id="acc"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
+  <div class="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
   <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></div>
 </div>
 <div class="wrap">
@@ -302,26 +306,130 @@ function view(d) {
   return v;
 }
 
+// The day's track since local midnight from the board's day history
+// (/hist?d=<UTC day>&o=<byte>): HIST_REPLY bytes a reply at most, then only
+// what is new, once a minute. Lines as in a .trk: lat,lon first, the time
+// (YYYYMMDDTHHMMSSZ) last; a gap over 5 min breaks the line.
+var HIST_REPLY = 16384, hist = {start: -1, days: [], off: {}, rest: {}, pts: [], km: 0, busy: false, at: 0};
+function utcDay(ms) { return new Date(ms).toISOString().slice(0, 10).replace(/-/g, ""); }
+function histParse(day, text) {
+  var ls = ((hist.rest[day] || "") + text).split("\n");
+  hist.rest[day] = ls.pop();
+  for (var i = 0; i < ls.length; i++) {
+    var f = ls[i].split(","), s = f[f.length - 1];
+    if (f.length < 5 || s.length !== 16 || f[0] === "") continue;
+    var t = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(9, 11), +s.slice(11, 13), +s.slice(13, 15));
+    var la = +f[0], lo = +f[1], q = hist.pts[hist.pts.length - 1];
+    if (t < hist.start || isNaN(t) || isNaN(la) || isNaN(lo)) continue;
+    if (q && t - q[0] <= 300000) {
+      var c = Math.cos(la * Math.PI / 180);
+      hist.km += Math.sqrt(Math.pow((la - q[1]) * 110.54, 2) + Math.pow((lo - q[2]) * 111.32 * c, 2));
+    }
+    hist.pts.push([t, la, lo]);
+  }
+}
+function histLoad() {
+  var now = Date.now(), m = new Date(now);
+  m.setHours(0, 0, 0, 0);
+  if (m.getTime() !== hist.start) {     // a new local day: start over
+    hist = {start: m.getTime(), days: [utcDay(m.getTime())], off: {}, rest: {}, pts: [], km: 0, busy: false, at: 0};
+  }
+  if (hist.days.indexOf(utcDay(now)) < 0) hist.days.push(utcDay(now));
+  hist.busy = true;
+  histNext(0);
+}
+function histNext(i) {
+  if (i >= hist.days.length) {
+    hist.busy = false;
+    hist.at = Date.now();
+    if (mapD) placeMap(mapD);
+    return;
+  }
+  var day = hist.days[i], o = hist.off[day] || 0, x = new XMLHttpRequest();
+  x.open("GET", "/hist?d=" + day + "&o=" + o, true);
+  x.timeout = 10000;
+  x.onload = function () {
+    var t = x.status === 200 ? x.responseText : "";
+    if (t) { hist.off[day] = o + t.length; histParse(day, t); }
+    histNext(t.length >= HIST_REPLY ? i : i + 1);
+  };
+  x.onerror = x.ontimeout = function () { hist.busy = false; hist.at = Date.now(); };
+  x.send();
+}
+// world pixels (256 a tile at zoom 0) of a position at zoom z
+function wpx(lat, lon, z) {
+  var k = 256 * Math.pow(2, z), r = lat * Math.PI / 180;
+  return [(lon + 180) / 360 * k, (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * k];
+}
+// The view: the position and the day's track fitted between the header
+// and the telemetry strip, centred on them. A fractional zoom (ZOOM at
+// most, 13 at least): the tiles of the zoom above, scaled down (sc <= 1,
+// crisp). -> the tile zoom, the scale and the world pixel at the map's
+// anchor (50%, 42%)
+function fitView(lat, lon, el) {
+  var w = el.offsetWidth, h = el.offsetHeight, top = 44, bot = h - 90, zf = ZOOM;
+  var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, ps = hist.pts.concat([[0, lat, lon]]);
+  for (var i = 0; i < ps.length; i++) {
+    var q = wpx(ps[i][1], ps[i][2], 0);
+    x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]);
+  }
+  if (x1 > x0) zf = Math.min(zf, Math.log((w - 48) / (x1 - x0)) / Math.LN2);
+  if (y1 > y0) zf = Math.min(zf, Math.log((bot - top - 32) / (y1 - y0)) / Math.LN2);
+  zf = Math.max(13, zf);
+  var z = Math.ceil(zf - 1e-9), k = Math.pow(2, z), sc = Math.pow(2, zf - z);
+  if (hist.pts.length < 2) { var c = wpx(lat, lon, z); return {z: z, sc: sc, X: c[0], Y: c[1]}; }
+  return {z: z, sc: sc, X: (x0 + x1) / 2 * k, Y: (y0 + y1) / 2 * k + (h * .42 - (top + bot) / 2) / sc};
+}
+function histPath(t, z) {               // SVG path in the tile layer's pixels
+  var k = Math.pow(2, z), d = "", prev = 0;
+  for (var i = 0; i < hist.pts.length; i++) {
+    var p = hist.pts[i], r = p[1] * Math.PI / 180;
+    var x = ((p[2] + 180) / 360 * k - t.x) * 256, y = ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * k - t.y) * 256;
+    d += (i && p[0] - prev <= 300000 ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+    prev = p[0];
+  }
+  return d;
+}
+
 // The map: tiles around the position, rebuilt only when the centre tile
 // changes; the fraction moves the layer (no reload every poll)
-var mapKey = "", mapD = null;
+var mapKey = "", trkKey = "", mapD = null;
 function placeMap(d) {
   mapD = d;
   var el = document.getElementById("map"), p = String(d.position || "").split(", ");
   if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) { el.className = "map nofix"; return; }
   el.className = "map";
   // tiles to cover the element from its centre (a wide screen needs more)
-  var nx = Math.ceil(el.offsetWidth / 512) + 1, ny = Math.ceil(el.offsetHeight / 512) + 1;
-  var t = tile(+p[0], +p[1], ZOOM), key = t.x + "/" + t.y + "/" + nx + "/" + ny, box = document.getElementById("tiles");
+  var v = fitView(+p[0], +p[1], el), z = v.z, sc = v.sc, me = wpx(+p[0], +p[1], z);
+  var nx = Math.ceil(el.offsetWidth / 512 / sc) + 1, ny = Math.ceil(el.offsetHeight / 512 / sc) + 1;
+  var t = {x: Math.floor(v.X / 256), y: Math.floor(v.Y / 256), fx: v.X % 256, fy: v.Y % 256,
+    mpp: tile(+p[0], +p[1], z).mpp / sc};
+  var key = z + "/" + t.x + "/" + t.y + "/" + nx + "/" + ny, box = document.getElementById("tiles");
+  // the pin, its ring and the coordinates at the position (off the anchor
+  // when the view is centred on the day's track)
+  var ids = ["acc", "pin", "coord"];
+  for (var j = 0; j < 3; j++) {
+    var s = document.getElementById(ids[j]).style;
+    s.left = "calc(50% + " + ((me[0] - v.X) * sc).toFixed(1) + "px)";
+    s.top = "calc(42% + " + ((me[1] - v.Y) * sc).toFixed(1) + "px)";
+  }
   if (key !== mapKey) {
     var h = "";
     for (var dx = -nx; dx <= nx; dx++) for (var dy = -ny; dy <= ny; dy++)
-      h += '<img alt="" src="https://tile.openstreetmap.org/' + ZOOM + "/" + (t.x + dx) + "/" + (t.y + dy) +
+      h += '<img alt="" src="https://tile.openstreetmap.org/' + z + "/" + (t.x + dx) + "/" + (t.y + dy) +
         '.png" style="left:' + dx * 256 + "px;top:" + dy * 256 + 'px">';
     box.innerHTML = h;
     mapKey = key;
   }
-  box.style.transform = "translate(" + (-t.fx).toFixed(1) + "px," + (-t.fy).toFixed(1) + "px)";
+  box.style.transform = (sc < 1 ? "scale(" + sc.toFixed(4) + ") " : "") +
+    "translate(" + (-t.fx).toFixed(1) + "px," + (-t.fy).toFixed(1) + "px)";
+  var trk = document.getElementById("trk");
+  trk.style.transform = box.style.transform;
+  if (key + "/" + hist.pts.length !== trkKey) {
+    trkKey = key + "/" + hist.pts.length;
+    trk.innerHTML = hist.pts.length ? '<svg width="1" height="1"><path d="' + histPath(t, z) + '"/></svg>' : "";
+    document.getElementById("day").innerHTML = hist.pts.length ? "<em>TODAY </em>" + hist.km.toFixed(2) + " KM" : "";
+  }
   // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
   var acc = document.getElementById("acc"), px = typeof d.hacc === "number" ? d.hacc * 2 / t.mpp :
     typeof d.hdop === "number" ? d.hdop * UERE * 2 / t.mpp : 0;
@@ -353,6 +461,7 @@ function tick() {
       document.getElementById("live").innerHTML = "LIVE";
       paint(view(d));
       placeMap(d);
+      if (!hist.busy && Date.now() - hist.at >= 60000) histLoad();
     } catch (e) { stale(); }
     setTimeout(tick, every * 1000);
   };

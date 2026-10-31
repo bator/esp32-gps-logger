@@ -435,6 +435,19 @@ only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
 panels fade and `LIVE` turns into `OFFLINE · 2 MIN 10 S AGO`. HDOP is
 rounded to two decimals on the page; the JSON keeps the receiver's value.
+
+**Day history on the map.** The page draws today's track (since local
+midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
+header, and zooms out (17 down to 13) until the track fits around the
+position. A gap of over 5 minutes breaks the line. Every track line the
+logger writes also goes to `/hist/YYYYMMDD.trk` (its UTC date; the same
+text as the track file, which is deleted once it is uploaded). The newest
+7 days are kept (`HIST_DAYS`), and nothing is added while the flash is
+nearly full (under 2 × `MIN_FREE`). The page asks
+`/hist?d=YYYYMMDD&o=<byte>`: a reply is at most 16 KB (`HIST_REPLY`, so a
+long day cannot outrun `WEB_DEADLINE`), the page asks again from where it
+got to, and after that only for what is new, once a minute. A day is ~50
+bytes a point: ~65 KB for 1300 points.
 The board sends the file in 1 KB reads and the JSON piece by piece (a
 diagnostic line a piece, gathered into 1 KB sends), so a page view needs
 ~2 KB of Python heap (building the whole page used to need ~20 KB, enough
@@ -1075,6 +1088,7 @@ with a NEO-6M; most never need changing.
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` | 2 s / 5 s | How long one receive or send may wait; how long a whole request may take |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
+| `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |

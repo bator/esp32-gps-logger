@@ -187,6 +187,10 @@ STAY_WIFI_MISS = 6                       # this many scans in a row over at
 STAY_WIFI_GONE = 60000                   # least this many ms (no fix needed)
 STALE = 2000                             # ms: older position = no fix
 LOG_DIR = "/gpx"
+HIST_DIR = "/hist"                       # the day history the page draws:
+HIST_DAYS = 7                            # each written line, a file a UTC
+                                         # day, the last HIST_DAYS kept
+HIST_REPLY = 16384                       # bytes at most per /hist reply
 MIN_FREE = 32768                         # bytes of flash kept free
 MAX_BATCH = 240                          # RAM cap while flash writes fail
 HOLD_RELEASE = 600000                    # ms without a fix after which what a
@@ -3454,6 +3458,7 @@ def flush(hold=None):
     log["wfail"] = False
     log["points"] += k
     up["left"] += k
+    _hist_add(batch, k)
     q = log["seg_tc"]
     if log["new_seg"] and q:
         last = batch[k - 1][-17:-1]
@@ -3463,6 +3468,60 @@ def flush(hold=None):
         del q[:i]                        # the breaks written
         log["new_seg"] = bool(q)
     del batch[:k]
+
+def _hist_add(lines, k):
+    """Append lines[:k], the track lines just written, to the day history:
+    HIST_DIR/YYYYMMDD.trk by each line's own (UTC) date, the same text as
+    the track file, which is deleted once uploaded. The status page draws
+    the day from it (/hist). Best effort: a failed write costs only the
+    drawing, and it stops while the flash is nearly full. A new day's file
+    drops the oldest beyond HIST_DAYS."""
+    if not HIST_DAYS or not k:
+        return
+    room = free()
+    if room is not None and room < 2 * MIN_FREE:
+        return
+    i = 0
+    while i < k:
+        day = lines[i][-17:-9]
+        j = i + 1
+        while j < k and lines[j][-17:-9] == day:
+            j += 1
+        if len(day) == 8 and day.isdigit():
+            path = HIST_DIR + "/" + day + ".trk"
+            new = _file_size(path) is None
+            f = None
+            try:
+                if new:
+                    try:
+                        os.mkdir(HIST_DIR)
+                    except OSError:
+                        pass             # (there already)
+                f = open(path, "ab")
+                while i < j:
+                    f.write(lines[i].encode())
+                    i += 1
+            except (OSError, MemoryError):
+                log["herr"] = log.get("herr", 0) + 1
+            if f is not None:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+            if new:
+                _hist_prune()
+        i = j
+
+def _hist_prune():
+    """Delete the day files beyond the newest HIST_DAYS."""
+    try:
+        days = sorted(n for n in os.listdir(HIST_DIR)
+                      if len(n) == 12 and n.endswith(".trk")
+                      and n[:8].isdigit())
+    except OSError:
+        return
+    for n in days[:-HIST_DAYS]:
+        _rm(HIST_DIR + "/" + n)
 
 def _dist(lat1, lon1, lat2, lon2):
     """Metres between two nearby positions (equirectangular approximation)."""
@@ -5969,10 +6028,52 @@ def _web_reply(c, req):
     if path.startswith(b"/status.json"):
         _sv_fresh()
         _web_send(c, "200 OK", "application/json", _web_json_parts())
+    elif path.startswith(b"/hist?"):
+        _web_hist(c, path)
     elif path == b"/" or path.startswith(b"/?"):
         _web_page(c, _web_gzip(req))
     else:
         _web_send(c, "404 Not Found", "text/plain", ("not found",))
+
+def _web_hist(c, path):
+    """/hist?d=YYYYMMDD&o=N: the day's history file from byte N on, at most
+    HIST_REPLY bytes (the page asks again from where it got to: a whole day
+    in one reply could outrun WEB_DEADLINE). A missing day is a 404."""
+    d, o = "", 0
+    try:
+        for kv in path[6:].decode().split("&"):
+            if kv.startswith("d="):
+                d = kv[2:]
+            elif kv.startswith("o="):
+                o = int(kv[2:])
+    except (UnicodeError, ValueError):
+        d = ""
+    f = None
+    if len(d) == 8 and d.isdigit() and o >= 0:
+        try:
+            f = open(HIST_DIR + "/" + d + ".trk", "rb")
+        except OSError:
+            pass
+    if f is None:
+        _web_send(c, "404 Not Found", "text/plain", ("no such day",))
+        return
+    try:
+        size = os.stat(HIST_DIR + "/" + d + ".trk")[6]
+        o = min(o, size)
+        n = min(size - o, HIST_REPLY)
+        _web_head(c, "200 OK", "text/plain", "Content-Length: %d\r\n" % n)
+        f.seek(o)
+        buf = bytearray(WEB_CHUNK)
+        mv = memoryview(buf)
+        while n > 0:
+            k = f.readinto(mv[:min(n, WEB_CHUNK)])
+            if not k:
+                break
+            _web_out(c, mv[:k])
+            n -= k
+            read_uart()
+    finally:
+        f.close()
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
