@@ -7548,6 +7548,581 @@ check("RXBUF-DROP: the rest moves to the front in one slice store",
       dropped == (True, 500, 1), repr(dropped))
 
 
+# PVT: UBX-NAV-PVT on a u-blox M8/M10 (new feature, 2026-10-31): parsing,
+# the weighted integer mean, float-free track lines (#TRK2), the setup per
+# receiver kind with its NMEA fallback, upload fields
+import struct as _struct
+
+
+def pvt_frame(ymdhms, lat, lon, hacc=1.5, fix=3, flags=0x01, flags3=0,
+              valid=0x07, tacc=50, nano=0, hmsl=100.0, mps=0.0, head=0.0,
+              vacc=2.5, nsv=12, pdop=1.2, sacc=0.3, hacc_mm=None):
+    """A UBX-NAV-PVT frame (92-byte payload, u-blox M10 layout). lat/lon
+    are degrees, or ints already in 1e-7 degrees."""
+    y, mo, d, h, mi, s = ymdhms
+    li = lat if isinstance(lat, int) else int(round(lat * 1e7))
+    lo = lon if isinstance(lon, int) else int(round(lon * 1e7))
+    p = _struct.pack("<IHBBBBBBIiBBBBiiiiIIiiiiiIIHH4xihH",
+                     0, y, mo, d, h, mi, s, valid, tacc, nano, fix, flags,
+                     0, nsv, lo, li, int(hmsl * 1000) + 40000,
+                     int(round(hmsl * 1000)),
+                     int(round(hacc * 1000)) if hacc_mm is None else hacc_mm,
+                     int(round(vacc * 1000)), 0, 0, 0, int(round(mps * 1000)),
+                     int(round(head * 100000)), int(round(sacc * 1000)),
+                     500000, int(round(pdop * 100)), flags3, 0, 0, 0)
+    return gl._ubx(0x01, 0x07, p)
+
+
+def pvt_second(ymdhms, n=5, **kw):
+    """n epochs of one second (0.2 s apart): kw values may be lists."""
+    for k in range(n):
+        a = dict((key, v[k] if isinstance(v, list) else v)
+                 for key, v in kw.items())
+        lat, lon = a.pop("lat", 47.5), a.pop("lon", 19.0)
+        gl._ubx_frame(pvt_frame(ymdhms, lat, lon, nano=k * 200000000, **a))
+
+
+def pvt_monver(hw, protver):
+    pl = b"ROM SPG 5.10 (7b202e)".ljust(30, b"\0") + hw.ljust(10, b"\0")
+    pl += protver.ljust(30, b"\0")
+    return gl._ubx(0x0A, 0x04, pl)
+
+
+T0 = (2026, 10, 31, 12, 0, 0)
+
+
+def t_at(s, base=T0):
+    return base[:5] + (base[5] + s,)
+
+
+# PVT-PARSE: one unpack_from per frame fills the fields GGA/RMC fill
+gl.reset()
+pvt_second(T0, lat=-33.8567844, lon=-151.2152967, hacc=2.0, mps=1.5,
+           head=271.5, hmsl=58.6, vacc=3.0, nsv=17, pdop=1.4, sacc=0.4)
+pre = (gl.st["seq"], gl.st["valid"])
+pvt_second(t_at(1), n=1)
+check("PVT-PARSE: a second is published when the next one starts",
+      pre == (0, False) and gl.st["seq"] == 1 and gl.st["valid"] is True
+      and gl.st["time"] == "12:00:00" and gl.st["date"] == "2026-10-31"
+      and gl.st["fix_src"] == "pvt", repr((pre, gl.st["time"])))
+check("PVT-PARSE: negative lat/lon kept as 1e-7 ints, accuracy, elevation",
+      gl.st["lat_i"] == -338567844 and gl.st["lon_i"] == -1512152967
+      and abs(gl.st["lat"] + 33.8567844) < 1e-9
+      and abs(gl.st["hacc"] - 2.0) < 1e-9 and abs(gl.st["alt"] - 58.6) < 1e-9
+      and abs(gl.st["mps"] - 1.5) < 1e-9 and gl.st["epochs"] == 5,
+      repr((gl.st["lat_i"], gl.st["lon_i"], gl.st["hacc"], gl.st["alt"])))
+pvt_second(T0, n=1, lat=47.5, lon=19.0, mps=2.0, head=12.5, vacc=3.5,
+           nsv=9, pdop=1.8, sacc=0.6)    # (an old second: still parsed)
+gl.st["rx"] = _clock[0]
+check("PVT-PARSE: latest epoch's speed, course, sats, fix type, accuracies",
+      gl.st["used"] == 9 and gl.st["fixtype"] == 3 and gl.st["quality"] == 1
+      and abs(gl.st["speed"] - 7.2) < 1e-9
+      and abs(gl.st["course"] - 12.5) < 1e-9
+      and abs(gl.st["gspeed"] - 2.0) < 1e-9
+      and abs(gl.st["vacc"] - 3.5) < 1e-9 and abs(gl.st["sacc"] - 0.6) < 1e-9
+      and abs(gl.st["pdop"] - 1.8) < 1e-9 and gl.status() == "3D fix",
+      repr((gl.st["used"], gl.st["speed"], gl.st["course"])))
+
+
+def pvt_case(**kw):
+    gl.reset()
+    pvt_second(T0, **kw)
+    pvt_second(t_at(1), n=1, **kw)
+    gl.st["rx"] = _clock[0]
+    return (gl.st["valid"],
+            bool(gl.has_fix(_clock[0])) and gl._usable(_clock[0]))
+
+
+c_llh = pvt_case(flags3=1)
+c_nofix = pvt_case(flags=0)
+c_2d = pvt_case(fix=2)
+ele_2d = gl._fields(_clock[0])[0]
+c_dr = pvt_case(fix=5)                    # time only
+c_far = pvt_case(hacc=25.0)
+c_edge = pvt_case(hacc=20.0)
+c_none = pvt_case(hacc_mm=0xFFFFFFFF)     # "unknown": ~2**32 mm
+check("PVT-FILTER: invalidLlh, no gnssFixOK, time-only -> no fix",
+      c_llh == (False, False) and c_nofix == (False, False)
+      and c_dr == (False, False), repr((c_llh, c_nofix, c_dr)))
+check("PVT-FILTER: 2D is a fix as GGA's is (no elevation in the line)",
+      c_2d == (True, True) and ele_2d == "", repr((c_2d, ele_2d)))
+check("PVT-FILTER: hAcc over PVT_MAX_HACC (or unknown) is a fix, not usable",
+      c_far == (True, False) and c_edge == (True, True)
+      and c_none == (True, False) and gl.PVT_MAX_HACC == 20,
+      repr((c_far, c_edge, c_none)))
+
+# PVT-FRAME: a cut NAV-PVT (another protocol's 84-byte payload) and a broken
+# checksum are counted bad, not read
+gl.reset()
+_uart_rx[:] = []
+good = pvt_frame(T0, 47.5, 19.0)
+short = gl._ubx(0x01, 0x07, bytes(good[6:6 + 84]))
+broken = bytearray(good)
+broken[-1] ^= 0xFF
+_uart_rx.extend(short + bytes(broken) + good)
+gl.read_uart()
+check("PVT-FRAME: truncated and bad-checksum frames counted, the good read",
+      gl.st["ubx_bad"] == 2 and gl.st["ubx_ok"] == 1 and gl.ep["pn"] == 1,
+      "bad=%d ok=%d pn=%d" % (gl.st["ubx_bad"], gl.st["ubx_ok"],
+                              gl.ep["pn"]))
+_uart_rx[:] = []
+
+# PVT-AVG: integer offsets from the second's first fix weighted by 1/hAcc^2
+gl.reset()
+lats = [475000000, 475000010, 475000030, 475000005, 474999990]
+lons = [190000000, 190000020, 189999990, 190000000, 190000013]
+haccs = [1.0, 2.0, 4.0, 1.0, 0.0]          # (0: counted as 1 mm)
+pvt_second(T0, lat=lats, lon=lons, hacc=haccs)
+pvt_second(t_at(1), n=1)
+ws = [1 / max(h, 0.001) ** 2 for h in haccs]
+
+
+def wmean(v):
+    return v[0] + gl._round(sum(w * (x - v[0]) for w, x in zip(ws, v))
+                            / sum(ws))
+
+
+check("PVT-AVG: the mean is weighted by 1/hAcc^2 (hAcc 0 guarded)",
+      gl.st["lat_i"] == wmean(lats) and gl.st["lon_i"] == wmean(lons)
+      and gl.st["lat_i"] == 474999990 and gl.st["epochs"] == 5,
+      repr((gl.st["lat_i"], gl.st["lon_i"], wmean(lats), wmean(lons))))
+gl.reset()
+pvt_second(T0, lat=[475000000, 475000500, 475000510, 475000520, 475000530],
+           hacc=[30.0, 2.0, 2.0, 2.0, 2.0])
+pvt_second(t_at(1), n=1)
+over = (gl.st["lat_i"], gl.st["epochs"])
+gl.reset()
+pvt_second(T0, lat=[475000000, 475000500, 475000510, 475000520, 475000530],
+           hacc=[2.0, 2.0, 30.0, 2.0, 2.0])
+pvt_second(t_at(1), n=1)
+over2 = (gl.st["lat_i"], gl.st["epochs"], round(gl.st["hacc"], 3))
+check("PVT-AVG: a fix over PVT_MAX_HACC is left out of a second with good "
+      "ones (before or after them)",
+      over == (475000515, 4) and over2 == (475000388, 4, 2.0),
+      repr((over, over2)))
+gl.reset()
+pvt_second(T0, lat=lats, mps=[1.0, 1.0, 5.0, 1.0, 1.0],
+           hacc=[3.0, 1.0, 1.0, 1.0, 1.0])
+pvt_second(t_at(1), n=1)
+check("PVT-AVG: above AVG_MAX_SPEED the point is the second's first fix",
+      gl.st["lat_i"] == lats[0] and abs(gl.st["hacc"] - 3.0) < 1e-9
+      and abs(gl.st["mps"] - 1.0) < 1e-9,
+      repr((gl.st["lat_i"], gl.st["hacc"], gl.st["mps"])))
+
+# PVT-I7: integer coordinates printed without a float, as "%.6f" would
+i7 = [gl._i7(v) for v in (474979123, 474979125, -5, -4, 5, 4, 0, -15, 15,
+                          -1512152967, 1799999995, -1799999995, -10, 9)]
+check("PVT-I7: 1e-7 ints -> 6 decimals, halves away from zero, no -0",
+      i7 == ["47.497912", "47.497913", "-0.000001", "0.000000", "0.000001",
+             "0.000000", "0.000000", "-0.000002", "0.000002", "-151.215297",
+             "180.000000", "-180.000000", "-0.000001", "0.000001"], repr(i7))
+
+# PVT-SECONDS: 5 Hz epochs, one point a second; midnight; seconds queued
+# behind a blocking call; an epoch reported as sec 59 + 0.999999 s
+gl.reset()
+d1 = (2026, 10, 18, 23, 59, 59)
+pvt_second(d1, lat=[475000000 + k for k in range(5)])
+gl._ubx_frame(pvt_frame((2026, 10, 18, 23, 59, 59), 47.6, 19.0,
+                        nano=999999000))      # = 00:00:00.000 of the 19th
+mid1 = (gl.st["time"], gl.st["date"], gl.st["seq"], gl.st["epochs"])
+pvt_second((2026, 10, 19, 0, 0, 0), n=4, lat=47.6)
+pvt_second((2026, 10, 19, 0, 0, 1), n=1, lat=47.7)
+mid2 = (gl.st["time"], gl.st["date"], gl.st["seq"], gl.st["epochs"],
+        gl.st["lat_i"])
+check("PVT-SECONDS: 5 epochs a second publish once; across midnight dated",
+      mid1 == ("23:59:59", "2026-10-18", 1, 5)
+      and mid2 == ("00:00:00", "2026-10-19", 2, 5, 476000000),
+      repr((mid1, mid2)))
+q_td = tempfile.mkdtemp(prefix="pvtq-")
+saved_dir = gl.LOG_DIR
+try:
+    gl.LOG_DIR = q_td
+    gl.reset()
+    gl.log_reset()
+    _uart_rx[:] = []
+    for s_ in range(4):                   # read after a blocking POST
+        for k in range(5):
+            _uart_rx.extend(pvt_frame(t_at(s_), 475000000 + 100 * s_,
+                                      190000000, nano=k * 200000000))
+    gl.read_uart()
+    queued = len(gl.st["q"])
+    gl.log_tick()
+    q_lines = list(gl.log["batch"])
+finally:
+    gl.LOG_DIR = saved_dir
+    shutil.rmtree(q_td, ignore_errors=True)
+check("PVT-SECONDS: seconds published in one read are each a point",
+      queued == 3 and len(q_lines) == 3
+      and q_lines[0] == "47.500000,19.000000,100.0,1.5,0.0,20261031T120000Z\n"
+      and q_lines[2].startswith("47.500020,19.000000,"), repr(q_lines))
+
+# TRK2: a file opened on NAV-PVT fixes is "#TRK2", its lines written from
+# the integers (no single-precision grid); readers take TRK1 and TRK2
+t2_td = tempfile.mkdtemp(prefix="trk2-")
+saved_dir = gl.LOG_DIR
+try:
+    gl.LOG_DIR = t2_td
+    gl.reset()
+    gl.log_reset()
+    for s_ in range(4):                   # (the 4th publishes the 3rd)
+        pvt_second(t_at(s_), lat=474979123 + 200 * s_, lon=190402456,
+                   hacc=1.25, mps=1.44, hmsl=123.45)
+        gl.log_tick()
+    gl.flush()
+    path2 = gl.log["file"]
+    with open(path2) as f:
+        raw2 = f.read()
+    # a receiver restart: NMEA seconds in the TRK2 file keep its format
+    gl.handle(rv_nmea("GPGGA,120004.00,4728.0000,N,01900.0000,E,1,08,1.2,"
+                      "99.0,M,40.0,M,,"))
+    gl.handle(rv_nmea("GPRMC,120004.00,A,4728.0000,N,01900.0000,E,0.0,,"
+                      "311026,,,A"))
+    gl.handle(rv_nmea("GPGGA,120005.00,4728.0000,N,01900.0000,E,1,08,1.2,"
+                      "99.0,M,40.0,M,,"))
+    gl.log_tick()
+    nmea_in_2 = gl.log["batch"][-1]
+    gl.flush()
+    gl.log["file"] = None                 # (as _close_file leaves it)
+    gl.log["created"] = False
+    # and the other way: a TRK1 file (opened on NMEA) gets NAV-PVT seconds
+    gl.reset()
+    gl.log_reset()
+    gl.handle(rv_nmea("GPGGA,130000.00,4728.0000,N,01900.0000,E,1,08,1.2,"
+                      "99.0,M,40.0,M,,"))
+    gl.handle(rv_nmea("GPRMC,130000.00,A,4728.0000,N,01900.0000,E,0.0,,"
+                      "311026,,,A"))
+    gl.handle(rv_nmea("GPRMC,130001.00,A,4728.0000,N,01900.0000,E,0.0,,"
+                      "311026,,,A"))
+    gl.log_tick()
+    pvt_second((2026, 10, 31, 13, 0, 2), lat=474667777, lon=190000000,
+               hacc=4.0)
+    pvt_second((2026, 10, 31, 13, 0, 3), n=1)
+    gl.log_tick()
+    gl.flush()
+    path1 = gl.log["file"]
+    with open(path1) as f:
+        raw1 = f.read()
+    n2, ok2, size2, _o, eof2 = gl.read_batch(path2, 0)
+    locs2 = json.loads(bytes(gl._body[:size2]))["locations"]
+    body2 = bytes(gl._body[:size2])
+    n1, ok1, size1, _o, eof1 = gl.read_batch(path1, 0)
+    locs1 = json.loads(bytes(gl._body[:size1]))["locations"]
+    cnt = gl.count_points()
+    gl._append_bad(path2, 0, os.path.getsize(path2))
+    with open(path2 + ".bad") as f:
+        bad2 = f.read()
+    nb, okb, sizeb, _o, _e = gl.read_batch(path2 + ".bad", 0)
+    locsb = json.loads(bytes(gl._body[:sizeb]))["locations"]
+finally:
+    gl.LOG_DIR = saved_dir
+    gl.log_reset()
+    shutil.rmtree(t2_td, ignore_errors=True)
+want2 = ("#TRK2\n"
+         "47.497912,19.040246,123.5,1.2,1.4,20261031T120000Z\n"
+         "47.497932,19.040246,123.5,1.2,1.4,20261031T120001Z\n"
+         "47.497952,19.040246,123.5,1.2,1.4,20261031T120002Z\n#END\n")
+check("TRK2: a NAV-PVT file is #TRK2 lat,lon,ele,acc,speed,time from ints",
+      raw2 == want2, repr(raw2))
+check("TRK2: NMEA seconds in a TRK2 file: acc = HDOP * HDOP_M, no speed",
+      nmea_in_2 == "47.466667,19.000000,99.0,6.0,,20261031T120004Z\n",
+      repr(nmea_in_2))
+check("TRK2: a TRK1 file keeps TRK1 for NAV-PVT seconds (hdop = acc / 5)",
+      raw1.startswith("#TRK1\n47.466667,19.000000,99.0,1.2,20261031T130000Z\n")
+      and "47.466778,19.000000,100.0,0.8,20261031T130002Z\n" in raw1,
+      repr(raw1))
+check("TRK2: upload JSON - accuracy from acc, speed in m/s, altitude",
+      (n2, ok2, eof2) == (5, 5, True)
+      and locs2[0]["geometry"]["coordinates"] == [19.040246, 47.497912]
+      and locs2[0]["properties"] == {
+          "timestamp": "2026-10-31T12:00:00Z", "altitude": 123.5,
+          "horizontal_accuracy": 1.2, "speed": 1.4,
+          "device_id": gl.DEVICE_ID}
+      and locs2[4]["properties"]["horizontal_accuracy"] == 6.0
+      and "speed" not in locs2[4]["properties"]
+      and b'"horizontal_accuracy":1.2,"speed":1.4,"device_id"' in body2,
+      repr(body2[:300]))
+check("TRK2: TRK1 lines still read as before (hdop * HDOP_M, no speed)",
+      (n1, ok1, eof1) == (2, 2, True)
+      and locs1[0]["properties"]["horizontal_accuracy"] == 6.0
+      and locs1[1]["properties"]["horizontal_accuracy"] == 4.0
+      and "speed" not in locs1[1]["properties"], json.dumps(locs1)[:300])
+check("TRK2: count_points and the .bad copy take TRK2 lines",
+      cnt == 7 and bad2.count("\n") == 5 and not bad2.startswith("#")
+      and (nb, okb) == (5, 5) and locsb[0]["properties"]["speed"] == 1.4,
+      "cnt=%d bad=%r" % (cnt, bad2[:80]))
+# TRK2-READ: odd fields of a TRK2 line are dropped or the point skipped as
+# they are on TRK1 lines; a 6th comma is no point line
+rb2 = tempfile.mkdtemp(prefix="trk2r-")
+try:
+    p_ = os.path.join(rb2, "20261031_120000.trk")
+    with open(p_, "wb") as f:
+        f.write(b"#TRK2\n"
+                b"47.5,19.0,,1.25,inf,20261031T120000Z\n"
+                b"47.5,19.0,,,,20261031T120001Z\n"
+                b"47.5,19.0,,\xff,,20261031T120002Z\n"
+                b"47.5,19.0,,1.0,2.0,,20261031T120003Z\n"
+                b"47.5,19.0,,x,02.50,20261031T120004Z\n#END\n")
+    nr, okr, sizer, _o, _e = gl.read_batch(p_, 0)
+    locr = json.loads(bytes(gl._body[:sizer]))["locations"]
+finally:
+    shutil.rmtree(rb2, ignore_errors=True)
+check("TRK2-READ: canonical numbers, empty/inf/text fields left out, a bad "
+      "byte or a 6th comma skips the line",
+      (nr, okr) == (4, 3)
+      and locr[0]["properties"].get("horizontal_accuracy") == 1.2
+      and "speed" not in locr[0]["properties"]
+      and "horizontal_accuracy" not in locr[1]["properties"]
+      and locr[2]["properties"].get("speed") == 2.5
+      and "horizontal_accuracy" not in locr[2]["properties"],
+      repr((nr, okr, locr)))
+t2g = trk2gpx.convert(["#TRK2\n",
+                       "47.497912,19.040246,123.5,1.2,1.4,20261031T120000Z\n",
+                       "47.5,19.0,,,,20261031T120001Z\n",
+                       "47.5,19.0,10.0,0.9,20261031T120002Z\n"], "x")
+check("TRK2: trk2gpx reads TRK2 lines (acc and speed as extensions)",
+      'xmlns:esp="' in t2g
+      and '<trkpt lat="47.497912" lon="19.040246"><ele>123.5</ele><time>'
+          '2026-10-31T12:00:00Z</time><extensions><esp:acc>1.2</esp:acc>'
+          '<esp:speed>1.4</esp:speed></extensions></trkpt>' in t2g
+      and '<time>2026-10-31T12:00:01Z</time></trkpt>' in t2g
+      and '<hdop>0.9</hdop></trkpt>' in t2g, t2g)
+check("TRK2: trk2gpx output of TRK1 lines unchanged (no extension namespace)",
+      "xmlns:esp" not in trk2gpx.convert(
+          ["47.5,19.0,10.0,0.9,20261031T120002Z\n"], "x"))
+
+# TRK2-RING: the way out rebuilt from the departure ring is the line
+# _sample_line writes, NAV-PVT seconds (from the integers) and NMEA ones
+# mixed, in a TRK2 and in a TRK1 file (single precision: mpy_unix_logger)
+def ring_mixed(fmt):
+    gl.reset()
+    gl.log_reset()
+    gl.log["fmt"] = fmt
+    gl.log["batch"] = ["x"]               # (a file's lines: its format)
+    gl.log["still"] = sl = gl._still_state()
+    sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
+    want = []
+    for k in range(gl.STILL_DEP_MAX + 7):
+        tm = "10:%02d:%02d" % (k // 60, k % 60)
+        if k % 3:
+            gl.st.update(valid=True, date="2026-10-31", time=tm, fixtype=3,
+                         lat_i=474979123 + 271 * k, lon_i=-3141593 - 314 * k,
+                         hacc=0.5 + k % 7 * 1.25, mps=k % 5 * 0.45 or None,
+                         alt=123.45 + k, hdop=None, std=None)
+            gl.st["lat"] = gl.st["lat_i"] / 1e7
+            gl.st["lon"] = gl.st["lon_i"] / 1e7
+        else:
+            gl.st.update(valid=True, date="2026-10-31", time=tm, fixtype=3,
+                         lat_i=None, lon_i=None, hacc=None, mps=None,
+                         lat=47.49791234567 + k * 0.0000271828,
+                         lon=-0.31415 - k * 0.0000314159, alt=-0.04,
+                         hdop=1.25 + k % 3, hdop_at=_clock[0], std=None)
+        want.append(gl._sample_line(_clock[0], None, None)[1])
+        gl._ring_add(sl, _clock[0], (gl.st["lat"], gl.st["lon"]), 10.0 + k)
+    gl.log["batch"] = []
+    gl.log["file"] = "/nonexistent/x.trk"
+    gl._still_leave()
+    got = list(gl.log["batch"])
+    gl.log_reset()
+    return want[-gl.STILL_DEP_MAX:], got
+
+
+w2, g2 = ring_mixed(2)
+w1, g1 = ring_mixed(1)
+check("TRK2-RING: the way out is the line _sample_line writes (TRK2 and "
+      "TRK1 files, NAV-PVT and NMEA seconds)",
+      w2 == g2 and w1 == g1 and g2[1].count(",") == 5
+      and g1[1].count(",") == 4 and g2[1].startswith("47.498129,-0.314411,")
+      and g1[1].startswith("47.498129,-0.314411,"),
+      repr([(a, b) for a, b in zip(w2 + w1, g2 + g1) if a != b][:2]))
+gl.reset()
+
+# PVT-SETUP: the receiver's kind (MON-VER) picks the setup: M10 one
+# CFG-VALSET (RAM) with NAV-PVT on and every NMEA sentence off, M8 legacy
+# CFG-MSG, u-blox 6/7 NMEA as before
+
+
+def pvt_setup(kind_frame, gps_pvt=True):
+    saved = gl.GPS_PVT
+    gl.GPS_PVT = gps_pvt
+    try:
+        gl.reset()
+        _uart_rx[:] = []
+        if kind_frame is not None:
+            gl._ubx_frame(kind_frame)
+        _uart_tx[:] = []
+        gl.gps_setup()
+        return [f for f in _uart_tx if f[2:3] == b"\x06"]
+    finally:
+        gl.GPS_PVT = saved
+
+
+def nmea_set(frames):
+    return [f for f in frames if f[2:4] == b"\x06\x01" and f[6] == 0xF0]
+
+
+M10_VER = pvt_monver(b"000A0000", b"PROTVER=34.10")
+M8_VER = pvt_monver(b"00080000", b"PROTVER=18.00")
+U6_VER = pvt_monver(b"00040007", b"PROTVER 7.03")
+F9_VER = pvt_monver(b"00190000", b"PROTVER=27.11")
+fr10 = pvt_setup(M10_VER)
+# CFG-VALSET payload by hand: version 0, layers 0x01 (RAM), 2 reserved,
+# then key (U4 LE) + U1 value per item; keys from the u-blox M10 SPG 5.10
+# interface description / SparkFun u-blox_config_keys.h
+vs = bytes((0, 1, 0, 0))
+for key, val in ((0x20910007, 1), (0x209100BB, 0), (0x209100AC, 0),
+                 (0x209100C0, 0), (0x209100D4, 0), (0x209100C5, 0),
+                 (0x209100CA, 0), (0x209100B1, 0)):
+    vs += _struct.pack("<IB", key, val)
+vs_frame = gl._ubx(0x06, 0x8A, vs)
+check("PVT-SETUP: M10 - one CFG-VALSET (RAM): NAV-PVT on, GGA/RMC/GSA/GST/"
+      "GSV/GLL/VTG off, between the 1 Hz and 5 Hz rate frames",
+      gl.st["mode"] == "pvt" and gl.st["setup_ok"] is True
+      and vs_frame in fr10 and not nmea_set(fr10)
+      and fr10[0] == gl._rate(1000) and fr10[-1] == gl._rate(200)
+      and fr10.index(vs_frame) == 2 and len(fr10) == 4,
+      repr([f.hex() for f in fr10]))
+fr8 = pvt_setup(M8_VER)
+want8 = ([gl._ubx(6, 1, bytes((0x01, 0x07, 1)))]
+         + [gl._ubx(6, 1, bytes((0xF0, m, 0)))
+            for m in (0x00, 0x04, 0x02, 0x07, 0x03, 0x01, 0x05)])
+check("PVT-SETUP: M8 - legacy CFG-MSG: NAV-PVT every epoch, NMEA off",
+      gl.st["mode"] == "pvt" and fr8[2:-1] == want8
+      and not any(f[2:4] == b"\x06\x8a" for f in fr8),
+      repr([f.hex() for f in fr8]))
+fr6 = pvt_setup(U6_VER)
+fr_unknown = pvt_setup(None)
+want_nmea = [gl._ubx(6, 1, bytes((0xF0, m, r))) for m, r in gl.GPS_MSGS]
+check("PVT-SETUP: u-blox 6 (and an unknown receiver) keep the NMEA setup",
+      gl.st["mode"] == "nmea" and fr6[2:-1] == want_nmea
+      and fr_unknown[2:-1] == want_nmea, repr([f.hex() for f in fr6]))
+fr_off = pvt_setup(M10_VER, gps_pvt=False)
+check("PVT-SETUP: GPS_PVT=0 keeps NMEA on an M10",
+      gl.st["mode"] == "nmea" and fr_off[2:-1] == want_nmea)
+fr9 = pvt_setup(F9_VER)
+check("PVT-SETUP: kinds - protocol 23+ VALSET, 15-22 CFG-MSG, older NMEA",
+      vs_frame in fr9
+      and gl._gps_kind(pvt_monver(b"00000000", b"PROTVER=15.00")[6:-2])
+      == "m8"
+      and gl._gps_kind(pvt_monver(b"00070000", b"PROTVER 14.00")[6:-2])
+      is None, repr([f.hex() for f in fr9]))
+pv_env = []
+saved = gl.GPS_PVT
+for v_ in ("0 # nmea", "auto", "1", "x", None):
+    gl.GPS_PVT = True if v_ != "auto" else False
+    gl._gps_pvt_env({"GPS_PVT": v_} if v_ is not None else {})
+    pv_env.append(gl.GPS_PVT)
+gl.GPS_PVT = saved
+import inspect as _inspect
+run_src = _inspect.getsource(gl.run)
+check("PVT-SETUP: .env GPS_PVT auto/1/0 (comment-safe), read before setup",
+      pv_env == [False, True, True, True, True]
+      and run_src.index("_gps_pvt_env") < run_src.index("gps_setup()"),
+      repr(pv_env))
+
+# PVT-BOOT: the boot setup is NMEA (model unknown); MON-VER naming an M10
+# makes the PVT setup due (within GPS_RETRY), not a second NMEA one
+gl.reset()
+_uart_rx[:] = []
+gl.gps_setup()
+mode0 = gl.st["mode"]
+_uart_ver[0] = M10_VER
+_uart_tx[:] = []
+try:
+    gl.gps_check(_clock[0])               # polls MON-VER: the answer
+    gl.read_uart()
+    for _ in range(8):
+        _clock[0] += 1000
+        gl.gps_check(_clock[0])
+finally:
+    _uart_ver[0] = None
+check("PVT-BOOT: MON-VER of an M10 after an NMEA setup -> the PVT setup",
+      mode0 == "nmea" and gl.st["mode"] == "pvt" and gl.st["gps_kind"] == "m10"
+      and vs_frame in _uart_tx and gl.st["ack_n"] == 0,
+      "%r %r" % (mode0, gl.st["mode"]))
+
+# PVT-CHECK: _setup_check counts NAV-PVT epochs (no fix needed, no GST);
+# one a second is not taken; none at all by GPS_VERIFY: NMEA for this boot
+
+
+def pvt_verify(n_per_s, secs=12, frames=True):
+    pvt_setup(M10_VER)
+    _uart_tx[:] = []
+    for k in range(secs):
+        if frames:
+            pvt_second(t_at(k), n=n_per_s, flags=0, fix=0)   # no fix
+        else:
+            gl.handle(rv_nmea("GPRMC,1200%02d.00,V,,,,,,,311026,,,N" % k))
+        _clock[0] += 1000
+        gl.gps_check(_clock[0])
+    return [f for f in _uart_tx if f[2:3] == b"\x06"]
+
+
+diag_clear()
+gl.DIAG = 60000
+try:
+    v5 = pvt_verify(5)
+    v5_state = (gl.st["checked"], gl.st["extra"], gl.st["pvt_bad"])
+    v1 = pvt_verify(1)
+    v1_state = (gl.st["extra"] > 0 or bool(v1), gl.st["pvt_bad"])
+    vn = pvt_verify(5, secs=25, frames=False)
+    vn_state = (gl.st["pvt_bad"], gl.st["mode"])
+    fb_lines = [l for l in diag_lines() if l.startswith("gps pvt")]
+finally:
+    gl.DIAG = 0
+check("PVT-CHECK: 5 NAV-PVT epochs a second without a fix -> taken, no GST",
+      v5 == [] and v5_state == (True, 0, False), repr((v5, v5_state)))
+check("PVT-CHECK: one NAV-PVT a second -> not taken, set up again",
+      v1_state == (True, False) and vs_frame in v1, repr(v1_state))
+check("PVT-CHECK: no NAV-PVT by GPS_VERIFY -> NMEA setup, PVT off this boot",
+      vn_state == (True, "nmea") and nmea_set(vn)[-len(want_nmea):]
+      == want_nmea and fb_lines == ["gps pvt no NAV-PVT, NMEA this boot"],
+      repr((vn_state, fb_lines)))
+pvt_setup(M10_VER)
+gl.st["pvt_bad"] = True                   # (given up earlier this boot)
+_uart_tx[:] = []
+gl.gps_setup()
+check("PVT-CHECK: given up -> NMEA setups for the rest of the boot",
+      gl.st["mode"] == "nmea" and vs_frame not in _uart_tx)
+_uart_nak.add((0x06, 0x8A))
+try:
+    fr_nak = pvt_setup(M10_VER)
+    nak_state = (gl.st["pvt_bad"], gl.st["setup_ok"])
+    _uart_tx[:] = []
+    _clock[0] += gl.GPS_RETRY + 1000
+    gl.gps_check(_clock[0])
+finally:
+    _uart_nak.discard((0x06, 0x8A))
+check("PVT-CHECK: a NAK of the CFG-VALSET -> PVT off, the NMEA setup next",
+      nak_state == (True, False) and gl.st["mode"] == "nmea"
+      and nmea_set(_uart_tx) == want_nmea, repr(nak_state))
+
+# PVT-RESTART: a restarted receiver is back at NMEA: its banner counts, its
+# NMEA positions keep the track going, and the setup turns PVT on again
+pvt_setup(M10_VER)
+gl.st["checked"] = True
+_uart_tx[:] = []
+_uart_rx[:] = []
+_uart_rx.extend(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+                + b"\r\n")
+for k in range(3):
+    _uart_rx.extend(rv_nmea("GPGGA,1200%02d.00,4730.000,N,01900.000,E,1,08,"
+                            "1.0,100.0,M,40.0,M,," % k) + b"\r\n")
+    _uart_rx.extend(rv_nmea("GPRMC,1200%02d.00,A,4730.000,N,01900.000,E,"
+                            "0.1,,311026,,,A" % k) + b"\r\n")
+gl.read_uart()
+restart = (gl.st["gps_boots"], gl.st["fix_src"], gl.st["valid"],
+           gl.st["extra"] > 0)
+for _ in range(gl.GPS_RETRY // 1000 + 1):
+    _clock[0] += 1000
+    gl.gps_check(_clock[0])
+check("PVT-RESTART: banner counted, NMEA fixes used, PVT set up again",
+      restart == (1, "nmea", True, True) and vs_frame in _uart_tx
+      and gl.st["mode"] == "pvt" and gl.st["gps_kind"] == "m10",
+      repr(restart))
+_uart_rx[:] = []
+gl.reset()
+
+
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
 rv_td = tempfile.mkdtemp(prefix="rev29-")
 
@@ -8898,6 +9473,31 @@ check("RTC: upload_tick sets the clock before the POST (one diag line)",
       rtc_res[2] == ([(2026, 10, 31, wd, 12, 0, 0, 0)], 1,
                      ["clock set 2026-10-31T12:00:00Z"]), repr(rtc_res[2]))
 
+# RTC-PVT (new feature): NAV-PVT time sets the clock when it is valid, fully
+# resolved and tAcc < PVT_MAX_TACC, a position fix or not (indoors at home)
+
+
+def rtc_pvt(**kw):
+    gl.reset()
+    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
+    gl._rtc_set[0] = False
+    pvt_second((2026, 10, 31, 12, 0, 0), flags=0, fix=0, **kw)
+    pvt_second((2026, 10, 31, 12, 0, 1), n=1, flags=0, fix=0, **kw)
+    gl._rtc_sync(_clock[0])
+    return RTC.sets[:]
+
+
+rp_ok = rtc_pvt()
+rp_tacc = rtc_pvt(tacc=gl.PVT_MAX_TACC + 1)
+rp_unres = rtc_pvt(valid=0x03)
+rp_nodate = rtc_pvt(valid=0x06)
+gl.reset()
+check("RTC-PVT: valid, fully resolved NAV-PVT time sets the clock, no fix "
+      "needed", rp_ok == [(2026, 10, 31, wd, 12, 0, 0, 0)], repr(rp_ok))
+check("RTC-PVT: tAcc too large, not fully resolved or no valid date: not",
+      rp_tacc == [] and rp_unres == [] and rp_nodate == [],
+      repr((rp_tacc, rp_unres, rp_nodate)))
+
 # TLS out of memory TLS_REBOOT_N times in a row at home: a clean reboot
 for n_ in os.listdir(up_td):
     os.remove(os.path.join(up_td, n_))
@@ -9879,10 +10479,23 @@ gl.st["valid"] = False
 gl.wifi.update(state="off", ssid=None, rssi=None)
 gl.st["svs"] = None
 page_json2 = gl._web_json()
+# a NAV-PVT second (new feature): hAcc, the fix source, UBX frame counts
+gl.st.update(valid=True, fixtype=3, quality=1, hdop=None, lat=47.1,
+             lon=18.4, lat_i=471000000, lon_i=184000000, hacc=30.04,
+             fix_src="pvt", ubx_ok=500, ubx_bad=2)
+page_json3 = gl._web_json()
 gl._web_diag = _diag_saved
+jd1, jd3 = json.loads(page_json), json.loads(page_json3)
 check("PAGE: JSON is generated piece by piece (no list in RAM)",
       not isinstance(gl._web_json_parts(), (list, tuple))
-      and json.loads(page_json)["hdop"] == 0.88199996)
+      and jd1["hdop"] == 0.88199996)
+check("PAGE-PVT: status JSON hacc (m), fix_src and ubx ok / bad; nmea kept",
+      jd3["hacc"] == 30.0 and jd3["fix_src"] == "pvt"
+      and jd3["ubx"] == "500 / 2" and jd3["hdop"] is None
+      and "nmea" in jd3 and jd1["hacc"] is None and jd1["ubx"] == "0 / 0",
+      repr((jd3.get("hacc"), jd3.get("fix_src"), jd3.get("ubx"),
+            jd1.get("hacc"))))
+gl.reset()
 import shutil
 import subprocess
 node = shutil.which("node")
@@ -9894,7 +10507,7 @@ elif node is None:
 else:
     here = os.path.dirname(os.path.abspath(__file__))
     out = []
-    for js in (page_json, page_json2):
+    for js in (page_json, page_json2, page_json3):
         r = subprocess.run([node, os.path.join(here, "web_page_test.js"),
                             os.path.join(here, "..", "web.html")],
                            input=js, capture_output=True, text=True)
@@ -9902,8 +10515,26 @@ else:
             out.append(json.loads(r.stdout))
         except ValueError:
             out.append({"error": r.stdout + r.stderr})
-    v, v2 = out
+    v, v2, v3 = out
     tm, tm2 = v.get("tm", ""), v2.get("tm", "")
+    tm3, sy3 = v3.get("tm", ""), v3.get("sys", "")
+    check("PAGE-PVT: telemetry shows +-hAcc m (amber over PVT_MAX_HACC), "
+          "HDOP without it",
+          '<div class="warn"><small>ACC</small><b>&plusmn;30.0<em>m</em>'
+          '</b></div>' in tm3 and "<small>HDOP</small>" not in tm3
+          and "<small>ACC</small>" not in tm and "<small>HDOP</small>" in tm,
+          tm3[:400])
+    check("PAGE-PVT: map ring from hAcc as it is, coordinates +-hAcc m",
+          v3.get("dom", {}).get("acc") == "74px"
+          and v3.get("coord", "").endswith("&plusmn;30.0 m")
+          and v.get("coord", "").endswith("&plusmn;2.2 m"),
+          repr((v3.get("dom", {}).get("acc"), v3.get("coord"),
+                v.get("coord"))))
+    check("PAGE-PVT: Systems shows the fix source and the UBX frame counts",
+          '>FIX SOURCE<span class="">NAV-PVT<em>ubx 500 ok &middot; 2 bad'
+          '</em>' in sy3 and v3.get("unlabeled") == []
+          and '>FIX SOURCE<span class="">-<em>ubx 0 ok' in v.get("sys", ""),
+          sy3[-900:])
     check("PAGE: telemetry strip - fix, sats, HDOP, uplink, WiFi, NMEA bad",
           '<div class="ok"><small>FIX</small><b>3D</b></div>' in tm
           and "<small>SATS</small><b>1<em>/2</em>" in tm

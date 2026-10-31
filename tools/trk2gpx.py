@@ -7,9 +7,14 @@
 Quarantined (.trk.bad) and parked unreadable (.trk.err) files convert the
 same way; bytes that are not UTF-8 (a damaged flash block) are replaced.
 
-Line format: "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ" (ele/hdop may be empty),
-"-" starts a new segment, "#..." lines are the header/footer, and a line
-without its newline (cut off by a power loss) is skipped.
+Line format: "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ" (#TRK1; ele/hdop may be
+empty) or "lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ" (#TRK2, from UBX-NAV-PVT:
+acc the horizontal accuracy in m, speed in m/s, each may be empty), told
+apart by the line itself; "-" starts a new segment, "#..." lines are the
+header/footer, and a line without its newline (cut off by a power loss) is
+skipped. A TRK2 point's acc and speed go into <extensions> (namespace
+EXT_NS, declared only when there is one): GPX 1.1 has no accuracy element,
+and its <hdop> is not one.
 """
 import math
 import sys
@@ -20,6 +25,7 @@ GPX_HEAD = ('<?xml version="1.0" encoding="UTF-8"?>\n'
             'xmlns="http://www.topografix.com/GPX/1/1">\n'
             '<trk><name>%s</name><trkseg>\n')
 GPX_TAIL = "</trkseg></trk></gpx>\n"
+EXT_NS = "https://github.com/bator/esp32-gps-logger/trk2"
 
 
 def _iso(tc):
@@ -40,15 +46,24 @@ def _num(s):
 
 
 def read_points(lines):
-    """Yield (new_segment, lat, lon, ele, hdop, iso_time) for valid lines."""
+    """Yield (new_segment, lat, lon, ele, hdop, iso_time, acc, speed) for
+    valid lines (hdop "" on a TRK2 line, acc and speed None on a TRK1
+    line)."""
     new_seg = False
     for raw in lines:
         if raw == "-\n":
             new_seg = True
             continue
-        if not raw.endswith("\n") or raw.startswith("#") or raw.count(",") != 4:
+        if (not raw.endswith("\n") or raw.startswith("#")
+                or raw.count(",") not in (4, 5)):
             continue
-        lat_s, lon_s, ele, hdop, tc = raw[:-1].split(",")
+        f = raw[:-1].split(",")
+        acc = speed = None
+        if len(f) == 6:
+            lat_s, lon_s, ele, acc, speed, tc = f
+            hdop = ""
+        else:
+            lat_s, lon_s, ele, hdop, tc = f
         try:
             lat, lon = float(lat_s), float(lon_s)
         except ValueError:
@@ -57,7 +72,9 @@ def read_points(lines):
         if (t is None or not math.isfinite(lat) or not math.isfinite(lon)
                 or abs(lat) > 90 or abs(lon) > 180):
             continue
-        yield new_seg, lat, lon, _num(ele), _num(hdop), t
+        yield (new_seg, lat, lon, _num(ele), _num(hdop), t,
+               None if acc is None else _num(acc),
+               None if speed is None else _num(speed))
         new_seg = False
 
 
@@ -65,7 +82,8 @@ def convert(lines, name):
     """Track lines -> GPX 1.1 text. name becomes the <trk><name>."""
     out = [GPX_HEAD % escape(name)]
     first = True
-    for new_seg, lat, lon, ele, hdop, t in read_points(lines):
+    ext = False
+    for new_seg, lat, lon, ele, hdop, t, acc, speed in read_points(lines):
         if new_seg and not first:
             out.append("</trkseg><trkseg>\n")
         first = False
@@ -74,9 +92,20 @@ def convert(lines, name):
         tags += "<time>%s</time>" % t
         if hdop:
             tags += "<hdop>%s</hdop>" % hdop
+        if acc or speed:
+            ext = True
+            tags += ("<extensions>" + ("<esp:acc>%s</esp:acc>" % acc if acc
+                                       else "")
+                     + ("<esp:speed>%s</esp:speed>" % speed if speed else "")
+                     + "</extensions>")
         out.append('<trkpt lat="%.6f" lon="%.6f">%s</trkpt>\n'
                    % (lat, lon, tags))
     out.append(GPX_TAIL)
+    if ext:
+        out[0] = out[0].replace(
+            'xmlns="http://www.topografix.com/GPX/1/1"',
+            'xmlns="http://www.topografix.com/GPX/1/1" xmlns:esp="%s"'
+            % EXT_NS, 1)
     return "".join(out)
 
 

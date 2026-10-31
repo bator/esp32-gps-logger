@@ -126,9 +126,10 @@ var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", 3: "watchdog", 4: 
 var TLS_KB = 48;                        // TLS_MIN_KB in gps_logger.py
 var POINT_B = 46;                       // bytes per .trk point
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
+var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
 // every status.json key the page shows (tests check none is missing)
-var SHOWN = ("fix sats hdop utc position nmea gps_boots gps_loops receiver setup_ok points left files " +
+var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea gps_boots gps_loops receiver setup_ok points left files " +
   "bad_files sent upload upload_err stay uptime prev_run boot_cause temp mhz mem heap_kb idf flash_kb " +
   "wifi rssi pulses").split(" ");
 var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime"];
@@ -229,10 +230,15 @@ function view(d) {
   var q = String(d.idf || "").split(" / "), fr = +q[0], big = +q[1];
   var pk = typeof d.mem === "number" ? Math.round(d.mem / 1024) : null;
   var hd = typeof d.hdop === "number" ? d.hdop : null, q4 = wifiQ(d.rssi);
+  var ha = typeof d.hacc === "number" ? d.hacc : null;          // NAV-PVT: metres
+  var acc = ha !== null ? ha : hd !== null ? hd * UERE : null;  // (else from HDOP)
+  var src = d.fix_src === "pvt" ? "NAV-PVT" : d.fix_src === "nmea" ? "NMEA" : "-";
+  var ub = String(d.ubx || "- / -").split(" / ");                 // UBX frames ok / bad
   v.up = "UP " + esc(hms(d.uptime).toUpperCase());
   v.tm = cell("FIX", esc(fix.replace(" fix", "")).toUpperCase(), "", fixTone(fix)) +
     cell("SATS", esc(sats[1]), "/" + esc(sats[0])) +
-    cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "") +
+    (ha !== null ? cell("ACC", "&plusmn;" + ha.toFixed(1), "m", ha > MAX_HACC ? "warn" : "") :
+      cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "")) +
     cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 ? "warn" : "") +
     (q4 ? cell("WIFI", wifiIcon(q4[0]) + q4[1] + '<em>%</em><em class="db">' + d.rssi + " dBm</em>", "", q4[2]) :
       cell("WIFI", esc(ws[0]).toUpperCase())) +
@@ -274,6 +280,7 @@ function view(d) {
     line("RECEIVER", esc(comma > 0 ? rx.slice(0, comma) : rx).toUpperCase() + "<em>" + num(d.gps_boots) + " rst" + dot +
       num(d.gps_loops) + " loops" + dot + "setup " + (d.setup_ok === true ? "ok" : d.setup_ok === false ? "no" : "-") +
       "</em>", d.gps_loops > 0 || d.setup_ok === false ? "warn" : "") +
+    line("FIX SOURCE", src + "<em>ubx " + esc(ub[0]) + " ok" + dot + esc(ub[1]) + " bad</em>") +
     line("WIFI", esc(ssid || nn(ws[0])) + (q4 ? " &middot; " + q4[1] + "% (" + d.rssi + " dBm)" : "") + "<em>" + num(d.pulses) +
       " keep-alive</em>", q4 ? q4[2] : "") +
     line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() + (pr ? "<em>prev " + esc(pr) + "</em>" : ""),
@@ -287,7 +294,7 @@ function view(d) {
   v.coord = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ?
     Math.abs(+p[0]).toFixed(5) + "&deg; " + (+p[0] < 0 ? "S" : "N") + "  " +
     Math.abs(+p[1]).toFixed(5) + "&deg; " + (+p[1] < 0 ? "W" : "E") +
-    (hd === null ? "" : dot + "&plusmn;" + (hd * UERE).toFixed(1) + " m") :
+    (acc === null ? "" : dot + "&plusmn;" + acc.toFixed(1) + " m") :
     "NO FIX &middot; " + esc(fix).toUpperCase();
   return v;
 }
@@ -312,7 +319,9 @@ function placeMap(d) {
     mapKey = key;
   }
   box.style.transform = "translate(" + (-t.fx).toFixed(1) + "px," + (-t.fy).toFixed(1) + "px)";
-  var acc = document.getElementById("acc"), px = typeof d.hdop === "number" ? d.hdop * UERE * 2 / t.mpp : 0;
+  // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
+  var acc = document.getElementById("acc"), px = typeof d.hacc === "number" ? d.hacc * 2 / t.mpp :
+    typeof d.hdop === "number" ? d.hdop * UERE * 2 / t.mpp : 0;
   acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
 }
 
