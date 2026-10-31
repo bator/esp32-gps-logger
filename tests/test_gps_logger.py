@@ -3788,9 +3788,32 @@ try:
     sv_reset()
     for i in range(10 * 60):
         sv_fix(i * 1.4, 0, 1.0)
+    walk_pts = len(sv_lines())
     check("STAY: a 10 min walk is never stationary, fully recorded",
-          sv_active() is False and len(sv_lines()) >= 190,     # MIN_MOVE 3 m
-          "points=%d" % len(sv_lines()))
+          sv_active() is False and walk_pts >= 190,
+          "points=%d" % walk_pts)
+    check("MINMOVE: 1 m default - walking (1.4 m/s) gets ~a point a second",
+          gl.MIN_MOVE == 1 and walk_pts >= 550, "points=%d" % walk_pts)
+    saved_mm = gl.MIN_MOVE
+    try:
+        gl.MIN_MOVE = 3
+        sv_reset()
+        for i in range(10 * 60):
+            sv_fix(i * 1.4, 0, 1.0)
+        walk3 = len(sv_lines())
+    finally:
+        gl.MIN_MOVE = saved_mm
+    # standing still: the receiver's static hold keeps the fix within cm;
+    # the 5-fix mean wobbles well under a metre
+    sv_reset()
+    sv_fix(0, 0, 0.0)
+    before = len(sv_lines())
+    for i in range(30):                # (no rnd: later tests use its sequence)
+        sv_fix((i * 7 % 7 - 3) * 0.1, (i * 5 % 7 - 3) * 0.1, 0.0)
+    still_new = len(sv_lines()) - before
+    check("MINMOVE: 3 m kept a point every ~2-3 s; standing adds none",
+          walk3 < 0.5 * walk_pts and still_new == 0,
+          "3m=%d 1m=%d still=%d" % (walk3, walk_pts, still_new))
 
     # walking slowly away from a stay (1 m/s) leaves past STILL_EXIT
     sv_reset()
@@ -3835,7 +3858,10 @@ try:
     sv_drift(150)
     check("STAY: a stay on the home network closes the track",
           sv_active() and gl.log["still"]["home"] and gl.log["file"] is None
-          and home_file in gl.pending())
+          and home_file in gl.pending(),
+          "active=%s home=%s file=%s batch=%d pending=%r" % (
+              sv_active(), gl.log["still"].get("home"), gl.log["file"],
+              len(gl.log["batch"]), gl.pending()))
     n_before = len(sv_lines())
     sv_drift(30 * 60)
     check("STAY: 30 min at home writes no points (no heartbeat)",
@@ -6616,6 +6642,18 @@ check("PAGE: polls status.json at the board's refresh_s, no reload",
       and 'http-equiv="refresh"' not in page_src
       and "prefers-color-scheme:dark" in page_src
       and 'name="viewport"' in page_src)
+
+
+# MINMOVE-ENV: .env MIN_MOVE 0-50 m (decimals, comment), anything else keeps
+saved_mm = gl.MIN_MOVE
+got = []
+for v in ("2.5", "0", "7 # meters", "60", "-1", "x", None):
+    gl.MIN_MOVE = 1
+    gl._min_move_env({"MIN_MOVE": v} if v is not None else {})
+    got.append(gl.MIN_MOVE)
+gl.MIN_MOVE = saved_mm
+check("MINMOVE-ENV: 0-50 m read (decimals, comment); invalid keeps 1",
+      got == [2.5, 0.0, 7.0, 1, 1, 1, 1], repr(got))
 
 print()
 print("%d passed, %d failed" % (passed, failed))

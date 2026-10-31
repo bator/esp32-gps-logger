@@ -101,7 +101,9 @@ REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"
 
 SAMPLE = 1000                            # ms between sampled positions
-MIN_MOVE = 3                             # m from the last recorded point
+MIN_MOVE = 1                             # m from the last recorded point (.env
+                                         # MIN_MOVE 0-50; 3 m gave a point
+                                         # every ~3 s on foot)
 FLUSH = 60000                            # ms between batch writes to flash
 NEW_FILE_GAP = 300                       # s without fix → new file; also WiFi max age
 # Stationary filter, on any network. Indoors the GPS wanders tens of metres
@@ -1844,6 +1846,22 @@ def _gps_model_env(env):
         GPS_DYN_MODEL = n
     else:
         print("GPS_MODEL not one of", GPS_MODELS, "using", GPS_DYN_MODEL)
+
+def _min_move_env(env):
+    """MIN_MOVE=<metres> in .env, 0-50 (decimals allowed): how far from the
+    last point a new one has to be. Anything else keeps the default."""
+    global MIN_MOVE
+    v = _plain(env.get("MIN_MOVE"))
+    if not v:
+        return
+    try:
+        m = float(v)
+    except ValueError:
+        m = -1
+    if 0 <= m <= 50:
+        MIN_MOVE = m
+    else:
+        print("MIN_MOVE not 0-50 m, using", MIN_MOVE)
 
 def _keepalive_env(env):
     """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
@@ -4155,6 +4173,7 @@ def run():
         up_reset()
         env = load_env(ENV_FILE)
         _gps_model_env(env)              # before the first setup
+        _min_move_env(env)
         _diag_env(env)
         env = None
         _diag_boot()

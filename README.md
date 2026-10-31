@@ -139,6 +139,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin that cannot be driven falls back to `scan`. |
 | `KEEPALIVE_CONNECTED` | `1`/`0`: pulses also while connected and idle (a power bank at home with the status page on); `scan` or `gpio`, a scan keeps the link. Default 0. |
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
+| `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
@@ -146,7 +147,7 @@ HOSTNAME=Dawarich-GPS-tracker
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored.
@@ -633,7 +634,7 @@ with a NEO-6M; most never need changing.
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP |
 | `GPS_MAX_STD` | 20 m | Skip samples with a worse GST error estimate |
-| `MIN_MOVE` | 3 m | Distance from the last point before a new one |
+| `MIN_MOVE` | 1 m | Distance from the last point before a new one (`.env` `MIN_MOVE`). Standing still the receiver's static hold (below 0.5 m/s) and the 5-fix average keep the position from creeping past it |
 | `SAMPLE` | 1 s | Sampling interval when no averaged second is available (tests) |
 
 **Track files**
