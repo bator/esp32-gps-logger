@@ -6062,6 +6062,31 @@ check("U-10: an unreadable track is held, the next uploads, then .err",
       "posts=%d %r" % (len(_posts), os.listdir(up_td)))
 os.remove(bad_p + ".err")
 
+# POS-ERR: a batch with nothing to send whose .pos write fails is a flash
+# error, not an unreadable track: READ_ERR_MAX of them must not park it
+pe_p = os.path.join(up_td, "20261002_100000.trk")
+make_trk(pe_p, gl.UPLOAD_BATCH + 10,
+         times=["2026-10-05T00:00:%02dX" % (i % 60)
+                for i in range(gl.UPLOAD_BATCH + 10)])
+real_wo = gl.write_offset
+gl.write_offset = lambda path, off: (_ for _ in ()).throw(OSError(28))
+_posts[:] = []
+try:
+    for _ in range(gl.READ_ERR_MAX + 2):
+        gl.up["next_at"] = _clock[0]
+        gl.up["hold"] = {}
+        gl.upload_tick()
+        _clock[0] += 1000
+finally:
+    gl.write_offset = real_wo
+check("POS-ERR: a failing .pos write is 'fs err', the track is not parked",
+      os.path.exists(pe_p) and not os.path.exists(pe_p + ".err")
+      and gl.up["state"] == "fs err" and not _posts,
+      "state %s %r" % (gl.up["state"], os.listdir(up_td)))
+for x_ in (pe_p, pe_p + ".err"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
 # U-14: the quarantine copy lands but the offset write fails: no crash
 q_p = os.path.join(up_td, "20261003_100000.trk")
 make_trk(q_p, gl.UPLOAD_BATCH + 5)      # not EOF: the .pos is written

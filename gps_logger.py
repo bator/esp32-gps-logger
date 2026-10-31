@@ -3735,20 +3735,6 @@ def upload_tick():
         n, n_ok, size, new_off, eof = read_batch(path, off)
         feed()
         fsize = _file_size(path) or 0
-        if not n:
-            if eof or fsize == 0:
-                _rm(path)                # empty / EOF track and .bad
-                _rm(path + ".pos")
-                _clear_bad_full(path)
-            else:
-                print("pos skip", path, off, new_off, fsize)
-                write_offset(path, 0)
-            up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
-            return
-        if not size:
-            commit_offset(path, n, new_off, eof)
-            up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
-            return
     except OSError as e:
         # unreadable (corrupt LittleFS block, EIO): hold it back so the
         # newer tracks still go, and after READ_ERR_MAX tries park it as
@@ -3772,6 +3758,28 @@ def upload_tick():
     except MemoryError:
         up["skip"] = path
         _low_mem(now)
+        return
+    if not size:
+        # nothing to send: a write error here is a flash error, not an
+        # unreadable track (READ_ERR_MAX of them parked a good one as .err)
+        try:
+            if n:
+                commit_offset(path, n, new_off, eof)
+            elif eof or fsize == 0:
+                _rm(path)                # empty / EOF track and .bad
+                _rm(path + ".pos")
+                _clear_bad_full(path)
+            else:
+                print("pos skip", path, off, new_off, fsize)
+                write_offset(path, 0)
+        except OSError as e:
+            print("upload pos", path, repr(e))
+            _fs_err(now)
+            return
+        except MemoryError:
+            _low_mem(now)
+            return
+        up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
         return
     gc.collect()                         # frees an empty grown heap area
     big = idf_heap()[1]
@@ -3813,9 +3821,7 @@ def upload_tick():
         try:
             commit_offset(path, n, new_off, eof)
         except OSError:
-            up["err"] += 1
-            up["state"] = "fs err"
-            _schedule(now)
+            _fs_err(now)
             return
         up["sent"] += n_ok
         up["fail4"] = 0
@@ -3859,6 +3865,12 @@ def upload_tick():
         up["err"] += 1
         up["state"] = "err " + ("net" if code is None else str(code))
         _schedule(now, retry)
+
+def _fs_err(now):
+    """A .pos write (or delete) failed: retry later, the track stays."""
+    up["err"] += 1
+    up["state"] = "fs err"
+    _schedule(now)
 
 def _low_mem(now):
     gc.collect()
