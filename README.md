@@ -381,6 +381,7 @@ page shows the last 15 lines (`WEB_DIAG`), right after the switch to
 | `hdop`, `points`, `sent` | Last HDOP (`None` on the NAV-PVT path: its accuracy is `hacc` in `/status.json`), points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
 | `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`); at home, if it stays low for 5 minutes with tracks waiting, the board reboots cleanly (at most once per 30 minutes) |
+| `ubx G/B` / `hacc` | Only on the NAV-PVT path (u-blox M8/M10), where NMEA stops after the setup and HDOP stays `None`: UBX frames good/bad, and the receiver's horizontal accuracy estimate of the last fix in metres (`-` without a fix). The status page shows the same: `UBX BAD` instead of `NMEA BAD` in the strip, ±hAcc in the event log |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
