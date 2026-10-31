@@ -243,7 +243,7 @@ check("NAV-PVT parsed from a memoryview (one unpack_from)",
       and abs(gl.st["hacc"] - 1.75) < 1e-6)
 s = gl._sample_line(time.ticks_ms(), None, None)
 check("NAV-PVT line from the integers (no float grid)", s is not None
-      and s[1] == "47.497912,-0.314159,123.5,1.8,1.4,20261031T120000Z\n")
+      and s[1] == "47.497912,-0.314159,123.5,2,1.4,20261031T120000Z\n")   # acc 1.75 up
 if s is not None:
     print("pvt line", repr(s[1]))
 check("integer coordinates: halves away from zero, no -0",

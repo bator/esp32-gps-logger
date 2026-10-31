@@ -3529,14 +3529,20 @@ def _fields(now):
     """The elevation, HDOP, accuracy and speed fields of a track line for
     the current fix ("" when not known), for either format (_line). Also
     what the departure ring keeps (_RE). From NMEA: acc = HDOP * HDOP_M,
-    no speed; from NAV-PVT: hdop = acc / HDOP_M."""
+    no speed; from NAV-PVT: hdop = acc / HDOP_M, and acc in whole metres,
+    rounded up, at least 1: Dawarich keeps horizontal_accuracy as an
+    integer, and the M10's 0.4-0.5 m with SBAS was stored as 0 (seen on a
+    walk, where the track was ~5 m off the phone's)."""
     ele = ""
     if st["alt"] is not None and st.get("fixtype") != 2:
         ele = "%.1f" % st["alt"]
     h = st.get("hacc") if st.get("lat_i") is not None else None
     if h is not None:
         v = st.get("mps")
-        return (ele, "%.1f" % (h / HDOP_M), "%.1f" % h,
+        a = int(h)
+        if a < h or a < 1:
+            a = max(a + 1, 1)
+        return (ele, "%.1f" % (h / HDOP_M), "%d" % a,
                 "%.1f" % v if v is not None else "")
     hdop = _fresh_hdop(now)
     if hdop is None:

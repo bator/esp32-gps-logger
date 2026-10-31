@@ -610,8 +610,8 @@ console line.
   complete. Older `.gpx` files are still uploaded.
 - **TRK2.** A file opened while the fixes come from NAV-PVT has a `#TRK2`
   header and `lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ` lines (~51 bytes): acc
-  the horizontal accuracy in m, speed in m/s (one decimal each, empty when
-  unknown). The time stays the last field of every line, as the writer and
+  the horizontal accuracy in whole metres, rounded up and at least 1 (see
+  Fields), speed in m/s with one decimal (each empty when unknown). The time stays the last field of every line, as the writer and
   the readers rely on that. A file keeps its format for life: NMEA seconds
   in a TRK2 file (a receiver restart) are written with acc = HDOP x 5 and no
   speed, NAV-PVT seconds in a TRK1 file (opened before the receiver was
@@ -846,7 +846,10 @@ home.
 - **Fields.** Each point is a GeoJSON feature with `timestamp`, `altitude`,
   `horizontal_accuracy` and `device_id` properties; a TRK2 point also has
   `speed` (m/s). `horizontal_accuracy` is HDOP x 5 m (`HDOP_M`) for a TRK1
-  line and the receiver's own estimate for a TRK2 line. Dawarich's Overland
+  line and the receiver's own estimate for a TRK2 line, in whole metres,
+  rounded up and at least 1: Dawarich keeps `accuracy` as an integer, and
+  the M10's 0.4-0.5 m estimate with SBAS was stored as 0 (on a walk the
+  track was ~5 m off the phone's). Dawarich's Overland
   importer (`app/services/overland/params.rb`) stores `horizontal_accuracy`
   as `accuracy`, `speed` as `velocity`, `altitude` and `vertical_accuracy`;
   a `course` would land only in the raw data, so it is not stored or sent

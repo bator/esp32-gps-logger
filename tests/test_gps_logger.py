@@ -7714,6 +7714,24 @@ check("PVT-AVG: above AVG_MAX_SPEED the point is the second's first fix",
 # PVT-I7: integer coordinates printed without a float, as "%.6f" would
 i7 = [gl._i7(v) for v in (474979123, 474979125, -5, -4, 5, 4, 0, -15, 15,
                           -1512152967, 1799999995, -1799999995, -10, 9)]
+# PVT-ACC: Dawarich keeps horizontal_accuracy as an integer; the M10's
+# 0.4-0.5 m (SBAS) was stored as 0: acc goes in whole metres, rounded up,
+# at least 1 (hdop keeps acc / HDOP_M)
+
+
+def acc_field(h):
+    gl.st.update(lat_i=475000000, lon_i=190000000, hacc=h, mps=1.0,
+                 alt=None)
+    f = gl._fields(_clock[0])
+    return f[2], f[1]
+
+
+acc_got = [acc_field(h) for h in (0.0, 0.4, 0.999, 1.0, 1.001, 2.5, 20.0)]
+gl.reset()
+check("PVT-ACC: acc in whole metres, rounded up, at least 1",
+      [a for a, _ in acc_got] == ["1", "1", "1", "1", "2", "3", "20"]
+      and acc_got[1][1] == "0.1", repr(acc_got))
+
 check("PVT-I7: 1e-7 ints -> 6 decimals, halves away from zero, no -0",
       i7 == ["47.497912", "47.497913", "-0.000001", "0.000000", "0.000001",
              "0.000000", "0.000000", "-0.000002", "0.000002", "-151.215297",
@@ -7755,7 +7773,7 @@ finally:
     shutil.rmtree(q_td, ignore_errors=True)
 check("PVT-SECONDS: seconds published in one read are each a point",
       queued == 3 and len(q_lines) == 3
-      and q_lines[0] == "47.500000,19.000000,100.0,1.5,0.0,20261031T120000Z\n"
+      and q_lines[0] == "47.500000,19.000000,100.0,2,0.0,20261031T120000Z\n"
       and q_lines[2].startswith("47.500020,19.000000,"), repr(q_lines))
 
 # TRK2: a file opened on NAV-PVT fixes is "#TRK2", its lines written from
@@ -7820,9 +7838,9 @@ finally:
     gl.log_reset()
     shutil.rmtree(t2_td, ignore_errors=True)
 want2 = ("#TRK2\n"
-         "47.497912,19.040246,123.5,1.2,1.4,20261031T120000Z\n"
-         "47.497932,19.040246,123.5,1.2,1.4,20261031T120001Z\n"
-         "47.497952,19.040246,123.5,1.2,1.4,20261031T120002Z\n#END\n")
+         "47.497912,19.040246,123.5,2,1.4,20261031T120000Z\n"   # acc 1.2
+         "47.497932,19.040246,123.5,2,1.4,20261031T120001Z\n"   # up: 2
+         "47.497952,19.040246,123.5,2,1.4,20261031T120002Z\n#END\n")
 check("TRK2: a NAV-PVT file is #TRK2 lat,lon,ele,acc,speed,time from ints",
       raw2 == want2, repr(raw2))
 check("TRK2: NMEA seconds in a TRK2 file: acc = HDOP * HDOP_M, no speed",
@@ -7837,11 +7855,11 @@ check("TRK2: upload JSON - accuracy from acc, speed in m/s, altitude",
       and locs2[0]["geometry"]["coordinates"] == [19.040246, 47.497912]
       and locs2[0]["properties"] == {
           "timestamp": "2026-10-31T12:00:00Z", "altitude": 123.5,
-          "horizontal_accuracy": 1.2, "speed": 1.4,
+          "horizontal_accuracy": 2.0, "speed": 1.4,
           "device_id": gl.DEVICE_ID}
       and locs2[4]["properties"]["horizontal_accuracy"] == 6.0
       and "speed" not in locs2[4]["properties"]
-      and b'"horizontal_accuracy":1.2,"speed":1.4,"device_id"' in body2,
+      and b'"horizontal_accuracy":2.0,"speed":1.4,"device_id"' in body2,
       repr(body2[:300]))
 check("TRK2: TRK1 lines still read as before (hdop * HDOP_M, no speed)",
       (n1, ok1, eof1) == (2, 2, True)
