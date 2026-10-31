@@ -8097,12 +8097,24 @@ for key, val in ((0x20910007, 1), (0x209100BB, 0), (0x209100AC, 0),
                  (0x209100CA, 0), (0x209100B1, 0)):
     vs += _struct.pack("<IB", key, val)
 vs_frame = gl._ubx(0x06, 0x8A, vs)
+# GLONASS on: CFG-SIGNAL-GLO_ENA 0x10310025, CFG-SIGNAL-GLO_L1_ENA
+# 0x10310018 (M10 SPG 5.10 interface description / SparkFun
+# u-blox_config_keys.h), RAM
+
+
+def glo_frame(on):
+    return gl._ubx(0x06, 0x8A, bytes((0, 1, 0, 0))
+                   + _struct.pack("<IB", 0x10310025, on)
+                   + _struct.pack("<IB", 0x10310018, on))
+
+
 check("PVT-SETUP: M10 - one CFG-VALSET (RAM): NAV-PVT on, GGA/RMC/GSA/GST/"
       "GSV/GLL/VTG off, between the 1 Hz and 5 Hz rate frames",
       gl.st["mode"] == "pvt" and gl.st["setup_ok"] is True
       and vs_frame in fr10 and not nmea_set(fr10)
       and fr10[0] == gl._rate(1000) and fr10[-1] == gl._rate(200)
-      and fr10.index(vs_frame) == 2 and len(fr10) == 4,
+      and fr10[2] == glo_frame(1)
+      and fr10.index(vs_frame) == 3 and len(fr10) == 5,
       repr([f.hex() for f in fr10]))
 fr8 = pvt_setup(M8_VER)
 want8 = ([gl._ubx(6, 1, bytes((0x01, 0x07, 1)))]
@@ -8124,7 +8136,8 @@ check("PVT-SETUP: u-blox 6 (and an unknown receiver) keep the NMEA setup",
       repr([f.hex() for f in fr6]))
 fr_off = pvt_setup(M10_VER, gps_pvt=False)
 check("PVT-SETUP: GPS_PVT=0 keeps NMEA on an M10",
-      gl.st["mode"] == "nmea" and fr_off[2:-1] == want_nmea + [pvt_stop])
+      gl.st["mode"] == "nmea"
+      and fr_off[2:-1] == [glo_frame(1)] + want_nmea + [pvt_stop])
 fr9 = pvt_setup(F9_VER)
 check("PVT-SETUP: kinds - protocol 23+ VALSET, 15-22 CFG-MSG, older NMEA",
       vs_frame in fr9
@@ -8145,6 +8158,88 @@ check("PVT-SETUP: .env GPS_PVT auto/1/0 (comment-safe), read before setup",
       pv_env == [False, True, True, True, True]
       and run_src.index("_gps_pvt_env") < run_src.index("gps_setup()"),
       repr(pv_env))
+
+# GLO: GLONASS on an M10 (off by default there), one CFG-VALSET to RAM
+# after NAV5, once per receiver start (a signal change restarts its GNSS
+# part), off too with GPS_GLO=0, a NAK tolerated; no frame on others
+diag_clear()
+gl.DIAG = 60000
+try:
+    pvt_setup(M10_VER)
+    g_on = (gl.st["glo_boots"], gl.st["setup_ok"])
+    _uart_tx[:] = []
+    gl.gps_setup()                        # a retry, same receiver start
+    g_retry = glo_frame(1) in _uart_tx
+    gl.st["gps_boots"] += 1               # restarted: back at its defaults
+    _uart_tx[:] = []
+    gl.gps_setup()
+    g_again = glo_frame(1) in _uart_tx and gl.st["glo_boots"] == 1
+    g_lines = [l for l in diag_lines() if l.startswith("gps glonass")]
+finally:
+    gl.DIAG = 0
+check("GLO: an M10 gets GLONASS on once per receiver start, one log line",
+      g_on == (0, True) and not g_retry and g_again
+      and g_lines == ["gps glonass on"], repr((g_on, g_retry, g_lines)))
+saved_glo = gl.GPS_GLO
+gl.GPS_GLO = False
+try:
+    fr_glo0 = pvt_setup(M10_VER)
+finally:
+    gl.GPS_GLO = saved_glo
+check("GLO: GPS_GLO=0 sends it off (RAM outlives an ESP reset)",
+      glo_frame(0) in fr_glo0 and glo_frame(1) not in fr_glo0)
+_uart_nak_frames.add(glo_frame(1))
+try:
+    fr_gnak = pvt_setup(M10_VER)
+    gnak = (gl.st["glo_bad"], gl.st["setup_ok"], gl.st["mode"])
+    _uart_tx[:] = []
+    gl.st["gps_boots"] += 1
+    gl.gps_setup()
+    gnak_again = glo_frame(1) in _uart_tx
+finally:
+    _uart_nak_frames.discard(glo_frame(1))
+check("GLO: a NAK - the rest of the setup goes on, not asked again this boot",
+      gnak == (True, True, "pvt") and vs_frame in fr_gnak
+      and fr_gnak[-1] == gl._rate(200) and not gnak_again, repr(gnak))
+check("GLO: no GLONASS frame for an M8, a u-blox 6 or an unknown receiver",
+      not any(f[2:4] == b"\x06\x8a" and f[6:8] == b"\x00\x01"
+              and b"\x25\x00\x31\x10" in f
+              for f in pvt_setup(M8_VER) + pvt_setup(U6_VER)
+              + pvt_setup(None)))
+glo_env = []
+saved_glo = gl.GPS_GLO
+for v_ in ("0", "1", "x", None):
+    gl.GPS_GLO = v_ != "1"
+    gl._gps_glo_env({"GPS_GLO": v_} if v_ is not None else {})
+    glo_env.append(gl.GPS_GLO)
+gl.GPS_GLO = saved_glo
+check("GLO: .env GPS_GLO 1/0, anything else keeps the default, read before "
+      "setup",
+      glo_env == [False, True, True, True]
+      and run_src.index("_gps_glo_env") < run_src.index("gps_setup()"),
+      repr(glo_env))
+# GPS_PVT=0 on an M10: MON-VER after the NMEA boot setup makes a setup due
+# for GLONASS alone (the mode stays NMEA)
+saved = gl.GPS_PVT
+gl.GPS_PVT = False
+gl.reset()
+_uart_rx[:] = []
+gl.gps_setup()
+_uart_ver[0] = M10_VER
+_uart_tx[:] = []
+try:
+    gl.gps_check(_clock[0])
+    gl.read_uart()
+    for _ in range(8):
+        _clock[0] += 1000
+        gl.gps_check(_clock[0])
+finally:
+    _uart_ver[0] = None
+    gl.GPS_PVT = saved
+check("GLO: GPS_PVT=0 - MON-VER of an M10 makes the GLONASS setup due",
+      glo_frame(1) in _uart_tx and gl.st["mode"] == "nmea"
+      and gl.st["glo_boots"] == gl.st["gps_boots"] and vs_frame not in _uart_tx,
+      repr((gl.st["mode"], gl.st["glo_boots"])))
 
 # PVT-BOOT: the boot setup is NMEA (model unknown); MON-VER naming an M10
 # makes the PVT setup due (within GPS_RETRY), not a second NMEA one

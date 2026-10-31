@@ -125,6 +125,7 @@ HOSTNAME=Dawarich-GPS-tracker
 # CPU_MHZ=80
 # GPS_MODEL=0
 # GPS_PVT=auto
+# GPS_GLO=1
 # DIAG=60
 # WEB=1
 # WEB_AWAY=0
@@ -147,6 +148,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
+| `GPS_GLO` | `1` (default): GLONASS on beside GPS, Galileo and BeiDou on a u-blox M10 (off in its defaults); `0`: off. See [GPS](#gps). Read at boot. |
 | `GPS_PVT` | `auto` (default): on a u-blox M8/M10 (from UBX-MON-VER) fixes come as UBX-NAV-PVT, NMEA off; `0`: NMEA on every receiver. See [GPS](#gps). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
@@ -154,7 +156,7 @@ HOSTNAME=Dawarich-GPS-tracker
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `GPS_PVT`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `GPS_PVT`, `GPS_GLO`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Values may be quoted. On the keys above the comment goes first, then the
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
@@ -517,6 +519,17 @@ console line.
   that frame alone (a u-blox 6 has no NAV-PVT) does not fail the setup. A
   NAV-PVT frame that still comes in the NMEA mode is not used and counts as
   a message the setup turned off, so the setup is sent again.
+- **GLONASS on an M10** (`.env` `GPS_GLO=1`, the default). The M10's
+  defaults are GPS, Galileo, BeiDou, QZSS and SBAS; no GLONASS satellite
+  showed in the list on the board. Once MON-VER names an M10, the setup
+  sends one UBX-CFG-VALSET to RAM after NAV5 with `CFG-SIGNAL-GLO_ENA` and
+  `CFG-SIGNAL-GLO_L1_ENA` (1, or 0 with `GPS_GLO=0`: RAM outlives an ESP
+  reset). A signal change restarts the receiver's GNSS part (the fix is lost
+  for a second or two), so it is sent once per receiver start, not at every
+  setup retry, and again after a restart (back at its defaults). With
+  `GPS_PVT=0` MON-VER makes a setup due for it alone. A NAK keeps it off for
+  the boot and the rest of the setup goes on; the diagnostic log gets
+  `gps glonass on` / `off` / `refused` when that changes.
 - **Setup retries.** It is sent again while the receiver still sends the
   sentences it turns off, and also while the setup is not acknowledged (an
   ACK lost, a silent receiver that took the blind burst), less and less
@@ -994,6 +1007,7 @@ with a NEO-6M; most never need changing.
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP (NMEA) |
 | `GPS_MAX_STD` | 20 m | Skip samples with a worse GST error estimate (NMEA) |
+| `GPS_GLO` | `True` | GLONASS on on a u-blox M10 (`.env` `GPS_GLO`: `1` / `0`) |
 | `GPS_PVT` | `True` (auto) | UBX-NAV-PVT instead of NMEA on a u-blox M8/M10 (`.env` `GPS_PVT`: `auto` / `0`) |
 | `PVT_MAX_HACC` | 20 m | Skip NAV-PVT seconds with a worse horizontal accuracy estimate; fixes above it count in a second's mean only when it has no better one |
 | `PVT_MAX_TACC` | 1 s | NAV-PVT time at least this accurate (and valid, fully resolved) sets the board clock |

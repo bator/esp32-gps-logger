@@ -29,6 +29,9 @@ GPS_MAX_STD = 20                         # m: receiver's own error estimate
 GPS_PVT = True                           # u-blox M8/M10: UBX-NAV-PVT every
                                          # fix instead of NMEA (.env GPS_PVT:
                                          # auto, 0 = NMEA on every receiver)
+GPS_GLO = True                           # u-blox M10: GLONASS on beside GPS,
+                                         # Galileo and BeiDou (.env GPS_GLO
+                                         # 1/0; its default is off)
 PVT_MAX_HACC = 20                        # m: NAV-PVT's horizontal accuracy
                                          # estimate above this = not usable
 PVT_MAX_TACC = 1000000000                # ns: NAV-PVT time this accurate
@@ -381,6 +384,9 @@ def reset():
               ack_id=None, ack=None, ack_n=0, checked=True, hz1=0, hz5=0,
               set_ok=0, gst_at=None, loop_more=0, loop_said=None,
               nt_said=None, nt_more=0, ver_said=None,
+              # GLONASS (M10): the restart count (gps_boots) it was set
+              # for, refused this boot, the state the log last told
+              glo_boots=None, glo_bad=False, glo_said=None,
               # NAV-PVT (M8/M10): mode of the last setup ("pvt"/"nmea"),
               # the receiver's kind from MON-VER (kept over a restart),
               # PVT given up for this boot, the last frame, the source of
@@ -969,6 +975,41 @@ PVT_NMEA_OFF = (0x00, 0x04, 0x02, 0x07, 0x03, 0x01, 0x05)   # (CFG-MSG ids)
 # acknowledge it; a u-blox 6 without NAV-PVT may refuse it, which is fine.
 PVT_STOP = _ubx(0x06, 0x01, bytes((0x01, 0x07, 0)))
 
+# GLONASS on an M10 (st["gps_kind"] "m10"): CFG-SIGNAL-GLO_ENA and
+# CFG-SIGNAL-GLO_L1_ENA (u-blox M10 SPG 5.10 interface description,
+# UBX-21035062), one CFG-VALSET to RAM like the NAV-PVT setup. Off by
+# default: GPS, Galileo, BeiDou, QZSS and SBAS only (no GLONASS satellite
+# in the list on the board). Set once per receiver start (a signal change
+# restarts its GNSS part: a fix lost for a second or two, so not at every
+# retry), also when off (GPS_GLO=0 after a boot that turned it on: RAM
+# outlives an ESP reset, see PVT_STOP).
+CFG_SIGNAL_GLO = (0x10310025, 0x10310018)
+
+def _glo_due():
+    """The GLONASS frame is due: an M10, not refused this boot, not yet
+    set since the receiver's last start."""
+    return (st["gps_kind"] == "m10" and not st["glo_bad"]
+            and st["glo_boots"] != st["gps_boots"])
+
+def _glo_setup(t0):
+    """Send the GLONASS frame (GPS_GLO) until acknowledged: True / None
+    (refused: a NAK, kept off this boot) / False (silent), see _ubx_ack."""
+    on = 1 if GPS_GLO else 0
+    r = _ubx_ack(_valset([(k, on) for k in CFG_SIGNAL_GLO]), t0)
+    if r is True:
+        st["glo_boots"] = st["gps_boots"]
+        say = "gps glonass " + ("on" if on else "off")
+    elif r is None:
+        st["glo_bad"] = True
+        say = "gps glonass refused"
+    else:
+        return r
+    print(say)
+    if st["glo_said"] != say:            # a line when it changes, not at
+        st["glo_said"] = say             # every receiver restart
+        _diag_write(say)
+    return r
+
 def _valset(keys):
     """UBX-CFG-VALSET to RAM of (key, U1 value) pairs."""
     p = bytearray(4 + 5 * len(keys))
@@ -1083,6 +1124,8 @@ def gps_setup():
             ok = r is not False          # silent: it stopped answering
             if r is None:
                 print("gps nav5 refused")
+            if ok and _glo_due():
+                ok = _glo_setup(t0) is not False   # (refused: the rest)
             mode = _gps_mode()
             for fr in _setup_msgs(mode):
                 if ok:
@@ -1249,7 +1292,8 @@ def gps_check(now):
     poll = st["sv_poll_at"] is None or _age(now, st["sv_poll_at"]) >= SV_POLL
     # the receiver's model came (MON-VER), or PVT was given up: the other
     # mode's setup is due as if this one had not been taken
-    other = st["mode"] is not None and st["mode"] != _gps_mode()
+    other = ((st["mode"] is not None and st["mode"] != _gps_mode())
+             or _glo_due())              # (an M10 named, or restarted)
     if not (at is None
             or (not st["extra"] and not other and st["setup_ok"] is True)
             or _age(now, at) < st["setup_wait"]):
@@ -2816,6 +2860,17 @@ def _gps_pvt_env(env):
         GPS_PVT = False
     else:
         print("GPS_PVT not auto or 0, using", "auto" if GPS_PVT else "0")
+
+def _gps_glo_env(env):
+    """GPS_GLO in .env: 1 (default) turns GLONASS on on an M10, 0 off."""
+    global GPS_GLO
+    v = _plain(env.get("GPS_GLO"))
+    if not v:
+        return
+    if v in ("1", "0"):
+        GPS_GLO = v == "1"
+    else:
+        print("GPS_GLO not 1 or 0, using", 1 if GPS_GLO else 0)
 
 def _min_move_env(env):
     """MIN_MOVE=<metres> in .env, 0-50 (decimals allowed): how far from the
@@ -6193,6 +6248,7 @@ def run():
         env = load_env(ENV_FILE)
         _gps_model_env(env)              # before the first setup
         _gps_pvt_env(env)
+        _gps_glo_env(env)
         _min_move_env(env)
         _diag_env(env)
         env = None
