@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>GPS logger</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23060b16'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='.45'/%3E%3Ccircle cx='32' cy='32' r='10' fill='none' stroke='%2322d3ee' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='4.5' fill='%2322d3ee'/%3E%3Cpath d='M32 5v9M32 50v9M5 32h9M50 32h9' stroke='%2322d3ee' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#060b16">
 <!-- Status page of gps_logger.py, served from the board's flash as is.
      It loads once, then polls /status.json (every refresh_s from the JSON)
      and redraws the boxes. The map tiles come from OpenStreetMap and the
@@ -43,6 +45,8 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .tm small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}
 .tm b{display:block;font-size:22px;color:#fff;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tm b em,.sys em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
+.wb{display:inline-flex;align-items:flex-end;gap:2px;height:15px;margin-right:7px;vertical-align:-1px}
+.wb i{width:4px;border-radius:1px;background:var(--l)}.wb i.on{background:currentColor}
 .tm .ok b{color:var(--ok);text-shadow:0 0 12px rgba(52,211,153,.5)}
 .tm .warn b,.sys .warn{color:var(--warn)}.tm .bad b,.sys .bad{color:var(--bad)}
 .g{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;margin-top:12px}
@@ -80,7 +84,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .svt{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
 .svt td{padding:3px 6px;border-top:1px solid var(--l);text-align:right}
 .svt td:first-child{text-align:left}.svt .u td{color:var(--m)}
-@media(max-width:760px){.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+@media(max-width:760px){.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.wf b{font-size:14px}.wf em{display:none}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -151,6 +155,16 @@ function tile(lat, lon, z) {            // slippy-map tile and pixel offset in i
   return {x: Math.floor(x), y: Math.floor(y), fx: (x - Math.floor(x)) * 256, fy: (y - Math.floor(y)) * 256,
     mpp: 156543.03 * Math.cos(r) / n};
 }
+function wifiQ(rssi) {                 // [bars 0-4, word, tone] for an RSSI in dBm
+  if (rssi === null || rssi === undefined) return null;
+  return rssi >= -55 ? [4, "EXCELLENT", ""] : rssi >= -67 ? [3, "GOOD", ""] : rssi >= -75 ? [2, "FAIR", "warn"] :
+    rssi >= -85 ? [1, "WEAK", "bad"] : [0, "NO SIGNAL", "bad"];
+}
+function wifiBars(n) {
+  var h = '<span class="wb">';
+  for (var i = 1; i <= 4; i++) h += '<i class="' + (i <= n ? "on" : "") + '" style="height:' + i * 25 + '%"></i>';
+  return h + "</span>";
+}
 function cell(label, value, unit, tone) {
   return '<div class="' + (tone || "") + '"><small>' + label + "</small><b>" + value + (unit ? "<em>" + unit + "</em>" : "") +
     "</b></div>";
@@ -206,13 +220,14 @@ function view(d) {
   var pct = ok + bad ? bad * 100 / (ok + bad) : 0;
   var ws = String(d.wifi || "").split(" "), ssid = ws.slice(1).join(" ");
   var q = String(d.idf || "").split(" / "), fr = +q[0], big = +q[1], pk = Math.round((d.mem || 0) / 1024);
-  var hd = typeof d.hdop === "number" ? d.hdop : null, noRssi = d.rssi === null || d.rssi === undefined;
+  var hd = typeof d.hdop === "number" ? d.hdop : null, q4 = wifiQ(d.rssi);
   v.up = "UP " + esc(hms(d.uptime).toUpperCase());
   v.tm = cell("FIX", esc(fix.replace(" fix", "")).toUpperCase(), "", fixTone(fix)) +
     cell("SATS", esc(sats[1]), "/" + esc(sats[0])) +
     cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "") +
     cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 ? "warn" : "") +
-    cell("WIFI", noRssi ? esc(ws[0]).toUpperCase() : d.rssi, noRssi ? "" : "dBm") +
+    (q4 ? cell("WIFI", wifiBars(q4[0]) + q4[1], d.rssi + " dBm", (q4[2] + " wf").trim()) :
+      cell("WIFI", esc(ws[0]).toUpperCase())) +
     cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : "");
   var dots = "", bars = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
   for (var i = 0; i < svs.length; i++) {
@@ -251,7 +266,8 @@ function view(d) {
     line("RECEIVER", esc(comma > 0 ? rx.slice(0, comma) : rx).toUpperCase() + "<em>" + num(d.gps_boots) + " rst" + dot +
       num(d.gps_loops) + " loops" + dot + "setup " + (d.setup_ok === true ? "ok" : d.setup_ok === false ? "no" : "-") +
       "</em>", d.gps_loops > 0 || d.setup_ok === false ? "warn" : "") +
-    line("WIFI", esc(ssid || ws[0]) + "<em>" + num(d.pulses) + " keep-alive</em>") +
+    line("WIFI", esc(ssid || ws[0]) + (q4 ? " &middot; " + q4[1] + " (" + d.rssi + " dBm)" : "") + "<em>" + num(d.pulses) +
+      " keep-alive</em>", q4 ? q4[2] : "") +
     line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() + (pr ? "<em>prev " + esc(pr) + "</em>" : ""),
       d.boot_cause === 3 || /crash/.test(pr) ? "warn" : "") +
     line("CHIP", (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz" +
@@ -269,15 +285,18 @@ function view(d) {
 
 // The map: tiles around the position, rebuilt only when the centre tile
 // changes; the fraction moves the layer (no reload every poll)
-var mapKey = "";
+var mapKey = "", mapD = null;
 function placeMap(d) {
+  mapD = d;
   var el = document.getElementById("map"), p = String(d.position || "").split(", ");
   if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) { el.className = "map nofix"; return; }
   el.className = "map";
-  var t = tile(+p[0], +p[1], ZOOM), key = t.x + "/" + t.y, box = document.getElementById("tiles");
+  // tiles to cover the element from its centre (a wide screen needs more)
+  var nx = Math.ceil(el.offsetWidth / 512) + 1, ny = Math.ceil(el.offsetHeight / 512) + 1;
+  var t = tile(+p[0], +p[1], ZOOM), key = t.x + "/" + t.y + "/" + nx + "/" + ny, box = document.getElementById("tiles");
   if (key !== mapKey) {
     var h = "";
-    for (var dx = -3; dx <= 3; dx++) for (var dy = -2; dy <= 2; dy++)
+    for (var dx = -nx; dx <= nx; dx++) for (var dy = -ny; dy <= ny; dy++)
       h += '<img alt="" src="https://tile.openstreetmap.org/' + ZOOM + "/" + (t.x + dx) + "/" + (t.y + dy) +
         '.png" style="left:' + dx * 256 + "px;top:" + dy * 256 + 'px">';
     box.innerHTML = h;
@@ -319,7 +338,10 @@ function tick() {
   x.onerror = x.ontimeout = function () { stale(); setTimeout(tick, every * 1000); };
   x.send();
 }
-if (typeof document !== "undefined") tick();
+if (typeof document !== "undefined") {
+  window.onresize = function () { if (mapD) placeMap(mapD); };
+  tick();
+}
 </script>
 </body>
 </html>

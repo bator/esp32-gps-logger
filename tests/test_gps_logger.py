@@ -6594,7 +6594,10 @@ else:
           and "<small>SATS</small><b>1<em>/2</em>" in tm
           and "<small>HDOP</small><b>0.88</b>" in tm
           and "<small>UPLINK</small><b>120<em>pts</em>" in tm
-          and "<small>WIFI</small><b>-75<em>dBm</em>" in tm
+          and '<div class="warn wf"><small>WIFI</small><b><span class="wb"><i class="on" '
+              'style="height:25%"></i><i class="on" style="height:50%"></i><i class="" '
+              'style="height:75%"></i><i class="" style="height:100%"></i></span>'
+              'FAIR<em>-75 dBm</em>' in tm
           and "<small>NMEA BAD</small>" in tm, tm[:400])
     check("PAGE: no fix amber, WiFi off shows the state, map says NO FIX",
           '<div class="warn"><small>FIX</small><b>WAITING</b>' in tm2
@@ -6629,6 +6632,10 @@ else:
           and lg.index("BOOT &middot; WATCHDOG &middot; PREVIOUS RUN 10 MIN 00 S")
               < lg.index("3D FIX &middot; 13/21 SATS &middot; 4 PTS")
           and '<span class="err">IDF 20 KB</span>' in lg, lg[:500])
+    check("PAGE: WiFi quality words from RSSI; favicon; map fills wide screens",
+          v.get("wq") == [[4, "EXCELLENT", ""], [3, "GOOD", ""], [2, "FAIR", "warn"],
+                          [1, "WEAK", "bad"], [0, "NO SIGNAL", "bad"], None],
+          repr(v.get("wq")))
     check("PAGE: satellite table and map tile maths",
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"
@@ -6641,6 +6648,8 @@ check("PAGE: polls status.json at the board's refresh_s, no reload",
       "/status.json" in page_src and "refresh_s" in page_src
       and 'http-equiv="refresh"' not in page_src
       and "tile.openstreetmap.org" in page_src and "OpenStreetMap</a>" in page_src
+      and '<link rel="icon" href="data:image/svg+xml,' in page_src
+      and "el.offsetWidth / 512" in page_src and "window.onresize" in page_src
       and 'name="viewport"' in page_src)
 
 
