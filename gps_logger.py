@@ -3171,7 +3171,7 @@ def count_points():
                     f.seek(off)
                 while True:
                     line = _readline(f)
-                    if line is None:
+                    if line is None or (not gpx and line == _FOOT):
                         break
                     nlines += 1
                     if nlines & 63 == 0:
@@ -3276,6 +3276,8 @@ def _point(line, gpx):
                                 tc[9:11], tc[11:13], tc[13:15])
     return (f[0], f[1], t, f[2], f[3])
 
+_FOOT = FOOTER.encode()
+
 def read_batch(path, off=0):
     """Fill _body with up to UPLOAD_BATCH valid points from byte offset off
     as Overland JSON -> (n, n_ok, body_len, new_off, eof).
@@ -3290,7 +3292,10 @@ def read_batch(path, off=0):
         while True:
             line_start = f.tell()
             line = _readline(f)
-            if line is None:
+            if line is None or (not gpx and line == _FOOT):
+                # the footer ends a .trk: bytes after it are left over from
+                # a longer flush that failed (a later, shorter one wrote its
+                # footer before them), lines the logger dropped
                 eof = True
                 break
             nlines += 1

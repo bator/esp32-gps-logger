@@ -1681,6 +1681,35 @@ try:
           ok_bad and bad.count(b"\n") == 3 and b"#" not in bad,
           "ok=%s bad=%r" % (ok_bad, bad[:80]))
 
+    # TRK-END: the footer ends a .trk. A failed longer flush, then a shorter
+    # good one, leaves old point lines after "#END": dropped drift points
+    # that must not be uploaded; the file still counts as complete
+    end_dir = os.path.join(tmpdir, "trkend")
+    os.makedirs(end_dir)
+    gl.LOG_DIR = end_dir
+    te = os.path.join(end_dir, "20261005_130000.trk")
+    good = [trk_line(52.5 + i * 0.001, 13.4, "2026-10-05T13:00:%02dZ" % i)
+            for i in range(3)]
+    drift = [trk_line(53.9, 14.9, "2026-10-05T13:00:%02dZ" % (i + 10))
+             for i in range(4)]
+    with open(te, "wb") as f:
+        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+                 + "52.6,13.5,,,2026100").encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(te, 0)
+    te_left = gl.count_points()
+    online(end_dir)
+    with open(te, "wb") as f:
+        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+                 + gl.FOOTER).encode())
+    pump()
+    te_locs = locations()
+    check("TRK-END: reading stops at #END; what follows is not uploaded",
+          (n, n_ok, eof) == (3, 3, True) and te_left == 3
+          and len(te_locs) == 3 and not os.path.exists(te)
+          and all(loc["geometry"]["coordinates"][1] < 53 for loc in te_locs),
+          "n=%s n_ok=%s eof=%s left=%s posted=%d exists=%s" % (
+              n, n_ok, eof, te_left, len(te_locs), os.path.exists(te)))
+
     gl.LOG_DIR = saved_dir
 
     # --- K1: keepalive deinit + deadline -----------------------------------
