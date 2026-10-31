@@ -109,11 +109,12 @@ GPS_STORM_QUIET = 10000                  # ms without a restart (in a storm
                                          # over, set it up within GPS_RETRY
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
-# GPIO16/17 are its console UART, so it uses UART1 on GPIO4 (TX) / GPIO5 (RX).
+# GPIO16/17 are its console UART, so it uses UART1 on GPIO18 (TX) / GPIO19
+# (RX): plain pins, unlike the strapping pins GPIO4/5 the GPS used before.
 # main.py keeps the matching boot-bypass pin.
 IS_C6 = "ESP32C6" in getattr(sys.implementation, "_machine", "")
 if IS_C6:
-    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 4, 5, 7, 6
+    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 18, 19, 7, 6
 else:
     GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 2, 17, 16, 22, 21
 
@@ -2885,14 +2886,15 @@ def _pin_taken(n):
     """A pin the board already uses or must not drive: GPS UART, I2C
     (OLED), main.py's boot-bypass pin (10 on the C6, 25 on the ESP32); on
     the C6 the USB D-/D+ pins 12/13 and UART0 16/17 (the console), the
-    strapping pins 8/9 (a MOSFET gate's pull-down holds 9 low at reset:
-    download mode) and the SPI flash pins 24-30; on the ESP32 the strapping
+    strapping pins 4/5 (JTAG, the old GPS wiring) and 8/9 (a MOSFET gate's
+    pull-down holds 9 low at reset: download mode) and the SPI flash pins
+    24-30; on the ESP32 the strapping
     pin 0 (download mode), UART0 1/3 and the SPI flash pins 6-11 (driving
     one crashes the board). Pulsing one of them breaks it."""
     if n in (GPS_TX, GPS_RX, I2C_SCL, I2C_SDA):
         return True
     if IS_C6:
-        return n in (8, 9, 10, 12, 13, 16, 17) or 24 <= n <= 30
+        return n in (4, 5, 8, 9, 10, 12, 13, 16, 17) or 24 <= n <= 30
     return n in (0, 1, 3, 25) or 6 <= n <= 11
 
 _pb_pin = None
