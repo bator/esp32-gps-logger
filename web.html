@@ -4,151 +4,125 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>GPS logger</title>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <!-- Status page of gps_logger.py, served from the board's flash as is.
      It loads once, then polls /status.json (every refresh_s from the JSON)
-     and redraws the boxes. -->
+     and redraws the boxes. The map tiles come from OpenStreetMap and the
+     fonts from Google Fonts when the phone is online. -->
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
 <style>
-:root{--b:#eceef1;--c:#fff;--t:#1f2328;--m:#5f6670;--l:#e3e6ea;--in:#eef0f3;--ac:#2563eb;--bad:#b91c1c;--warn:#b45309;--ok:#15803d}
-@media(prefers-color-scheme:dark){:root{--b:#0c0d10;--c:#1c1f25;--t:#e6e8eb;--m:#9aa1aa;--l:#2e333a;--in:#262a31;--ac:#60a5fa;--bad:#f87171;--warn:#fbbf24;--ok:#4ade80}}
-body{font:15px Inter,system-ui,sans-serif;margin:0 auto;padding:16px;max-width:900px;background:var(--b);color:var(--t)}
-h1{font-size:20px;font-weight:700;letter-spacing:-.01em;margin:0}
-.m,small,text,.h{color:var(--m);fill:var(--m)}
-.w{display:grid;gap:12px;margin:12px 0;transition:opacity .3s}
-.off .w,.off .t{opacity:.45}
-.c{background:var(--c);border-radius:12px;padding:12px 14px}
-.lb,.hr small{display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}
-.ic{display:inline-block;width:15px;height:15px;margin:0 6px 0 0;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-3px}
-.k{display:grid;grid-template-columns:1fr 1fr;padding:0;overflow:hidden;grid-column:1/-1}
-.k>div{padding:12px 14px;min-width:0}
-.k>div:nth-child(2n){border-left:1px solid var(--l)}
-.k>div:nth-child(n+3){border-top:1px solid var(--l)}
-.k b{display:block;font-size:28px;font-weight:700;letter-spacing:-.02em;margin:4px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.k small:last-child{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.w{grid-template-columns:1fr 1fr}.l{grid-column:1/-1;margin:-4px 2px 0}
-@media(min-width:720px){.s{grid-area:1/1/3/2}.k{grid-column:2}}
-svg{display:block;max-width:400px;margin:4px auto 0}
-.a{fill:none;stroke:var(--l)}
-text{font-size:12px;text-anchor:middle}
-[class^=g],[class*=" g"]{--s:#9ca3af}.g0{--s:#3b82f6}.g2{--s:#14b8a6}.g3{--s:#f59e0b}.g6{--s:#ec4899}
-circle[class]{fill:var(--s);stroke:var(--s);stroke-width:1.5}
-circle.u{fill:none}
-.b{display:flex;flex-direction:column}
-.r{flex:1;display:flex;align-items:flex-end;gap:2px;min-height:110px;margin-top:10px;background:linear-gradient(var(--l),var(--l)) 0 0/100% 1px no-repeat,linear-gradient(var(--l),var(--l)) 0 33.33%/100% 1px no-repeat,linear-gradient(var(--l),var(--l)) 0 66.67%/100% 1px no-repeat}
-.r i{flex:1;min-width:2px;min-height:2px;background:var(--s);border-radius:2px 2px 0 0;box-sizing:border-box}
-.r .u{background:none;border:1.5px solid var(--s)}
-.l span{white-space:nowrap;margin-right:10px}
-.l i,.sg i{display:inline-block;width:9px;height:9px;border-radius:5px;margin-right:4px;background:var(--s)}
-.l .u{background:none;border:1.5px solid var(--m);box-sizing:border-box}
-.d0:before,.d1:before,.d2:before{content:"\25cf";margin-right:6px;color:#dc2626}
-.d1:before{color:#d97706}.d2:before{color:#16a34a}
-/* tabs */
-.t{background:var(--c);border-radius:12px;padding:0 16px 8px;transition:opacity .3s}
-.tabs{display:flex;border-bottom:1px solid var(--l);margin:0 -16px 4px;padding:0 8px}
-.tabs button{flex:1;white-space:nowrap;font:inherit;font-size:14px;color:var(--m);background:none;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;padding:12px 4px 10px;cursor:pointer}
-.tabs button[aria-selected=true]{color:var(--t);font-weight:600;border-bottom-color:var(--ac)}
-.p[hidden]{display:none}
-.h{font-size:11px;text-transform:uppercase;letter-spacing:.07em;margin:14px 0 4px}
-/* details: one row per subsystem */
-.hr{display:grid;grid-template-columns:18px 1fr auto;column-gap:12px;padding:12px 0;border-top:1px solid var(--l);cursor:pointer}
-.hr p,.hr .mt{display:none}.hr.o p,.hr.o .mt{display:block}
-.hr small:after{content:"";display:inline-block;width:5px;height:5px;margin:0 0 2px 7px;border:solid var(--m);border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
-.hr.o small:after{transform:rotate(-135deg);margin-bottom:-1px}
-.hr:first-child{border-top:0}
-.hr>.ic{width:18px;height:18px;margin:1px 0 0;color:var(--m)}
-.ic.ok{color:#16a34a}.ic.warn{color:#d97706}.ic.bad{color:#dc2626}
-.hr strong{display:block;font-size:16px;font-weight:600;margin-top:1px;overflow-wrap:anywhere}
-.hr p{margin:2px 0 0;font-size:13px;color:var(--m);font-variant-numeric:tabular-nums}
-.hr>b{font-size:20px;font-weight:700;letter-spacing:-.01em;text-align:right;align-self:center}
-.hr>b em{display:block;font-style:normal;font-weight:400;font-size:11px;color:var(--m)}
-.bad{color:var(--bad)}.warn{color:var(--warn)}
-.mt{position:relative;height:6px;border-radius:3px;background:var(--l);margin-top:8px;max-width:360px}
-.mt i{display:block;height:6px;border-radius:3px;background:#16a34a}
-.mt.bad i{background:#dc2626}.mt.warn i{background:#d97706}
-.mt b{position:absolute;top:-3px;width:2px;height:12px;background:var(--t)}
-/* satellites */
-.sg{margin:14px 0 4px;font-weight:600}
-.sr.hd+.sg{margin-top:6px}
-.sg small{font-weight:400;margin-left:6px}
-.sr{display:grid;grid-template-columns:3.2em 1fr 2.4em 2.8em 3.2em;align-items:center;gap:8px;padding:3px 0;font-variant-numeric:tabular-nums}
-.sr span{text-align:right}.sr span:first-child{text-align:left}
-.sr.hd{font-size:12px;color:var(--m)}
-.sr.u{color:var(--m)}
-.sb{height:8px;border-radius:4px;background:var(--l)}
-.sb i{display:block;height:8px;border-radius:4px;background:var(--s);box-sizing:border-box}
-.u .sb i{background:none;border:1.5px solid var(--s)}
-.uh{font-size:11px;color:var(--warn)}
-.ns{margin-top:12px;font-size:13px;color:var(--m);line-height:1.5}
-/* log: timeline */
-.tl{list-style:none;margin:0;padding:0}
-.tl li{position:relative;display:grid;grid-template-columns:3.4em 1fr;gap:10px;padding:5px 0 5px 0}
-.tl li:before{content:"";position:absolute;left:calc(3.4em + 4px);top:0;bottom:0;width:2px;background:var(--l)}
-.tl li:first-child:before{top:50%}.tl li:last-child:before{bottom:50%}
-.tl time{font-size:13px;color:var(--m);font-variant-numeric:tabular-nums;text-align:right}
-.tl p{margin:0;padding-left:18px;position:relative;font-size:13px;font-variant-numeric:tabular-nums}
-.tl p:before{content:"";position:absolute;left:-1px;top:5px;width:8px;height:8px;border-radius:50%;background:var(--l);border:2px solid var(--c)}
-.tl .f2 p:before{background:#16a34a}.tl .f1 p:before{background:#d97706}.tl .f0 p:before{background:#dc2626}
-.tl .e p{font-weight:600;font-size:14px}
-.tl .e p:before{left:-3px;top:4px;width:12px;height:12px;background:var(--m)}
-.tl .boot p:before{background:#3b82f6}.tl .err p:before{background:var(--bad)}.tl .gps p:before{background:var(--warn)}
-.tl small{display:block;font-weight:400}
-.tl .st{color:var(--m)}
+:root{--b:#060b16;--l:#16233d;--t:#d6e2ff;--m:#7487ae;--a:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
+body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-serif}
+.tm,.sys,.term,.p h2,.hud,.coord,.legend,.svt{font-family:"JetBrains Mono",ui-monospace,monospace}
+/* map */
+.map{position:relative;height:360px;overflow:hidden;background:#0a1222}
+.tiles{position:absolute;left:50%;top:42%;filter:invert(1) hue-rotate(195deg) saturate(.35) brightness(.62) contrast(1.15)}
+.tiles img{position:absolute;width:256px;height:256px}
+.map:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(6,11,22,.55) 0,rgba(6,11,22,0) 22%,rgba(6,11,22,0) 55%,var(--b) 100%),radial-gradient(circle at 50% 42%,rgba(34,211,238,.1),transparent 45%)}
+.grid{position:absolute;inset:0;z-index:1;background-image:linear-gradient(rgba(34,211,238,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(34,211,238,.06) 1px,transparent 1px);background-size:40px 40px}
+.acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(34,211,238,.6);background:radial-gradient(circle,rgba(34,211,238,.18),rgba(34,211,238,.04) 70%);z-index:2}
+.pin{position:absolute;left:50%;top:42%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--a);box-shadow:0 0 0 4px rgba(34,211,238,.25),0 0 22px var(--a);z-index:3}
+.pin:after{content:"";position:absolute;inset:-14px;border-radius:50%;border:1px solid rgba(34,211,238,.5);animation:p 2s infinite}
+@keyframes p{from{transform:scale(.5);opacity:1}to{transform:scale(2.2);opacity:0}}
+.nofix .pin,.nofix .acc{display:none}
+.coord{position:absolute;left:50%;top:42%;transform:translate(16px,-34px);font-size:11px;font-weight:600;color:var(--a);z-index:4;white-space:nowrap;text-shadow:0 0 8px rgba(34,211,238,.6)}
+.nofix .coord{transform:translate(-50%,-50%);color:var(--warn);text-shadow:none;font-size:13px}
+.hud{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:12px;padding:14px 16px;z-index:4;max-width:1100px;margin:auto;box-sizing:border-box}
+.hud h1{font-size:14px;font-weight:700;letter-spacing:.18em;margin:0;color:#fff}
+.live{font-size:11px;font-weight:600;color:var(--ok);letter-spacing:.1em;display:flex;align-items:center;gap:6px}
+.live:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}
+.off .live{color:var(--warn)}
+.hud .up{margin-left:auto;color:var(--m);font-size:12px}
+.attr{position:absolute;right:8px;bottom:6px;font-size:10px;color:var(--m);z-index:4}
+.attr a{color:inherit}
+/* panels */
+.wrap{max-width:1100px;margin:-96px auto 0;padding:0 16px 18px;position:relative;z-index:5;transition:opacity .3s}
+.off .wrap{opacity:.5}
+.tm{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--l);border:1px solid var(--l);border-radius:14px;overflow:hidden}
+.tm div{background:rgba(10,19,38,.9);padding:11px 12px;min-width:0}
+.tm small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}
+.tm b{display:block;font-size:22px;color:#fff;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm b em,.sys em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
+.tm .ok b{color:var(--ok);text-shadow:0 0 12px rgba(52,211,153,.5)}
+.tm .warn b,.sys .warn{color:var(--warn)}.tm .bad b,.sys .bad{color:var(--bad)}
+.g{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;margin-top:12px}
+.p{background:linear-gradient(180deg,rgba(18,32,60,.75),rgba(9,16,32,.85));border:1px solid var(--l);border-radius:14px;padding:14px}
+.p h2{font-size:10.5px;font-weight:600;letter-spacing:.16em;color:var(--m);margin:0 0 10px;text-transform:uppercase}
+.col{display:flex;flex-direction:column;gap:12px}.col .p:last-child{flex:1}
+/* sky radar */
+.radar svg{display:block;width:100%;max-width:380px;margin:auto}
+.rg{fill:none;stroke:rgba(34,211,238,.18)}.rx{stroke:rgba(34,211,238,.12)}
+.sweep{fill:url(#sw)}
+text{fill:var(--m);font:600 9px "JetBrains Mono",monospace;text-anchor:middle}
+[class^=g],[class*=" g"]{--s:#94a3b8}.g0{--s:#38bdf8}.g2{--s:#34d399}.g3{--s:#fbbf24}.g6{--s:#f472b6}
+circle[class^=g],circle[class*=" g"]{fill:var(--s);stroke:var(--s);stroke-width:1.2;filter:drop-shadow(0 0 4px var(--s))}
+circle.u{fill:none;filter:none;opacity:.7}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--m);margin-top:8px;justify-content:center}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:4px;background:var(--s);box-shadow:0 0 6px var(--s);margin-right:5px}
+.legend .u i{background:none;border:1.5px solid var(--m);box-shadow:none;box-sizing:border-box}
+/* signal */
+.r{display:flex;align-items:flex-end;gap:2px;height:90px;background:linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 0/100% 1px no-repeat,linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 33.33%/100% 1px no-repeat,linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 66.67%/100% 1px no-repeat}
+.r i{flex:1;min-height:2px;background:linear-gradient(0deg,var(--s),transparent 140%);box-shadow:0 0 6px var(--s)}
+.r .u{opacity:.25;box-shadow:none}
+/* systems */
+.sys{font-size:12px;color:var(--m);display:flex;justify-content:space-between;gap:10px;margin-top:9px}
+.sys:first-child{margin-top:0}
+.sys span{color:#fff;text-align:right}
+.bar{position:relative;height:6px;background:var(--l);border-radius:3px;margin-top:6px}
+.bar i{display:block;height:100%;border-radius:3px;background:var(--a);box-shadow:0 0 8px var(--a)}
+.bar.bad i{background:var(--bad);box-shadow:0 0 8px var(--bad)}
+.bar b{position:absolute;top:-3px;width:2px;height:12px;background:var(--warn)}
+/* log + satellite table */
+.term{font-size:12.5px;line-height:1.75;color:#9fb3da;overflow-x:auto;white-space:nowrap}
+.term .t{color:var(--m)}.term .ok{color:var(--ok)}.term .boot{color:var(--a)}.term .err{color:var(--bad)}.term .warn{color:var(--warn)}.term .info{color:#c4b5fd}
+details.p{margin-top:12px}
+details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter-spacing:.16em;color:var(--m);text-transform:uppercase}
+.svt{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+.svt td{padding:3px 6px;border-top:1px solid var(--l);text-align:right}
+.svt td:first-child{text-align:left}.svt .u td{color:var(--m)}
+@media(max-width:760px){.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
-<svg style="display:none"><!-- line icons in the style of Lucide (ISC) -->
-  <symbol id="i-fix" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
-  <symbol id="i-sats" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><path d="M10.4 21.9a10 10 0 0 0 9.94-15.42M13.5 2.1a10 10 0 0 0-9.84 15.42"/></symbol>
-  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 13v8M8 17l4-4 4 4"/><path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24"/></symbol>
-  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M12 20h.01M2 8.82a15 15 0 0 1 20 0M5 12.86a10 10 0 0 1 14 0M8.5 16.43a5 5 0 0 1 7 0"/></symbol>
-  <symbol id="i-sky" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16.24 7.76-1.8 5.41a2 2 0 0 1-1.27 1.27L7.76 16.24l1.8-5.41a2 2 0 0 1 1.27-1.27z"/></symbol>
-  <symbol id="i-sig" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16M8 17v-3M13 17V9M18 17V5"/></symbol>
-  <symbol id="i-dish" viewBox="0 0 24 24"><path d="M4 10a7.31 7.31 0 0 0 10 10Z"/><path d="m9 15 3-3M17 13a6 6 0 0 0-6-6M21 13A10 10 0 0 0 11 3"/></symbol>
-  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 5-5.5 10.2-7.4 11.8a1 1 0 0 1-1.2 0C9.5 20.2 4 15 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></symbol>
-  <symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
-  <symbol id="i-disk" viewBox="0 0 24 24"><path d="M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01"/></symbol>
-  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></symbol>
-</svg>
-<h1 id="dev">GPS logger</h1>
-<div class="m" id="sub">connecting&hellip;</div>
-<div class="w">
-  <div class="c k">
-    <div><span class="lb"><svg class="ic"><use href="#i-fix"/></svg>Fix</span><b id="k0">-</b><small id="s0">HDOP -</small></div>
-    <div><span class="lb"><svg class="ic"><use href="#i-sats"/></svg>Satellites</span><b id="k1">-</b><small>used / seen</small></div>
-    <div><span class="lb"><svg class="ic"><use href="#i-up"/></svg>Upload</span><b id="k2">-</b><small id="s2">waiting</small></div>
-    <div><span class="lb"><svg class="ic"><use href="#i-wifi"/></svg>WiFi</span><b id="k3">-</b><small id="s3">-</small></div>
-  </div>
-  <div class="c s"><span class="lb"><svg class="ic"><use href="#i-sky"/></svg>Sky view</span>
-    <svg viewBox="-100 -100 200 200">
-      <g class="a"><circle r="90"/><circle r="60"/><circle r="30"/><path d="M0-90V90M-90 0H90"/></g>
-      <text y="-92">N</text><text x="95" y="3">E</text><text y="99">S</text><text x="-95" y="3">W</text>
-      <g id="dots"></g>
-    </svg>
-  </div>
-  <div class="c b"><div><span class="lb" title="lines at 15, 30 and 45 dBHz"><svg class="ic"><use href="#i-sig"/></svg>Signal</span><small id="bh">dBHz</small></div><div class="r" id="bars"></div></div>
-    <small class="l"><span><i class="g0"></i>GPS</span><span><i class="g2"></i>Galileo</span><span><i class="g3"></i>BeiDou</span><span><i class="g6"></i>GLONASS</span><span><i class="g1"></i>other</span><span><i class="g1 u"></i>not used</span></small>
+<div class="map nofix" id="map">
+  <div class="tiles" id="tiles"></div><div class="grid"></div>
+  <div class="acc" id="acc"></div><div class="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
+  <div class="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="up" id="up"></span></div>
+  <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></div>
 </div>
-<div class="t">
-  <div class="tabs" role="tablist">
-    <button role="tab" aria-selected="true" data-p="pd">Details</button>
-    <button role="tab" aria-selected="false" data-p="ps">Satellites</button>
-    <button role="tab" aria-selected="false" data-p="pl">Log</button>
+<div class="wrap">
+  <div class="tm" id="tm"></div>
+  <div class="g">
+    <div class="p radar"><h2 id="skyh">Sky</h2>
+      <svg viewBox="-104 -104 208 208">
+        <defs><radialGradient id="sw" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="scale(90)"><stop offset="0" stop-color="rgba(34,211,238,.18)"/><stop offset="1" stop-color="rgba(34,211,238,0)"/></radialGradient></defs>
+        <path class="sweep" d="M0 0L0-90A90 90 0 0 1 77.9-45Z"/>
+        <circle class="rg" r="90"/><circle class="rg" r="60"/><circle class="rg" r="30"/>
+        <path class="rx" d="M0-90V90M-90 0H90M-63.6-63.6L63.6 63.6M63.6-63.6L-63.6 63.6"/>
+        <text y="-94">N</text><text x="97" y="3">E</text><text y="101">S</text><text x="-97" y="3">W</text>
+        <g id="dots"></g>
+      </svg>
+      <div class="legend"><span class="g0"><i></i>GPS</span><span class="g2"><i></i>GAL</span><span class="g3"><i></i>BDS</span><span class="g6"><i></i>GLO</span><span class="g1"><i></i>OTHER</span><span class="u"><i></i>NOT USED</span></div>
+    </div>
+    <div class="col">
+      <div class="p"><h2 id="bh">Signal &middot; dBHz</h2><div class="r" id="bars"></div></div>
+      <div class="p"><h2>Systems</h2><div id="sys"></div></div>
+    </div>
   </div>
-  <div class="p" id="pd" role="tabpanel"></div>
-  <div class="p" id="ps" role="tabpanel" hidden></div>
-  <div class="p" id="pl" role="tabpanel" hidden></div>
+  <div class="p" style="margin-top:12px"><h2>Event log</h2><div class="term" id="log"></div></div>
+  <details class="p"><summary id="svh">Satellite table</summary><table class="svt" id="svt"></table></details>
 </div>
 <script>
 var GNSS = {GPS: 0, SBAS: 1, Galileo: 2, BeiDou: 3, QZSS: 5, GLONASS: 6};
 var BOOT = {1: "power on", 2: "hard reset", 3: "watchdog", 4: "deep sleep", 5: "soft reset"};
 var TLS_KB = 48;                        // TLS_MIN_KB in gps_logger.py
 var POINT_B = 46;                       // bytes per .trk point
-// every status.json key the Details tab shows (tests check none is missing)
+var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
+var ZOOM = 17;
+// every status.json key the page shows (tests check none is missing)
 var SHOWN = ("fix sats hdop utc position nmea gps_boots gps_loops receiver setup_ok points left files " +
   "bad_files sent upload upload_err stay uptime prev_run boot_cause temp mhz mem heap_kb idf flash_kb " +
   "wifi rssi pulses").split(" ");
-// keys shown elsewhere or folded into another cell (tests: every key used)
 var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime"];
 
 function esc(v) {
@@ -166,110 +140,31 @@ function hms(s) {                       // as _hms() in gps_logger.py
   if (s < 86400) return Math.floor(s / 3600) + " h " + two(Math.floor(s / 60) % 60) + " min";
   return Math.floor(s / 86400) + " d " + two(Math.floor(s / 3600) % 24) + " h";
 }
-function num(n) {                       // 24362 -> "24 362"
-  return n === null || n === undefined ? "-" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-}
-function pl(n, word) { return num(n) + " " + word + (n === 1 ? "" : "s"); }
+function num(n) { return n === null || n === undefined ? "-" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
 function gid(sv) { return GNSS[sv.system] === undefined ? 1 : GNSS[sv.system]; }
 function cls(sv) { return "g" + gid(sv) + (sv.used ? "" : " u"); }
 function tip(sv) { return esc(sv.name) + " " + (sv.cno || "-") + " dBHz"; }
-function fixCls(fix) { return fix.indexOf("3D") === 0 ? 2 : fix.indexOf("fix") >= 0 ? 1 : 0; }
+function fixTone(fix) { return fix.indexOf("3D") === 0 ? "ok" : fix.indexOf("fix") >= 0 ? "warn" : "bad"; }
+function tile(lat, lon, z) {            // slippy-map tile and pixel offset in it
+  var n = Math.pow(2, z), r = lat * Math.PI / 180;
+  var x = (lon + 180) / 360 * n, y = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n;
+  return {x: Math.floor(x), y: Math.floor(y), fx: (x - Math.floor(x)) * 256, fy: (y - Math.floor(y)) * 256,
+    mpp: 156543.03 * Math.cos(r) / n};
+}
+function cell(label, value, unit, tone) {
+  return '<div class="' + (tone || "") + '"><small>' + label + "</small><b>" + value + (unit ? "<em>" + unit + "</em>" : "") +
+    "</b></div>";
+}
+function line(label, value, tone) {
+  return '<div class="sys">' + label + '<span class="' + (tone || "") + '">' + value + "</span></div>";
+}
 function meter(frac, tone, mark) {
-  return '<div class="mt ' + tone + '"><i style="width:' + Math.max(0, Math.min(100, Math.round(frac * 100))) +
-    '%"></i>' + (mark === undefined ? "" : '<b style="left:' + Math.round(mark * 100) + '%"></b>') + "</div>";
+  return '<div class="bar ' + (tone || "") + '"><i style="width:' + Math.max(0, Math.min(100, Math.round(frac * 100))) + '%"></i>' +
+    (mark === undefined ? "" : '<b style="left:' + Math.round(mark * 100) + '%"></b>') + "</div>";
 }
 
-// Details: one row per subsystem - status dot, headline, one quiet line of
-// numbers, a number on the right
-var opened = {};                        // Details rows the viewer opened
-var ICON = {Receiver: "dish", Position: "pin", Upload: "up", Memory: "gauge", Storage: "disk", WiFi: "wifi",
-  Device: "cpu"};
-function row(tone, title, main, sub, right, extra) {
-  return '<div class="hr' + (opened[title] ? " o" : "") + '" data-r="' + title + '"><svg class="ic ' + tone + '"><use href="#i-' + ICON[title] + '"/></svg><div><small>' + title + "</small><strong>" + main +
-    "</strong>" + (sub ? "<p>" + sub + "</p>" : "") + (extra || "") + "</div><b>" + (right || "") + "</b></div>";
-}
-function details(d) {
-  var dot = " &middot; ", h = "", t;
-  var nm = String(d.nmea || "0 / 0").split(" / "), ok = +nm[0], bad = +nm[1];
-  var pct = ok ? bad * 100 / (ok + bad) : 0;
-  t = d.gps_loops > 0 || d.setup_ok === false || pct > 1 ? "warn" : ok ? "ok" : "";
-  var rx = String(d.receiver || "unknown receiver"), cut = rx.indexOf(", ");
-  h += row(t, "Receiver", esc(cut > 0 ? rx.slice(0, cut) : rx),
-    (cut > 0 ? esc(rx.slice(cut + 2)) + "<br>" : "") + pl(ok, "sentence") + dot + num(bad) + " bad" + dot +
-    pl(d.gps_boots, "restart") + dot + pl(d.gps_loops, "reset loop") + dot + "setup " +
-    (d.setup_ok === true ? "acknowledged" : d.setup_ok === false ? "not acknowledged" : "-"),
-    pct.toFixed(1) + "%<em>bad</em>");
-  var fix = d.fix || "-", sats = String(d.sats || "- / -").split(" / ");
-  h += row(["bad", "warn", "ok"][fixCls(fix)], "Position", d.position ? esc(d.position) : esc(fix),
-    esc(fix) + dot + "HDOP " + (typeof d.hdop === "number" ? d.hdop.toFixed(2) : "-") + dot + esc(sats[1]) +
-    " of " + esc(sats[0]) + " satellites" + (d.utc ? dot + esc(String(d.utc).slice(11, 19)) + " UTC" : ""),
-    esc(sats[1]) + "<em>used</em>");
-  t = d.bad_files > 0 ? "bad" : d.upload_err > 0 || /err|low/.test(d.upload || "") ? "warn" : "ok";
-  h += row(t, "Upload", esc(d.upload), pl(d.left, "point") + " waiting in " + pl(d.files, "file") + dot +
-    num(d.sent) + " sent since boot" + dot + pl(d.upload_err, "error") + dot + num(d.bad_files) +
-    " quarantined" + dot + num(d.points) + " logged" + (d.stay === "yes" ? dot + "staying" : ""),
-    num(d.left) + "<em>waiting</em>");
-  var q = String(d.idf || "").split(" / "), fr = +q[0], big = +q[1], pk = Math.round((d.mem || 0) / 1024);
-  t = big < TLS_KB ? "bad" : pk < 8 ? "warn" : isNaN(big) ? "" : "ok";
-  h += row(t, "Memory", isNaN(big) ? "-" : big + " KB in one block for TLS" + (big < TLS_KB ? ", below " +
-    TLS_KB + " KB" : ""), "IDF heap " + (isNaN(fr) ? "-" : fr) + " KB free" + dot + "Python heap " + pk +
-    " KB free of " + esc(d.heap_kb) + " KB", "", isNaN(big) ? "" :
-    '<div class="mt ' + (big < TLS_KB ? "bad" : "") + '"><i style="width:' + Math.min(100, Math.round(big / 1.6)) +
-    '%"></i><b style="left:' + Math.round(TLS_KB / 1.6) + '%"></b></div>');
-  var fk = d.flash_kb;
-  h += row(fk === null || fk === undefined ? "" : fk < 1024 ? "warn" : "ok", "Storage",
-    fk === null || fk === undefined ? "-" : (fk / 1024).toFixed(1) + " MB free",
-    fk === null || fk === undefined ? "" : "room for about " + num(Math.floor(fk * 1024 / POINT_B)) + " points",
-    "");
-  var ws = String(d.wifi || "").split(" "), ssid = ws.slice(1).join(" ");
-  h += row(ws[0] === "connected" ? "ok" : "", "WiFi", ssid ? esc(ssid) : esc(ws[0]),
-    esc(ws[0]) + (d.rssi === null || d.rssi === undefined ? "" : dot + d.rssi + " dBm") + dot + pl(d.pulses, "keep-alive pulse"), d.rssi === null || d.rssi === undefined ? "" : d.rssi + "<em>dBm</em>");
-  var pr = d.prev_run ? String(d.prev_run) : "";
-  h += row(d.boot_cause === 3 || /crash/.test(pr) ? "warn" : "ok", "Device", "up " + hms(d.uptime),
-    "boot: " + esc(BOOT[d.boot_cause] || d.boot_cause) + (pr ? dot + "previous run " + esc(pr) : "") + dot +
-    (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C chip" + dot + esc(d.mhz) + " MHz",
-    (d.temp === null || d.temp === undefined ? "-" : d.temp) + "&deg;<em>chip</em>");
-  return h;
-}
-
-function satellites(svs) {
-  if (!svs.length) return "<small>No satellite list from the receiver yet.</small>";
-  var groups = {}, order = [0, 2, 3, 6, 5, 1], h = "", quiet = {}, ql = [];
-  for (var i = 0; i < svs.length; i++) {
-    var g = gid(svs[i]);
-    (groups[g] = groups[g] || []).push(svs[i]);
-  }
-  var all = svs.filter(function (s) { return s.used; }).length;
-  h += '<div class="h">' + all + " used of " + svs.length + " listed</div>";
-  h += '<div class="sr hd"><span>#</span><span style="text-align:left">signal</span><span>dBHz</span>' +
-    "<span>elev</span><span>azim</span></div>";
-  for (var o = 0; o < order.length; o++) {
-    var list = groups[order[o]];
-    if (!list) continue;
-    var used = list.filter(function (s) { return s.used; }).length;
-    var name = order[o] === 1 ? "SBAS / other" : list[0].system;
-    var rows = "";
-    for (var j = 0; j < list.length; j++) {
-      var s = list[j], up = s.elev !== null && s.elev >= 0;
-      if (!s.cno) {
-        (quiet[name] = quiet[name] || []).push(s.svid + (s.unhealthy ? "!" : ""));
-        continue;
-      }
-      rows += '<div class="sr ' + cls(s) + '" title="' + tip(s) + '"><span>' + s.svid +
-        (s.unhealthy ? ' <span class="uh" title="unhealthy">!</span>' : "") +
-        '</span><div class="sb"><i style="width:' + Math.min(Math.floor((s.cno || 0) * 100 / 45), 100) +
-        '%"></i></div><span>' + (s.cno || "-") + "</span><span>" + (up ? s.elev + "&deg;" : "-") +
-        "</span><span>" + (up ? s.azim + "&deg;" : "-") + "</span></div>";
-    }
-    if (rows) h += '<div class="sg g' + order[o] + '"><i></i>' + esc(name) + "<small>" + used + " used of " +
-      list.length + "</small></div>" + rows;
-  }
-  for (var k in quiet) ql.push("<b>" + esc(k) + "</b> " + quiet[k].join(" "));
-  return h + (ql.length ? '<div class="ns">No signal: ' + ql.join(" &middot; ") + "</div>" : "");
-}
-
-// Log tab: the diag tail as a timeline, newest on top. Status lines (one a
-// minute) become a quiet row of numbers, everything else is an event.
+// Event log: the diag tail, newest on top. Status lines (one a minute) are
+// a row of numbers, everything else an event.
 var STATUS = /^up (\d+) utc (\S+) nmea (\d+)\/(\d+) gpsboots (\d+) loops (\d+) sats (\S+) fix (\S+) hdop (\S+) points (\d+) sent (\d+) wifi (\S+) pulses (\d+) mem (\d+) idf (\S+)\/(\S+)/;
 function clock(utc, up) {
   var m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/.exec(utc);
@@ -277,75 +172,120 @@ function clock(utc, up) {
   var t = new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
   return two(t.getHours()) + ":" + two(t.getMinutes());
 }
-function logLine(line) {
-  var m = STATUS.exec(line);
+function logLine(l) {
+  var m = STATUS.exec(l), t = "--:--", kind = "", text;
   if (m) {
-    var fix = m[8].replace(/_/g, " "), big = +m[16], sv = m[7].split("/");
-    return '<li class="st f' + fixCls(fix) + '"><time>' + clock(m[2], +m[1]) + "</time><p>" + esc(fix) +
-      " &middot; " + esc(sv[1]) + "/" + esc(sv[0]) + " sats" + (+m[10] ? " &middot; " + num(m[10]) + " pts" : "") +
-      ' &middot; <span class="' + (big < TLS_KB ? "bad" : "") + '">IDF&nbsp;' + esc(m[16]) + "&nbsp;KB</span></p></li>";
+    var fix = m[8].replace(/_/g, " "), sv = m[7].split("/");
+    t = clock(m[2], +m[1]);
+    kind = fixTone(fix) === "ok" ? "ok" : "warn";
+    text = esc(fix.toUpperCase()) + " &middot; " + esc(sv[1]) + "/" + esc(sv[0]) + " SATS" +
+      (+m[10] ? " &middot; " + num(m[10]) + " PTS" : "") + " &middot; " +
+      (+m[16] < TLS_KB ? '<span class="err">IDF ' + esc(m[16]) + " KB</span>" : "IDF " + esc(m[16]) + " KB");
+    return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";
   }
-  var kind = "", title = esc(line), sub = "";
-  var b = /^boot cause (\S+) prev_up (\S+)/.exec(line);
+  var b = /^boot cause (\S+) prev_up (\S+)/.exec(l);
   if (b) {
     kind = "boot";
-    title = "Boot &middot; " + esc(BOOT[b[1]] || "cause " + b[1]);
-    sub = b[2] === "-" ? "" : "previous run " + hms(+b[2]);
-  } else if (/^(crash|reboot|upload (err|aborted|low idf))/.test(line)) {
-    kind = "err";
-  } else if (/^gps reset loop/.test(line)) {
-    kind = "gps";
-  } else if (/^gps /.test(line)) {
-    title = "Receiver &middot; " + esc(line.slice(4));
-  } else if (/^stay left/.test(line)) {
-    title = "Left the stay (WiFi)";
-    sub = esc(line.slice(10));
+    text = "BOOT &middot; " + esc((BOOT[b[1]] || "cause " + b[1]).toUpperCase()) +
+      (b[2] === "-" ? "" : " &middot; PREVIOUS RUN " + esc(hms(+b[2]).toUpperCase()));
+  } else if (/^gps /.test(l) && !/^gps reset loop/.test(l)) {
+    kind = "info";
+    text = "RECEIVER &middot; " + esc(l.slice(4).toUpperCase());
+  } else {
+    kind = /^(crash|reboot|upload (err|aborted|low idf))/.test(l) ? "err" : /^gps reset loop/.test(l) ? "warn" : "";
+    text = esc(l.toUpperCase());
   }
-  return '<li class="e ' + kind + '"><time></time><p>' + title + (sub ? "<small>" + sub + "</small>" : "") +
-    "</p></li>";
-}
-function logView(lines) {
-  if (!lines.length) return "<small>The diagnostic log is empty.</small>";
-  var h = "";
-  for (var i = lines.length - 1; i >= 0; i--) h += logLine(lines[i]);
-  return '<ol class="tl">' + h + "</ol>";
+  return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";
 }
 
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it)
 function view(d) {
-  var v = {}, svs = d.satellites || [], used = 0, fix = d.fix || "-";
-  v.dev = esc(d.device);
-  v.sub = "up " + hms(d.uptime) + (d.position ? " &middot; " + esc(d.position) : "");
-  v.k0 = '<span class="d' + fixCls(fix) + '">' + esc(fix) + "</span>";
-  v.s0 = "HDOP " + (typeof d.hdop === "number" ? d.hdop.toFixed(2) : "-");
+  var v = {}, svs = d.satellites || [], used = 0, fix = d.fix || "-", dot = " &middot; ";
   var sats = String(d.sats || "- / -").replace("None", "-").split(" / ");   // "seen / used"
-  v.k1 = esc(sats[1]) + " / " + esc(sats[0]);
-  v.k2 = esc(d.left);
-  v.s2 = "waiting &middot; " + esc(d.upload);
-  var ws = String(d.wifi || "").split(" ");
-  v.k3 = d.rssi === null || d.rssi === undefined ? esc(ws[0]) : d.rssi + " dBm";
-  v.s3 = ws.slice(1).join(" ") ? esc(ws.slice(1).join(" ")) : "no network";
-  var dots = "", bars = "";
+  var nm = String(d.nmea || "0 / 0").split(" / "), ok = +nm[0], bad = +nm[1];
+  var pct = ok + bad ? bad * 100 / (ok + bad) : 0;
+  var ws = String(d.wifi || "").split(" "), ssid = ws.slice(1).join(" ");
+  var q = String(d.idf || "").split(" / "), fr = +q[0], big = +q[1], pk = Math.round((d.mem || 0) / 1024);
+  var hd = typeof d.hdop === "number" ? d.hdop : null, noRssi = d.rssi === null || d.rssi === undefined;
+  v.up = "UP " + esc(hms(d.uptime).toUpperCase());
+  v.tm = cell("FIX", esc(fix.replace(" fix", "")).toUpperCase(), "", fixTone(fix)) +
+    cell("SATS", esc(sats[1]), "/" + esc(sats[0])) +
+    cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "") +
+    cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 ? "warn" : "") +
+    cell("WIFI", noRssi ? esc(ws[0]).toUpperCase() : d.rssi, noRssi ? "" : "dBm") +
+    cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : "");
+  var dots = "", bars = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
   for (var i = 0; i < svs.length; i++) {
-    var s = svs[i];
+    var s = svs[i], up = s.elev !== null && s.elev >= 0;
     if (s.used) used++;
-    if (s.elev !== null && s.elev >= 0) {
+    if (up) {
       var r = 90 - s.elev, a = s.azim * Math.PI / 180;
-      dots += '<circle class="' + cls(s) + '" cx="' + Math.round(r * Math.sin(a)) +
-        '" cy="' + Math.round(-r * Math.cos(a)) + '" r="' + (3 + Math.floor((s.cno || 0) / 12)) +
-        '"><title>' + tip(s) + "</title></circle>";
+      dots += '<circle class="' + cls(s) + '" cx="' + Math.round(r * Math.sin(a)) + '" cy="' + Math.round(-r * Math.cos(a)) +
+        '" r="' + (2.4 + Math.floor((s.cno || 0) / 14)) + '"><title>' + tip(s) + "</title></circle>";
     }
     bars += '<i class="' + cls(s) + '" style="height:' + Math.min(Math.floor((s.cno || 0) * 100 / 45), 100) +
       '%" title="' + tip(s) + '"></i>';
+    tbl += '<tr class="' + (s.used ? "" : "u") + '"><td>' + esc(s.name) + (s.unhealthy ? " !" : "") + "</td><td>" +
+      (s.cno || "-") + "</td><td>" + (up ? s.elev + "&deg;" : "-") + "</td><td>" + (up ? s.azim + "&deg;" : "-") +
+      "</td><td>" + (s.used ? "&#9679;" : "") + "</td></tr>";
   }
   v.dots = dots;
-  v.bars = bars || "<small>No satellite list from the receiver yet.</small>";
-  v.bh = "dBHz" +
-    (d.satellites_age_s === null || d.satellites_age_s === undefined ? "" : " &middot; list " + hms(d.satellites_age_s) + " old");
-  v.pd = details(d);
-  v.ps = satellites(svs);
-  v.pl = logView(d.diag || []);
+  v.bars = bars || '<span class="sys">NO SATELLITE LIST YET</span>';
+  v.skyh = "Sky &middot; " + used + " locked / " + svs.length + " tracked";
+  v.bh = "Signal &middot; dBHz" + (d.satellites_age_s === null || d.satellites_age_s === undefined ? "" :
+    " &middot; list " + hms(d.satellites_age_s) + " old");
+  v.svh = "Satellite table &middot; " + svs.length;
+  v.svt = tbl;
+  var rx = String(d.receiver || "unknown receiver"), comma = rx.indexOf(", ");
+  var fk = d.flash_kb, pr = d.prev_run ? String(d.prev_run) : "";
+  v.sys = line("IDF BLOCK", isNaN(big) ? "-" : big + " KB<em>of " + fr + " free</em>", big < TLS_KB ? "bad" : "") +
+    (isNaN(big) ? "" : meter(big / 160, big < TLS_KB ? "bad" : "", TLS_KB / 160)) +
+    line("PY HEAP FREE", pk + " / " + esc(d.heap_kb) + " KB", pk < 8 ? "warn" : "") +
+    (d.heap_kb ? meter(pk / d.heap_kb) : "") +
+    line("FLASH FREE", fk === null || fk === undefined ? "-" : (fk / 1024).toFixed(1) + " MB<em>&asymp;" +
+      num(Math.floor(fk * 1024 / POINT_B / 1000)) + "k pts</em>") +
+    line("UPLINK", esc(d.upload).toUpperCase() + "<em>" + num(d.sent) + " sent" + dot + num(d.files) + " files" + dot +
+      num(d.upload_err) + " err" + dot + num(d.bad_files) + " bad</em>",
+      d.bad_files > 0 ? "bad" : d.upload_err > 0 || /err|low/.test(d.upload || "") ? "warn" : "") +
+    line("TRACK", num(d.points) + " pts logged" + (d.stay === "yes" ? "<em>staying</em>" : "")) +
+    line("RECEIVER", esc(comma > 0 ? rx.slice(0, comma) : rx).toUpperCase() + "<em>" + num(d.gps_boots) + " rst" + dot +
+      num(d.gps_loops) + " loops" + dot + "setup " + (d.setup_ok === true ? "ok" : d.setup_ok === false ? "no" : "-") +
+      "</em>", d.gps_loops > 0 || d.setup_ok === false ? "warn" : "") +
+    line("WIFI", esc(ssid || ws[0]) + "<em>" + num(d.pulses) + " keep-alive</em>") +
+    line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() + (pr ? "<em>prev " + esc(pr) + "</em>" : ""),
+      d.boot_cause === 3 || /crash/.test(pr) ? "warn" : "") +
+    line("CHIP", (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz" +
+      (d.utc ? "<em>" + esc(String(d.utc).slice(11, 19)) + " UTC</em>" : ""));
+  var lines = d.diag || [], log = "";
+  for (var j = lines.length - 1; j >= 0; j--) log += logLine(lines[j]);
+  v.log = log || '<span class="t">THE DIAGNOSTIC LOG IS EMPTY</span>';
+  var p = String(d.position || "").split(", ");
+  v.coord = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ?
+    (+p[0]).toFixed(5) + "&deg; N  " + (+p[1]).toFixed(5) + "&deg; E" +
+    (hd === null ? "" : dot + "&plusmn;" + (hd * UERE).toFixed(1) + " m") :
+    "NO FIX &middot; " + esc(fix).toUpperCase();
   return v;
+}
+
+// The map: tiles around the position, rebuilt only when the centre tile
+// changes; the fraction moves the layer (no reload every poll)
+var mapKey = "";
+function placeMap(d) {
+  var el = document.getElementById("map"), p = String(d.position || "").split(", ");
+  if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) { el.className = "map nofix"; return; }
+  el.className = "map";
+  var t = tile(+p[0], +p[1], ZOOM), key = t.x + "/" + t.y, box = document.getElementById("tiles");
+  if (key !== mapKey) {
+    var h = "";
+    for (var dx = -3; dx <= 3; dx++) for (var dy = -2; dy <= 2; dy++)
+      h += '<img alt="" src="https://tile.openstreetmap.org/' + ZOOM + "/" + (t.x + dx) + "/" + (t.y + dy) +
+        '.png" style="left:' + dx * 256 + "px;top:" + dy * 256 + 'px">';
+    box.innerHTML = h;
+    mapKey = key;
+  }
+  box.style.transform = "translate(" + (-t.fx).toFixed(1) + "px," + (-t.fy).toFixed(1) + "px)";
+  var acc = document.getElementById("acc"), px = typeof d.hdop === "number" ? d.hdop * UERE * 2 / t.mpp : 0;
+  acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
 }
 
 var last = 0, every = 15;
@@ -357,8 +297,8 @@ function paint(v) {
 }
 function stale() {
   document.body.className = "off";
-  document.getElementById("sub").innerHTML = last ?
-    "offline &middot; last update " + hms((Date.now() - last) / 1000) + " ago" : "no answer from the board";
+  document.getElementById("live").innerHTML = last ? "OFFLINE &middot; " + esc(hms((Date.now() - last) / 1000).toUpperCase()) +
+    " AGO" : "NO ANSWER";
 }
 function tick() {
   var x = new XMLHttpRequest();
@@ -370,36 +310,16 @@ function tick() {
       every = d.refresh_s || 15;
       last = Date.now();
       document.body.className = "";
+      document.getElementById("live").innerHTML = "LIVE";
       paint(view(d));
+      placeMap(d);
     } catch (e) { stale(); }
     setTimeout(tick, every * 1000);
   };
   x.onerror = x.ontimeout = function () { stale(); setTimeout(tick, every * 1000); };
   x.send();
 }
-function tab(id) {
-  var bs = document.querySelectorAll(".tabs button");
-  for (var i = 0; i < bs.length; i++) {
-    var on = bs[i].getAttribute("data-p") === id;
-    bs[i].setAttribute("aria-selected", on ? "true" : "false");
-    document.getElementById(bs[i].getAttribute("data-p")).hidden = !on;
-  }
-  try { localStorage.tab = id; } catch (e) {}
-}
-if (typeof document !== "undefined") {
-  document.querySelector(".tabs").onclick = function (e) {
-    if (e.target.getAttribute("data-p")) tab(e.target.getAttribute("data-p"));
-  };
-  try { if (localStorage.tab) tab(localStorage.tab); } catch (e) {}
-  document.getElementById("pd").onclick = function (e) {
-    var r = e.target.closest(".hr");
-    if (!r) return;
-    var k = r.getAttribute("data-r");
-    opened[k] = !opened[k];
-    r.className = "hr" + (opened[k] ? " o" : "");
-  };
-  tick();
-}
+if (typeof document !== "undefined") tick();
 </script>
 </body>
 </html>

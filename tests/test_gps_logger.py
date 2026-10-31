@@ -6559,7 +6559,10 @@ gl._web_diag = lambda: ["up 60 utc 20261031T053014Z nmea 9/1 gpsboots 0 "
                          "sent 0 wifi connected pulses 0 mem 27000 idf "
                          "157/20 heap 124", "boot cause 3 prev_up 600 mhz 80",
                          "up 60 <b>"]
+_idf_saved = gl.idf_heap
+gl.idf_heap = lambda: (157, 144)
 page_json = gl._web_json()
+gl.idf_heap = _idf_saved
 gl.st["valid"] = False
 gl.wifi.update(state="off", ssid=None, rssi=None)
 gl.st["svs"] = None
@@ -6585,62 +6588,59 @@ else:
         except ValueError:
             out.append({"error": r.stdout + r.stderr})
     v, v2 = out
-    check("PAGE: tiles - fix with a green dot and HDOP, sats, queue, WiFi",
-          v.get("k0") == '<span class="d2">3D fix</span>'
-          and v.get("s0") == "HDOP 0.88" and v.get("k1") == "1 / 2"
-          and v.get("k2") == "120" and v.get("s2") == "waiting &middot; idle"
-          and v.get("k3") == "-75 dBm" and v.get("s3") == "&lt;x&gt;"
-          and v.get("sub", "").endswith("&middot; 47.10000, 18.40000"),
-          repr(v)[:400])
-    check("PAGE: no fix amber, WiFi off shows the state, no list says so",
-          v2.get("k0") == '<span class="d1">Waiting fix</span>'
-          and v2.get("k3") == "off" and v2.get("s3") == "no network"
-          and v2.get("k1") == "- / 0"
-          and "&middot;" not in v2.get("sub", "-")
-          and "No satellite list" in v2.get("bars", ""), repr(v2)[:400])
-    check("PAGE: sky plot - horizon east at x 90, zenith centre, hollow unused",
-          '<circle class="g0" cx="90" cy="0" r="5"><title>GPS 16 26 dBHz'
+    tm, tm2 = v.get("tm", ""), v2.get("tm", "")
+    check("PAGE: telemetry strip - fix, sats, HDOP, uplink, WiFi, NMEA bad",
+          '<div class="ok"><small>FIX</small><b>3D</b></div>' in tm
+          and "<small>SATS</small><b>1<em>/2</em>" in tm
+          and "<small>HDOP</small><b>0.88</b>" in tm
+          and "<small>UPLINK</small><b>120<em>pts</em>" in tm
+          and "<small>WIFI</small><b>-75<em>dBm</em>" in tm
+          and "<small>NMEA BAD</small>" in tm, tm[:400])
+    check("PAGE: no fix amber, WiFi off shows the state, map says NO FIX",
+          '<div class="warn"><small>FIX</small><b>WAITING</b>' in tm2
+          and "<small>WIFI</small><b>OFF</b>" in tm2
+          and v2.get("coord", "").startswith("NO FIX")
+          and v.get("coord", "").startswith("47.10000&deg; N  18.40000&deg; E")
+          and "NO SATELLITE LIST" in v2.get("bars", ""), tm2[:400])
+    check("PAGE: sky radar - horizon east at x 90, zenith centre, hollow unused",
+          '<circle class="g0" cx="90" cy="0" r="3.4"><title>GPS 16 26 dBHz'
           in v.get("dots", "")
-          and '<circle class="g3 u" cx="0" cy="0" r="4">' in v.get("dots", "")
-          and "SBAS 5" not in v.get("dots", "-"), v.get("dots", "")[:300])
+          and '<circle class="g3 u" cx="0" cy="0" r="2.4">' in v.get("dots", "")
+          and "SBAS 5" not in v.get("dots", "-")
+          and v.get("skyh") == "Sky &middot; 1 locked / 3 tracked",
+          v.get("dots", "")[:300])
     check("PAGE: one bar per satellite (45 dBHz full, stub for none)",
           '<i class="g0" style="height:57%" title="GPS 16 26 dBHz">'
           in v.get("bars", "")
           and '<i class="g3 u" style="height:26%"' in v.get("bars", "")
           and '<i class="g1 u" style="height:0%" title="SBAS 5 - dBHz">'
           in v.get("bars", ""), v.get("bars", "")[:300])
-    pd, ps, pl = v.get("pd", ""), v.get("ps", ""), v.get("pl", "")
-    check("PAGE: Details - one row per subsystem, every JSON key shown",
-          v.get("unlabeled") == [] and [t for t in ("Receiver", "Position",
-              "Upload", "Memory", "Storage", "WiFi", "Device")
-              if "<small>%s</small>" % t not in pd] == []
-          and "HDOP 0.88" in pd and "1 of 2 satellites" in pd
-          and "<small>WiFi</small><strong>&lt;x&gt;</strong>" in pd
-          and "120 points waiting in 0 files" in pd
-          and '<div class="hr" data-r="Position"><svg class="ic ok"><use '
-              'href="#i-pin"/></svg>' in pd,
-          repr(v.get("unlabeled")) + pd[:300])
-    check("PAGE: Satellites by system with a bar each; no signal in one line",
-          "1 used of 3 listed" in ps
-          and ps.index('class="sg g0"') < ps.index('class="sg g3"')
-          and '<div class="sr g0" title="GPS 16 26 dBHz"><span>16</span>'
-          '<div class="sb"><i style="width:57%">' in ps
-          and 'class="sg g1"' not in ps
-          and "No signal: <b>SBAS / other</b> 5" in ps, ps[-400:])
-    check("PAGE: Log - newest first, status rows quiet, events highlighted",
-          pl.startswith('<ol class="tl"><li class="e "><time></time><p>up 60 '
-                        '&lt;b&gt;')
-          and pl.index("Boot &middot; watchdog") < pl.index('class="st f2"')
-          and "previous run 10 min 00 s" in pl
-          and "3D fix &middot; 13/21 sats &middot; 4 pts" in pl
-          and '<span class="bad">IDF&nbsp;20&nbsp;KB</span>' in pl, pl[:500])
+    sy = v.get("sys", "")
+    check("PAGE: Systems - every JSON key shown, escaped, IDF bar with mark",
+          v.get("unlabeled") == [] and ">IDF BLOCK<" in sy
+          and '<b style="left:30%">' in sy and "&lt;x&gt;" in sy
+          and "<x>" not in sy and ">UPLINK<" in sy and "IDLE" in sy
+          and ">RECEIVER<" in sy and ">BOOT<" in sy,
+          repr(v.get("unlabeled")) + sy[:300])
+    lg = v.get("log", "")
+    check("PAGE: Event log - newest first, status rows, events, red low IDF",
+          lg.startswith('<div><span class="t">--:--</span>  <span class="">'
+                        'UP 60 &lt;B&gt;')
+          and lg.index("BOOT &middot; WATCHDOG &middot; PREVIOUS RUN 10 MIN 00 S")
+              < lg.index("3D FIX &middot; 13/21 SATS &middot; 4 PTS")
+          and '<span class="err">IDF 20 KB</span>' in lg, lg[:500])
+    check("PAGE: satellite table and map tile maths",
+          "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
+          and v.get("svh") == "Satellite table &middot; 3"
+          and v.get("tile", {}).get("x") == 72235
+          and v.get("tile", {}).get("y") == 46048, repr(v.get("tile")))
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "web.html")) as f:
     page_src = f.read()
 check("PAGE: polls status.json at the board's refresh_s, no reload",
       "/status.json" in page_src and "refresh_s" in page_src
       and 'http-equiv="refresh"' not in page_src
-      and "prefers-color-scheme:dark" in page_src
+      and "tile.openstreetmap.org" in page_src and "OpenStreetMap</a>" in page_src
       and 'name="viewport"' in page_src)
 
 

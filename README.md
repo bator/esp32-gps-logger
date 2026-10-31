@@ -288,30 +288,33 @@ quarantined `.bad` files, upload state, stay; uptime and how long the previous r
 14 s`; seconds in the JSON), boot cause, chip temperature, free Python heap
 and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
-page fits one phone screen: four tiles (fix with a green/amber/red dot and
-HDOP, satellites used/seen, points waiting for upload with the upload
-state, WiFi signal), a sky plot of the satellites (centre = overhead, edge
-= horizon, north up; colour = system: GPS blue, Galileo teal, BeiDou amber,
-GLONASS pink; filled = in the fix, hollow = not used, bigger = stronger)
-and one bar per satellite (height = signal, lines at 15/30/45 dBHz; on a
-phone the sky plot and the bars share a row). Below, three tabs:
-*Details* has one row per subsystem (receiver, position, upload, memory,
-storage, WiFi, device) with an icon in the status colour (green / amber /
-red), a headline and a number; a tap opens the row's line of figures (NMEA
-counts, IDF and Python heap with a bar marking the 48 KB TLS needs, room
-for points, previous run...). *Satellites* groups them by system with a
-signal bar each; the ones without a signal are listed in one line. *Log*
-shows the diagnostic log as a timeline, newest on top: the minute status
-lines as a quiet row (local time, fix, satellites, points, IDF block, red
-below 48 KB) and boots, upload errors and receiver changes as events. Text
-uses Inter from Google Fonts when the phone is online, the system font
-otherwise. The page is a file on the board (`/web.html`, copied by
-`deploy.sh`) and loads once; then it asks for `/status.json` every 15 s
-(`WEB_REFRESH`, sent in the JSON) and redraws only the boxes, so the open
-tab and rows stay open. When the board does not answer
-(asleep, out of range) the boxes fade and the line under the name says
-`offline · last update 2 min 10 s ago`. It follows the phone's dark mode;
-the page rounds HDOP to two decimals, the JSON keeps the receiver's value.
+page is a dark telemetry view. On top, a darkened OpenStreetMap map is
+centred on the position, with a glowing dot, an accuracy ring (HDOP x
+2.5 m) and the coordinates; without a fix it says `NO FIX`. Over its lower
+edge a strip shows fix, satellites used/seen, HDOP, points waiting for
+upload, WiFi signal and the share of bad NMEA sentences. Below:
+- a radar-style sky plot (centre = overhead, edge = horizon, north up;
+  colour = system: GPS blue, Galileo green, BeiDou amber, GLONASS pink;
+  filled = in the fix, hollow = not used);
+- one signal bar per satellite (lines at 15/30/45 dBHz);
+- *Systems*: the largest IDF heap block, with a mark at the 48 KB TLS
+  needs, then the Python heap, free flash, upload state and counters,
+  points logged and stay, receiver restarts and setup, WiFi and keep-alive
+  pulses, boot cause with the previous run, chip temperature and GPS time;
+- the *Event log*: the diagnostic log, newest on top, with the minute
+  status lines as rows (local time, fix, satellites, points, IDF block, red
+  below 48 KB) and boots, upload errors and receiver lines as events;
+- a folded satellite table (signal, elevation, azimuth, used).
+
+Amber or red marks what needs a look. The map tiles and the fonts (Inter,
+JetBrains Mono) load from the internet when the phone is online; without
+it the page shows the grid and the system font. The page is a file on the
+board (`/web.html`, copied by `deploy.sh`) and loads once; then it asks
+for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
+only the boxes; the map tiles reload only when the position moves to
+another tile. When the board does not answer (asleep, out of range) the
+panels fade and `LIVE` turns into `OFFLINE · 2 MIN 10 S AGO`. HDOP is
+rounded to two decimals on the page; the JSON keeps the receiver's value.
 The board sends the file in 1 KB reads and the JSON piece by piece, so a
 page view needs ~2 KB of Python heap (building the whole page used to need
 ~20 KB, enough to double the Python heap into the IDF heap TLS needs). It is
