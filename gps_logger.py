@@ -214,6 +214,8 @@ HTTP_WAIT = 30000                        # ms for the server's answer, the
                                          # UART read meanwhile (a 4 KB buffer
                                          # holds ~5 s of NMEA)
 HTTP_CHUNK = 1024                        # body bytes per write, UART between
+HTTP_LINE = 256                          # bytes per read of an answer line
+HTTP_LINES = 64                          # reads of the answer's head at most
 HTTP_MAX = 60000                         # ms wall clock for one POST: a timer
                                          # feeds the WDT meanwhile and then
                                          # closes the socket (a hung TLS call
@@ -3556,16 +3558,26 @@ def _raw_post(url, data, headers, timeout):
             feed()
             if _age(time.ticks_ms(), t0) >= HTTP_WAIT:
                 raise OSError(110)       # ETIMEDOUT
-        line = s.readline()
+        line = s.readline(HTTP_LINE)
         code = int(line.split(None, 2)[1])
         retry = None
-        while True:
-            h = s.readline()
-            if not h or h == b"\r\n":
-                break
-            k, _, v = h.partition(b":")
-            if k.strip().lower() == b"retry-after":
-                retry = v.strip().decode()
+        try:
+            # the status is in: a reset, a timeout or the guard closing
+            # the socket in the headers must not turn a 2xx into a resend
+            # (a duplicate batch). Bounded reads: a long header comes in
+            # pieces, only a piece at a line start is a header or the end.
+            bol = True
+            for _ in range(HTTP_LINES):
+                h = s.readline(HTTP_LINE)
+                if not h or (bol and h in (b"\r\n", b"\n")):
+                    break
+                if bol:
+                    k, _, v = h.partition(b":")
+                    if k.strip().lower() == b"retry-after":
+                        retry = v.strip().decode()
+                bol = h[-1:] == b"\n"
+        except Exception as e:
+            print("upload head", code, repr(e))
         return _Resp(code, retry)
     finally:
         _guard_stop()

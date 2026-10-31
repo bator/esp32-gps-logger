@@ -6123,9 +6123,14 @@ class RvSock:
         self.out += b
         return len(b)
 
-    def readline(self):
+    def readline(self, n=-1):
+        self.limits = getattr(self, "limits", []) + [n]
+        if self.rd >= len(self.resp) and getattr(self, "fail", None):
+            raise self.fail                  # reset / closed after the head
         i = self.resp.find(b"\n", self.rd)
         i = len(self.resp) if i < 0 else i + 1
+        if n is not None and n >= 0:
+            i = min(i, self.rd + n)
         line, self.rd = self.resp[self.rd:i], i
         return line
 
@@ -6279,6 +6284,44 @@ check("TLS-CTX: a context that failed to be made is made on the next POST",
       ctx_retry, repr(ctx_fail))
 check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
       to is not None and _clock[0] - t0 >= gl.HTTP_WAIT, repr(to))
+
+# HEAD-ERR: once the status line is in, an error in the header loop keeps
+# the 2xx (a reset there resent the batch: a duplicate); bounded reads
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+try:
+    head_res = []
+    for fail_ in (OSError(104), OSError(110), OSError(9)):
+        rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\nServer: x\r\n",
+                            polls=0)
+        rv_sock[0].fail = fail_
+        try:
+            head_res.append(gl._raw_post("https://d.example", b"{}", {},
+                                         15).status_code)
+        except OSError as e:
+            head_res.append(e)
+    # a header longer than a read, then one cut right before its CRLF:
+    # the pieces are neither headers nor the end of the head
+    long_v = b"a" * 400
+    cut = b"X-Cut: " + b"b" * (256 - 7)
+    rv_sock[0] = RvSock(b"HTTP/1.1 429 Too Many\r\nX-Long: " + long_v
+                        + b"\r\n" + cut + b"\r\nRetry-After: 9\r\n\r\n",
+                        polls=0)
+    r_long = gl._raw_post("https://d.example", b"{}", {}, 15)
+    limits = rv_sock[0].limits
+finally:
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = real_mods[2]
+    tls_ctx_reset()
+check("HEAD-ERR: reset/timeout/close in the headers keeps the 201",
+      head_res == [201, 201, 201], repr(head_res))
+check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
+      r_long.status_code == 429 and r_long.headers.get("Retry-After") == "9"
+      and limits and all(0 < n_ <= 256 for n_ in limits),
+      "%r %r" % (r_long.headers, limits[:4]))
 
 # TLS out of memory TLS_REBOOT_N times in a row at home: a clean reboot
 for n_ in os.listdir(up_td):
