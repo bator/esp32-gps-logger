@@ -38,6 +38,7 @@ _uart_rx = bytearray()
 _uart_ack = [True]
 _uart_drop = [0]
 _uart_nak = set()
+_uart_nak_frames = set()                 # whole frames refused (NAK)
 _uart_silent = set()
 _freqs = [240000000]
 
@@ -104,7 +105,8 @@ class UART(object):
             elif (data[2], data[3]) in _uart_silent:
                 pass
             else:
-                kind = 0x00 if (data[2], data[3]) in _uart_nak else 0x01
+                kind = (0x00 if (data[2], data[3]) in _uart_nak
+                        or data in _uart_nak_frames else 0x01)
                 ack = bytes((0x05, kind, 2, 0, data[2], data[3]))
                 ca = cb = 0
                 for x in ack:
@@ -3690,13 +3692,13 @@ try:
     check("ACK: the setup starts at 1 Hz and ends at GPS_HZ, all acknowledged",
           _uart_tx[0].hex() == rate1000
           and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex()
-          and len(_uart_tx) == len(gl.GPS_MSGS) + 3
+          and len(_uart_tx) == len(gl.GPS_MSGS) + 4   # + the NAV-PVT stop
           and gl.st["setup_ok"] is True)
     _uart_tx[:] = []
     _uart_drop[0] = 2                               # two frames lost
     gl.gps_setup()
     check("ACK: a dropped frame is sent again until acknowledged",
-          len(_uart_tx) == len(gl.GPS_MSGS) + 5
+          len(_uart_tx) == len(gl.GPS_MSGS) + 6
           and _uart_tx[0] == _uart_tx[1] == _uart_tx[2]
           and gl.st["setup_ok"] is True, "frames=%d" % len(_uart_tx))
     _uart_tx[:] = []
@@ -3710,7 +3712,7 @@ try:
     check("ACK: no answer -> GPS_ACK_TRIES tries, then the message frames once",
           [f.hex() for f in _uart_tx[:gl.GPS_ACK_TRIES]]
           == [rate1000] * gl.GPS_ACK_TRIES
-          and len(_uart_tx) == gl.GPS_ACK_TRIES + len(gl.GPS_MSGS)
+          and len(_uart_tx) == gl.GPS_ACK_TRIES + len(gl.GPS_MSGS) + 1
           and not any(f.hex() in rates for f in _uart_tx[gl.GPS_ACK_TRIES:])
           and gl.st["setup_ok"] is False
           and _clock[0] - t0 <= gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 400,
@@ -3843,7 +3845,7 @@ try:
     check("UBX: a receiver silent after the first frame blocks ~4 s",
           gl.st["setup_ok"] is False
           and _clock[0] - t0 <= 2 * gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 500
-          and len(_uart_tx) == 1 + gl.GPS_ACK_TRIES + len(gl.GPS_MSGS),
+          and len(_uart_tx) == 2 + gl.GPS_ACK_TRIES + len(gl.GPS_MSGS),
           "ms=%d frames=%d" % (_clock[0] - t0, len(_uart_tx)))
     check("UBX: ... and stays at 1 Hz: no GPS_HZ frame after an unanswered one",
           gl._rate(1000 // gl.GPS_HZ).hex()
@@ -7992,12 +7994,16 @@ check("PVT-SETUP: M8 - legacy CFG-MSG: NAV-PVT every epoch, NMEA off",
 fr6 = pvt_setup(U6_VER)
 fr_unknown = pvt_setup(None)
 want_nmea = [gl._ubx(6, 1, bytes((0xF0, m, r))) for m, r in gl.GPS_MSGS]
+# CFG-MSG class 0x01 id 0x07 (NAV-PVT) rate 0, by hand: the NMEA setup's
+# last message frame
+pvt_stop = b"\xb5\x62\x06\x01\x03\x00\x01\x07\x00\x12\x50"
 check("PVT-SETUP: u-blox 6 (and an unknown receiver) keep the NMEA setup",
-      gl.st["mode"] == "nmea" and fr6[2:-1] == want_nmea
-      and fr_unknown[2:-1] == want_nmea, repr([f.hex() for f in fr6]))
+      gl.st["mode"] == "nmea" and fr6[2:-1] == want_nmea + [pvt_stop]
+      and fr_unknown[2:-1] == want_nmea + [pvt_stop],
+      repr([f.hex() for f in fr6]))
 fr_off = pvt_setup(M10_VER, gps_pvt=False)
 check("PVT-SETUP: GPS_PVT=0 keeps NMEA on an M10",
-      gl.st["mode"] == "nmea" and fr_off[2:-1] == want_nmea)
+      gl.st["mode"] == "nmea" and fr_off[2:-1] == want_nmea + [pvt_stop])
 fr9 = pvt_setup(F9_VER)
 check("PVT-SETUP: kinds - protocol 23+ VALSET, 15-22 CFG-MSG, older NMEA",
       vs_frame in fr9
@@ -8083,6 +8089,37 @@ _uart_tx[:] = []
 gl.gps_setup()
 check("PVT-CHECK: given up -> NMEA setups for the rest of the boot",
       gl.st["mode"] == "nmea" and vs_frame not in _uart_tx)
+
+# NMEA-PVT-STOP: an ESP reset leaves the receiver powered, NAV-PVT on from
+# the NAV-PVT boot before (a RAM VALSET). GPS_PVT=0: the NMEA setup turns
+# it off (CFG-MSG, the model not known yet); a NAK of that frame alone (a
+# u-blox 6 has no NAV-PVT) is no failed setup; a NAV-PVT frame while in
+# the NMEA mode is not used and makes the setup due again
+_uart_nak_frames.add(pvt_stop)
+try:
+    fr_u6nak = pvt_setup(U6_VER, gps_pvt=False)
+    u6nak = (gl.st["setup_ok"], gl.st["mode"])
+finally:
+    _uart_nak_frames.discard(pvt_stop)
+check("NMEA-PVT-STOP: a NAK of the NAV-PVT stop alone -> setup ok, 5 Hz",
+      u6nak == (True, "nmea") and fr_u6nak[-2] == pvt_stop
+      and fr_u6nak[-1] == gl._rate(1000 // gl.GPS_HZ),
+      repr((u6nak, [f.hex() for f in fr_u6nak[-2:]])))
+pvt_setup(None, gps_pvt=False)            # boot: model unknown
+gl.st["checked"] = True
+_clock[0] += 2000
+ubx0 = gl.st["ubx_ok"]
+pvt_second(t_at(0), lat=47.6, lon=19.1)    # still on in the receiver
+left_on = (gl.st["valid"], gl.st["lat_i"], gl.st["fix_src"], gl.st["extra"],
+           gl.st["ubx_ok"] - ubx0)
+_uart_tx[:] = []
+for _ in range(gl.GPS_RETRY // 1000 + 1):
+    _clock[0] += 1000
+    gl.gps_check(_clock[0])
+check("NMEA-PVT-STOP: NAV-PVT in the NMEA mode -> not used, set up again",
+      left_on[:3] == (False, None, None) and left_on[3] == 5
+      and left_on[4] == 5 and pvt_stop in _uart_tx
+      and gl.st["mode"] == "nmea", repr(left_on))
 _uart_nak.add((0x06, 0x8A))
 try:
     fr_nak = pvt_setup(M10_VER)

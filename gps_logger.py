@@ -850,6 +850,10 @@ def _ubx_frame(fr):
     st["ack"] to 1 / 0. Others (late ACKs) are dropped."""
     cls, mid = fr[2], fr[3]
     if cls == 0x01 and mid == 0x07:
+        if st["mode"] == "nmea":         # left on (PVT_STOP not taken yet):
+            st["ubx_ok"] += 1            # not used, and the setup is due
+            _extra(None, None)           # again
+            return
         if len(fr) != PVT_LEN:           # another protocol's NAV-PVT, or
             st["ubx_bad"] += 1           # cut: not read
             return
@@ -953,6 +957,13 @@ CFG_MSGOUT_NMEA = (0x209100BB,           # CFG-MSGOUT-NMEA_ID_GGA_UART1
                    0x209100CA,           # ..._GLL_UART1
                    0x209100B1)           # ..._VTG_UART1
 PVT_NMEA_OFF = (0x00, 0x04, 0x02, 0x07, 0x03, 0x01, 0x05)   # (CFG-MSG ids)
+# The NMEA setup ends NAV-PVT too: a VALSET to RAM outlives an ESP reset
+# (the receiver keeps its power), so a boot with GPS_PVT=0 after a NAV-PVT
+# boot found NAV-PVT still coming beside the NMEA (seen on the board, and
+# both overrun 9600 baud). The legacy CFG-MSG, as the model is not known
+# yet at the first setup: an M8 and the M10 (SPG 5.10, on the board)
+# acknowledge it; a u-blox 6 without NAV-PVT may refuse it, which is fine.
+PVT_STOP = _ubx(0x06, 0x01, bytes((0x01, 0x07, 0)))
 
 def _valset(keys):
     """UBX-CFG-VALSET to RAM of (key, U1 value) pairs."""
@@ -974,7 +985,7 @@ def _setup_msgs(mode):
     """The message frames of a setup in mode (see GPS_MSGS)."""
     if mode == "nmea":
         return [_ubx(0x06, 0x01, bytes((0xF0, mid, rate)))
-                for mid, rate in GPS_MSGS]
+                for mid, rate in GPS_MSGS] + [PVT_STOP]
     if st["gps_kind"] == "m10":
         return [_valset([(CFG_MSGOUT_PVT, 1)]
                         + [(k, 0) for k in CFG_MSGOUT_NMEA])]
@@ -1072,7 +1083,7 @@ def gps_setup():
             for fr in _setup_msgs(mode):
                 if ok:
                     r = _ubx_ack(fr, t0)
-                    ok = r is True
+                    ok = r is True or (r is None and fr is PVT_STOP)
                     if r is None and mode == "pvt":
                         _pvt_off("refused")   # a NAK: NMEA next time
                 else:
