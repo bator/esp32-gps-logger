@@ -1261,6 +1261,26 @@ try:
           w["state"] == "connected" and w["ssid"] == "phone",
           "state=%s ssid=%s connects=%s" % (
               w["state"], w["ssid"], WLAN.connects))
+    # WR-a: a good scan that lists none of them: the boot round tries every
+    # configured network (12 s each, radio on), later rounds only every
+    # UNLISTED_EVERY rounds; a hidden one (never listed by name) every round
+    def wr_rounds(env_text, n):
+        start_wifi(env_text, [("unrelated", -40)], [])
+        tries = []
+        for _ in range(n):
+            WLAN.connects = []
+            gl.wifi["state"] = "not found"
+            gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"]
+            gl.wifi_tick()
+            drain_wifi()
+            tries.append([c[0] for c in WLAN.connects])
+        return tries
+    every = getattr(gl, "UNLISTED_EVERY", 4)
+    tries = wr_rounds(triple, every)
+    hid = wr_rounds(env_hid_home, 2)
+    check("WR-a: unlisted networks are tried at boot and every Nth round",
+          tries == [[]] * (every - 1) + [["home", "phone", "cabin"]]
+          and hid == [["home"], ["home"]], "%r %r" % (tries, hid))
     # logging continues
     gl.log_reset()
     gl.log["full"] = False
@@ -2152,6 +2172,32 @@ try:
     check("HID: repeated hidden-home fails do not grow backoff",
           (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
           "backoff=%s" % gl.wifi.get("roam_backoff"))
+
+    # WR-31: five neighbours' hidden APs taking turns as the strongest one:
+    # each hidden-home try drops the hotspot for >= 12 s. Failed hidden
+    # roams grow their own hold (10, 20, 40, 60 min); the visible-home
+    # check stays at ROAM_CHECK
+    w = start_wifi(env_hid_home, [("phone", -40)], ["phone"])
+    WLAN.ok = set(["phone"])
+    gl.st["speed"] = None
+    WLAN.connects = []
+    for i in range(24):                  # 2 h of ROAM_CHECKs
+        _clock[0] += gl.ROAM_CHECK
+        WLAN.scan_aps = [("", -50, bytes([0x20 + i % 5]) * 6),
+                         ("phone", -40)]
+        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        if WLAN.instances:
+            WLAN.instances[-1]._status = 3
+        gl.wifi["state"] = "connected"
+        gl.wifi["home"] = False
+        gl.wifi["ssid"] = "phone"
+        gl.wifi_tick()
+        drain_wifi()
+    hid_tries = len([c for c in WLAN.connects if c[0] == "home"])
+    check("WR-31: failed hidden-home roams back off (not every 5 min)",
+          1 <= hid_tries <= 6
+          and (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
+          "tries=%d backoff=%s" % (hid_tries, gl.wifi.get("roam_backoff")))
 
     # exponential roam backoff (wrong home PSK / unseen home)
     w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
@@ -3674,6 +3720,14 @@ try:
     check("REVIEW3-2: an SSID missing from the scan is not retried",
           calls == ["home", "phone"] and w["ssid"] == "phone",
           "calls=%s" % calls)
+    # WR-30: a hidden home behind a strong blank AP gets that RSSI, so its
+    # failed first association (the C6 cold-boot 202) is retried at once
+    w, calls, out = rv_start_wifi(
+        rv_env + "SSID_HIDDEN=1\n", [("", -55, b"\x31" * 6), ("phone", -40)],
+        ["home", "phone"], fail_first=("home",))
+    check("WR-30: a hidden home behind a strong blank AP is retried at once",
+          calls == ["home", "home"] and w["ssid"] == "home"
+          and w["state"] == "connected", "calls=%s" % calls)
     gl.wifi_reset()
 
     # STAY: position-based stationary filter. Indoors the GPS speed is noise
@@ -5029,6 +5083,31 @@ try:
     check("CPU: .env CPU_MHZ 160 / 0 taken, 100 and missing keep the default",
           (a, b, c, d) == (160, 0, 80, 80) and same,
           "%s %s %s %s same=%s" % (a, b, c, d, same))
+    # WR-d: one failed clock change (the drop-back after a POST) is tried
+    # again, not blacklisted for good (the board stayed at 160 MHz)
+    mach = sys.modules["machine"]
+    real_freq = mach.freq
+    fails = [1]
+
+    def flaky_freq(v=None):
+        if v is not None and fails[0]:
+            fails[0] -= 1
+            raise OSError("busy")
+        return real_freq(v)
+    mach.freq = flaky_freq
+    try:
+        gl._freq_bad[:] = []
+        real_freq(160000000)
+        gl._set_freq(80)
+        dropped = _freqs[-1] == 80000000 and 80 not in gl._freq_bad
+        fails[0] = 99
+        gl._set_freq(160)
+        capped = 160 in gl._freq_bad and fails[0] >= 99 - 5
+    finally:
+        mach.freq = real_freq
+        gl._freq_bad[:] = []
+    check("WR-d: a failed clock change is retried, refused ones capped",
+          dropped and capped, "%s %s %r" % (dropped, capped, _freqs[-3:]))
 
     # a round that finds no network: nothing to upload -> sleep; with a
     # track waiting -> the usual backoff, 15 s doubling to 10 min, until a
@@ -5047,10 +5126,10 @@ try:
     rounds, on_between = [], 0
     for _ in range(40 * 60 // 5):                  # 40 minutes
         _clock[0] += 5000
-        before = len(WLAN.connects)
-        gl.wifi_tick()
+        before = gl.wifi.get("rounds")   # (a good scan listing none of
+        gl.wifi_tick()                   # them tries none: no connect)
         drain_wifi()
-        if len(WLAN.connects) > before:
+        if gl.wifi.get("rounds") != before:
             rounds.append(_clock[0])
         on_between += bool(wl().active())
     check("SLEEP: ... the radio is off between the rounds",
@@ -5270,6 +5349,26 @@ try:
         check("PB_KEEPALIVE: .env KEEPALIVE_MODE / KEEPALIVE_PIN, bad ones kept",
               m1 == "scan" and p1 == 12 and gl.PB_MODE == "scan"
               and gl.PB_PIN == 12, "%s %s %s %s" % (m1, p1, gl.PB_MODE, gl.PB_PIN))
+        # WR-b: a pin the board already uses (GPS, I2C, boot-bypass, the
+        # C6's USB) is refused: pulsing it broke the GPS or the console
+        saved_c6 = gl.IS_C6
+        kept = []
+        try:
+            for v in (gl.GPS_TX, gl.GPS_RX, gl.I2C_SCL, gl.I2C_SDA, 25):
+                gl.PB_PIN = 26
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                kept.append(gl.PB_PIN)
+            gl.IS_C6 = True
+            for v in (10, 12, 13):
+                gl.PB_PIN = 2
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                kept.append(gl.PB_PIN)
+            gl._keepalive_env({"KEEPALIVE_PIN": "3"})
+            free = gl.PB_PIN
+        finally:
+            gl.IS_C6 = saved_c6
+        check("WR-b: KEEPALIVE_PIN on a GPS/I2C/boot/USB pin keeps the default",
+              kept == [26] * 5 + [2] * 3 and free == 3, "%r %r" % (kept, free))
         saved = gl.PB_KEEPALIVE
         try:
             gl._keepalive_env({"KEEPALIVE": "0"})
@@ -5302,6 +5401,63 @@ try:
         fh.write(b"\xef\xbb\xbfSSID=home\nWPA2=x\nGEO_URL=https://d\nAPI_KEY=k\n")
     check("BOM: a UTF-8 BOM before the first key is ignored",
           "SSID" in gl.load_env(bom) and len(gl._load_nets(gl.load_env(bom))) == 1)
+
+    # WR-11: a .env saved as ANSI (Notepad): UnicodeError at every boot ->
+    # boot-fail -> REPL. Now read as bytes: a non-UTF-8 SSID/WPA2 stays
+    # bytes (connect() takes them), any other such value is skipped
+    ansi = os.path.join(rv_dir, "env_ansi")
+    with open(ansi, "wb") as fh:
+        fh.write(b"SSID=K\xe1v\xe9z\xf3\nWPA2=jelsz\xf3\nGEO_URL=https://d\xe9\n"
+                 b"API_KEY=k\nDEVICE_ID=bike\n")
+    crash, env = None, {}
+    try:
+        env = gl.load_env(ansi)
+        nets = gl._load_nets(env)
+    except Exception as e:
+        crash, nets = e, []
+    raw = b"K\xe1v\xe9z\xf3"
+    ok_env = (crash is None and env.get("SSID") == raw
+              and env.get("WPA2") == b"jelsz\xf3" and "GEO_URL" not in env
+              and env.get("API_KEY") == "k" and env.get("DEVICE_ID") == "bike")
+    got = None
+    if nets:
+        real_scan = WLAN.scan
+        WLAN.scan = lambda self: [(raw, b"\x07" * 6, 1, -50, 4, False)]
+        try:
+            reset_wlan()
+            WLAN.ok = {raw}
+            gl.wifi_reset()
+            gl.wifi["nets"] = nets
+            gl.wifi["wlan"] = wa = WLAN(0)
+            wa.active(True)
+            gl._wifi_begin_round(wa)
+            for _ in range(10):
+                _clock[0] += 500
+                gl.wifi_tick()
+            got = (gl.wifi["state"], [c[:2] for c in WLAN.connects[:1]],
+                   gl._wifi_line())
+        except Exception as e:
+            crash = e
+        finally:
+            WLAN.scan = real_scan
+            gl.wifi_reset()
+    check("WR-11: a non-UTF-8 .env neither raises nor loses the network",
+          ok_env and got is not None and got[0] == "connected"
+          and got[1] == [(raw, b"jelsz\xf3")]
+          and got[2].startswith("WiFi K"), "%r %r %r" % (crash, env, got))
+
+    # WR-c: quotes and a comment on a comment-safe key: comment off first,
+    # then the quotes (IP="192.168.1.60" # static kept the quotes: DHCP)
+    qenv = os.path.join(rv_dir, "env_quote")
+    with open(qenv, "wb") as fh:
+        fh.write(b'SSID=home\nIP="192.168.1.60"  # static\n'
+                 b"GW='192.168.1.1' # router\nDEVICE_ID=\"bike\" # mine\n")
+    qn = gl._load_nets(gl.load_env(qenv))
+    check("WR-c: a quoted value with a comment loses both (static IP kept)",
+          qn and qn[0]["ip"] == ("192.168.1.60", "255.255.255.0",
+                                 "192.168.1.1", "192.168.1.1")
+          and gl._plain('"bike" # mine') == "bike",
+          repr(qn and qn[0]["ip"]))
 
     # REVIEW2-2: a timestamp taken just after now is age 0, not "very old"
     now = _clock[0]
@@ -5915,6 +6071,196 @@ try:
     check("HIDDEN: a blank AP whose home try failed is not tried again",
           ok_before and not ok_after and ok_other,
           "%r %r %r" % (ok_before, ok_after, ok_other))
+
+    # WR-4: a failed roam to the hidden home blamed that blank AP until
+    # reboot (it may be our own router, briefly unreachable): the blame
+    # ends after BLANK_BAD_HOLD and on any hidden-home connect
+    gl.wifi_reset()
+    gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                        "hidden": True, "bssid": None, "ip": None}]
+    gl.wifi["wlan"] = wb = WLAN(0)
+    gl.wifi.update(blank_rssi=-50, blank_bssid=b"\x12" * 6, roaming=True)
+    gl._mark_failed("home", "test")
+    held = not gl._blank_home_ok()
+    _clock[0] += getattr(gl, "BLANK_BAD_HOLD", 3600000)
+    expired = gl._blank_home_ok()
+    gl.wifi["roaming"] = True
+    gl._mark_failed("home", "test")
+    again = not gl._blank_home_ok()
+    gl.wifi["ssid"] = "home"
+    gl._wifi_got_ip(wb)
+    cleared = gl._blank_home_ok()
+    check("WR-4: a blamed blank AP is cleared by time and by a home connect",
+          held and expired and again and cleared,
+          "%r %r %r %r" % (held, expired, again, cleared))
+
+    # WR-5: connected to the hidden home, its BSSID is learned (v1.29 has
+    # no config("bssid"): the one blank AP on the link's channel near its
+    # RSSI); then a stranger's hidden AP is no longer "home in range" (it
+    # vetoed departures), ours still is. Nothing learned: as before
+    hid_nets = [{"ssid": "home", "pw": "x", "home": True, "hidden": True,
+                 "bssid": None, "ip": None},
+                {"ssid": "hot", "pw": "y", "home": False, "hidden": False,
+                 "bssid": None, "ip": None}]
+    mine_b, neigh_b = b"\x41" * 6, b"\x42" * 6
+    w = rv_connect(["home"], [("", -55, mine_b), ("hot", -40)],
+                   nets=[dict(n) for n in hid_nets])
+    conn = gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "home"
+    gl.wifi_tick()                       # the learning scan
+    learned = list(gl.wifi.get("home_aps") or [])
+    gl._wifi_off(w, "sleep")
+    WLAN.scan_aps = [("", -40, neigh_b), ("hot", -40)]
+    stranger = gl.home_in_range()
+    WLAN.scan_aps = [("", -60, mine_b), ("", -40, neigh_b)]
+    ours = gl.home_in_range()
+    check("WR-5: the hidden home's BSSID is learned; strangers' blank APs "
+          "no longer count as home", conn and learned == [mine_b]
+          and stranger is False and ours is True,
+          "%r %r %r %r" % (conn, learned, stranger, ours))
+    w = rv_connect(["home"], [("", -55, mine_b), ("", -52, neigh_b),
+                              ("hot", -40)], nets=[dict(n) for n in hid_nets])
+    gl.wifi_tick()
+    amb = list(gl.wifi.get("home_aps") or [])
+    gl._wifi_off(w, "sleep")
+    WLAN.scan_aps = [("", -40, neigh_b)]
+    before = gl.home_in_range()
+    check("WR-5: two blank APs that fit: nothing learned, any counts as before",
+          amb == [] and before is True, "%r %r" % (amb, before))
+
+    # WR-29: no GEO_URL/API_KEY ("no .env") or a full .bad ("bad full"):
+    # the radio never went off away from home
+    w = rv_connect(["hot"], [("hot", -50)])
+    trk = os.path.join(rv_td, "20261031_100000.trk")
+    make_trk(trk, 3)
+    gl.up["url"] = None
+    for _ in range(gl.WIFI_IDLE // 1000 + 5):
+        _clock[0] += 1000
+        gl.upload_tick()
+        gl.wifi_tick()
+    noenv = (gl.up["state"], gl.wifi["state"])
+    gl.up["url"] = "https://dawarich.example.com"
+    now = _clock[0]
+    gl.up.update(state="bad full", next_at=now + gl.BACKOFF_START,
+                 hold={trk: now + gl.BACKOFF_MAX})
+    wait = gl._upload_wait(now)
+    gl.up["hold"] = {}
+    os.remove(trk)
+    check("WR-29: 'no .env' lets the radio sleep; 'bad full' waits for the hold",
+          noenv == ("no .env", "sleep") and wait >= gl.BACKOFF_MAX - 1000,
+          "%r %r" % (noenv, wait))
+
+    # WR-30: WEB, radio asleep: a keep-alive scan seeing the hidden home's
+    # learned BSSID starts a round (it only knew visible SSIDs)
+    gl.WEB, gl.PB_MODE = True, "scan"
+    w = rv_connect(["home"], [("", -55, mine_b), ("hot", -40)],
+                   nets=[dict(n) for n in hid_nets])
+    gl.wifi_tick()                       # learn
+    WLAN.ok, WLAN.scan_aps = set(), []
+    gl._wifi_off(w, "sleep")
+    WLAN.ok, WLAN.scan_aps = {"home"}, [("", -55, mine_b)]
+    t0, back = _clock[0], None
+    for _ in range(5 * 60):
+        _clock[0] += 1000
+        gl.keepalive_tick(_clock[0])
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            back = (_clock[0] - t0) // 1000
+            break
+    check("WR-30: a keep-alive scan seeing the hidden home's BSSID wakes it",
+          back is not None and back <= 60, "back after %r s" % back)
+
+    # WR-30: WEB on, gpio keep-alive (no scan sees home come back): a failed
+    # round searches on with the backoff for WEB_SEARCH, then sleeps; it
+    # dropped to WIFI_SLEEP (status page down 1 h) at once
+    gl.PB_MODE = "gpio"
+    w = rv_connect([], [])
+    for _ in range(60):
+        if gl.wifi["state"] != "connecting":
+            break
+        _clock[0] += 1000
+        gl.wifi_tick()
+    first = gl.wifi["state"]
+    WLAN.ok, WLAN.scan_aps = {"home"}, [("home", -50)]
+    t0, back = _clock[0], None
+    for _ in range(10 * 60):
+        _clock[0] += 1000
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            back = (_clock[0] - t0) // 1000
+            break
+    w = rv_connect([], [])
+    for _ in range(45 * 60 // 5):
+        _clock[0] += 5000
+        gl.wifi_tick()
+    check("WR-30: WEB without scan keep-alive: a failed round searches on, "
+          "then sleeps", first == "not found" and back is not None
+          and back <= 120 and gl.wifi["state"] == "sleep",
+          "%r %r %r" % (first, back, gl.wifi["state"]))
+    gl.WEB, gl.PB_MODE = False, "scan"
+
+    # WR-e: wifi_tick asked any(home) of every configured network on every
+    # loop pass: cached per nets list
+    class WrNets(list):
+        n = 0
+
+        def __iter__(self):
+            WrNets.n += 1
+            return list.__iter__(self)
+    w = rv_connect(["hot"], [("hot", -50)])
+    gl.wifi["nets"] = WrNets(gl.wifi["nets"])
+    for _ in range(50):
+        _clock[0] += 100
+        gl.wifi_tick()
+    check("WR-e: the 'any home network' flag is not rebuilt every pass",
+          WrNets.n <= 2 and gl.wifi["state"] == "connected", "%d" % WrNets.n)
+
+    # WR-3: the esp32 port raises RuntimeError ("Wifi Unknown Error 0x...")
+    # for an unmapped IDF error (no memory in a scan); every WLAN call site
+    # caught OSError only -> machine.reset(), five early ones -> REPL
+    def rt_err(*a, **k):
+        raise RuntimeError("Wifi Unknown Error 0x101")
+    names = ("scan", "active", "connect", "disconnect", "status", "ifconfig",
+             "config")
+    real_w = dict((k, WLAN.__dict__[k]) for k in names)
+    real_ctor = sys.modules["network"].WLAN
+    gl.PB_MODE, gl.PB_CONNECTED = "scan", True
+    w = rv_connect(["hot"], [("hot", -50)])
+    crashed = []
+
+    def rt_try(label, fn):
+        try:
+            fn()
+        except Exception as e:
+            crashed.append("%s %r" % (label, e))
+    for k in names:
+        setattr(WLAN, k, rt_err)
+    try:
+        _clock[0] += gl.PB_KEEPALIVE
+        rt_try("keepalive connected", lambda: gl.keepalive_tick(_clock[0]))
+        rt_try("wifi_tick connected", gl.wifi_tick)
+        gl.wifi["state"] = "sleep"
+        rt_try("home_in_range", gl.home_in_range)
+        _clock[0] += gl.PB_KEEPALIVE
+        rt_try("keepalive asleep", lambda: gl.keepalive_tick(_clock[0]))
+        gl.wifi["state"] = "not found"
+        gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"]
+        rt_try("wifi_tick round", gl.wifi_tick)
+        gl.wifi["state"] = "connecting"
+        rt_try("wifi_tick connecting", gl.wifi_tick)
+        rt_try("wifi_stop", gl.wifi_stop)
+        sys.modules["network"].WLAN = rt_err
+        gl._pb_w = None
+        rt_try("pb_wlan", gl._pb_wlan)
+        write_env(rv_td, "SSID=home\nWPA2=x\n")
+        gl.wifi_reset()
+        rt_try("wifi_start", gl.wifi_start)
+    finally:
+        for k in names:
+            setattr(WLAN, k, real_w[k])
+        sys.modules["network"].WLAN = real_ctor
+        gl._pb_w = None
+    check("WR-3: a RuntimeError from any WLAN call does not escape",
+          crashed == [] and gl.wifi["state"] == "error", repr(crashed))
 finally:
     (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, WLAN.ok, gl.PB_MODE,
      gl.PB_CONNECTED) = saved_rv

@@ -136,7 +136,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `HOSTNAME` | DHCP hostname, `[A-Za-z0-9-]{1,32}` (defaults to `DEVICE_ID`) |
 | `KEEPALIVE` | Seconds between power bank keep-alive pulses, 5–600; `0` turns it off (e.g. on a car charger). Default 5. |
 | `KEEPALIVE_MODE` | What a pulse is: `scan` (default: a full WiFi scan, ~2 s), `radio` (the radio switched on and off, ~0.2 s; too little for a bank that averages the load), `gpio` (the keep-alive pin high for 0.1 s, for a load resistor). |
-| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin that cannot be driven falls back to `scan`. |
+| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin the board already uses (GPS TX/RX, I2C, the boot-bypass pin 25 / C6: 10, the C6's USB pins 12/13) is refused with a console line and the default kept. A pin that cannot be driven falls back to `scan`. |
 | `KEEPALIVE_CONNECTED` | `1`/`0`: pulses also while connected and idle (a power bank at home with the status page on); `scan` or `gpio`, a scan keeps the link. Default 0. |
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
@@ -149,8 +149,12 @@ HOSTNAME=Dawarich-GPS-tracker
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
   `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
+- Values may be quoted. On the keys above the comment goes first, then the
+  quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
-  ignored.
+  ignored. A file saved as ANSI does not stop the boot: an SSID or password
+  that is not UTF-8 is used byte for byte, any other such value is skipped
+  with a console line.
 
 A static IP for network #1 (a network without `IP` stays on DHCP, and moving
 from a static network to a DHCP one hands the interface back to DHCP):
@@ -485,13 +489,16 @@ tell a stay from a drive, so the stay filter works on positions.
 
 1. Scan once, keep the strongest BSSID per SSID.
 2. Try a home AP at ≥ −75 dBm first, then other visible known APs, strongest
-   first, then configured networks the scan missed, in config order. A hidden
-   home is preferred when the scan shows a strong empty-SSID AP. If the scan
-   fails, config order is used.
+   first, then configured networks the scan missed, in config order: hidden
+   ones every round, the others in the first round and every 4th
+   (`UNLISTED_EVERY`), since each costs a 12 s try with the radio on. A
+   hidden home is preferred when the scan shows a strong empty-SSID AP. If
+   the scan fails, every network is tried in config order.
 3. Each try is polled from the main loop (~12 s deadline), so GPS sampling
-   goes on. An AP seen at ≥ −75 dBm gets one immediate retry: on the C6 the
-   first association after a cold boot often fails after ~7.5 s with status
-   202 although the password is right, and the retry connects within ~1 s.
+   goes on. An AP seen at ≥ −75 dBm (a hidden home: the strong empty-SSID
+   AP) gets one immediate retry: on the C6 the first association after a
+   cold boot often fails after ~7.5 s with status 202 although the password
+   is right, and the retry connects within ~1 s.
    Otherwise the SSID is marked failed for 2 minutes and the next one is
    tried. A leftover fail reason from the previous SSID (MicroPython 1.29) is
    not taken as this attempt failing.
@@ -509,7 +516,12 @@ tell a stay from a drive, so the stay filter works on positions.
   stay that began at home stays a home stay while the radio sleeps.
 - If no network is found and there is something to upload, it retries with
   backoff (15 s doubling to 10 minutes) until one connects, the radio off in
-  between; with nothing to upload it sleeps.
+  between; with nothing to upload it sleeps. With `WEB` on and a keep-alive
+  that does not scan (`gpio`, `radio` or off), it searches on with that
+  backoff for 30 minutes (`WEB_SEARCH`) after the link went down, so the page
+  comes back after a router restart instead of an hour later.
+- Without `GEO_URL`/`API_KEY` nothing is ever sent, so the radio sleeps once
+  idle as if all were uploaded.
 - While uploads back off (server down, 5xx, 401) the radio stays on only
   for a short backoff. Once the next attempt is `WIFI_OFF_WAIT` (60 s) or
   more away it is turned off (`wifi off until upload retry`) and a round
@@ -536,7 +548,8 @@ set up at all (no `.env`, no SSID). What the pulse is (`KEEPALIVE_MODE`):
   burst the bank cannot miss, ~5 mA on average, nothing blocked.
 
 With the status page on (`WEB`), a keep-alive scan that sees a home network
-at ≥ −75 dBm while the radio sleeps or found nothing starts a round at once
+(a hidden home: one of its learned BSSIDs) at ≥ −75 dBm while the radio
+sleeps or found nothing starts a round at once
 (`wifi home in range`): after a router restart the page used to stay down
 for an hour. At most once a minute, doubling while those rounds fail.
 
@@ -544,7 +557,8 @@ for an hour. At most once a minute, doubling while those rounds fail.
 15–25 mA on the original ESP32 against its 240 MHz default. A POST runs at
 160 MHz (`CPU_MHZ_UP`) so the TLS handshake stays quick, then the clock
 drops back. The UART runs off the fixed APB clock, so 9600 baud is unaffected.
-`CPU_MHZ=0` leaves the firmware default.
+`CPU_MHZ=0` leaves the firmware default. A failed clock change is tried
+again (3 tries); only a clock refused every time is left alone for good.
 
 **Roaming home:** on a non-home network, when nearly stopped (speed below
 5 km/h, or in a stay), the logger scans for home every 5 minutes and switches
@@ -553,6 +567,17 @@ switch to a visible home; stopping after a drive resets that only when a
 visible home is in view. A hidden home is tried with `bssid=None` (matched by
 SSID) when a strong empty-SSID AP is seen; a neighbour's hidden AP can cause
 a false attempt, and switching to a hidden home can be slower.
+
+**Hidden home:** while connected to it the logger learns its BSSID (one scan:
+the only empty-SSID AP on the link's channel within 8 dB of its RSSI; up to
+4 kept, in RAM). Once learned, only those count as the hidden home for
+roaming, the boot preference, "home in range" (stay departures) and the
+keep-alive wake, so a neighbour's hidden AP no longer cancels a departure.
+Until then (after a reboot, or with two candidates in that scan) any strong
+empty-SSID AP counts, as before. A failed hidden-home try skips that AP for
+an hour (cleared when the hidden home connects), and failed hidden-home
+roams back off on their own (10 minutes doubling to 60) without slowing the
+check for a visible home.
 
 ### Upload
 
@@ -684,6 +709,9 @@ with a NEO-6M; most never need changing.
 | `WIFI_OFF_WAIT` | 60 s | An upload backoff at least this long turns the radio off until it is due |
 | `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
 | `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
+| `UNLISTED_EVERY` | 4 | A network a good scan did not list is tried every Nth round (hidden ones always) |
+| `WEB_SEARCH` | 30 min | With `WEB` and no scan keep-alive, failed rounds keep searching this long before sleeping |
+| `BLANK_BAD_HOLD` / `HOME_AP_MAX` / `LEARN_RSSI` | 1 h / 4 / 8 dB | Hidden home: a blank AP whose try failed is skipped; learned BSSIDs kept; RSSI match for learning |
 
 **Upload**
 
