@@ -154,6 +154,61 @@ check("departure ring way out", len(b) == 5 and b[0]
       and b[4] == "47.500000,19.000800,123.4,1.2,20261029T064119Z\n")
 gl.log_reset()
 
+
+# The way out rebuilt from the ring is the line _sample_line writes for the
+# same fix, rounding included: run on a single-precision build (the board's
+# floats; MICROPYTHON_F32 in the suite) as well as on doubles. Elevations
+# and HDOPs that round differently in single and double precision, and
+# tracks across the prime meridian and the equator (offsets from a first
+# sample of the other sign were rounded there).
+def ring_vs_line(lat0, lon0, dlat, dlon, alt, hdop, date="2026-10-29"):
+    gl.log_reset()
+    gl.log["still"] = sl = gl._still_state()
+    sl.update(active=True, anchor=(lat0, lon0), aref=(lat0, lon0), n=10)
+    gl.st.update(valid=True, date=date, alt=alt, hdop=hdop, fixtype=3,
+                 std=None, std_at=None)
+    want = []
+    for k in range(gl.STILL_DEP_MAX + 20):          # (the ring wraps)
+        now = time.ticks_ms()
+        gl.st.update(lat=lat0 + k * dlat, lon=lon0 + k * dlon, hdop_at=now,
+                     time="07:%02d:%02d" % (k // 60, k % 60))
+        want.append(gl._sample_line(now, None, None)[1])
+        gl._ring_add(sl, now, (gl.st["lat"], gl.st["lon"]), 10.0 + k)
+    gl._still_leave()
+    got = gl.log["batch"]
+    want = want[-gl.STILL_DEP_MAX:]
+    bad = [(w, g) for w, g in zip(want, got) if w != g]
+    if bad or len(got) != len(want):
+        print("ring vs line", len(got), len(want), bad[:2])
+    return not bad and len(got) == len(want)
+
+
+ok = True
+# (positions with many digits: one that ends in a 5 right after the 6th
+# decimal rounds either way on a double host, ring or not)
+for case in ((47.49791234567, 19.04024561234, 0.0000271828, 0.0000397141,
+              123.45, 1.25),
+             (51.47781234567, -0.00213141593, 0.0000123456, 0.0000317654,
+              -0.04, 0.95),
+             (-0.00071234567, -78.46781234567, 0.0000191919, 0.0000072727,
+              8848.86, 2.35),
+             (-33.85678441234, 151.21529671234, -0.0000233333, 0.0000301234,
+              58.65, 4.45),
+             (64.12651234567, -21.81741234567, 0.0000191234, -0.0000277654,
+              None, None)):
+    ok = ring_vs_line(*case) and ok
+check("departure ring rebuilds the lines _sample_line writes", ok)
+# seconds in the ring count from its first sample: a fix dated 2099 (a
+# receiver past a week rollover) overflowed the 32-bit array and was
+# stamped 1963 on the board (CPython raises)
+try:
+    ok = ring_vs_line(47.5, 19.0, 0.00002, 0.00003, 100.0, 1.0, "2099-08-22")
+except OverflowError as e:
+    print("ring 2099", repr(e))
+    ok = False
+check("departure ring keeps times after 2088", ok)
+gl.log_reset()
+
 try:
     jd = json.loads("".join(gl._web_json_parts()))
 except Exception as e:

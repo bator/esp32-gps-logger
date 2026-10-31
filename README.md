@@ -530,7 +530,9 @@ console line.
 - **Filter.** Skipped: fresh HDOP above 5, or a GST estimate above 20 m (the
   larger of latitude and longitude, 1σ). A cold start can show a good HDOP
   while the position walks in from far away (measured: 230 m, over 65 s); GST
-  catches it. 2D fixes omit altitude.
+  catches it. 2D fixes omit altitude. A fix dated before 2020 or from 2088
+  on is not used at all: a receiver past a GPS week rollover reports 1999
+  (read as 2099) or 2000.
 - **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
   line (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop
   empty when unknown), `-` for a new segment and an `#END` footer. Reading
@@ -543,7 +545,9 @@ console line.
   by a power loss is skipped on read.
 - **Segments and files.** A short fix loss starts a new segment (the `-`
   goes before the first point after it; every loss gets its own, also while
-  the points before it are still held in RAM). A loss over 5 minutes starts
+  the points before it are still held in RAM or writes keep failing: losses
+  whose points were dropped from a full batch share one). A loss over 5
+  minutes starts
   a new file: the old track is closed so it uploads. Only while flash writes
   keep failing does the new trip go on in the same file, after a `-`. Lines
   a stay still being proven held from before the loss move on to the new
@@ -586,13 +590,21 @@ tell a stay from a drive, so the stay filter works on positions.
   walk). A multipath jump that freezes 200 m away does neither, however long
   it lasts, and an excursion that turns back does not count. The way out is
   written from near the anchor, from the last 90 samples, in time order
-  (kept in preallocated arrays, 24 bytes a sample: as line tuples they took
-  ~20 kB of the heap and broke uploads).
+  (kept in preallocated arrays, 28 bytes a sample: as line tuples they took
+  ~20 kB of the heap and broke uploads). Each line is rebuilt exactly as it
+  would have been written then, the board's single-precision rounding
+  included.
 - **Leaving after a fix gap** (over 30 s; a metro or a garage, then sitting
-  still elsewhere): a fix more than 300 m from the anchor, or 3 in a row
-  beyond 150 m, ends the stay without waiting for them to recede, and the
-  way out starts there. Before, nothing receded, so the stay went on and
-  nothing was written at the new place. Leaving home keeps its check below.
+  still elsewhere): beyond 150 m the stay ends without waiting for the fixes
+  to recede once the device clearly sits elsewhere: 10 fixes within 50 m of
+  the first of them over 60 s (`STILL_GAP_STAY`), or one fix more than 1 km
+  out (`STILL_GAP_JUMP`, beyond any multipath jump). Fixes coming closer do
+  not count (a cold start converging walks in), and a receding run leaves
+  as usual. The way out starts at the first fix after the gap. Before,
+  nothing receded, so the stay went on and nothing was written at the new
+  place; and when one fix beyond 300 m or 3 beyond 150 m ended it, a single
+  outlier, a jump frozen for 3 s or a cold start walking in wrote a spike.
+  Leaving home keeps its check below.
 - **Leaving without a fix** (away from home). The first 3 WiFi scans of the
   stay (keep-alive pulses, roam and connect rounds) note the access points
   around; later scans that see one of them add the others seen with it (a
@@ -600,7 +612,9 @@ tell a stay from a drive, so the stay filter works on positions.
   and locally administered BSSIDs (phone hotspots, a train's WiFi) are left
   out, since they travel along. When none of them shows up in 6 scans in a
   row over at least 60 s, the stay ends (`stay left, wifi`): no more anchor
-  points at the old place. Before, a train ride home without a fix kept
+  points at the old place. A way out is written only if the last fix was
+  more than 50 m from the anchor; otherwise the recent fixes are the stay's
+  drift. Before, a train ride home without a fix kept
   writing the old anchor every 5 minutes until home. Where no access point
   is around while learning, or with no scans (keep-alive `gpio`/`radio` or
   off, the radio connected), only a fix ends the stay, or:
@@ -624,7 +638,11 @@ tell a stay from a drive, so the stay filter works on positions.
   further departures wait 60 s.
 - **After a fix gap** (over 30 s): fixes more than 150 m from the open window
   restart both windows; more than 50 m restart only the open one, so two
-  places are never mixed while what it held stays held.
+  places are never mixed while what it held stays held. The previous window
+  is dropped on its own when the fix is more than 150 m from it. Each gap is
+  judged once: a fix back after 5 minutes judged it before the old track
+  closed and again right after, and the second verdict released into the
+  new file the old place's drift the first had held over.
 - A walk (1.4 m/s) is never a stay: its centroid moves on by more than 50 m a
   minute.
 
@@ -898,6 +916,7 @@ with a NEO-6M; most never need changing.
 | `STILL_FILE` | 30 min | Age at which an away stay's file is closed on WiFi |
 | `STILL_HOME_HOLD` | 60 s | Wait after a refused home departure |
 | `STILL_GAP` | 30 s | Time without a usable fix that counts as a gap |
+| `STILL_GAP_STAY` / `STILL_GAP_JUMP` | 60 s / 1 km | After a gap, beyond `STILL_EXIT`: how long `STILL_MIN_FIXES` fixes within `STILL_RADIUS` must span, or one fix's distance, to end the stay |
 | `STILL_DEP_MAX` | 90 | Recent samples kept to write the way out |
 | `STILL_MEAN_N` | 1800 | Fixes the anchor mean averages over |
 | `HOLD_RELEASE` | 10 min | Without a fix this long, what a stay being proven holds is written |

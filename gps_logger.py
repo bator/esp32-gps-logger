@@ -164,6 +164,13 @@ STILL_HOME_HOLD = 60000                  # ms a departure from home waits
                                          # after the home WiFi was in range
 STILL_GAP = 30000                        # ms without a usable fix that counts
                                          # as a gap (the device may have moved)
+STILL_GAP_STAY = 60000                   # ms: back after a gap out past
+                                         # STILL_EXIT, STILL_MIN_FIXES fixes
+                                         # within STILL_RADIUS of the first
+                                         # over this long end the stay (a
+                                         # multipath jump lasts seconds)
+STILL_GAP_JUMP = 1000                    # m: one fix this far after a gap ends
+                                         # it (no multipath jump reaches it)
 STILL_DEP_MAX = 90                       # recent samples kept for the departure
 STILL_MEAN_N = 1800                      # samples the anchor mean averages over
 STAY_WIFI = True                         # an away stay ends when none of the
@@ -2890,17 +2897,24 @@ log = {}
 
 # The departure ring (see _still_active, _still_leave): the last
 # STILL_DEP_MAX usable samples of a stay, preallocated once. Per sample its
-# time in seconds since 2020 (_RT), and in _RF five floats: latitude and
-# longitude as offsets from the ring's first sample (single precision keeps
-# them to the centimetre), elevation, HDOP (_RNONE when not in the line) and
-# the distance from the anchor. The track lines are rebuilt on leaving. As
-# tuples of the line, its time and the position they took ~225 B a sample on
-# the board: 90 of them grew the heap to 116 of 124 kB and left no block
-# over 2 kB, so the next larger allocation took the heap mbedTLS needs.
+# time in seconds from the ring's first sample (_RT; a stay's "rt0"), in
+# _RF the latitude, the longitude and the distance from the anchor, and in
+# _RE the elevation and HDOP fields as the track line writes them (_ele_hd:
+# 8 and 4 bytes, space padded). A rebuilt line is the line _sample_line
+# would have written, rounding included: on the board a float is single
+# precision, the very value an array("f") keeps; a double (a test host)
+# takes three single floats, each what the ones before rounded off, which
+# add up to it exactly. The track lines are rebuilt on leaving. As tuples of
+# the line, its time and the position they took ~225 B a sample on the
+# board: 90 of them grew the heap to 116 of 124 kB and left no block over
+# 2 kB, so the next larger allocation took the heap mbedTLS needs.
 from array import array
+_NP = 1 if 1.0 + 1e-12 == 1.0 else 3     # floats a coordinate takes
+_RW = 2 * _NP + 1                        # floats a sample takes (d last)
 _RT = array("i", bytes(4 * STILL_DEP_MAX))         # (zeros, 4 B each:
-_RF = array("f", bytes(4 * 5 * STILL_DEP_MAX))     # a raw initialiser)
-_RNONE = -1e9                            # (exact in single precision)
+_RF = array("f", bytes(4 * _RW * STILL_DEP_MAX))   # a raw initialiser)
+_RE = bytearray(12 * STILL_DEP_MAX)
+_RPAD = b"            "                  # 12 spaces: an empty _RE entry
 
 def log_reset():
     log.clear()
@@ -2915,7 +2929,8 @@ def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
-            "rn": 0, "ri": 0, "rref": None, "gap_n": 0, "pos": None,
+            "rn": 0, "ri": 0, "rt0": 0, "gap_n": 0, "gap_at": None,
+            "gap_ref": None, "gap_seen": None, "pos": None,
             "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
             "last_at": None, "last_d": 0, "file_at": None, "veto_at": None,
             "move_c": None, "wins": 0, "hold_tc": None, "aps": {},
@@ -2987,9 +3002,11 @@ def start_file(stamp=None):
     except OSError:
         pass                             # already exists
     name = stamp or _stamp()
+    # (wfail: a write that failed on the previous file must not keep the
+    # next one from closing: log_tick)
     log.update(file=LOG_DIR + "/" + name + ".trk", created=False, points=0,
                new_seg=False, seg_tc=[], file_at=time.ticks_ms(),
-               good_size=None)
+               good_size=None, wfail=False)
     # First write happens when there are points (parking must not create
     # an empty / one-point file just because a fix came back).
 
@@ -3032,20 +3049,22 @@ def flush(hold=None):
     # A segment break goes before the first line recorded after it (each
     # time in seg_tc), not before the whole batch: lines held or not yet
     # flushed from before the break stay in the old segment. Not at the
-    # very start of a file.
+    # very start of a file. seg_tc is in time order, as the lines are: one
+    # pass over both, each line's time sliced once.
     seg = None
     if log["new_seg"]:
-        for tc in log["seg_tc"]:
-            if tc is None:
-                break                    # (no line recorded after it yet)
-            i = 0
-            while i < k and batch[i][-17:-1] < tc:
-                i += 1
-            if i < k and (i > 0 or not creating):
-                if seg is None:
-                    seg = []
-                if i not in seg:
+        q = log["seg_tc"]
+        j = i = 0
+        while i < k and j < len(q) and q[j] is not None:   # (None: no
+            t = batch[i][-17:-1]                          # line after it)
+            if q[j] <= t:
+                if i > 0 or not creating:
+                    if seg is None:
+                        seg = []
                     seg.append(i)
+                while j < len(q) and q[j] is not None and q[j] <= t:
+                    j += 1
+            i += 1
     try:
         extra = len(NEW_SEG) * len(seg) if seg is not None else 0
         pts = 0
@@ -3067,10 +3086,11 @@ def flush(hold=None):
                 if start < 0:
                     start = 0
             expected = start + extra + pts + len(FOOTER)
-        i = 0
+        i = j = 0
         while i < k:
-            if seg is not None and i in seg:
+            if seg is not None and j < len(seg) and seg[j] == i:
                 f.write(NEW_SEG.encode())
+                j += 1
             f.write(batch[i].encode())
             i += 1
         f.write(FOOTER.encode())
@@ -3154,27 +3174,40 @@ def _sample_line(now, prev, last_t):
     prev."""
     if not _usable(now):
         return None
-    hdop = _fresh_hdop(now)
     lat, lon = st["lat"], st["lon"]
     t = st["date"] + "T" + st["time"] + "Z"
     if (last_t is not None and t <= last_t) or (prev is not None and _dist(
             prev[0], prev[1], lat, lon) <= MIN_MOVE):
         return None
+    ele, hd = _ele_hd(now)
+    return t, "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hd, _tc())
+
+def _ele_hd(now):
+    """The elevation and HDOP fields of a track line for the current fix
+    ("" when not known). Also what the departure ring keeps (_RE)."""
     ele = ""
     if st["alt"] is not None and st.get("fixtype") != 2:
         ele = "%.1f" % st["alt"]
-    hd = ("%.1f" % hdop) if hdop is not None else ""
-    return t, "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hd, _tc())
+    hdop = _fresh_hdop(now)
+    return ele, ("%.1f" % hdop) if hdop is not None else ""
 
 def _seg_break():
     """Start a new segment with the next line recorded. A break whose line
     is still in RAM stays queued (one per loss: two short losses within
-    held lines were one break)."""
+    held lines were one break). Breaks whose lines are gone (the MAX_BATCH
+    cap, a full flash) all go before the oldest line left, so one of them
+    stands for all: the queue never outgrows the batch. (A cap of 16 that
+    dropped the oldest lost real breaks: 18 losses while writes failed
+    wrote 16.)"""
     q = log["seg_tc"]
     if not q or q[-1] is not None:
+        b = log["batch"]
+        t0 = b[0][-17:-1] if b else None
+        i = 0
+        while i + 1 < len(q) and (t0 is None or q[i + 1] <= t0):
+            i += 1
+        del q[:i]
         q.append(None)
-        if len(q) > 16:
-            q.pop(0)
     log["new_seg"] = True
 
 def _record(s, pos):
@@ -3218,6 +3251,14 @@ def _civil(z):
 # from 1970 they pass MicroPython's small-int range (2**30), so every second
 # allocated a big int. From 2020 that lasts until 2054.
 EPOCH_DAYS = 18262                       # 2020-01-01 in days since 1970
+FIX_S_END = 2145916800                   # 2088-01-01 in seconds since 2020:
+                                         # a fix dated before 2020 or from
+                                         # then on is not used (a receiver
+                                         # past a GPS week rollover says 1999,
+                                         # read as 2099; the departure ring's
+                                         # 32-bit seconds overflowed silently
+                                         # on the board and stamped the way
+                                         # out 1951)
 
 def _fix_s():
     """Seconds since 2020 of the current fix's date and time, or None."""
@@ -3254,18 +3295,30 @@ def _still_gap(now, pos):
     and dropping the previous window too released the drift held for the
     stay (measured: 13 lines in 14 min). Also run when a fix returns after
     NEW_FILE_GAP, before the old track closes: what a window from before
-    the gap held is then written to it, not moved on to the next file."""
+    the gap held is then written to it, not moved on to the next file.
+    Once per gap (gap_seen): _sample runs it again with last_at unchanged,
+    and that second verdict, taken from the previous window once the open
+    one was gone, released into the new file what the first had held over.
+    The previous window is measured on its own: one beyond STILL_EXIT
+    cannot pair with anything here, even when the open window is near
+    (judged by the open window alone, its lines moved on to the new file)."""
     sl = log["still"]
-    if sl["last_at"] is None or _age(now, sl["last_at"]) <= STILL_GAP:
+    la = sl["last_at"]
+    if la is None or _age(now, la) <= STILL_GAP or sl["gap_seen"] == la:
         return
-    c = sl["prev"][0] if sl["prev"] else None
+    sl["gap_seen"] = la
+    p = sl["prev"]
+    pd = None if p is None else _dist(p[0][0], p[0][1], pos[0], pos[1])
+    gd = pd
     if sl["win_at"] is not None and sl["sum"][2]:
         r, sm = sl["ref"], sl["sum"]
-        c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
-    gd = None if c is None else _dist(c[0], c[1], pos[0], pos[1])
+        gd = _dist(r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2], pos[0], pos[1])
     if gd is not None and gd > STILL_EXIT:
         sl.update(win_at=None, prev=None, hold_tc=None)
-    elif gd is not None and gd > STILL_RADIUS:
+        return
+    if pd is not None and pd > STILL_EXIT:
+        sl["prev"] = None
+    if gd is not None and gd > STILL_RADIUS:
         # do not mix two places in one window, but keep holding what the
         # restarted window held: a pair that proves a stay drops it
         if sl["win_at"] is not None and sl["hold_tc"] is None:
@@ -3383,7 +3436,8 @@ def _close_file():
                                          # would create an empty file)
     b = log["batch"]
     if not b:
-        log.update(file=None, created=False, file_at=None, new_seg=False)
+        log.update(file=None, created=False, file_at=None, new_seg=False,
+                   wfail=False)          # (a failure of a batch now gone)
         del log["seg_tc"][:]
         return True
     hold = _still_hold()
@@ -3472,7 +3526,7 @@ def _stay_scan(aps):
                       % (len(known), sl["ap_miss"]))
                 _diag_write("stay left wifi aps %d scans %d"
                             % (len(known), sl["ap_miss"]))
-                _still_leave()
+                _still_leave(wifi_seen=True)
             return
         sl["ap_miss"], sl["ap_miss_at"] = 0, None
     for r, b in seen:                    # recency first, then signal
@@ -3486,61 +3540,85 @@ def _stay_scan(aps):
 def _ring_add(sl, now, pos, d):
     """Keep a usable sample of the stay in the departure ring (see _RT),
     the oldest overwritten when it is full. A sample that falls back from
-    the one before by more than STILL_TOL starts it over: the way out
-    (_still_leave) never reaches back past it."""
+    the one before by more than STILL_TOL starts it over: the ring is
+    always a run that kept receding, the way out (_still_leave)."""
     s = _fix_s()
     if s is None:
         return
     cap = len(_RT)
     n, i = sl["rn"], sl["ri"]
-    if n and d + STILL_TOL < _RF[5 * ((i + n - 1) % cap) + 4]:
+    if n and d + STILL_TOL < _RF[_RW * ((i + n - 1) % cap) + _RW - 1]:
         n = 0
     if not n:
-        sl["rref"], i = pos, 0
+        sl["rt0"], i = s, 0
     if n < cap:
         j = (i + n) % cap
         n += 1
     else:
         j, i = i, (i + 1) % cap
     sl["rn"], sl["ri"] = n, i
-    r = sl["rref"]
-    _RT[j] = s
-    k = 5 * j
-    _RF[k] = pos[0] - r[0]
-    _RF[k + 1] = pos[1] - r[1]
-    alt, hd = st["alt"], _fresh_hdop(now)
-    _RF[k + 2] = (alt if alt is not None and st.get("fixtype") != 2
-                  else _RNONE)
-    _RF[k + 3] = _RNONE if hd is None else hd
-    _RF[k + 4] = d
+    _RT[j] = s - sl["rt0"]               # (seconds since 2020 overflowed it
+                                         # from 2088 on: see _sample)
+    k = _RW * j
+    _ring_put(k, pos[0])
+    _ring_put(k + _NP, pos[1])
+    _RF[k + _RW - 1] = d
+    e, h = _ele_hd(now)
+    k = 12 * j
+    _RE[k:k + 12] = _RPAD
+    if len(e) <= 8:                      # (beyond 99999.9 m: none)
+        _RE[k:k + len(e)] = e.encode()
+    if len(h) <= 4:
+        _RE[k + 8:k + 8 + len(h)] = h.encode()
 
-def _still_leave():
-    """End the stay and write the way out: the trailing run of recent
-    samples whose distance from the anchor kept growing (within STILL_TOL),
-    so the departure starts near the anchor, not STILL_EXIT away."""
+def _ring_put(k, v):
+    """Keep coordinate v in _RF from k on (see _NP)."""
+    m = k + _NP
+    while k < m:
+        _RF[k] = v
+        v -= _RF[k]                      # (what single precision lost)
+        k += 1
+
+def _ring_deg(k):
+    """A coordinate kept in the departure ring from _RF[k] on (_NP floats,
+    added up largest first: exact)."""
+    v = _RF[k]
+    m = k + _NP
+    k += 1
+    while k < m:
+        v += _RF[k]
+        k += 1
+    return v
+
+def _still_leave(wifi_seen=False):
+    """End the stay and write the way out: the samples in the departure
+    ring, a run whose distance from the anchor kept growing (within
+    STILL_TOL), so the departure starts near the anchor, not STILL_EXIT
+    away. With wifi_seen (the stay's access points are gone, _stay_scan)
+    only if the last sample was out past STILL_NEAR: otherwise the ring is
+    the stay's drift, and the stay just ends."""
     sl = log["still"]
-    n, i0, cap, r = sl["rn"], sl["ri"], len(_RT), sl["rref"]
-    i = n - 1
-    while i > 0 and (_RF[5 * ((i0 + i - 1) % cap) + 4]
-                     <= _RF[5 * ((i0 + i) % cap) + 4] + STILL_TOL):
-        i -= 1
+    n, i0, cap = sl["rn"], sl["ri"], len(_RT)
+    if (wifi_seen and n
+            and _RF[_RW * ((i0 + n - 1) % cap) + _RW - 1] <= STILL_NEAR):
+        n = 0
+    i = 0
     prev = None
-    while 0 <= i < n:
+    while i < n:
         j = (i0 + i) % cap
         i += 1
-        k = 5 * j
-        p = (r[0] + _RF[k], r[1] + _RF[k + 1])
-        t, tc = _stamp_s(_RT[j])
+        p = (_ring_deg(_RW * j), _ring_deg(_RW * j + _NP))
+        t, tc = _stamp_s(sl["rt0"] + _RT[j])
         # only what comes after the last line (an anchor point may have
         # been written while the way out began), so the track stays in order
         if (log["last_t"] is not None and t <= log["last_t"]) or (
                 prev is not None
                 and _dist(prev[0], prev[1], p[0], p[1]) <= MIN_MOVE):
             continue
-        e, h = _RF[k + 2], _RF[k + 3]
+        k = 12 * j
         line = "%.6f,%.6f,%s,%s,%s\n" % (
-            p[0], p[1], "" if e == _RNONE else "%.1f" % e,
-            "" if h == _RNONE else "%.1f" % h, tc)
+            p[0], p[1], _RE[k:k + 8].decode().strip(),
+            _RE[k + 8:k + 12].decode().strip(), tc)
         if log["file"] is None:
             start_file(tc[:8] + "_" + tc[9:15])
         _record((t, line), p)
@@ -3549,53 +3627,76 @@ def _still_leave():
     wifi["sleep_home"] = False           # left: no longer at home
     log["still"] = _still_state()
 
+def _still_recede(sl, d):
+    """A sample out past STILL_EXIT: True when the departure is clear.
+    Leaving: STILL_EXIT_N samples each gaining STILL_STEP (a vehicle), or
+    STILL_EXIT_SLOW samples out there that gained STILL_SLOW_GAIN in all (a
+    walk). A multipath jump that freezes 200 m away gains nothing, however
+    long it lasts. A sample that falls back by more than STILL_TOL starts
+    the count over."""
+    if d + STILL_TOL < sl["far_d"]:
+        sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
+        return False
+    sl["far_n"] = sl["far_n"] + 1 if d >= sl["far_d"] + STILL_STEP else 1
+    if not sl["far_slow"]:
+        sl["far_0"] = d
+    sl["far_slow"] += 1
+    sl["far_d"] = d
+    return sl["far_n"] >= STILL_EXIT_N or (
+        sl["far_slow"] >= STILL_EXIT_SLOW
+        and d - sl["far_0"] >= STILL_SLOW_GAIN)
+
 def _still_active(now, pos):
     """One usable fix while stationary: watch for a departure (consecutive
     samples beyond STILL_EXIT that keep receding; an excursion that turns
-    back does not count; after a fix gap, samples that are simply out
-    there), refine the anchor (the heartbeat, the file rotation and the
-    home close are _still_beat)."""
+    back does not count; after a fix gap, a place out there where the fixes
+    stay together), refine the anchor (the heartbeat, the file rotation and
+    the home close are _still_beat)."""
     sl = log["still"]
     a = sl["anchor"]
     d = _dist(a[0], a[1], pos[0], pos[1])
     gap = sl["last_at"] is not None and _age(now, sl["last_at"]) > STILL_GAP
-    if d > STILL_EXIT and (gap or sl["gap_n"]):
+    if d > STILL_EXIT and (gap or sl["gap_at"] is not None):
         # Back after a fix gap out past STILL_EXIT (a metro or a garage,
-        # then sitting still elsewhere): there is no receding run to wait
-        # for, and a stay that waited for one wrote nothing at the new
-        # place. Clearly out (2 * STILL_EXIT), or STILL_EXIT_N samples in a
-        # row out there, end it; the way out starts at the first of them.
-        if gap:
-            sl["rn"] = sl["gap_n"] = 0
-        sl["gap_n"] += 1
+        # then sitting still elsewhere): there may be no receding run to
+        # wait for, and a stay that waited for one wrote nothing at the new
+        # place. It ends when the board clearly is elsewhere: one fix past
+        # STILL_GAP_JUMP, or STILL_MIN_FIXES within STILL_RADIUS of the
+        # first of them over STILL_GAP_STAY. Not on a single fix out past
+        # 2 * STILL_EXIT, or STILL_EXIT_N of them (a 320 m outlier, a jump
+        # frozen 200 m out for 3 s ended it and wrote a spike). Fixes coming
+        # closer are not counted: a cold start converging walks in from
+        # 230 m. (Not reset either: indoors at the new place the drift comes
+        # closer every other second.) A receding run still leaves as usual.
+        # The way out starts at the first fix after the gap.
+        g = sl["gap_ref"]
+        if g is None or _dist(g[0], g[1], pos[0], pos[1]) > STILL_RADIUS:
+            if gap or g is None:         # (a walk on out there keeps
+                sl["rn"] = 0             # its way out in the ring)
+                sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
+            sl.update(gap_ref=pos, gap_at=now, gap_n=1)
+        elif d + STILL_TOL >= sl["last_d"]:
+            sl["gap_n"] += 1
         _ring_add(sl, now, pos, d)
-        if d > 2 * STILL_EXIT or sl["gap_n"] >= STILL_EXIT_N:
+        if _still_recede(sl, d) or d > STILL_GAP_JUMP or (
+                sl["gap_n"] >= STILL_MIN_FIXES
+                and _age(now, sl["gap_at"]) >= STILL_GAP_STAY):
             if not (sl["home"] and _home_veto(now, sl)):
                 sl["far_d"] = d          # (for the "stay end" line)
                 _still_leave()
                 return
-            sl["gap_n"] = 0
+            sl.update(gap_ref=pos, gap_at=now, gap_n=1, far_n=0, far_d=0,
+                      far_slow=0)
     elif d > STILL_EXIT and d + STILL_TOL >= sl["far_d"]:
         _ring_add(sl, now, pos, d)
-        # Leaving: STILL_EXIT_N samples each gaining STILL_STEP (a vehicle),
-        # or STILL_EXIT_SLOW samples out there that gained STILL_SLOW_GAIN
-        # in all (a walk). A multipath jump that freezes 200 m away gains
-        # nothing, however long it lasts.
-        sl["far_n"] = sl["far_n"] + 1 if d >= sl["far_d"] + STILL_STEP else 1
-        if not sl["far_slow"]:
-            sl["far_0"] = d
-        sl["far_slow"] += 1
-        sl["far_d"] = d
-        if sl["far_n"] >= STILL_EXIT_N or (
-                sl["far_slow"] >= STILL_EXIT_SLOW
-                and d - sl["far_0"] >= STILL_SLOW_GAIN):
+        if _still_recede(sl, d):
             if not (sl["home"] and _home_veto(now, sl)):
                 _still_leave()
                 return
             sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
     else:
         sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
-        sl["gap_n"] = 0
+        sl.update(gap_n=0, gap_at=None, gap_ref=None)
         _ring_add(sl, now, pos, d)
         if d <= STILL_NEAR:
             _still_mean(sl, pos)
@@ -3731,6 +3832,8 @@ def _sample(now):
     stay logic and the track when the fix is usable."""
     secs = _fix_s()
     if secs is not None:
+        if not 0 <= secs < FIX_S_END:
+            return                       # (see FIX_S_END)
         log["clock"] = (secs, now)       # GPS time for the heartbeat (2020)
     if not st["date"] or not _usable(now):
         return                           # (a second with GGA only, e.g. the
