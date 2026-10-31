@@ -14,4 +14,5 @@ const labeled = new Set(ctx.OTHER);
 for (const k of ctx.SHOWN) labeled.add(k);
 v.unlabeled = Object.keys(d).filter((k) => !labeled.has(k));
 v.tile = ctx.tile(47.1, 18.4, 17);
+v.wq = [-50, -60, -70, -80, -90, null].map((r) => ctx.wifiQ(r));
 process.stdout.write(JSON.stringify(v));
