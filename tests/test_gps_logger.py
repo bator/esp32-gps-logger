@@ -6755,6 +6755,41 @@ check("LOWIDF-GC: low IDF heap -> gc.collect() first, then the upload goes",
       len(_posts) >= 1 and not _resets and gl.up["state"] != "low idf",
       "%d posts %d resets %r" % (len(_posts), len(_resets), gl.up["state"]))
 
+# LOWPY: under TLS_MIN_PY_KB of free Python heap after the collect the POST
+# waits ("low mem"): its allocations would grow the heap into the IDF block
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+lp_p = os.path.join(up_td, "20261007_120000.trk")
+make_trk(lp_p, 3)
+real_idf_info = getattr(gl, "_idf_info", None)
+real_mem_free = gl.gc.mem_free
+gl._idf_info = lambda: (157 * 1024, 126 * 1024)
+gl.idf_heap = lambda: (157, 126)
+gl.gc.mem_free = lambda: 126 * 1024 + 8000
+_posts[:] = []
+diag_clear()
+gl.DIAG = 60000
+try:
+    pump()
+    low = (len(_posts), gl.up["state"], os.path.exists(lp_p))
+    gl.gc.mem_free = lambda: 126 * 1024 + 20000
+    pump()
+    ok_ = (len(_posts), os.path.exists(lp_p))
+finally:
+    gl.gc.mem_free = real_mem_free
+    gl.idf_heap = real_idf
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+lp_diag = [l for l in diag_lines() if l.startswith("upload low mem")]
+diag_clear()
+check("LOWPY: below TLS_MIN_PY_KB free Python heap the POST waits, then goes",
+      low == (0, "low mem", True) and ok_ == (1, False)
+      and lp_diag == ["upload low mem 8000 B"], "%r %r %r" % (low, ok_,
+                                                               lp_diag))
+
 # HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
 # diag showed a flat "mem" while the heap doubled into the IDF heap.
 # HEAP-B: to the byte, from esp32.idf_heap_info (not the KB-floored block)

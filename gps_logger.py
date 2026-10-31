@@ -225,6 +225,11 @@ TLS_MIN_KB = 48                          # largest IDF heap block a TLS POST
                                          # needs (measured: at 20 KB every
                                          # handshake failed); below it no
                                          # try, and at home a clean reboot
+TLS_MIN_PY_KB = 12                       # free Python heap a POST needs after
+                                         # gc.collect(); below it the POST
+                                         # waits: the socket and TLS objects
+                                         # would grow the heap into the IDF
+                                         # block TLS needs
 TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
                                          # home): a clean reboot, the IDF heap
                                          # stays fragmented otherwise
@@ -3825,6 +3830,17 @@ def upload_tick():
             _diag_write("upload low idf %d KB" % big)
         if not _lowidf_reboot(big):
             _schedule(now)
+        return
+    pf = py_heap()[0]
+    if pf < TLS_MIN_PY_KB * 1024:
+        # an allocation that does not fit after a GC grows the heap by up
+        # to its own size, out of the IDF block TLS needs: wait instead
+        up["err"] += 1
+        up["state"] = "low mem"
+        if up.get("last_err") != "low mem":
+            up["last_err"] = "low mem"
+            _diag_write("upload low mem %d B" % pf)
+        _schedule(now)
         return
     if not _bad_full_left():
         up["state"] = "sending"
