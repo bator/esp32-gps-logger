@@ -1550,19 +1550,26 @@ def _diag(now):
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
     HDOP, points logged/sent, WiFi state, keep-alive pulses, free Python
     heap, IDF heap free/largest block (KB), Python heap size (KB: it
-    doubles into the IDF heap when an allocation does not fit)."""
+    doubles into the IDF heap when an allocation does not fit). On the
+    NAV-PVT path also the UBX frames good/bad and hAcc (m): there NMEA
+    stops after the setup and HDOP is unknown."""
     view = sv_seen()
     fr, big = idf_heap()
     pf, pk = py_heap()
+    pvt = ""
+    if st["mode"] == "pvt":
+        ha = st["hacc"] if st["lat_i"] is not None else None
+        pvt = " ubx %d/%d hacc %s" % (st["ubx_ok"], st["ubx_bad"],
+                                     "-" if ha is None else "%.1f" % ha)
     _diag_write(
         "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
         "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s "
-        "heap %d" % (
+        "heap %d%s" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
             st["loops"], view, sv_used(), status().replace(" ", "_"),
             st["hdop"], log["points"], up["sent"],
             wifi["state"].replace(" ", "_"), wifi["pb_scans"],
-            pf, fr, big, pk))
+            pf, fr, big, pk, pvt))
 
 def checksum_ok(line):
     star = line.rfind(b"*")
