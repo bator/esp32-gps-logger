@@ -284,7 +284,17 @@ dBHz, elevation, azimuth, used), HDOP, GPS time, position, NMEA counts, the
 receiver model, receiver restarts; points logged, waiting and uploaded,
 quarantined `.bad` files, upload state, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON), boot cause, chip temperature, free heap and flash,
-WiFi, keep-alive pulses; and the last lines of the diagnostic log. It is
+WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
+page fits one phone screen: four tiles (fix with a green/amber/red dot and
+HDOP, satellites used/seen, points waiting for upload with the upload
+state, WiFi signal), a sky plot of the satellites (centre = overhead, edge
+= horizon, north up; colour = system: GPS blue, Galileo teal, BeiDou amber,
+GLONASS pink; filled = in the fix, hollow = not used, bigger = stronger)
+and one bar per satellite (height = signal, a full bar is 45 dBHz). The
+full list, the satellite table and the diagnostic log are folded under
+*Details*, *Satellites* and *Diagnostic log*; what you open stays open
+across the 15 s reloads. It follows the phone's dark mode; the page rounds
+HDOP to two decimals, the JSON keeps the receiver's value. It is
 plain HTTP without a password: keep it on your own network. The request
 head is read whole (up to 2 KB), the reply goes out in small pieces with
 the GPS read in between, and the free flash is measured at most every 30 s. For the page

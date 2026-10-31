@@ -3961,55 +3961,136 @@ def _web_json():
 def _web_html():
     return "".join(_web_html_parts())
 
+_CSS = (':root{--b:#f3f4f6;--c:#fff;--t:#1f2328;--m:#5f6670;--l:#e1e4e8}'
+        '@media(prefers-color-scheme:dark){:root{--b:#111317;--c:#1b1e23;'
+        '--t:#e6e8eb;--m:#9aa1aa;--l:#30353c}}'
+        'body{font:15px system-ui,sans-serif;margin:0 auto;padding:16px;'
+        'max-width:900px;background:var(--b);color:var(--t)}'
+        'h1{font-size:20px;margin:0}.m,small,summary,td:first-child,text'
+        '{color:var(--m);fill:var(--m)}.w{display:grid;gap:12px;margin:12px 0}'
+        '.k{display:grid;grid-template-columns:1fr 1fr;gap:12px}'
+        '.c,.k div,details{background:var(--c);border-radius:12px;'
+        'padding:12px 14px}b{display:block;font-size:24px;'
+        'font-variant-numeric:tabular-nums}'
+        '@media(min-width:720px){.w{grid-template-columns:1fr 1fr}'
+        '.s{grid-area:1/1/3/2}}svg{display:block;max-width:400px;margin:auto}',
+        '.a{fill:none;stroke:var(--l)}text{font-size:9px;text-anchor:middle}'
+        '[class^=g]{--s:#9ca3af}.g0{--s:#3b82f6}.g2{--s:#14b8a6}'
+        '.g3{--s:#f59e0b}.g6{--s:#ec4899}circle[class]{fill:var(--s);'
+        'stroke:var(--s);stroke-width:1.5}circle.u{fill:none}'
+        '.b{display:flex;flex-direction:column}.r{flex:1;display:flex;'
+        'align-items:flex-end;gap:2px;min-height:80px;margin-top:8px}'
+        '.r i{flex:1;min-height:2px;background:var(--s);border-radius:2px 2px'
+        ' 0 0;box-sizing:border-box}.r .u{background:none;border:1.5px solid'
+        ' var(--s)}.l span{white-space:nowrap;margin-right:10px}.l i{'
+        'display:inline-block;width:9px;height:9px;border-radius:5px;'
+        'margin-right:4px;background:var(--s)}.l .u{background:none;'
+        'border:1.5px solid var(--m);box-sizing:border-box}'
+        '.d0:before,.d1:before,.d2:before{content:"\\25cf";margin-right:6px;'
+        'color:#dc2626}.d1:before{color:#d97706}.d2:before{color:#16a34a}'
+        'details{margin-top:8px}summary{cursor:pointer}'
+        'table{border-collapse:collapse;width:100%;margin-top:8px}'
+        'td,th{padding:5px 4px;border-top:1px solid var(--l);text-align:left}'
+        'td+td{text-align:right;font-variant-numeric:tabular-nums}'
+        'pre{font-size:12px;overflow-x:auto}')
+
+def _sky(svs):
+    """The satellites on a polar sky plot: distance from the centre =
+    90 - elevation, angle = azimuth from north; filled = in the fix."""
+    out = ['<svg viewBox="-100 -100 200 200"><g class="a"><circle r="90"/>'
+           '<circle r="60"/><circle r="30"/><path d="M0-90V90M-90 0H90"/>'
+           '</g><text y="-92">N</text><text x="95" y="3">E</text>'
+           '<text y="99">S</text><text x="-95" y="3">W</text>']
+    for v in svs:
+        if v[2] is None or v[2] < 0:
+            continue
+        r = 90 - v[2]
+        a = math.radians(v[3])
+        out.append('<circle class="g%s%s" cx="%d" cy="%d" r="%d"><title>%s'
+                   ' %s dBHz</title></circle>' % (
+                       v[6], "" if v[4] else " u", r * math.sin(a),
+                       -r * math.cos(a), 3 + v[1] // 12, _sv_name(v),
+                       v[1] or "-"))
+    out.append("</svg>")
+    return out
+
 def _web_html_parts():
+    fix = status()
+    rssi = wifi.get("rssi")
+    svs = _sv_list()
+    age = _sv_age()
+    pos = None
+    if st["valid"] and st["lat"] is not None and st["lon"] is not None:
+        pos = "%.5f, %.5f" % (st["lat"], st["lon"])
     out = ['<!doctype html><html><head><meta charset="utf-8">'
            '<meta name="viewport" content="width=device-width,'
            'initial-scale=1"><meta http-equiv="refresh" content="%d">'
-           '<title>%s</title><style>'
-           'body{font:15px system-ui,sans-serif;margin:16px;max-width:640px;'
-           'background:#fafafa;color:#222}'
-           '@media(prefers-color-scheme:dark){body{background:#16181c;'
-           'color:#ddd}td{border-color:#333!important}}'
-           'h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:18px 0'
-           ' 4px;opacity:.7}table{border-collapse:collapse;width:100%%}'
-           'td{padding:4px 6px;border-bottom:1px solid #ddd}'
-           'td:last-child{text-align:right;font-variant-numeric:tabular-nums}'
-           'pre{font-size:12px;overflow-x:auto;white-space:pre}'
-           '</style></head><body><h1>%s</h1>' % (
-               WEB_REFRESH, _esc(DEVICE_ID), _esc(DEVICE_ID))]
+           '<title>%s</title><style>' % (WEB_REFRESH, _esc(DEVICE_ID))]
+    out += _CSS                          # two pieces, ~1 KB each
+    out.append('</style></head><body><h1>%s</h1><div class="m">up %s%s'
+               '</div><div class="w"><div class="k">' % (
+                   _esc(DEVICE_ID), _hms(uptime_s()),
+                   "" if pos is None else " &middot; " + pos))
+    for big, small in (
+            ('<span class="d%d">%s</span>' % (
+                2 if fix.startswith("3D") else 1 if "fix" in fix else 0,
+                _esc(fix)),
+             "HDOP " + ("-" if st["hdop"] is None else "%.2f" % st["hdop"])),
+            ("%s / %d" % (sv_used(), sv_seen()), "satellites used / seen"),
+            (up["left"], "to upload, " + _esc(up["state"])),
+            (_esc(wifi["state"]) if rssi is None else "%d dBm" % rssi,
+             _esc(wifi.get("ssid") or "WiFi"))):
+        out.append("<div><b>%s</b><small>%s</small></div>" % (big, small))
+    out.append('</div><div class="c s">')
+    out += _sky(svs)
+    out.append('<small class="l">')
+    for g, name in ((0, "GPS"), (2, "Galileo"), (3, "BeiDou"),
+                    (6, "GLONASS"), (1, "other"), ("1 u", "not used")):
+        out.append('<span><i class="g%s"></i>%s</span>' % (g, name))
+    out.append('</small></div><div class="c b"><small>Signal per satellite'
+               ' (dBHz, full bar 45)%s'
+               '</small><div class="r">' % (
+                   "" if age is None else ", list %s old" % _hms(age)))
+    for v in svs:
+        out.append('<i class="g%s%s" style="height:%d%%" title="%s %s dBHz">'
+                   '</i>' % (v[6], "" if v[4] else " u", min(v[1] * 100 // 45, 100),
+                             _sv_name(v), v[1] or "-"))
+    if not svs:
+        out.append("<small>No satellite list from the receiver yet.</small>")
+    out.append("</div></div></div><details><summary>Details</summary><table>")
     sec = None
     for s_, label, key, v in _web_rows():
         if key == "uptime":
             v = _hms(v)                  # the JSON keeps seconds
         elif key == "prev_uptime":
             v = _prev_text()
+        elif key == "hdop" and v is not None:
+            v = "%.2f" % v
         if s_ != sec:
-            out.append("%s<h2>%s</h2><table>" % ("</table>" if sec else "",
-                                                  s_))
+            out.append('<tr><th colspan="2">%s</th></tr>' % s_)
             sec = s_
         out.append("<tr><td>%s</td><td>%s</td></tr>" % (label, _esc(v)))
-    age = _sv_age()
-    out.append("</table><h2>Satellites%s</h2>" % (
-        "" if age is None else " <small>(list %s old)</small>" % _hms(age)))
-    svs = _sv_list()
-    if svs:
-        out.append("<table><tr><td>Satellite</td><td>Signal (dBHz)</td>"
-                   "<td>Elevation</td><td>Azimuth</td><td>Used</td></tr>")
-        for v in svs:
-            out.append("<tr><td>%s%s</td><td>%s</td><td>%s</td>"
-                       "<td>%s</td><td>%s</td></tr>" % (
-                           _sv_name(v), " (unhealthy)" if v[5] else "",
-                           v[1] if v[1] else "-",
-                           "-" if v[2] is None else "%d&deg;" % v[2],
-                           "-" if v[2] is None else "%d&deg;" % v[3],
-                           "yes" if v[4] else ""))
-        out.append("</table>")
-    else:
-        out.append("<p>No satellite list from the receiver yet.</p>")
-    out.append("<h2>Diagnostic log</h2><pre>")
+    out.append("</table></details><details><summary>Satellites (%d used "
+               "of %d)</summary><table><tr><th>Satellite</th><th>dBHz</th>"
+               "<th>Elev</th><th>Azim</th><th>Used</th></tr>" % (
+                   len([v for v in svs if v[4]]), len(svs)))
+    for v in svs:
+        out.append("<tr><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                   "<td>%s</td></tr>" % (
+                       _sv_name(v), " (unhealthy)" if v[5] else "",
+                       v[1] if v[1] else "-",
+                       "-" if v[2] is None else "%d&deg;" % v[2],
+                       "-" if v[2] is None else "%d&deg;" % v[3],
+                       "yes" if v[4] else ""))
+    out.append("</table></details><details><summary>Diagnostic log</summary>"
+               "<pre>")
     for line in _web_diag():
         out.append(_esc(line) + "\n")
-    out.append("</pre></body></html>")
+    # the reload keeps what was opened
+    out.append("</pre></details><script>document.querySelectorAll('details')"
+               ".forEach(function(e,i){try{e.open=sessionStorage['d'+i]=='1'"
+               ";e.ontoggle=function(){sessionStorage['d'+i]=e.open?1:''}}"
+               "catch(x){}})</script></body></html>")
     return out
 
 def _web_read(c):
@@ -4051,11 +4132,11 @@ def _web_reply(c, req):
     # (measured: 7 KB took 5 s and the next requests timed out)
     buf = bytearray()
     for b in body:
-        buf += b
-        if len(buf) >= WEB_CHUNK:
+        if buf and len(buf) + len(b) > WEB_CHUNK:
             c.sendall(buf)
             buf = bytearray()
             read_uart()                  # a slow client costs no NMEA
+        buf += b
     if buf:
         c.sendall(buf)
 

@@ -4786,15 +4786,16 @@ try:
         waited = _clock[0] - t0
     finally:
         _uart_sv[0] = None
+    sv_tbl = page[page.find("<summary>Satellites"):]
     check("SATS: a page view asks the receiver and lists the satellites",
-          p_page == 1 and "<h2>Satellites <small>(list 0 s old)</small></h2>"
-          in page
+          p_page == 1 and ", list 0 s old</small>" in page
+          and "<summary>Satellites (" in page
           and "<td>GPS 12</td><td>38</td><td>54&deg;</td><td>10&deg;</td>"
               "<td>yes</td>" in page
           and "SBAS 123 (unhealthy)" in page
-          and page.index("GPS 5") < page.index("GPS 12")
-              < page.index("SBAS 123") < page.index("GPS 25"),
-          page[page.find("Satellites"):page.find("Satellites") + 400])
+          and sv_tbl.index("GPS 5") < sv_tbl.index("GPS 12")
+              < sv_tbl.index("SBAS 123") < sv_tbl.index("GPS 25"),
+          sv_tbl[:400])
     check("SATS: a list younger than SV_FRESH is not asked for again; JSON",
           p_again == 1 and jd["satellites"][0]["name"] == "GPS 5"
           and jd["satellites"][1] == {"name": "GPS 12", "system": "GPS",
@@ -4878,14 +4879,15 @@ try:
           and m10_svs[2][4] is True and m10_svs[2][5] is True
           and m10_svs[3][4] is False and m10_svs[0][5] is False
           and seen_m10 == 3, "%r seen=%r" % (m10_svs, seen_m10))
+    sv_tbl = page[page.find("<summary>Satellites"):]
     check("M10: page lists GPS/Galileo/BeiDou/GLONASS names",
-          "<td>GPS 7</td><td>41</td>" in page and "Galileo 11" in page
-          and "BeiDou 22 (unhealthy)" in page and "GLONASS 3" in page
-          and page.index("GPS 7") < page.index("Galileo 11")
-              < page.index("BeiDou 22") < page.index("GLONASS 3")
-          and "<td>BeiDou 33</td><td>-</td><td>-</td><td>-</td>" in page
+          "<td>GPS 7</td><td>41</td>" in sv_tbl and "Galileo 11" in sv_tbl
+          and "BeiDou 22 (unhealthy)" in sv_tbl and "GLONASS 3" in sv_tbl
+          and sv_tbl.index("GPS 7") < sv_tbl.index("Galileo 11")
+              < sv_tbl.index("BeiDou 22") < sv_tbl.index("GLONASS 3")
+          and "<td>BeiDou 33</td><td>-</td><td>-</td><td>-</td>" in sv_tbl
           and "-91" not in page,
-          page[page.find("<h2>Satellites"):page.find("<h2>Satellites") + 500])
+          sv_tbl[:500])
     check("M10: the receiver model from MON-VER is on the page and in JSON",
           "u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10" in page
           and jd.get("receiver") == "u-blox M10, ROM SPG 5.10 (7b202e), "
@@ -6464,6 +6466,59 @@ gl.gps_check(_clock[0])
 sent = len([f for f in _uart_tx if f[2:3] == b"\x06"]) > 0
 check("GPS-STORM-END: after the storm the setup comes within ~15 s, not 30-60",
       storm_wait == gl.GPS_STORM_WAIT and sent, "%r %r" % (storm_wait, sent))
+
+
+# STYLE: status page - tiles, sky plot, signal bars, folded details
+gl.reset()
+gl.up_reset()
+gl.wifi_reset()
+gl.st.update(rx=_clock[0], valid=True, fixtype=3, quality=1,
+             hdop=0.88199996, lat=47.1, lon=18.4)
+gl.st["svs"] = [(16, 26, 0, 90, True, False, 0),
+                (11, 12, 90, 250, False, False, 3),
+                (5, 0, None, 0, False, False, 1)]
+gl.st["svs_at"] = _clock[0]
+gl.up["left"] = 120
+gl.wifi.update(state="connected", ssid="<x>", rssi=-75)
+page = gl._web_html()
+jd = json.loads(gl._web_json())
+tiles = page[page.find('<div class="k">'):page.find('<div class="c s">')]
+gl.st["valid"] = False
+gl.wifi.update(state="off", ssid=None, rssi=None)
+tiles2 = gl._web_html()
+gl.st["rx"] = None
+tiles3 = gl._web_html()
+check("STYLE: four tiles - fix with a green dot and HDOP, sats, queue, WiFi",
+      '<b><span class="d2">3D fix</span></b><small>HDOP 0.88</small>' in tiles
+      and "<b>1 / 2</b><small>satellites used / seen</small>" in tiles
+      and "<b>120</b><small>to upload, idle</small>" in tiles
+      and "<b>-75 dBm</b><small>&lt;x&gt;</small>" in tiles
+      and tiles.count("<div><b>") == 4
+      and '<div class="m">up ' in page and "&middot; 47.10000, 18.40000"
+      in page, tiles)
+check("STYLE: waiting fix is amber, no data red; WiFi off shows the state",
+      '<span class="d1">Waiting fix</span>' in tiles2
+      and "<b>off</b><small>WiFi</small>" in tiles2
+      and "&middot; 47.1" not in tiles2
+      and '<span class="d0">No data!</span>' in tiles3, tiles2[:1500])
+check("STYLE: sky plot - horizon at r 90 east, zenith centre, hollow unused",
+      '<circle class="g0" cx="90" cy="0" r="5"><title>GPS 16 26 dBHz'
+      in page and '<circle class="g3 u" cx="0" cy="0" r="4">' in page
+      and "SBAS 5 - dBHz</title></circle>" not in page,
+      page[page.find("<svg"):page.find("</svg>")])
+check("STYLE: one bar per satellite (45 dBHz full, stub for none)",
+      '<i class="g0" style="height:57%" title="GPS 16 26 dBHz">' in page
+      and '<i class="g3 u" style="height:26%"' in page
+      and '<i class="g1 u" style="height:0%" title="SBAS 5 - dBHz">' in page,
+      page[page.find('class="r"'):page.find('class="r"') + 400])
+check("STYLE: details folded, HDOP rounded on the page only, JSON intact",
+      page.count("<details><summary>") == 3
+      and "<td>HDOP</td><td>0.88</td>" in page and jd["hdop"] == 0.88199996
+      and "<summary>Satellites (1 used of 3)</summary>" in page
+      and "sessionStorage" in page)
+check("STYLE: dark mode and phone layout in the stylesheet",
+      "prefers-color-scheme:dark" in page and "min-width:720px" in page
+      and 'name="viewport"' in page)
 
 print()
 print("%d passed, %d failed" % (passed, failed))
