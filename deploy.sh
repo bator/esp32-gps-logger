@@ -33,7 +33,22 @@ case "$MACHINE" in
 esac
 echo "Board: $MACHINE ($ARCH)"
 
-$PY -m mpy_cross -march="$ARCH" -o gps_logger.mpy gps_logger.py
+# A firmware built by tools/build_firmware.sh has the logger frozen in (and
+# a gps_frozen marker): a gps_logger.mpy on flash would shadow it and bring
+# its ~60 KB back into the Python heap, so only main.py and web.html go up
+FROZEN=$($MPREMOTE connect "$PORT" exec "
+try:
+    import gps_frozen
+    print('frozen', gps_frozen.COMMIT)
+except ImportError:
+    print('plain')" | tr -d '\r' | grep -E '^(frozen|plain)' | tail -n 1 || true)
+case "$FROZEN" in
+    frozen*)
+        FILES="main.py web.html"
+        echo "Firmware has the logger frozen in (${FROZEN#frozen }): main.py and web.html only;"
+        echo "tools/build_firmware.sh --flash updates the logger itself" ;;
+    *) $PY -m mpy_cross -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
+esac
 
 # Free flash, after dropping the .new files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
@@ -110,7 +125,8 @@ for n in '$FILES'.split():
     except OSError:
         os.remove(n)
         os.rename(n + '.new', n)
-'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')" \
+'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
+'$FROZEN'.startswith('frozen') and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
     + reset

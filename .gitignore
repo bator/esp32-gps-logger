@@ -221,3 +221,6 @@ __marimo__/
 
 # MicroPython precompiled modules
 *.mpy
+
+# Custom firmware build output and app backups (tools/build_firmware.sh)
+firmware/
