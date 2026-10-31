@@ -198,8 +198,9 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | Line | Meaning |
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
+| `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup the receiver still sends one fix a second, or no `GST`: it is set up again |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
-| `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring |
+| `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring. The diagnostic log gets the first one, then `gps reset loop N more windows` every 5 minutes and when it ends |
 | `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds |
 | `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
@@ -256,10 +257,14 @@ line a minute, a `stay left wifi` line when an away stay ends without a fix
 (see [Stays](#stays)), `gps reset loop …` lines (when the receiver keeps
 restarting, so they can be set against where you were), `upload err …`
 and `upload aborted …` lines, a `reboot tls memory` line before a TLS
-memory reboot, and a `crash` line before a crash reset. Past 32 KB the file
-becomes `/diag.1` (the older one is dropped), so the two hold about 7 hours
-at one line a minute; below the 32 KB flash reserve nothing is written.
-minute. After a walk, plug the board in and read it:
+memory reboot, and a `crash` line before a crash reset. A reset loop that
+goes on writes its first warning, then `gps reset loop N more windows`
+every 5 minutes (`GPS_LOOP_SAY`) and once when it ends, not a line every
+10 s. Past 32 KB the file becomes `/diag.1` (the older one is dropped), so
+the two hold about 7 hours at one line a minute; below the 32 KB flash
+reserve nothing is written. The status page shows the last 15 lines
+(`WEB_DIAG`), right after the switch to `/diag.1` from both files. After a
+walk, plug the board in and read it:
 
 ```bash
 .venv/bin/mpremote resume fs cat :/diag.log
@@ -348,7 +353,9 @@ console line.
 - **Setup retries.** It is sent again while the receiver still sends the
   sentences it turns off, and also while the setup is not acknowledged (an
   ACK lost, a silent receiver that took the blind burst), less and less
-  often.
+  often. 10 s after an acknowledged setup (`GPS_VERIFY`) it is checked: valid
+  seconds still at one fix each, or NMEA but no `GST` (without it the
+  `GPS_MAX_STD` filter is off), count as not taken, and it is sent again.
 - **Receiver filter** (UBX-CFG-NAV5, sent right after the 1 Hz frame):
   portable dynamic model (`GPS_DYN_MODEL`, `.env` `GPS_MODEL`: 3
   pedestrian, 4 automotive, …), 3D fixes only
@@ -367,7 +374,9 @@ console line.
   e.g. EGNOS 120–158) and UBX-NAV-SAT (M8 and later, with the system of
   each satellite; an M10 knows only this one; elevation `-` while its
   position is not known yet), then only the one that
-  answered. The binary answer is cut out of the NMEA stream by its length.
+  answered. The binary answer is cut out of the NMEA stream by its length;
+  sync bytes with a bad checksum (junk) are skipped alone, so the NMEA
+  after them is still read. A poll due with a setup goes right after it.
   UBX-MON-VER is asked for with it until the receiver names its model. A
   receiver restart (also a module swapped while running) forgets the list,
   the message and the model, so a new receiver is asked anew.
@@ -375,16 +384,23 @@ console line.
   (UBX-ACK, up to 4 tries). It starts with a switch to 1 Hz, and 5 Hz is
   asked only once every message frame was acknowledged. Reason: at 5 Hz with
   all sentences on, the receiver's output overruns 9600 baud, and then it
-  drops incoming frames (measured).
+  drops incoming frames (measured). What is read while it waits for an ACK
+  goes through the normal parser: the NMEA seconds are kept, and a start-up
+  banner counts as a restart (it is set up again).
 - **When it does not answer:** the message frames are sent once without
   waiting and the rate is left alone. If a frame goes unanswered mid-setup,
   the rest goes out the same way and it stays at 1 Hz. A setup blocks the
-  loop about 4 s at most.
+  loop about 4 s at most (`GPS_SETUP_MAX`): an overrun receiver whose ACKs
+  come seconds late took 10-30 s, so what is not acknowledged by then goes
+  out once without waiting, as if it did not answer.
 - **Retries.** While sentences it turned off keep coming, the setup is sent
   again: after 5 s, and for a receiver that never answers less and less often
-  (up to 5 minutes). A start-up banner (power dip) sets it up again at once.
-  A receiver that ignores everything (or an unwired ESP TX) stays at 1 Hz,
-  and each second's average is then that one fix.
+  (up to 5 minutes). One that acknowledges every setup but keeps sending
+  them gets the second retry after 5 s too, then 10, 20, 40 s and every
+  minute (`GPS_IGNORED_MAX`). A start-up banner (power dip) sets it up again
+  at once and starts that backoff afresh. A receiver that ignores everything
+  (or an unwired ESP TX) stays at 1 Hz, and each second's average is then
+  that one fix.
 - **Averaging.** The valid `GGA` positions, altitude and HDOP of each UTC
   second are averaged and published when the next second starts (`RMC`
   positions if a second had no `GGA`). `GST` gives the receiver's own error
@@ -676,7 +692,10 @@ with a NEO-6M; most never need changing.
 | `GPS_STORM_WAIT` / `GPS_STORM_QUIET` | 30 s / 10 s | Least time between setups while the receiver keeps restarting; quiet this long after a restart and it is set up within `GPS_RETRY` |
 | `AVG_MAX_SPEED` | 10 km/h | Faster than this a second's point is its first fix, not the mean |
 | `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
-| `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling only while it does not answer) |
+| `GPS_SETUP_MAX` | 4 s | Longest a setup blocks the loop; frames not acknowledged by then go out once without waiting |
+| `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling while it does not answer) |
+| `GPS_IGNORED_MAX` / `GPS_VERIFY` | 60 s / 10 s | Cap on the doubling wait for a receiver that acknowledges but ignores the setup; when an acknowledged setup is checked (still 1 fix/s or no `GST` = not taken) |
+| `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP |
 | `GPS_MAX_STD` | 20 m | Skip samples with a worse GST error estimate |
