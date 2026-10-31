@@ -128,7 +128,7 @@ HOSTNAME=Dawarich-GPS-tracker
 |-----|---------|
 | `SSID`, `WPA2` / `SSID2`, `WPA2_2` / `SSID3`, `WPA2_3` | Networks #1–#3 |
 | `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` | `1`/`0` (or `true`/`false`): treat as home. #1 is home by default, #2 and #3 are not. |
-| `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried even when the scan does not list it |
+| `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried in every round although the scan never lists it. Set it for every hidden network: without it a hidden SSID is tried only in the first round after a link loss, a wake or an arrival, and then every 4th round (up to ~40 minutes apart). |
 | `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a console message. |
 | `GEO_URL` | Dawarich origin. Use `https://`; see [Upload](#upload). |
 | `API_KEY` | Dawarich API key, sent as `Authorization: Bearer <key>` |
@@ -136,7 +136,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `HOSTNAME` | DHCP hostname, `[A-Za-z0-9-]{1,32}` (defaults to `DEVICE_ID`) |
 | `KEEPALIVE` | Seconds between power bank keep-alive pulses, 5–600; `0` turns it off (e.g. on a car charger). Default 5. |
 | `KEEPALIVE_MODE` | What a pulse is: `scan` (default: a full WiFi scan, ~2 s), `radio` (the radio switched on and off, ~0.2 s; too little for a bank that averages the load), `gpio` (the keep-alive pin high for 0.1 s, for a load resistor). |
-| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin the board already uses (GPS TX/RX, I2C, the boot-bypass pin 25 / C6: 10, the C6's USB pins 12/13) is refused with a console line and the default kept. A pin that cannot be driven falls back to `scan`. |
+| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin the board already uses (GPS TX/RX, I2C, the boot-bypass pin 25 / C6: 10, the C6's USB pins 12/13) or the chip needs (ESP32: strapping pin 0, UART0 1/3, SPI flash 6–11; C6: strapping pins 8/9, UART0 16/17, SPI flash 24–30) is refused with a console line and the default kept. A pin that cannot be driven falls back to `scan`. |
 | `KEEPALIVE_CONNECTED` | `1`/`0`: pulses also while connected and idle (a power bank at home with the status page on); `scan` or `gpio`, a scan keeps the link. Default 0. |
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
@@ -179,13 +179,16 @@ PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 The script asks the board which chip it is, compiles `gps_logger.py` to
 `gps_logger.mpy` for it and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
-It copies `gps_logger.mpy`, `main.py` and the status page `web.html` as
+It makes `web.html.gz` (`gzip -9 -n web.html`: ~9 KB instead of ~24 KB,
+what browsers get) and copies `gps_logger.mpy`, `main.py`, the status page
+`web.html` and `web.html.gz` as
 `<name>.new`, checks their size and SHA-256 on the board, and only then
 renames them over the old files; a failed check (`Copy check FAILED`)
 removes the `.new` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module. Then it
 removes a stray `gps_logger.py`, clears the boot-fail counter and resets
-the board.
+the board. When it cannot tell whether the firmware has the logger frozen
+in (no clear answer from the board), it stops instead of guessing.
 
 The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, and
@@ -213,17 +216,36 @@ It needs ESP-IDF v5.5.2 and a MicroPython v1.29.0 tree (by default
 ```bash
 tools/build_firmware.sh                          # build only
 PORT=/dev/ttyACM0 tools/build_firmware.sh --flash
-PORT=/dev/ttyACM0 ./deploy.sh                    # main.py and web.html
+PORT=/dev/ttyACM0 ./deploy.sh                    # main.py and the page
 ```
 
-`--flash` refuses to flash when the board's partition table differs from
-the build's. Otherwise it backs up the app partition to `firmware/`,
-removes the `gps_logger.mpy` that would shadow the frozen module, and
-writes only the app at 0x10000: the bootloader, the partition table and the
-file system (`.env`, tracks) stay as they are. The firmware also carries a
-small `gps_frozen` module. When `deploy.sh` finds it, it copies only
-`main.py` and `web.html` and removes a stray `gps_logger.mpy`. A logger
-change then means building and flashing the firmware again. To roll back,
+Freezing does not stop the Python heap from growing into the IDF heap
+(MicroPython's split heap stays on); it leaves so much of the 64 KB heap
+free that an allocation rarely has to.
+
+`--flash` first checks the board's partition table and refuses to flash
+when it differs from the build's. Then it backs up the app partition to
+`firmware/` and writes only the app at 0x10000: the bootloader, the
+partition table and the file system (`.env`, tracks) stay as they are.
+Nothing on the file system is touched before the write, so a failed check
+or write leaves the board as it was. Run `./deploy.sh` right after: it
+removes the old `gps_logger.mpy` (until then it shadows the frozen module
+and runs as before) and any stray `gps_logger.py` (`''` comes first in
+`sys.path`), and clears the boot-fail counter. Right after esptool's reset
+the raw REPL may not answer for a while; if `deploy.sh` cannot reach the
+board, run it again.
+
+The firmware also carries a small `gps_frozen` module with the commit
+(`-dirty` when the tree had uncommitted changes) and the SHA-256 of the
+frozen `gps_logger.py`. When `deploy.sh` finds it, it copies only `main.py`
+and the page and removes a stray `gps_logger.mpy`, but first compares that
+SHA-256 with the repo's `gps_logger.py`: when they differ (or a firmware
+built before the SHA was recorded) it stops and asks for
+`tools/build_firmware.sh --flash`; `FORCE=1 ./deploy.sh` deploys main.py
+and the page anyway. A logger change means building and flashing the
+firmware again. In an emergency `FORCE_MPY=1 ./deploy.sh` installs
+`gps_logger.mpy` on a frozen firmware too, with a warning: it shadows the
+frozen module and takes its ~60 KB of Python heap again. To roll back,
 write the backup with the `esptool.py` command `--flash` prints, then run
 `./deploy.sh`.
 
@@ -240,10 +262,11 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | Line | Meaning |
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
-| `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup the receiver still sends one fix a second, or no `GST`: it is set up again |
+| `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
+| `gps setup unverified: no fix` | 30 minutes after an acknowledged setup still no fix to check it by: no verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
 | `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring. The diagnostic log gets the first one, then `gps reset loop N more windows` every 5 minutes and when it ends |
-| `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds |
+| `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds. It counts as over after a quiet of twice its last gap between restarts (10-30 s) |
 | `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
@@ -307,14 +330,19 @@ To queue a `.bad` again:
 the board is on a power bank, so the logger also appends to `/diag.log` on
 flash: a `boot cause N` line at every start, a `gps <model>` line once
 the receiver says what it is (UBX-MON-VER, e.g. `gps u-blox M10, ROM SPG
-5.10 (7b202e), PROTVER=34.10`; again after a receiver restart), one status
-line a minute, a `stay left wifi` line when an away stay ends without a fix
-(see [Stays](#stays)), `gps reset loop …` lines (when the receiver keeps
-restarting, so they can be set against where you were), `upload err …`
+5.10 (7b202e), PROTVER=34.10`; after a receiver restart only if the model
+changed), one status line a minute, a `stay left wifi` line when an away
+stay ends without a fix (see [Stays](#stays)), `gps reset loop …` lines
+(when the receiver keeps restarting, so they can be set against where you
+were), `gps setup not taken: …` (at most one per 10 minutes,
+`GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
-when a POST waits for memory, `heap grew in <step> to N KB` when the
-Python heap grew during an upload step (`read_batch`, `tls_wrap`,
-`http_post`: the step that took IDF heap), a `reboot tls memory` or
+when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
+used, `clock set <UTC>` once a boot when the board clock is set from the
+GPS, `heap grew in <step> to N KB` when the
+Python heap grew during an upload step (`read_batch`, `connect`,
+`tls_wrap`, `post`, the whole POST: the step that took IDF heap), a
+`reboot tls memory` or
 `reboot low idf N KB S s` line before such a reboot, and a `crash` line
 before a crash reset. A reset loop that goes on writes its first warning,
 then `gps reset loop N more windows` every 5 minutes (`GPS_LOOP_SAY`) and
@@ -380,7 +408,11 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
 it the page shows the grid and the system font. The page is a file on the
-board (`/web.html`, copied by `deploy.sh`) and loads once; then it asks
+board (`/web.html`, copied by `deploy.sh`) and loads once; a browser
+(`Accept-Encoding: gzip`) gets `/web.html.gz` instead, ~9 KB instead of
+~24 KB, so it loads in a third of the sends; clients without gzip (curl
+without `--compressed`) and a board without the `.gz` get `web.html`. Copy
+both when you change the page by hand (or remove `/web.html.gz`); then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
 only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
@@ -398,7 +430,8 @@ router's DNS gives it, e.g. `….lan`, is refused too). Only a `GET` is
 answered; an empty or cut-off request is just closed. The request head is
 read whole (up to 2 KB), the reply goes out in small pieces with the GPS
 read in between; each receive or send may wait 2 s (`WEB_TIMEOUT`) and the
-whole request 5 s (`WEB_DEADLINE`), then the client is dropped, so a slow
+whole request 5 s (`WEB_DEADLINE`, which also cuts the waits short near
+its end), then the client is dropped, so a slow
 phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
 measured at most every 30 s (also for the OLED) and the waiting files are
 counted at most every 10 s. For the page
@@ -428,6 +461,10 @@ console line.
   often. 10 s after an acknowledged setup (`GPS_VERIFY`) it is checked: valid
   seconds still at one fix each, or NMEA but no `GST` (without it the
   `GPS_MAX_STD` filter is off), count as not taken, and it is sent again.
+  Only valid seconds tell: before the first fix (a setup at boot, indoors,
+  where an M10 may send no `GST` either) the check waits for 3 of them, up
+  to 30 minutes (`GPS_VERIFY_MAX`). It counts as taken only with 5 fixes a
+  second and `GST`.
 - **Receiver filter** (UBX-CFG-NAV5, sent right after the 1 Hz frame):
   portable dynamic model (`GPS_DYN_MODEL`, `.env` `GPS_MODEL`: 3
   pedestrian, 4 automotive, …), 3D fixes only
@@ -493,7 +530,9 @@ console line.
 - **Filter.** Skipped: fresh HDOP above 5, or a GST estimate above 20 m (the
   larger of latitude and longitude, 1σ). A cold start can show a good HDOP
   while the position walks in from far away (measured: 230 m, over 65 s); GST
-  catches it. 2D fixes omit altitude.
+  catches it. 2D fixes omit altitude. A fix dated before 2020 or from 2088
+  on is not used at all: a receiver past a GPS week rollover reports 1999
+  (read as 2099) or 2000.
 - **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
   line (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop
   empty when unknown), `-` for a new segment and an `#END` footer. Reading
@@ -506,7 +545,9 @@ console line.
   by a power loss is skipped on read.
 - **Segments and files.** A short fix loss starts a new segment (the `-`
   goes before the first point after it; every loss gets its own, also while
-  the points before it are still held in RAM). A loss over 5 minutes starts
+  the points before it are still held in RAM or writes keep failing: losses
+  whose points were dropped from a full batch share one). A loss over 5
+  minutes starts
   a new file: the old track is closed so it uploads. Only while flash writes
   keep failing does the new trip go on in the same file, after a `-`. Lines
   a stay still being proven held from before the loss move on to the new
@@ -549,13 +590,21 @@ tell a stay from a drive, so the stay filter works on positions.
   walk). A multipath jump that freezes 200 m away does neither, however long
   it lasts, and an excursion that turns back does not count. The way out is
   written from near the anchor, from the last 90 samples, in time order
-  (kept in preallocated arrays, 24 bytes a sample: as line tuples they took
-  ~20 kB of the heap and broke uploads).
+  (kept in preallocated arrays, 28 bytes a sample: as line tuples they took
+  ~20 kB of the heap and broke uploads). Each line is rebuilt exactly as it
+  would have been written then, the board's single-precision rounding
+  included.
 - **Leaving after a fix gap** (over 30 s; a metro or a garage, then sitting
-  still elsewhere): a fix more than 300 m from the anchor, or 3 in a row
-  beyond 150 m, ends the stay without waiting for them to recede, and the
-  way out starts there. Before, nothing receded, so the stay went on and
-  nothing was written at the new place. Leaving home keeps its check below.
+  still elsewhere): beyond 150 m the stay ends without waiting for the fixes
+  to recede once the device clearly sits elsewhere: 10 fixes within 50 m of
+  the first of them over 60 s (`STILL_GAP_STAY`), or one fix more than 1 km
+  out (`STILL_GAP_JUMP`, beyond any multipath jump). Fixes coming closer do
+  not count (a cold start converging walks in), and a receding run leaves
+  as usual. The way out starts at the first fix after the gap. Before,
+  nothing receded, so the stay went on and nothing was written at the new
+  place; and when one fix beyond 300 m or 3 beyond 150 m ended it, a single
+  outlier, a jump frozen for 3 s or a cold start walking in wrote a spike.
+  Leaving home keeps its check below.
 - **Leaving without a fix** (away from home). The first 3 WiFi scans of the
   stay (keep-alive pulses, roam and connect rounds) note the access points
   around; later scans that see one of them add the others seen with it (a
@@ -563,7 +612,9 @@ tell a stay from a drive, so the stay filter works on positions.
   and locally administered BSSIDs (phone hotspots, a train's WiFi) are left
   out, since they travel along. When none of them shows up in 6 scans in a
   row over at least 60 s, the stay ends (`stay left, wifi`): no more anchor
-  points at the old place. Before, a train ride home without a fix kept
+  points at the old place. A way out is written only if the last fix was
+  more than 50 m from the anchor; otherwise the recent fixes are the stay's
+  drift. Before, a train ride home without a fix kept
   writing the old anchor every 5 minutes until home. Where no access point
   is around while learning, or with no scans (keep-alive `gpio`/`radio` or
   off, the radio connected), only a fix ends the stay, or:
@@ -587,7 +638,11 @@ tell a stay from a drive, so the stay filter works on positions.
   further departures wait 60 s.
 - **After a fix gap** (over 30 s): fixes more than 150 m from the open window
   restart both windows; more than 50 m restart only the open one, so two
-  places are never mixed while what it held stays held.
+  places are never mixed while what it held stays held. The previous window
+  is dropped on its own when the fix is more than 150 m from it. Each gap is
+  judged once: a fix back after 5 minutes judged it before the old track
+  closed and again right after, and the second verdict released into the
+  new file the old place's drift the first had held over.
 - A walk (1.4 m/s) is never a stay: its centroid moves on by more than 50 m a
   minute.
 
@@ -598,15 +653,17 @@ tell a stay from a drive, so the stay filter works on positions.
 1. Scan once, keep the strongest BSSID per SSID.
 2. Try a home AP at ≥ −75 dBm first, then other visible known APs, strongest
    first, then configured networks the scan missed, in config order: hidden
-   ones every round, the others in the first round and every 4th
+   ones every round, the others in the first round (at boot, and again after
+   a link loss, a wake from sleep or a new stay) and every 4th
    (`UNLISTED_EVERY`), since each costs a 12 s try with the radio on. A
    hidden home is preferred when the scan shows a strong empty-SSID AP. If
    the scan fails, every network is tried in config order.
 3. Each try is polled from the main loop (~12 s deadline), so GPS sampling
-   goes on. An AP seen at ≥ −75 dBm (a hidden home: the strong empty-SSID
-   AP) gets one immediate retry: on the C6 the first association after a
-   cold boot often fails after ~7.5 s with status 202 although the password
-   is right, and the retry connects within ~1 s.
+   goes on. An AP seen at ≥ −75 dBm (a hidden home: one of its learned
+   BSSIDs at ≥ −75 dBm, not a stranger's blank AP) gets one immediate retry:
+   on the C6 the first association after a cold boot often fails after
+   ~7.5 s with status 202 although the password is right, and the retry
+   connects within ~1 s.
    Otherwise the SSID is marked failed for 2 minutes and the next one is
    tried. A leftover fail reason from the previous SSID (MicroPython 1.29) is
    not taken as this attempt failing.
@@ -624,12 +681,15 @@ tell a stay from a drive, so the stay filter works on positions.
   stay that began at home stays a home stay while the radio sleeps.
 - If no network is found and there is something to upload, it retries with
   backoff (15 s doubling to 10 minutes) until one connects, the radio off in
-  between; with nothing to upload it sleeps. With `WEB` on and a keep-alive
-  that does not scan (`gpio`, `radio` or off), it searches on with that
-  backoff for 30 minutes (`WEB_SEARCH`) after the link went down, so the page
-  comes back after a router restart instead of an hour later.
+  between; with nothing to upload it sleeps. With `WEB` on and no keep-alive
+  scan that could see home come back (`gpio`, `radio` or off, or a hidden
+  home whose BSSIDs are not learned yet), it searches on with that backoff
+  for 30 minutes (`WEB_SEARCH`) after the link went down, so the page comes
+  back after a router restart (or a router booting slower than the board)
+  instead of an hour later.
 - Without `GEO_URL`/`API_KEY` nothing is ever sent, so the radio sleeps once
-  idle as if all were uploaded.
+  idle as if all were uploaded, and waiting tracks do not make it search
+  away from home.
 - While uploads back off (server down, 5xx, 401) the radio stays on only
   for a short backoff. Once the next attempt is `WIFI_OFF_WAIT` (60 s) or
   more away it is turned off (`wifi off until upload retry`) and a round
@@ -666,26 +726,37 @@ for an hour. At most once a minute, doubling while those rounds fail.
 160 MHz (`CPU_MHZ_UP`) so the TLS handshake stays quick, then the clock
 drops back. The UART runs off the fixed APB clock, so 9600 baud is unaffected.
 `CPU_MHZ=0` leaves the firmware default. A failed clock change is tried
-again (3 tries); only a clock refused every time is left alone for good.
+again (3 tries); a clock refused every time is left alone for 30 minutes
+(`FREQ_RETRY`), then tried again, so one passing failure of the drop-back
+after a POST does not keep the board at 160 MHz.
 
 **Roaming home:** on a non-home network, when nearly stopped (speed below
 5 km/h, or in a stay), the logger scans for home every 5 minutes and switches
 to a home AP at ≥ −75 dBm. It backs off to 60 minutes only after a failed
 switch to a visible home; stopping after a drive resets that only when a
 visible home is in view. A hidden home is tried with `bssid=None` (matched by
-SSID) when a strong empty-SSID AP is seen; a neighbour's hidden AP can cause
-a false attempt, and switching to a hidden home can be slower.
+SSID) when a strong empty-SSID AP is seen, learned or not (another node of a
+mesh may not be learned yet); a neighbour's hidden AP can cause a false
+attempt, and switching to a hidden home can be slower.
 
-**Hidden home:** while connected to it the logger learns its BSSID (one scan:
-the only empty-SSID AP on the link's channel within 8 dB of its RSSI; up to
-4 kept, in RAM). Once learned, only those count as the hidden home for
-roaming, the boot preference, "home in range" (stay departures) and the
-keep-alive wake, so a neighbour's hidden AP no longer cancels a departure.
-Until then (after a reboot, or with two candidates in that scan) any strong
-empty-SSID AP counts, as before. A failed hidden-home try skips that AP for
-an hour (cleared when the hidden home connects), and failed hidden-home
-roams back off on their own (10 minutes doubling to 60) without slowing the
-check for a visible home.
+**Hidden home:** while connected to it (and only then) the logger learns
+the BSSID it is on: one scan, the record the IDF names with the hidden SSID
+if it shows one, else the only empty-SSID AP on the link's channel within
+8 dB of its RSSI. Connected through another node, that one is learned too.
+Up to 4 are kept, in `/home_aps` (hex, one per line, rewritten only when the
+list changes, never into the flash reserve), so they survive a reboot. A
+learned BSSID that is not the link for 5 hidden-home connects
+(`HOME_AP_MISS`), or that the scan shows with a visible SSID, is dropped,
+so a wrong one does not stick. Once some are learned, only those count for
+"home in range" (stay departures), the keep-alive wake and the immediate
+retry, so a neighbour's hidden AP no longer cancels a departure; any strong
+empty-SSID AP still counts for the boot preference and roaming (weaker
+evidence: a node not learned yet). Until then (or with two candidates in
+that scan) any strong empty-SSID AP counts, as before. A failed hidden-home
+try skips that AP for an hour (never one of the learned BSSIDs; cleared when
+the hidden home connects), and failed hidden-home roams back off on their
+own (10 minutes doubling to 60) without slowing the check for a visible
+home.
 
 ### Upload
 
@@ -734,14 +805,29 @@ check for a visible home.
   DER root certificate at `/ca.der` (`CA_FILE`; the one your server's chain
   ends in) turns verification on. With an `http://` `GEO_URL` the logger
   warns that everything goes in the clear. The `SSLContext` (and the
-  certificate) is made once, on the first POST, and reused.
+  certificate) is made once at boot, before the WiFi starts (made at the
+  first POST it could grow the Python heap and keep that area), and reused.
+  Only a missing `/ca.der` means no verification: one that cannot be read,
+  is empty or is not a valid certificate stops the POSTs (state `ca err`,
+  `upload ca err …` in the diagnostic log, retried every 30 s), never a
+  silent fall back. A `/ca.der` added, removed or replaced by one of another
+  size is picked up at the next POST; one of the same size takes a reboot.
+  mbedTLS checks the certificate's dates and the board clock starts at
+  2000-01-01 at every boot, so before a POST the logger sets it from a
+  valid GPS fix (a date in 2020–2087): once a boot (`clock set …` in the
+  diagnostic log), again only when it drifted more than 5 s
+  (`RTC_DRIFT`). With `/ca.der` and no fix since the boot, verified POSTs
+  fail until there is one.
 - **TLS memory:** five TLS allocation failures in a row at home
   (`TLS_REBOOT_N`; any other error ends the run) restart the board cleanly
   (`reboot tls memory` in the diagnostic log): the IDF heap stays
   fragmented otherwise. Counted: `MemoryError`, `ENOMEM` and the mbedTLS
   `*_ALLOC_FAILED` codes (SSL, X509, ECP, PK, …, also combined with a
   low-level code); `OSError(16)`, which is how `MPI_ALLOC_FAILED` arrives
-  but also `EBUSY`, only from the TLS handshake.
+  but also `EBUSY`, only from the TLS handshake; `ValueError("invalid
+  cert")`, which is how a failed allocation parsing `/ca.der` arrives, only
+  while the `SSLContext` is made with the IDF heap's largest block under
+  `TLS_MIN_KB` (else the file is bad: `ca err`).
 - **Low IDF heap:** below `TLS_MIN_KB` no POST is tried; the upload runs
   `gc.collect()` and checks again every 30 s at home (`LOWIDF_RETRY`). Only
   if it stays low for 5 minutes (`LOWIDF_WAIT`) with tracks waiting does
@@ -757,8 +843,12 @@ check for a visible home.
   the area emptied and was freed again. So the page streams its replies,
   and before giving up on TLS (`TLS_MIN_KB`) the upload runs `gc.collect()`,
   which returns an empty grown area, and measures again. It also wants
-  12 KB of free Python heap then (`TLS_MIN_PY_KB`; else `low mem` and a
-  retry): the socket and TLS objects must fit without growing the heap.
+  12 KB of free Python heap then, 8 KB on the frozen firmware
+  (`TLS_MIN_PY_KB`; else `low mem` and a retry every 30 s,
+  `LOWIDF_RETRY`): the socket and TLS objects must fit without growing the
+  heap. A POST itself takes a few KB (sockets, header lines; the
+  `SSLContext`, ~3 KB, is made at boot); frozen, no module bytecode
+  fragments the heap, so 8 KB leaves room.
   `gc.mem_free()` counts that largest IDF block (in bytes) as free Python
   heap, so the diag, the page and the upload line subtract it to the byte
   (`mem`, `heap`), and `heap grew in <step>` names the upload step during
@@ -787,12 +877,13 @@ with a NEO-6M; most never need changing.
 | `GPS_MIN_ELEV` / `GPS_STATIC_HOLD` | 10° / 50 cm/s | NAV5 elevation mask and static hold threshold (0 = off) |
 | `GPS_LOOP_WINDOW` / `GPS_LOOP_BANNERS` | 10 s / 3 | Banner starts with no NMEA in this window = `gps reset loop?` |
 | `GPS_FLAP_WINDOW` / `GPS_FLAP_RESTARTS` | 10 min / 5 | Full restarts within this window, NMEA or not = `gps reset loop?` |
-| `GPS_STORM_WAIT` / `GPS_STORM_QUIET` | 30 s / 10 s | Least time between setups while the receiver keeps restarting; quiet this long after a restart and it is set up within `GPS_RETRY` |
+| `GPS_STORM_WAIT` / `GPS_STORM_QUIET` | 30 s / 10 s | Least time between setups while the receiver keeps restarting; quiet this long after a restart (in a storm twice its last gap, up to `GPS_STORM_WAIT`) and it is set up within `GPS_RETRY` |
 | `AVG_MAX_SPEED` | 10 km/h | Faster than this a second's point is its first fix, not the mean |
 | `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
 | `GPS_SETUP_MAX` | 4 s | Longest a setup blocks the loop; frames not acknowledged by then go out once without waiting |
 | `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling while it does not answer) |
 | `GPS_IGNORED_MAX` / `GPS_VERIFY` | 60 s / 10 s | Cap on the doubling wait for a receiver that acknowledges but ignores the setup; when an acknowledged setup is checked (still 1 fix/s or no `GST` = not taken) |
+| `GPS_VERIFY_MAX` / `GPS_NOT_TAKEN_SAY` | 30 min / 10 min | Longest the check waits for 3 valid seconds; least time between `gps setup not taken` lines in the diagnostic log |
 | `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP |
@@ -825,6 +916,7 @@ with a NEO-6M; most never need changing.
 | `STILL_FILE` | 30 min | Age at which an away stay's file is closed on WiFi |
 | `STILL_HOME_HOLD` | 60 s | Wait after a refused home departure |
 | `STILL_GAP` | 30 s | Time without a usable fix that counts as a gap |
+| `STILL_GAP_STAY` / `STILL_GAP_JUMP` | 60 s / 1 km | After a gap, beyond `STILL_EXIT`: how long `STILL_MIN_FIXES` fixes within `STILL_RADIUS` must span, or one fix's distance, to end the stay |
 | `STILL_DEP_MAX` | 90 | Recent samples kept to write the way out |
 | `STILL_MEAN_N` | 1800 | Fixes the anchor mean averages over |
 | `HOLD_RELEASE` | 10 min | Without a fix this long, what a stay being proven holds is written |
@@ -845,8 +937,9 @@ with a NEO-6M; most never need changing.
 | `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
 | `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
 | `UNLISTED_EVERY` | 4 | A network a good scan did not list is tried every Nth round (hidden ones always) |
-| `WEB_SEARCH` | 30 min | With `WEB` and no scan keep-alive, failed rounds keep searching this long before sleeping |
+| `WEB_SEARCH` | 30 min | With `WEB` and no keep-alive scan that can see home (none, or a hidden home not learned yet), failed rounds keep searching this long before sleeping |
 | `BLANK_BAD_HOLD` / `HOME_AP_MAX` / `LEARN_RSSI` | 1 h / 4 / 8 dB | Hidden home: a blank AP whose try failed is skipped; learned BSSIDs kept; RSSI match for learning |
+| `HOME_AP_MISS` / `HOME_APS_FILE` | 5 / `/home_aps` | Hidden-home connects through other BSSIDs before an unseen learned one is dropped; the file that keeps them across reboots |
 
 **Upload**
 
@@ -860,10 +953,11 @@ with a NEO-6M; most never need changing.
 | `HTTP_WAIT` / `HTTP_CHUNK` | 30 s / 1 KB | Wait for the server's answer, body piece; the UART is read between |
 | `HTTP_LINE` / `HTTP_LINES` | 256 B / 64 | Bytes per read of an answer line; reads of the answer's head at most |
 | `HTTP_MAX` | 60 s | Wall clock for one POST: the guard timer feeds the WDT, then closes the socket |
-| `CA_FILE` | `/ca.der` | DER root certificate; if present, the server is verified |
+| `CA_FILE` | `/ca.der` | DER root certificate; if present, the server is verified (unreadable: no POST) |
+| `RTC_DRIFT` | 5 s | Board clock vs GPS time before the clock is set again (certificate dates) |
 | `TLS_REBOOT_N` | 5 | TLS allocation failures in a row (at home) before a clean reboot |
 | `TLS_MIN_KB` | 48 KB | Largest IDF heap block a POST needs; below it no try (`gc.collect()` and wait) |
-| `TLS_MIN_PY_KB` | 12 KB | Free Python heap a POST needs after `gc.collect()`; below it the POST waits |
+| `TLS_MIN_PY_KB` | 12 KB (frozen: 8 KB) | Free Python heap a POST needs after `gc.collect()`; below it the POST waits `LOWIDF_RETRY` |
 | `LOWIDF_RETRY` / `LOWIDF_WAIT` | 30 s / 5 min | Checks while the IDF block is low (at home); how long it may stay low with tracks waiting before a clean reboot |
 | `LOWIDF_REBOOT_GAP` / `LOWIDF_MARK` | 30 min / `/lowidf` | At most one low-idf reboot this often; the file that tells the next boot |
 | `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err` |
@@ -876,12 +970,14 @@ with a NEO-6M; most never need changing.
 |----------|---------|---------|
 | `WDT_TIMEOUT` | 120 s | Hardware watchdog |
 | `CPU_MHZ` / `CPU_MHZ_UPLOAD` | 80 / 160 | CPU clock in the loop and during a POST (`.env` `CPU_MHZ`, `CPU_MHZ_UP`); 0 = firmware default |
+| `FREQ_TRIES` / `FREQ_RETRY` | 3 / 30 min | Tries per clock change; how long a refused clock is left alone before it is tried again |
 | `KEEPALIVE_MAX` | 10 min | How long a Ctrl-C timer feeds the watchdog |
 | `BOOT_OK_MS` | 60 s | Healthy loop time that clears the boot-fail counter |
 | `STATUS` | 10 min | Console `status` line interval |
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
-| `WEB` / `WEB_PORT` / `WEB_TIMEOUT` | on / 80 / 2 s | Status page (`.env` `WEB`), its port, how long one client may take |
-| `WEB_PAGE` / `WEB_REFRESH` | `/web.html` / 15 s | The page file on the board; how often it polls `/status.json` |
+| `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
+| `WEB_TIMEOUT` / `WEB_DEADLINE` | 2 s / 5 s | How long one receive or send may wait; how long a whole request may take |
+| `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |
@@ -899,33 +995,46 @@ every pull request:
   `machine`/`network`/UART (exits 1 on any FAIL), plus
   `tests/mpy_unix_check.py` and `tests/mpy_unix_logger.py` (imports
   `gps_logger.py` with stub `machine`/`network` modules and runs its pure
-  paths) on a cached MicroPython 1.29 unix build; the smoke also runs
-  under CPython. It also runs:
+  paths) on a cached MicroPython 1.29 unix build, and the smoke again on a
+  single-precision build (`MICROPY_FLOAT_IMPL_FLOAT`, like the board: the
+  departure ring must rebuild the lines `_sample_line` writes); the smoke
+  also runs under CPython. It also runs:
   - `tests/web_loopback.py` on the unix build and CPython: the status page
     over real loopback sockets (a normal request, a foreign `Host`, an
     empty, an oversized, a stalled and a trickling request, a client
-    resetting mid-reply, a reply past the request deadline);
+    resetting mid-reply, a reply past the request deadline, the gzipped
+    page for a client that accepts it);
   - `node tests/web_page_test.js`: `web.html`'s view on generated
     `status.json`, and the whole page script (`tick`, `paint`, `placeMap`,
     `stale`) against a stub document. With `CI=true` (GitHub Actions) a
     missing `node` is a FAIL, not a SKIP;
   - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
     board-side code under CPython): copy, check and rename, too little
-    flash, a cut copy.
+    flash, a cut copy, frozen firmware (stale, `FORCE`, `FORCE_MPY`, no
+    clear answer);
+  - `tools/build_firmware.sh` with a fake ESP-IDF, MicroPython tree,
+    `esptool.py` and `mpremote`: the `gps_frozen` marker, and `--flash`
+    touching nothing on the board before a successful write.
 - `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
 - `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`,
   `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
-- `shellcheck deploy.sh`.
+- `shellcheck deploy.sh tools/build_firmware.sh`.
 
 The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
 .venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
-shellcheck deploy.sh
+shellcheck deploy.sh tools/build_firmware.sh
 .venv/bin/python -m mpy_cross -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
-MICROPYTHON=/path/to/micropython python3 tests/test_gps_logger.py
+MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \
+    python3 tests/test_gps_logger.py
 ```
+
+The single-precision unix build: `make -C ports/unix
+BUILD=build-f32 PROG=micropython-f32
+CFLAGS_EXTRA=-DMICROPY_FLOAT_IMPL=MICROPY_FLOAT_IMPL_FLOAT` in a
+MicroPython v1.29.0 tree.
 
 `tests/device_bench.py` is an optional on-device timing probe; nothing under
 `tests/` is copied to the board.

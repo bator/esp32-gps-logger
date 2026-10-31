@@ -4,6 +4,11 @@ try:
     import esp32                         # mcu_temperature() on C3/C6/S2/S3
 except ImportError:
     esp32 = None
+try:
+    __import__("gps_frozen")             # firmware of tools/build_firmware.sh:
+    FROZEN = True                        # this module's bytecode is in flash
+except ImportError:
+    FROZEN = False
 
 # Collect garbage early and often. When an allocation doesn't fit, the ESP32
 # port grows the Python heap with the largest free IDF block (~60 kB) instead,
@@ -28,6 +33,10 @@ GPS_IGNORED_MAX = 60000                  # ms cap between setups a receiver
 GPS_VERIFY = 10000                       # ms after an acknowledged setup:
                                          # still one fix a second, or no GST
                                          # = not taken, set up again
+GPS_VERIFY_MAX = 1800000                 # ms it waits for 3 valid seconds to
+                                         # tell (none before the first fix)
+GPS_NOT_TAKEN_SAY = 600000               # ms between "setup not taken" diag
+                                         # lines (the ones between counted)
 # UBX-CFG-NAV5: how the receiver's own filter is tuned (sent with the setup)
 GPS_DYN_MODEL = 0                        # 0 portable (car and foot alike),
                                          # 2 stationary, 3 pedestrian,
@@ -69,6 +78,8 @@ WEB_CHUNK = 1024                         # reply bytes per send
 WEB_REFRESH = 15                         # s between status.json polls of
                                          # the page (WEB_PAGE)
 WEB_PAGE = "/web.html"                   # the status page, served as is
+WEB_PAGE_GZ = "/web.html.gz"             # its gzip (deploy.sh), sent instead
+                                         # to a client that accepts gzip
 WEB_DIAG = 15                            # diag.log lines on the page
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
                                          # for the page on the other networks too
@@ -85,7 +96,9 @@ GPS_FLAP_RESTARTS = 5                    # full restarts (NMEA in between)
 GPS_FLAP_WINDOW = 600000                 # within this many ms = a reset loop
 GPS_STORM_WAIT = 30000                   # ms between setups while it loops:
                                          # each setup blocks the loop seconds
-GPS_STORM_QUIET = 10000                  # ms without a restart: the storm is
+GPS_STORM_QUIET = 10000                  # ms without a restart (in a storm
+                                         # twice its last gap, up to
+                                         # GPS_STORM_WAIT): the storm is
                                          # over, set it up within GPS_RETRY
 
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
@@ -151,6 +164,13 @@ STILL_HOME_HOLD = 60000                  # ms a departure from home waits
                                          # after the home WiFi was in range
 STILL_GAP = 30000                        # ms without a usable fix that counts
                                          # as a gap (the device may have moved)
+STILL_GAP_STAY = 60000                   # ms: back after a gap out past
+                                         # STILL_EXIT, STILL_MIN_FIXES fixes
+                                         # within STILL_RADIUS of the first
+                                         # over this long end the stay (a
+                                         # multipath jump lasts seconds)
+STILL_GAP_JUMP = 1000                    # m: one fix this far after a gap ends
+                                         # it (no multipath jump reaches it)
 STILL_DEP_MAX = 90                       # recent samples kept for the departure
 STILL_MEAN_N = 1800                      # samples the anchor mean averages over
 STAY_WIFI = True                         # an away stay ends when none of the
@@ -217,7 +237,12 @@ ROAM_MIN_RSSI = -75                      # do not jump to a weak home AP
 BLANK_BAD_HOLD = 3600000                 # ms a blank AP whose hidden-home
                                          # try failed is not tried again
 HOME_AP_MAX = 4                          # BSSIDs of the hidden home learned
-                                         # while connected to it (RAM only)
+                                         # while connected to it (kept in
+                                         # HOME_APS_FILE across reboots)
+HOME_AP_MISS = 5                         # hidden-home connects through other
+                                         # BSSIDs before an unseen one is
+                                         # dropped (a wrong one cannot stick)
+HOME_APS_FILE = "/home_aps"              # learned BSSIDs, hex, one per line
 LEARN_RSSI = 8                           # dB: the one blank AP on the link's
                                          # channel this close to its RSSI
 UNLISTED_EVERY = 4                       # rounds: a network a good scan did
@@ -226,6 +251,8 @@ WEB_SEARCH = 1800000                     # ms: WEB on and no scan keep-alive:
                                          # failed rounds search on (backoff)
                                          # this long before the radio sleeps
 FREQ_TRIES = 3                           # machine.freq() tries per change
+FREQ_RETRY = 1800000                     # ms a refused clock is left alone,
+                                         # then tried again
 LINE_MAX = 512                           # bounded track-line readline
 BOOT_OK_MS = 60000                       # clear boot-fail after this of _loop
 
@@ -248,6 +275,7 @@ HTTP_MAX = 60000                         # ms wall clock for one POST: a timer
                                          # closes the socket (a hung TLS call
                                          # reset the board by the WDT)
 CA_FILE = "/ca.der"                      # if present: verify the server
+                                         # (unreadable or empty: no POST)
 TLS_MIN_KB = 48                          # largest IDF heap block a TLS POST
                                          # needs (measured: at 20 KB every
                                          # handshake failed); below it no
@@ -258,11 +286,19 @@ LOWIDF_WAIT = 300000                     # ms low at home with tracks waiting:
 LOWIDF_REBOOT_GAP = 1800000              # ms: at most one such reboot this
                                          # often (LOWIDF_MARK spans the boot)
 LOWIDF_MARK = "/lowidf"                  # written just before that reboot
-TLS_MIN_PY_KB = 12                       # free Python heap a POST needs after
+TLS_MIN_PY_KB = 8 if FROZEN else 12      # free Python heap a POST needs after
                                          # gc.collect(); below it the POST
-                                         # waits: the socket and TLS objects
-                                         # would grow the heap into the IDF
-                                         # block TLS needs
+                                         # waits (LOWIDF_RETRY): the socket
+                                         # and TLS objects would grow the
+                                         # heap into the IDF block TLS needs.
+                                         # The SSLContext (~3 KB) is made at
+                                         # boot, a POST itself takes a few KB
+                                         # (sockets, header lines); frozen,
+                                         # no module bytecode fragments the
+                                         # heap, so 8 KB leaves room
+RTC_DRIFT = 5                            # s the board clock may be off the GPS
+                                         # time before it is set again
+                                         # (mbedTLS checks certificate dates)
 TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
                                          # home): a clean reboot, the IDF heap
                                          # stays fragmented otherwise
@@ -328,11 +364,12 @@ def reset():
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
-              storm_at=None, boot_at=None,
+              storm_at=None, boot_at=None, boot_last=None, boot_gap=0,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
               gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0,
               ack_id=None, ack=None, ack_n=0, checked=True, hz1=0, hz5=0,
-              set_ok=0, gst_at=None, loop_more=0, loop_said=None)
+              set_ok=0, gst_at=None, loop_more=0, loop_said=None,
+              nt_said=None, nt_more=0, ver_said=None)
     _ep_new(None)
 
 def _ep_new(t):
@@ -518,6 +555,9 @@ def txt(talker, f):
         # 2026-10-30 had 541 restarts, each setup blocking the loop
         now = time.ticks_ms()
         st["boot_at"] = now
+        last = st["boot_last"]           # the gap sets the storm's quiet
+        st["boot_gap"] = 0 if last is None else _age(now, last)
+        st["boot_last"] = now
         print("gps restarted")
         _gps_flap(now)                   # first: the restart that makes
         storm = (st["storm_at"] is not None     # it a storm waits too
@@ -627,8 +667,11 @@ def _ubx_frame(fr):
             st["gps_ver"] = _gps_ver(fr[6:-2])
         except (UnicodeError, ValueError):
             st["gps_ver"] = "?"
-        print("gps", st["gps_ver"])
-        _diag_write("gps " + st["gps_ver"])
+        v = st["gps_ver"]
+        print("gps", v)
+        if v != st["ver_said"]:          # asked again after every restart:
+            st["ver_said"] = v           # a line only when it changed
+            _diag_write("gps " + v)
         return
     if cls != 0x01 or len(fr) < 16:
         return
@@ -818,23 +861,49 @@ def _setup_check(now):
     late one of another frame, and a receiver may acknowledge and ignore.
     Valid seconds all at one fix (GPS_HZ not taken), or NMEA coming but no
     GST (the GPS_MAX_STD filter would be off without a word): counted as
-    a sentence it should not send, so gps_check sets it up again. Without
-    a fix or without NMEA there is nothing to tell (no verdict)."""
-    if st["checked"] or _age(now, st["setup_at"]) < GPS_VERIFY:
+    a sentence it should not send, so gps_check sets it up again. Only
+    valid seconds tell: before 3 of them (no fix yet: a setup at boot, or
+    indoors, where an M10 may send no GST either) there is no verdict yet,
+    it waits up to GPS_VERIFY_MAX. Taken (the backoff starts afresh) only
+    with GPS_HZ fixes a second and GST seen."""
+    if st["checked"]:
+        return
+    age = _age(now, st["setup_at"])
+    if age < GPS_VERIFY:
+        return
+    hz1, hz5 = st["hz1"], st["hz5"]
+    if hz1 + hz5 < 3:
+        if age >= GPS_VERIFY_MAX:
+            st["checked"] = True         # no fix all this time: no verdict
+            print("gps setup unverified: no fix")
         return
     st["checked"] = True
-    slow = GPS_HZ > 1 and st["hz1"] >= 3 and not st["hz5"]
+    slow = GPS_HZ > 1 and not hz5
     g = st["gst_at"]
-    no_gst = (st["ok"] - st["set_ok"] >= 10
-              and (g is None or time.ticks_diff(g, st["setup_at"]) < 0))
+    gst = g is not None and time.ticks_diff(g, st["setup_at"]) >= 0
+    no_gst = not gst and st["ok"] - st["set_ok"] >= 10
     if slow or no_gst:
         st["extra"] += 1
-        print("gps setup not taken:", "1 fix/s" if slow else "no GST")
-    elif not st["extra"]:
+        why = "1 fix/s" if slow else "no GST"
+        print("gps setup not taken:", why)
+        _not_taken(now, why)
+    elif gst and (hz5 or GPS_HZ == 1) and not st["extra"]:
         st["ack_n"] = 0                  # it took this one
 
+def _not_taken(now, why):
+    """A diag line for a setup that was not taken, one per GPS_NOT_TAKEN_SAY
+    (the ones between counted): a session left at 1 Hz leaves a trace."""
+    said = st["nt_said"]
+    if said is not None and _age(now, said) < GPS_NOT_TAKEN_SAY:
+        st["nt_more"] += 1
+        return
+    more = st["nt_more"]
+    st["nt_said"], st["nt_more"] = now, 0
+    _diag_write("gps setup not taken: " + why
+                + (" (%d more)" % more if more else ""))
+
 _STAMPS = ("rx", "pos_at", "hdop_at", "std_at", "gsa_at", "gst_at",
-           "boot_at", "loop_said")
+           "boot_at", "boot_last", "loop_said", "nt_said")
 
 def _stamps_old(now):
     """ticks_ms wraps every 2**30 ms, so a timestamp left alone for 12.4
@@ -872,13 +941,20 @@ def gps_check(now):
     # a silent receiver that took the blind burst): it may sit at 1 Hz
     at = st["setup_at"]
     b = st["boot_at"]
+    quiet = GPS_STORM_QUIET
+    t = st["storm_at"]
+    if t is not None and _age(now, t) < GPS_FLAP_WINDOW:
+        # in a storm, quiet means twice its last gap between restarts (up
+        # to GPS_STORM_WAIT): restarts 12 s apart each got a setup, 54 in
+        # 10 min, over a third of the loop blocked
+        quiet = min(max(quiet, 2 * st["boot_gap"]), GPS_STORM_WAIT)
     if (st["setup_wait"] > GPS_RETRY and b is not None
             and (st["extra"] or st["setup_ok"] is not True)
-            and _age(now, b) >= GPS_STORM_QUIET):
-        # quiet for GPS_STORM_QUIET since the last restart: the storm (or a
-        # long backoff) is over, the receiver sits at 1 Hz with every
-        # sentence on (or took only the blind burst, unacknowledged): set
-        # it up now (measured: over a minute at 1 Hz)
+            and _age(now, b) >= quiet):
+        # quiet since the last restart: the storm (or a long backoff) is
+        # over, the receiver sits at 1 Hz with every sentence on (or took
+        # only the blind burst, unacknowledged): set it up now (measured:
+        # over a minute at 1 Hz)
         st["setup_wait"] = GPS_RETRY
         st["boot_at"] = None
     # the satellite poll after a setup that is due, not before it: the
@@ -936,15 +1012,23 @@ def _temp():
         return None
 
 _freq_bad = []                           # clocks this board refused
+_freq_bad_at = [None]                    # ticks of the last refusal
 
 def _set_freq(mhz):
     """CPU clock: 80 MHz saves ~15-25 mA on the ESP32 against 240 (the UART
     runs off the fixed APB clock, WiFi needs 80 or more). A failed change
     is tried again (FREQ_TRIES in all): one passing error blacklisted the
     clock for good, and a failed drop-back after a POST left the board at
-    the upload clock. Refused every time: left alone, a console line once."""
-    if not mhz or mhz in _freq_bad:
+    the upload clock. Refused every time: left alone for FREQ_RETRY (a
+    console line each time), then tried again: one passing failure pinned
+    the board at the upload clock until reboot."""
+    if not mhz:
         return
+    if mhz in _freq_bad:
+        at = _freq_bad_at[0]
+        if at is not None and _age(time.ticks_ms(), at) < FREQ_RETRY:
+            return
+        del _freq_bad[:]                 # all of them get a new chance
     for _ in range(FREQ_TRIES):
         try:
             if machine.freq() != mhz * 1000000:
@@ -954,6 +1038,7 @@ def _set_freq(mhz):
             err = e
         time.sleep_ms(10)
     _freq_bad.append(mhz)
+    _freq_bad_at[0] = time.ticks_ms()
     print("cpu freq", mhz, repr(err))
 
 def _mhz_env(env, key, default):
@@ -1036,9 +1121,9 @@ def _diag_tail(path, n):
         start = size - DIAG_LINE * n
         with open(path, "rb") as f:
             if start > 0:
-                f.seek(start)
-            part = b""
-            cut = start > 0              # the first line is a partial one
+                f.seek(start - 1)        # the byte before: a line that
+            part = b""                   # starts at start is a whole one
+            cut = start > 0              # up to the first "\n": partial
             while True:
                 b = f.read(DIAG_BLOCK)
                 if not b:
@@ -1239,8 +1324,9 @@ def handle(line):
 # and compacted: growing a bytes object by each read and slicing it at each
 # line made a new copy of everything left (up to ~1.3 KB) several times a
 # second, and one big allocation grows the heap (see Upload) and starves
-# TLS. The scan for line ends and UBX sync bytes is a plain loop
-# (bytearray.find is not something to count on in MicroPython).
+# TLS. Line ends, UBX sync bytes and banners are searched with
+# bytearray.find (start/end in place, no copy: MicroPython 1.29 has it),
+# not byte by byte in Python.
 RX_READ = 256                            # bytes per readinto: small pieces
 RX_LINE = 256                            # no newline after this many bytes
 RX_FRAME = 1100                          # (or a UBX frame this long): junk
@@ -1249,18 +1335,15 @@ _rxv = memoryview(_rx)
 _rx_n = 0                                # bytes in _rx
 _rx_s = 0                                # scanned up to here: no line end,
                                          # no UBX sync before it
-_BANNER = b"TXT,01,01,02,"               # + "u": a u-blox start-up banner
+_BANNER = b"TXT,01,01,02,u"              # a u-blox start-up banner (start)
+RX_KEEP = len(_BANNER) - 1               # its start kept when junk is dropped
 
 def _rx_drop(r):
-    """Drop the first r bytes of _rx, the rest moved to the front in pieces
-    that do not overlap (MicroPython copies a slice with memcpy)."""
+    """Drop the first r bytes of _rx, the rest moved to the front (one
+    slice store: MicroPython copies it with memmove, overlap is fine)."""
     global _rx_n
     n = _rx_n - r
-    k = 0
-    while k < n:
-        m = n - k if n - k < r else r
-        _rxv[k:k + m] = _rxv[r + k:r + k + m]
-        k += m
+    _rxv[0:n] = _rxv[r:r + n]
     _rx_n = n
 
 def read_uart():
@@ -1273,34 +1356,31 @@ def read_uart():
             return
         st["rx"] = time.ticks_ms()
         st["spin"] += 1
-        # a start-up banner (or its start), also when split across reads
-        for j in range(n if n > 13 else 13, n + k):
-            if b[j] == 0x75 and bytes(_rxv[j - 13:j]) == _BANNER:
-                st["banners"] += 1
-        n += k
+        # a start-up banner (or its start), also when split across reads:
+        # every one that ends in what was just read
+        e = n + k
+        j = b.find(_BANNER, n - RX_KEEP if n > RX_KEEP else 0, e)
+        while j >= 0:
+            st["banners"] += 1
+            j = b.find(_BANNER, j + RX_KEEP + 1, e)
+        n = e
         _rx_n = n
         r = 0                            # bytes before r are done with
         s = _rx_s
         while True:
-            j = s
-            while j < n:
-                c = b[j]
-                if c == 10 or c == 0xB5:
+            # the first line end or UBX sync (0xB5 0x62, never in NMEA)
+            e = b.find(b"\n", s, n)
+            j = b.find(b"\xb5\x62", s, n if e < 0 else e)
+            if j < 0:
+                if e < 0:
+                    # a 0xB5 last may be a sync byte: looked at again
+                    s = n - 1 if n > s and b[n - 1] == 0xB5 else n
                     break
-                j += 1
-            if j == n:
-                s = n
-                break
-            if b[j] == 10:
+                j = e
+            if j == e:
                 e = j - 1 if j > r and b[j - 1] == 13 else j
                 handle(bytes(_rxv[r:e]))
                 r = s = j + 1
-                continue
-            if j + 1 == n:
-                s = j                    # 0xB5 last: a sync byte maybe
-                break
-            if b[j + 1] != 0x62:         # never in NMEA (ASCII)
-                s = j + 1
                 continue
             # a binary UBX answer: whole, by its length (it may hold 0x0A
             # bytes); what came before it is a cut-off line
@@ -1331,7 +1411,14 @@ def read_uart():
         n = _rx_n
         frame = n > 1 and b[0] == 0xB5 and b[1] == 0x62
         if n > (RX_FRAME if frame else RX_LINE):
-            _rx_n = _rx_s = 0            # no newline in sight: garbage/baud
+            # no newline in sight: garbage or a wrong baud rate. A banner
+            # start at its end stays (a reset loop sends "$GPTXT,01,01,02,u"
+            # and junk, no newline): counted when its "u" comes next read
+            k = RX_KEEP
+            while k and b.find(_BANNER[:k], n - k, n) < 0:
+                k -= 1
+            _rxv[0:k] = _rxv[n - k:n]
+            _rx_n = _rx_s = k
 
 # --- Watchdog ---------------------------------------------------------------
 # Created only from run()/_loop(), so the GPIO25 boot-bypass REPL is not
@@ -1614,7 +1701,8 @@ def wifi_reset():
                 pb_at=time.ticks_ms(), pb_scans=0,
                 wake=False, wake_at=None,
                 blank_rssi=None, blank_bssid=None, blank_bad=[],
-                home_aps=[], learn=False, hid_wait=ROAM_CHECK, hid_at=None,
+                blank_ours=False, home_aps=[], home_miss={}, learn=False,
+                hid_wait=ROAM_CHECK, hid_at=None,
                 rounds=0, down_at=None, hh=None,
                 seen_at=None, seen_wait=SEEN_WAIT, pb_conn_at=time.ticks_ms())
 
@@ -1652,13 +1740,16 @@ def _mark_failed(ssid, why=""):
             # home switch); hidden tries get their own growing hold, so
             # many neighbours' empty-SSID APs do not drop the hotspot every
             # ROAM_CHECK. That AP is skipped for BLANK_BAD_HOLD (it may be
-            # ours, briefly unreachable: not until reboot).
+            # ours, briefly unreachable: not until reboot). A learned BSSID
+            # of ours never is: one failed try shut our own router out for
+            # an hour (hid_wait throttles the tries already).
             now = wifi["failed"][ssid]
             b = wifi.get("hid_wait") or ROAM_CHECK
             wifi["hid_wait"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
             wifi["hid_at"] = now
             b = wifi.get("blank_bssid")
-            if b is not None and not _blank_bad(b, now):
+            if (b is not None and b not in (wifi.get("home_aps") or ())
+                    and not _blank_bad(b, now)):
                 bad = [x for x in wifi["blank_bad"]
                        if _age(now, x[1]) < BLANK_BAD_HOLD]
                 bad.append((b, now))
@@ -1675,8 +1766,12 @@ def _blank_bad(bssid, now):
 def _scan_known(w):
     """Visible known nets, strongest BSSID per SSID, or None if scan fails.
     Hidden APs are listed with an empty SSID; the strongest blank RSSI is
-    a hint that *some* hidden AP is nearby (not necessarily ours). Once
-    the hidden home's BSSIDs are learned (_learn_home), only those count."""
+    a hint that *some* hidden AP is nearby (not necessarily ours). One of
+    the hidden home's learned BSSIDs (_learn_home) at >= ROAM_MIN_RSSI is
+    taken first (blank_ours); else the strongest blank AP stays weak
+    evidence (a mesh node not learned yet): enough for the candidate order
+    and a roam, not for "home in range" or the keep-alive wake. A blank AP
+    whose hidden-home try failed lately (blank_bad) is skipped."""
     by = {}
     for n in wifi["nets"]:
         by[_ssid_b(n)] = n
@@ -1686,11 +1781,14 @@ def _scan_known(w):
     except WLAN_ERR:
         wifi["blank_rssi"] = None
         wifi["blank_bssid"] = None
+        wifi["blank_ours"] = False
         return None
     _stay_scan(aps)
     _home_seen(aps)
+    now = time.ticks_ms()
     best = {}
     blank_rssi, blank_bssid = None, None
+    own_rssi, own_bssid = None, None
     for rec in aps:
         # SSIDs compared as bytes: a neighbour's Latin-1 or cut-off UTF-8
         # SSID raised UnicodeError on decode() and crashed the logger
@@ -1699,8 +1797,11 @@ def _scan_known(w):
         rssi = rec[3]
         bssid = rec[1] if len(rec) > 1 else None
         if not ssid:
-            if mine and bssid not in mine:
-                continue                 # a neighbour's hidden AP
+            if _blank_bad(bssid, now):
+                continue                 # its hidden-home try failed
+            if bssid in mine:
+                if own_rssi is None or rssi > own_rssi:
+                    own_rssi, own_bssid = rssi, bssid
             if blank_rssi is None or rssi > blank_rssi:
                 blank_rssi, blank_bssid = rssi, bssid
             continue
@@ -1709,8 +1810,11 @@ def _scan_known(w):
         prev = best.get(ssid)
         if prev is None or rssi > prev[0]:
             best[ssid] = (rssi, bssid, by[ssid])
+    if own_rssi is not None and own_rssi >= ROAM_MIN_RSSI:
+        blank_rssi, blank_bssid = own_rssi, own_bssid
     wifi["blank_rssi"] = blank_rssi
     wifi["blank_bssid"] = blank_bssid
+    wifi["blank_ours"] = blank_bssid is not None and blank_bssid in mine
     found = []
     items = list(best.values())
     items.sort(key=lambda x: -x[0])
@@ -1758,7 +1862,7 @@ def home_in_range():
     for n in found:
         if n.get("home") and n.get("rssi", -100) >= ROAM_MIN_RSSI:
             return True
-    return bool(_blank_home_ok())
+    return bool(_blank_home_ok(True))
 
 def _home_veto(now, sl):
     """A departure from a home stay while the home WiFi is still in range
@@ -1783,14 +1887,17 @@ def _has_home():
         c = wifi["hh"] = (nets, any(n.get("home") for n in nets))
     return c[1]
 
-def _blank_home_ok():
+def _blank_home_ok(strict=False):
     """True if a hidden home is configured and a strong empty-SSID AP was
-    seen (one of its learned BSSIDs, once known: _scan_known)."""
+    seen. strict ("home in range"): once BSSIDs are learned, only one of
+    them counts (_scan_known); else any strong blank AP does."""
     r = wifi.get("blank_rssi")
     if r is None or r < ROAM_MIN_RSSI:
         return False
     if _blank_bad(wifi.get("blank_bssid"), time.ticks_ms()):
         return False                     # a hidden-home try there failed
+    if strict and wifi.get("home_aps") and not wifi.get("blank_ours"):
+        return False                     # a stranger's (or unlearned) AP
     for n in wifi.get("nets") or []:
         if n.get("home") and n.get("hidden"):
             return True
@@ -1798,17 +1905,35 @@ def _blank_home_ok():
 
 def _learn_home(w):
     """Connected to the hidden home: note its BSSID, so a neighbour's
-    empty-SSID AP no longer counts as home (_scan_known). v1.29 has no
-    config("bssid") getter: then a scan while connected, and the one blank
-    AP on the link's channel within LEARN_RSSI dB of its RSSI is ours.
-    Several such APs (or none): nothing learned, as before."""
+    empty-SSID AP no longer counts as home in range (_scan_known). v1.29
+    has no config("bssid") getter: then a scan while connected, and a
+    record carrying the hidden SSID (if the IDF names the AP it is on) or
+    else the one blank AP on the link's channel within LEARN_RSSI dB of its
+    RSSI is ours. Several such blank APs (or none): nothing learned.
+    Only on the hidden home itself: a drop before this tick and a hotspot
+    connect learned a neighbour's blank AP. A learned BSSID that is not the
+    link for HOME_AP_MISS connects, or that the scan shows with another
+    SSID, is dropped, so a wrong one does not stick. The list is kept in
+    HOME_APS_FILE when it changes."""
     wifi["learn"] = False
+    ssid = wifi.get("ssid")
+    if not (wifi.get("home") and _net_hidden(ssid)):
+        return
+    me = None
+    for n in wifi.get("nets") or []:
+        if n["ssid"] == ssid:
+            me = _ssid_b(n)
+            break
+    found = []
+    other = []                           # BSSIDs of visible networks
     b = None
     try:
         b = bytes(w.config("bssid"))
     except (OSError, ValueError, TypeError, RuntimeError):
         pass
-    if not b:
+    if b:
+        found.append(b)
+    else:
         try:
             ch = w.config("channel")
         except (OSError, ValueError, TypeError, RuntimeError):
@@ -1824,23 +1949,108 @@ def _learn_home(w):
         except WLAN_ERR:
             return
         feed()
+        one, many = None, False
         for rec in aps:
-            if rec[0] or (ch is not None and rec[2] != ch):
+            raw = rec[0]
+            if raw:
+                if not isinstance(raw, bytes):
+                    raw = raw.encode()
+                if raw == me:
+                    found.append(bytes(rec[1]))  # named by the IDF: ours
+                else:
+                    other.append(bytes(rec[1]))
+                continue
+            if ch is not None and rec[2] != ch:
                 continue
             if r is not None and abs(rec[3] - r) > LEARN_RSSI:
                 continue
-            if b is not None:
-                return                   # two of them: cannot tell
-            b = bytes(rec[1])
-    if not b:
-        return
+            many = one is not None
+            one = bytes(rec[1])
+        if not found and one is not None and not many:
+            found.append(one)
+    found = [x for x in found if len(x) == 6]
+    if not found:
+        return                           # cannot tell: nothing changes
     aps = wifi["home_aps"]
-    if b in aps:
-        aps.remove(b)
-    else:
-        print("wifi home ap learned")
-    aps.insert(0, b)
-    del aps[HOME_AP_MAX:]
+    miss = wifi["home_miss"]
+    old = list(aps)
+    for x in old:
+        if x not in found:
+            miss[x] = miss.get(x, 0) + 1
+    for x in reversed(found):
+        miss.pop(x, None)
+        if x in aps:
+            aps.remove(x)
+        else:
+            print("wifi home ap learned")
+        aps.insert(0, x)
+    keep = [x for x in aps if miss.get(x, 0) < HOME_AP_MISS
+            and x not in other][:HOME_AP_MAX]
+    for x in aps:
+        if x not in keep:
+            miss.pop(x, None)
+    aps[:] = keep
+    if aps != old:
+        _home_aps_save()
+
+_HEX = b"0123456789abcdef0123456789ABCDEF"
+
+def _hex_bssid(s):
+    """12 hex digits (a HOME_APS_FILE line, bytes) as 6 bytes, else None."""
+    s = s.strip()
+    if len(s) != 12:
+        return None
+    out = bytearray(6)
+    for i in range(12):
+        v = _HEX.find(s[i:i + 1])
+        if v < 0:
+            return None
+        out[i >> 1] = (out[i >> 1] << 4) | (v & 15)
+    return bytes(out)
+
+def _home_aps_load():
+    """The hidden home's BSSIDs learned before the reboot: the keep-alive
+    wake and "home in range" know it before it connected once. A missing
+    or damaged file (or a line that is no BSSID) is no error."""
+    aps = wifi["home_aps"] = []
+    if not HOME_APS_FILE:
+        return
+    try:
+        f = open(HOME_APS_FILE, "rb")
+    except OSError:
+        return
+    try:
+        for _ in range(4 * HOME_AP_MAX):     # bounded, garbage lines too
+            line = f.readline(40)
+            if not line:
+                break
+            b = _hex_bssid(line)
+            if b is not None and b not in aps:
+                aps.append(b)
+                if len(aps) >= HOME_AP_MAX:
+                    break
+    except (OSError, ValueError):
+        pass
+    finally:
+        f.close()
+
+def _home_aps_save():
+    """HOME_APS_FILE rewritten (a few bytes, only when the list changed);
+    not into the flash reserve the tracks keep (MIN_FREE). Never raises."""
+    if not HOME_APS_FILE:
+        return
+    try:
+        room = free()
+        if room is not None and room < MIN_FREE:
+            return
+        f = open(HOME_APS_FILE, "w")
+        try:
+            for b in wifi["home_aps"]:
+                f.write("%02x%02x%02x%02x%02x%02x\n" % tuple(b))
+        finally:
+            f.close()
+    except (OSError, TypeError, ValueError) as e:
+        print("home aps", repr(e))
 
 def _hidden_home_target(now, arrival=False):
     """Hidden home when a strong empty-SSID AP was seen.
@@ -1881,9 +2091,10 @@ def _candidate_order(w):
         cands = scanned + [dict(n) for n in wifi["nets"]
                            if n["ssid"] not in seen
                            and (every or n.get("hidden"))]
-    if _blank_home_ok():
-        # a hidden home with a strong blank AP gets the scan's RSSI, so a
-        # failed first association is retried at once (_wifi_failed)
+    if _blank_home_ok() and wifi.get("blank_ours"):
+        # a hidden home behind one of its learned BSSIDs gets the scan's
+        # RSSI, so a failed first association is retried at once
+        # (_wifi_failed); a stranger's blank AP is no reason for 2 x 12 s
         for n in cands:
             if n.get("home") and n.get("hidden") and n.get("rssi") is None:
                 n["rssi"] = wifi["blank_rssi"]
@@ -1952,6 +2163,7 @@ def _wifi_connect(w, net):
     wifi["state"] = "connecting"
     wifi["try_at"] = time.ticks_ms()
     wifi["saw_connecting"] = False
+    wifi["learn"] = False                # only a hidden-home GOT_IP sets it
     print("wifi try", net["ssid"])
     try:
         wifi["prev_status"] = w.status()
@@ -1999,6 +2211,7 @@ def _wifi_got_ip(w):
         wifi["rssi"] = None
     wifi["home"] = _net_home(wifi.get("ssid"))
     wifi["down_at"] = None
+    wifi["learn"] = False
     if wifi["home"] and _net_hidden(wifi.get("ssid")):
         # our hidden home answered: no blank AP stays blamed for an
         # earlier failed try, hidden roams are due again, and its BSSID is
@@ -2058,7 +2271,7 @@ def _wifi_round_failed(w):
     now = time.ticks_ms()
     if wifi.get("down_at") is None:
         wifi["down_at"] = now
-    if _all_uploaded() and not _web_search(now):
+    if _nothing_to_send() and not _web_search(now):
         _wifi_off(w, "sleep")
         return
     _radio_off(w)
@@ -2072,13 +2285,24 @@ def _web_search(now):
     can see the home network come back (_home_seen): a failed round keeps
     searching with the "not found" backoff for WEB_SEARCH after the link
     went down, instead of sleeping WIFI_SLEEP (1 h, page down) at once
-    (a router restart, a board booting faster than the router)."""
+    (a router restart, a board booting faster than the router). A hidden
+    home whose BSSIDs are not known yet is invisible to those scans."""
     if not WEB or not (WEB_AWAY or _has_home()):
         return False
-    if PB_KEEPALIVE and PB_MODE == "scan":
+    if PB_KEEPALIVE and PB_MODE == "scan" and _home_seeable():
         return False
     at = wifi.get("down_at")
     return at is not None and _age(now, at) < WEB_SEARCH
+
+def _home_seeable():
+    """A keep-alive scan can see home come back (_home_seen): a visible
+    home network is configured, or the hidden home's BSSIDs are known."""
+    if wifi.get("home_aps"):
+        return True
+    for n in wifi.get("nets") or []:
+        if n.get("home") and not n.get("hidden"):
+            return True
+    return False
 
 def _radio_off(w):
     try:
@@ -2164,10 +2388,15 @@ def _radio_idle_ok():
     open anchor file (and its RAM) waits. That file is closed every
     STILL_FILE while connected and wakes the hourly round (_all_uploaded),
     so the radio and a phone hotspot do not idle on for the whole stay."""
-    if _all_uploaded() or up.get("state") == "no .env":
-        return True                      # (no GEO_URL/API_KEY: never sends)
+    if _nothing_to_send():
+        return True
     sl = log["still"]
     return bool(sl["active"] and not sl["home"] and not pending())
+
+def _nothing_to_send():
+    """All uploaded, or no GEO_URL/API_KEY ("no .env": never sends, so the
+    waiting tracks are no reason for rounds every backoff or hour)."""
+    return _all_uploaded() or up.get("state") == "no .env"
 
 def _all_uploaded():
     """Nothing left for the network: no finished track waiting, nothing in
@@ -2186,6 +2415,7 @@ def wifi_wake():
         wifi["wake"] = True
         return True
     if wifi["state"] == "not found":
+        wifi["rounds"] = 0               # an arrival: try every network
         wifi["last_check"] = time.ticks_add(time.ticks_ms(), -wifi["backoff"])
         return True
     return False
@@ -2336,14 +2566,18 @@ def _keepalive_env(env):
             PB_CONNECTED = t
 
 def _pin_taken(n):
-    """A pin the board already uses: GPS UART, I2C (OLED), main.py's
-    boot-bypass pin (10 on the C6, 25 on the ESP32) and, on the C6, the
-    USB D-/D+ pins 12/13 (the console). Pulsing one of them breaks it."""
+    """A pin the board already uses or must not drive: GPS UART, I2C
+    (OLED), main.py's boot-bypass pin (10 on the C6, 25 on the ESP32); on
+    the C6 the USB D-/D+ pins 12/13 and UART0 16/17 (the console), the
+    strapping pins 8/9 (a MOSFET gate's pull-down holds 9 low at reset:
+    download mode) and the SPI flash pins 24-30; on the ESP32 the strapping
+    pin 0 (download mode), UART0 1/3 and the SPI flash pins 6-11 (driving
+    one crashes the board). Pulsing one of them breaks it."""
     if n in (GPS_TX, GPS_RX, I2C_SCL, I2C_SDA):
         return True
     if IS_C6:
-        return n in (10, 12, 13)
-    return n == 25
+        return n in (8, 9, 10, 12, 13, 16, 17) or 24 <= n <= 30
+    return n in (0, 1, 3, 25) or 6 <= n <= 11
 
 _pb_pin = None
 
@@ -2485,6 +2719,10 @@ def wifi_start():
     _set_freq(CPU_MHZ)
     wifi["nets"] = _load_nets(env)
     _has_home()                          # cached for wifi_tick
+    for n in wifi["nets"]:
+        if n.get("home") and n.get("hidden"):
+            _home_aps_load()             # the hidden home's known BSSIDs
+            break
     if wifi["nets"]:
         wifi["ssid"] = wifi["nets"][0]["ssid"]
         wifi["pw"] = wifi["nets"][0]["pw"]
@@ -2576,6 +2814,8 @@ def wifi_tick():
         wifi["try_at"] = now
         wifi["cand"] = []
         wifi["cand_i"] = 0
+        wifi["learn"] = False            # (it may come back on a hotspot)
+        wifi["rounds"] = 0               # the next round tries every network
         print("wifi lost", wifi.get("ssid") or "")
         return
     if wifi["state"] == "lost":
@@ -2602,12 +2842,14 @@ def wifi_tick():
             if _age(now, wifi["idle_at"]) < WIFI_IDLE:
                 return
             wifi["idle_at"] = now
-            if _all_uploaded() and not (WEB and (WEB_AWAY or _has_home())):
+            if (_nothing_to_send()
+                    and not (WEB and (WEB_AWAY or _has_home()))):
                 wifi["wake_at"] = None
                 return
         wifi["wake"] = False
         wifi["backoff"] = WIFI_RETRY
         wifi["last_check"] = now
+        wifi["rounds"] = 0               # a wake: the first round tries all
         _wifi_begin_round(w)
         return
     if _age(now, wifi["last_check"]) < wifi["backoff"]:
@@ -2655,17 +2897,24 @@ log = {}
 
 # The departure ring (see _still_active, _still_leave): the last
 # STILL_DEP_MAX usable samples of a stay, preallocated once. Per sample its
-# time in seconds since 2020 (_RT), and in _RF five floats: latitude and
-# longitude as offsets from the ring's first sample (single precision keeps
-# them to the centimetre), elevation, HDOP (_RNONE when not in the line) and
-# the distance from the anchor. The track lines are rebuilt on leaving. As
-# tuples of the line, its time and the position they took ~225 B a sample on
-# the board: 90 of them grew the heap to 116 of 124 kB and left no block
-# over 2 kB, so the next larger allocation took the heap mbedTLS needs.
+# time in seconds from the ring's first sample (_RT; a stay's "rt0"), in
+# _RF the latitude, the longitude and the distance from the anchor, and in
+# _RE the elevation and HDOP fields as the track line writes them (_ele_hd:
+# 8 and 4 bytes, space padded). A rebuilt line is the line _sample_line
+# would have written, rounding included: on the board a float is single
+# precision, the very value an array("f") keeps; a double (a test host)
+# takes three single floats, each what the ones before rounded off, which
+# add up to it exactly. The track lines are rebuilt on leaving. As tuples of
+# the line, its time and the position they took ~225 B a sample on the
+# board: 90 of them grew the heap to 116 of 124 kB and left no block over
+# 2 kB, so the next larger allocation took the heap mbedTLS needs.
 from array import array
+_NP = 1 if 1.0 + 1e-12 == 1.0 else 3     # floats a coordinate takes
+_RW = 2 * _NP + 1                        # floats a sample takes (d last)
 _RT = array("i", bytes(4 * STILL_DEP_MAX))         # (zeros, 4 B each:
-_RF = array("f", bytes(4 * 5 * STILL_DEP_MAX))     # a raw initialiser)
-_RNONE = -1e9                            # (exact in single precision)
+_RF = array("f", bytes(4 * _RW * STILL_DEP_MAX))   # a raw initialiser)
+_RE = bytearray(12 * STILL_DEP_MAX)
+_RPAD = b"            "                  # 12 spaces: an empty _RE entry
 
 def log_reset():
     log.clear()
@@ -2680,7 +2929,8 @@ def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
-            "rn": 0, "ri": 0, "rref": None, "gap_n": 0, "pos": None,
+            "rn": 0, "ri": 0, "rt0": 0, "gap_n": 0, "gap_at": None,
+            "gap_ref": None, "gap_seen": None, "pos": None,
             "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
             "last_at": None, "last_d": 0, "file_at": None, "veto_at": None,
             "move_c": None, "wins": 0, "hold_tc": None, "aps": {},
@@ -2752,9 +3002,11 @@ def start_file(stamp=None):
     except OSError:
         pass                             # already exists
     name = stamp or _stamp()
+    # (wfail: a write that failed on the previous file must not keep the
+    # next one from closing: log_tick)
     log.update(file=LOG_DIR + "/" + name + ".trk", created=False, points=0,
                new_seg=False, seg_tc=[], file_at=time.ticks_ms(),
-               good_size=None)
+               good_size=None, wfail=False)
     # First write happens when there are points (parking must not create
     # an empty / one-point file just because a fix came back).
 
@@ -2797,20 +3049,22 @@ def flush(hold=None):
     # A segment break goes before the first line recorded after it (each
     # time in seg_tc), not before the whole batch: lines held or not yet
     # flushed from before the break stay in the old segment. Not at the
-    # very start of a file.
+    # very start of a file. seg_tc is in time order, as the lines are: one
+    # pass over both, each line's time sliced once.
     seg = None
     if log["new_seg"]:
-        for tc in log["seg_tc"]:
-            if tc is None:
-                break                    # (no line recorded after it yet)
-            i = 0
-            while i < k and batch[i][-17:-1] < tc:
-                i += 1
-            if i < k and (i > 0 or not creating):
-                if seg is None:
-                    seg = []
-                if i not in seg:
+        q = log["seg_tc"]
+        j = i = 0
+        while i < k and j < len(q) and q[j] is not None:   # (None: no
+            t = batch[i][-17:-1]                          # line after it)
+            if q[j] <= t:
+                if i > 0 or not creating:
+                    if seg is None:
+                        seg = []
                     seg.append(i)
+                while j < len(q) and q[j] is not None and q[j] <= t:
+                    j += 1
+            i += 1
     try:
         extra = len(NEW_SEG) * len(seg) if seg is not None else 0
         pts = 0
@@ -2832,10 +3086,11 @@ def flush(hold=None):
                 if start < 0:
                     start = 0
             expected = start + extra + pts + len(FOOTER)
-        i = 0
+        i = j = 0
         while i < k:
-            if seg is not None and i in seg:
+            if seg is not None and j < len(seg) and seg[j] == i:
                 f.write(NEW_SEG.encode())
+                j += 1
             f.write(batch[i].encode())
             i += 1
         f.write(FOOTER.encode())
@@ -2919,27 +3174,40 @@ def _sample_line(now, prev, last_t):
     prev."""
     if not _usable(now):
         return None
-    hdop = _fresh_hdop(now)
     lat, lon = st["lat"], st["lon"]
     t = st["date"] + "T" + st["time"] + "Z"
     if (last_t is not None and t <= last_t) or (prev is not None and _dist(
             prev[0], prev[1], lat, lon) <= MIN_MOVE):
         return None
+    ele, hd = _ele_hd(now)
+    return t, "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hd, _tc())
+
+def _ele_hd(now):
+    """The elevation and HDOP fields of a track line for the current fix
+    ("" when not known). Also what the departure ring keeps (_RE)."""
     ele = ""
     if st["alt"] is not None and st.get("fixtype") != 2:
         ele = "%.1f" % st["alt"]
-    hd = ("%.1f" % hdop) if hdop is not None else ""
-    return t, "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hd, _tc())
+    hdop = _fresh_hdop(now)
+    return ele, ("%.1f" % hdop) if hdop is not None else ""
 
 def _seg_break():
     """Start a new segment with the next line recorded. A break whose line
     is still in RAM stays queued (one per loss: two short losses within
-    held lines were one break)."""
+    held lines were one break). Breaks whose lines are gone (the MAX_BATCH
+    cap, a full flash) all go before the oldest line left, so one of them
+    stands for all: the queue never outgrows the batch. (A cap of 16 that
+    dropped the oldest lost real breaks: 18 losses while writes failed
+    wrote 16.)"""
     q = log["seg_tc"]
     if not q or q[-1] is not None:
+        b = log["batch"]
+        t0 = b[0][-17:-1] if b else None
+        i = 0
+        while i + 1 < len(q) and (t0 is None or q[i + 1] <= t0):
+            i += 1
+        del q[:i]
         q.append(None)
-        if len(q) > 16:
-            q.pop(0)
     log["new_seg"] = True
 
 def _record(s, pos):
@@ -2983,6 +3251,14 @@ def _civil(z):
 # from 1970 they pass MicroPython's small-int range (2**30), so every second
 # allocated a big int. From 2020 that lasts until 2054.
 EPOCH_DAYS = 18262                       # 2020-01-01 in days since 1970
+FIX_S_END = 2145916800                   # 2088-01-01 in seconds since 2020:
+                                         # a fix dated before 2020 or from
+                                         # then on is not used (a receiver
+                                         # past a GPS week rollover says 1999,
+                                         # read as 2099; the departure ring's
+                                         # 32-bit seconds overflowed silently
+                                         # on the board and stamped the way
+                                         # out 1951)
 
 def _fix_s():
     """Seconds since 2020 of the current fix's date and time, or None."""
@@ -3019,18 +3295,30 @@ def _still_gap(now, pos):
     and dropping the previous window too released the drift held for the
     stay (measured: 13 lines in 14 min). Also run when a fix returns after
     NEW_FILE_GAP, before the old track closes: what a window from before
-    the gap held is then written to it, not moved on to the next file."""
+    the gap held is then written to it, not moved on to the next file.
+    Once per gap (gap_seen): _sample runs it again with last_at unchanged,
+    and that second verdict, taken from the previous window once the open
+    one was gone, released into the new file what the first had held over.
+    The previous window is measured on its own: one beyond STILL_EXIT
+    cannot pair with anything here, even when the open window is near
+    (judged by the open window alone, its lines moved on to the new file)."""
     sl = log["still"]
-    if sl["last_at"] is None or _age(now, sl["last_at"]) <= STILL_GAP:
+    la = sl["last_at"]
+    if la is None or _age(now, la) <= STILL_GAP or sl["gap_seen"] == la:
         return
-    c = sl["prev"][0] if sl["prev"] else None
+    sl["gap_seen"] = la
+    p = sl["prev"]
+    pd = None if p is None else _dist(p[0][0], p[0][1], pos[0], pos[1])
+    gd = pd
     if sl["win_at"] is not None and sl["sum"][2]:
         r, sm = sl["ref"], sl["sum"]
-        c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
-    gd = None if c is None else _dist(c[0], c[1], pos[0], pos[1])
+        gd = _dist(r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2], pos[0], pos[1])
     if gd is not None and gd > STILL_EXIT:
         sl.update(win_at=None, prev=None, hold_tc=None)
-    elif gd is not None and gd > STILL_RADIUS:
+        return
+    if pd is not None and pd > STILL_EXIT:
+        sl["prev"] = None
+    if gd is not None and gd > STILL_RADIUS:
         # do not mix two places in one window, but keep holding what the
         # restarted window held: a pair that proves a stay drops it
         if sl["win_at"] is not None and sl["hold_tc"] is None:
@@ -3148,7 +3436,8 @@ def _close_file():
                                          # would create an empty file)
     b = log["batch"]
     if not b:
-        log.update(file=None, created=False, file_at=None, new_seg=False)
+        log.update(file=None, created=False, file_at=None, new_seg=False,
+                   wfail=False)          # (a failure of a batch now gone)
         del log["seg_tc"][:]
         return True
     hold = _still_hold()
@@ -3237,7 +3526,7 @@ def _stay_scan(aps):
                       % (len(known), sl["ap_miss"]))
                 _diag_write("stay left wifi aps %d scans %d"
                             % (len(known), sl["ap_miss"]))
-                _still_leave()
+                _still_leave(wifi_seen=True)
             return
         sl["ap_miss"], sl["ap_miss_at"] = 0, None
     for r, b in seen:                    # recency first, then signal
@@ -3251,61 +3540,85 @@ def _stay_scan(aps):
 def _ring_add(sl, now, pos, d):
     """Keep a usable sample of the stay in the departure ring (see _RT),
     the oldest overwritten when it is full. A sample that falls back from
-    the one before by more than STILL_TOL starts it over: the way out
-    (_still_leave) never reaches back past it."""
+    the one before by more than STILL_TOL starts it over: the ring is
+    always a run that kept receding, the way out (_still_leave)."""
     s = _fix_s()
     if s is None:
         return
     cap = len(_RT)
     n, i = sl["rn"], sl["ri"]
-    if n and d + STILL_TOL < _RF[5 * ((i + n - 1) % cap) + 4]:
+    if n and d + STILL_TOL < _RF[_RW * ((i + n - 1) % cap) + _RW - 1]:
         n = 0
     if not n:
-        sl["rref"], i = pos, 0
+        sl["rt0"], i = s, 0
     if n < cap:
         j = (i + n) % cap
         n += 1
     else:
         j, i = i, (i + 1) % cap
     sl["rn"], sl["ri"] = n, i
-    r = sl["rref"]
-    _RT[j] = s
-    k = 5 * j
-    _RF[k] = pos[0] - r[0]
-    _RF[k + 1] = pos[1] - r[1]
-    alt, hd = st["alt"], _fresh_hdop(now)
-    _RF[k + 2] = (alt if alt is not None and st.get("fixtype") != 2
-                  else _RNONE)
-    _RF[k + 3] = _RNONE if hd is None else hd
-    _RF[k + 4] = d
+    _RT[j] = s - sl["rt0"]               # (seconds since 2020 overflowed it
+                                         # from 2088 on: see _sample)
+    k = _RW * j
+    _ring_put(k, pos[0])
+    _ring_put(k + _NP, pos[1])
+    _RF[k + _RW - 1] = d
+    e, h = _ele_hd(now)
+    k = 12 * j
+    _RE[k:k + 12] = _RPAD
+    if len(e) <= 8:                      # (beyond 99999.9 m: none)
+        _RE[k:k + len(e)] = e.encode()
+    if len(h) <= 4:
+        _RE[k + 8:k + 8 + len(h)] = h.encode()
 
-def _still_leave():
-    """End the stay and write the way out: the trailing run of recent
-    samples whose distance from the anchor kept growing (within STILL_TOL),
-    so the departure starts near the anchor, not STILL_EXIT away."""
+def _ring_put(k, v):
+    """Keep coordinate v in _RF from k on (see _NP)."""
+    m = k + _NP
+    while k < m:
+        _RF[k] = v
+        v -= _RF[k]                      # (what single precision lost)
+        k += 1
+
+def _ring_deg(k):
+    """A coordinate kept in the departure ring from _RF[k] on (_NP floats,
+    added up largest first: exact)."""
+    v = _RF[k]
+    m = k + _NP
+    k += 1
+    while k < m:
+        v += _RF[k]
+        k += 1
+    return v
+
+def _still_leave(wifi_seen=False):
+    """End the stay and write the way out: the samples in the departure
+    ring, a run whose distance from the anchor kept growing (within
+    STILL_TOL), so the departure starts near the anchor, not STILL_EXIT
+    away. With wifi_seen (the stay's access points are gone, _stay_scan)
+    only if the last sample was out past STILL_NEAR: otherwise the ring is
+    the stay's drift, and the stay just ends."""
     sl = log["still"]
-    n, i0, cap, r = sl["rn"], sl["ri"], len(_RT), sl["rref"]
-    i = n - 1
-    while i > 0 and (_RF[5 * ((i0 + i - 1) % cap) + 4]
-                     <= _RF[5 * ((i0 + i) % cap) + 4] + STILL_TOL):
-        i -= 1
+    n, i0, cap = sl["rn"], sl["ri"], len(_RT)
+    if (wifi_seen and n
+            and _RF[_RW * ((i0 + n - 1) % cap) + _RW - 1] <= STILL_NEAR):
+        n = 0
+    i = 0
     prev = None
-    while 0 <= i < n:
+    while i < n:
         j = (i0 + i) % cap
         i += 1
-        k = 5 * j
-        p = (r[0] + _RF[k], r[1] + _RF[k + 1])
-        t, tc = _stamp_s(_RT[j])
+        p = (_ring_deg(_RW * j), _ring_deg(_RW * j + _NP))
+        t, tc = _stamp_s(sl["rt0"] + _RT[j])
         # only what comes after the last line (an anchor point may have
         # been written while the way out began), so the track stays in order
         if (log["last_t"] is not None and t <= log["last_t"]) or (
                 prev is not None
                 and _dist(prev[0], prev[1], p[0], p[1]) <= MIN_MOVE):
             continue
-        e, h = _RF[k + 2], _RF[k + 3]
+        k = 12 * j
         line = "%.6f,%.6f,%s,%s,%s\n" % (
-            p[0], p[1], "" if e == _RNONE else "%.1f" % e,
-            "" if h == _RNONE else "%.1f" % h, tc)
+            p[0], p[1], _RE[k:k + 8].decode().strip(),
+            _RE[k + 8:k + 12].decode().strip(), tc)
         if log["file"] is None:
             start_file(tc[:8] + "_" + tc[9:15])
         _record((t, line), p)
@@ -3314,53 +3627,76 @@ def _still_leave():
     wifi["sleep_home"] = False           # left: no longer at home
     log["still"] = _still_state()
 
+def _still_recede(sl, d):
+    """A sample out past STILL_EXIT: True when the departure is clear.
+    Leaving: STILL_EXIT_N samples each gaining STILL_STEP (a vehicle), or
+    STILL_EXIT_SLOW samples out there that gained STILL_SLOW_GAIN in all (a
+    walk). A multipath jump that freezes 200 m away gains nothing, however
+    long it lasts. A sample that falls back by more than STILL_TOL starts
+    the count over."""
+    if d + STILL_TOL < sl["far_d"]:
+        sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
+        return False
+    sl["far_n"] = sl["far_n"] + 1 if d >= sl["far_d"] + STILL_STEP else 1
+    if not sl["far_slow"]:
+        sl["far_0"] = d
+    sl["far_slow"] += 1
+    sl["far_d"] = d
+    return sl["far_n"] >= STILL_EXIT_N or (
+        sl["far_slow"] >= STILL_EXIT_SLOW
+        and d - sl["far_0"] >= STILL_SLOW_GAIN)
+
 def _still_active(now, pos):
     """One usable fix while stationary: watch for a departure (consecutive
     samples beyond STILL_EXIT that keep receding; an excursion that turns
-    back does not count; after a fix gap, samples that are simply out
-    there), refine the anchor (the heartbeat, the file rotation and the
-    home close are _still_beat)."""
+    back does not count; after a fix gap, a place out there where the fixes
+    stay together), refine the anchor (the heartbeat, the file rotation and
+    the home close are _still_beat)."""
     sl = log["still"]
     a = sl["anchor"]
     d = _dist(a[0], a[1], pos[0], pos[1])
     gap = sl["last_at"] is not None and _age(now, sl["last_at"]) > STILL_GAP
-    if d > STILL_EXIT and (gap or sl["gap_n"]):
+    if d > STILL_EXIT and (gap or sl["gap_at"] is not None):
         # Back after a fix gap out past STILL_EXIT (a metro or a garage,
-        # then sitting still elsewhere): there is no receding run to wait
-        # for, and a stay that waited for one wrote nothing at the new
-        # place. Clearly out (2 * STILL_EXIT), or STILL_EXIT_N samples in a
-        # row out there, end it; the way out starts at the first of them.
-        if gap:
-            sl["rn"] = sl["gap_n"] = 0
-        sl["gap_n"] += 1
+        # then sitting still elsewhere): there may be no receding run to
+        # wait for, and a stay that waited for one wrote nothing at the new
+        # place. It ends when the board clearly is elsewhere: one fix past
+        # STILL_GAP_JUMP, or STILL_MIN_FIXES within STILL_RADIUS of the
+        # first of them over STILL_GAP_STAY. Not on a single fix out past
+        # 2 * STILL_EXIT, or STILL_EXIT_N of them (a 320 m outlier, a jump
+        # frozen 200 m out for 3 s ended it and wrote a spike). Fixes coming
+        # closer are not counted: a cold start converging walks in from
+        # 230 m. (Not reset either: indoors at the new place the drift comes
+        # closer every other second.) A receding run still leaves as usual.
+        # The way out starts at the first fix after the gap.
+        g = sl["gap_ref"]
+        if g is None or _dist(g[0], g[1], pos[0], pos[1]) > STILL_RADIUS:
+            if gap or g is None:         # (a walk on out there keeps
+                sl["rn"] = 0             # its way out in the ring)
+                sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
+            sl.update(gap_ref=pos, gap_at=now, gap_n=1)
+        elif d + STILL_TOL >= sl["last_d"]:
+            sl["gap_n"] += 1
         _ring_add(sl, now, pos, d)
-        if d > 2 * STILL_EXIT or sl["gap_n"] >= STILL_EXIT_N:
+        if _still_recede(sl, d) or d > STILL_GAP_JUMP or (
+                sl["gap_n"] >= STILL_MIN_FIXES
+                and _age(now, sl["gap_at"]) >= STILL_GAP_STAY):
             if not (sl["home"] and _home_veto(now, sl)):
                 sl["far_d"] = d          # (for the "stay end" line)
                 _still_leave()
                 return
-            sl["gap_n"] = 0
+            sl.update(gap_ref=pos, gap_at=now, gap_n=1, far_n=0, far_d=0,
+                      far_slow=0)
     elif d > STILL_EXIT and d + STILL_TOL >= sl["far_d"]:
         _ring_add(sl, now, pos, d)
-        # Leaving: STILL_EXIT_N samples each gaining STILL_STEP (a vehicle),
-        # or STILL_EXIT_SLOW samples out there that gained STILL_SLOW_GAIN
-        # in all (a walk). A multipath jump that freezes 200 m away gains
-        # nothing, however long it lasts.
-        sl["far_n"] = sl["far_n"] + 1 if d >= sl["far_d"] + STILL_STEP else 1
-        if not sl["far_slow"]:
-            sl["far_0"] = d
-        sl["far_slow"] += 1
-        sl["far_d"] = d
-        if sl["far_n"] >= STILL_EXIT_N or (
-                sl["far_slow"] >= STILL_EXIT_SLOW
-                and d - sl["far_0"] >= STILL_SLOW_GAIN):
+        if _still_recede(sl, d):
             if not (sl["home"] and _home_veto(now, sl)):
                 _still_leave()
                 return
             sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
     else:
         sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
-        sl["gap_n"] = 0
+        sl.update(gap_n=0, gap_at=None, gap_ref=None)
         _ring_add(sl, now, pos, d)
         if d <= STILL_NEAR:
             _still_mean(sl, pos)
@@ -3496,6 +3832,8 @@ def _sample(now):
     stay logic and the track when the fix is usable."""
     secs = _fix_s()
     if secs is not None:
+        if not 0 <= secs < FIX_S_END:
+            return                       # (see FIX_S_END)
         log["clock"] = (secs, now)       # GPS time for the heartbeat (2020)
     if not st["date"] or not _usable(now):
         return                           # (a second with GGA only, e.g. the
@@ -3622,6 +3960,13 @@ def up_reset():
               enomem=0, last_err=None, guard_hits=_guard["hits"],
               lowidf_at=None, lowidf_seen=None,
               lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
+    # the SSLContext now, in the boot's heap before the WiFi starts (made
+    # at the first POST it could grow the heap and pin that area)
+    _tls_ctx[0] = None
+    try:
+        _tls_context()
+    except Exception as e:               # the first POST tries again
+        print("tls context", repr(e))
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -4241,14 +4586,30 @@ def _io_write(s, b):
         i += n
         t0 = time.ticks_ms()
 
-_tls_ctx = [None]                        # the one SSLContext, made once
+_tls_ctx = [None, None]                  # the one SSLContext, and the size
+                                         # of the CA_FILE it was made with
+                                         # (None: there was none)
+
+def _ca_size():
+    """Size of CA_FILE, None if there is none (ENOENT). Any other error
+    raises: no POST then, never an unverified one."""
+    try:
+        return os.stat(CA_FILE)[6]
+    except OSError as e:
+        if _enoent(e):
+            return None
+        raise
 
 def _tls_context():
     """The SSLContext every POST wraps its socket with: made (and CA_FILE
-    read) on first use and kept. It is the biggest single Python heap
-    block of a POST; made per POST it came at the worst time (and could
-    grow the heap into the IDF block TLS needs). Not kept if making it
-    failed, so the next POST tries again."""
+    read) once, by up_reset() at boot before the WiFi starts, and kept. It
+    is the biggest single Python heap block of a POST; made at the first
+    POST it came at the worst time (and could grow the heap into the IDF
+    block TLS needs, and keep that area for the rest of the run). Not
+    kept if making it failed, so the next POST tries again.
+    Without CA_FILE (ENOENT only) the server is not verified; a CA_FILE
+    that cannot be read, or is empty, raises: no POST, never a silent
+    fall back to an unverified one."""
     ctx = _tls_ctx[0]
     if ctx is not None:
         return ctx
@@ -4256,20 +4617,95 @@ def _tls_context():
         import tls
     except ImportError:
         import ssl as tls
-    ctx = tls.SSLContext(tls.PROTOCOL_TLS_CLIENT)
     ca = None
     try:
         with open(CA_FILE, "rb") as f:
             ca = f.read()
-    except OSError:
-        pass
-    if ca:
+    except OSError as e:
+        if not _enoent(e):
+            raise
+    if ca is not None and not ca:
+        raise ValueError("empty " + CA_FILE)
+    ph = _post_phase[0]
+    _post_phase[0] = "ctx"               # modtls reports an allocation that
+    ctx = tls.SSLContext(tls.PROTOCOL_TLS_CLIENT)   # fails parsing the CA
+    if ca:                               # as ValueError("invalid cert")
         ctx.verify_mode = tls.CERT_REQUIRED
         ctx.load_verify_locations(cadata=ca)
     else:
         ctx.verify_mode = tls.CERT_NONE
-    _tls_ctx[0] = ctx
+    _post_phase[0] = ph
+    _tls_ctx[0], _tls_ctx[1] = ctx, (len(ca) if ca else None)
     return ctx
+
+def _tls_ready(now):
+    """Before a POST over https: the SSLContext, made again when CA_FILE
+    changed size since (added, removed, replaced by one of another size;
+    one of the same size takes a reboot). False (no POST, retried after
+    LOWIDF_RETRY) when it cannot be made: state "ca err" and a diag line,
+    or, out of memory, "low mem" counted in the run TLS_REBOOT_N ends."""
+    _post_phase[0] = None
+    try:
+        if _tls_ctx[0] is not None and _ca_size() != _tls_ctx[1]:
+            _tls_ctx[0] = None
+            gc.collect()
+            print("upload: %s changed, new TLS context" % CA_FILE)
+        _tls_context()
+        return True
+    except Exception as e:               # (MemoryError too)
+        oom = _enomem(e)
+        up["enomem"] = up.get("enomem", 0) + 1 if oom else 0
+        up["err"] += 1
+        up["state"] = "low mem" if oom else "ca err"
+        err = repr(e)[:60]
+        print("upload ca", err)
+        if err != up.get("last_err"):
+            up["last_err"] = err
+            _diag_write("upload ca err %s" % err)
+        gc.collect()
+        _schedule(now, LOWIDF_RETRY)
+        if oom:
+            _tls_reboot()
+        return False
+    finally:
+        _post_phase[0] = None
+
+_rtc_set = [False]                       # board clock set from the GPS once
+
+def _rtc_sync(now):
+    """mbedTLS checks the server certificate's dates against the board
+    clock, which starts at 2000-01-01 each boot: with CA_FILE every
+    verified POST failed. Set it from the GPS fix (valid, a date in
+    2020-2087) before a POST: once a boot, again only when it drifted more
+    than RTC_DRIFT s. Seconds since 2020 (small ints)."""
+    if not has_fix(now):
+        return
+    s = _fix_s()
+    if s is None:
+        return
+    s += _age(now, st["pos_at"]) // 1000
+    d = s // 86400
+    y, m, dd = _civil(d + EPOCH_DAYS)
+    if not 2020 <= y <= 2087:
+        return
+    rtc = machine.RTC()
+    try:
+        if _rtc_set[0]:
+            t = rtc.datetime()
+            c = ((_days(t[0], t[1], t[2]) - EPOCH_DAYS) * 86400
+                 + t[4] * 3600 + t[5] * 60 + t[6])
+            if -RTC_DRIFT <= c - s <= RTC_DRIFT:
+                return
+        r = s % 86400
+        # weekday 0 = Monday; 2020-01-01 was a Wednesday
+        rtc.datetime((y, m, dd, (d + 2) % 7, r // 3600, r // 60 % 60,
+                      r % 60, 0))
+    except Exception as e:               # no RTC: the POST still goes
+        print("rtc", repr(e))
+        return
+    if not _rtc_set[0]:
+        _diag_write("clock set %s" % _stamp_s(s)[0])
+    _rtc_set[0] = True
 
 def _tls_wrap(s, host):
     """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
@@ -4311,7 +4747,8 @@ def _guard_start(sock, ms):
 def _guard_stop():
     _guard["until"] = _guard["sock"] = None
 
-_post_phase = [None]                     # "connect", "tls", "http" in a POST
+_post_phase = [None]                     # "connect", "tls", "http" in a POST,
+                                         # "ctx" while the SSLContext is made
 
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
@@ -4334,7 +4771,7 @@ def _raw_post(url, data, headers, timeout):
         s.settimeout(timeout)
         s.connect(ai[-1])
         if proto == "https":
-            _heap_note("http_post")
+            _heap_note("connect")
             _post_phase[0] = "tls"       # the handshake
             s = _tls_wrap(s, host)
             _heap_note("tls_wrap")
@@ -4398,9 +4835,17 @@ def _enomem(e):
     """TLS out of memory: MemoryError, ENOMEM (modtls raises SSL_ALLOC_FAILED
     as it) or an mbedTLS ALLOC_FAILED code. modtls turns -1..-255 into a
     positive errno, so MPI (-0x10) arrives as 16, which is also EBUSY, and
-    ASN1 (-0x6A) as 106: those count only from the TLS handshake."""
+    ASN1 (-0x6A) as 106: those count only from the TLS handshake. A
+    failed allocation parsing CA_FILE comes as ValueError("invalid cert"):
+    out of memory only while the SSLContext is made, and only with the
+    IDF heap's largest block under TLS_MIN_KB (else the file is bad)."""
     if isinstance(e, MemoryError):
         return True
+    if isinstance(e, ValueError):
+        if _post_phase[0] != "ctx":
+            return False
+        big = idf_heap()[1]
+        return big is None or big < TLS_MIN_KB
     a = getattr(e, "args", None) or (None,)
     n = a[0]
     if not isinstance(n, int):
@@ -4430,6 +4875,9 @@ def _http_post(size):
         retry = _retry_after_ms(r)
         up["enomem"] = 0
         up["last_err"] = None
+        # the guard may have closed the socket while the headers were read
+        # (the status kept): not a sign of the next error's abort
+        up["guard_hits"] = _guard["hits"]
     except MemoryError:
         up["enomem"] = up.get("enomem", 0) + 1
         raise
@@ -4617,13 +5065,19 @@ def upload_tick():
     if pf < TLS_MIN_PY_KB * 1024:
         # an allocation that does not fit after a GC grows the heap by up
         # to its own size, out of the IDF block TLS needs: wait instead
+        # (a fixed retry: the doubling backoff waited up to BACKOFF_MAX
+        # for a heap that is back after the next collect)
         up["err"] += 1
         up["state"] = "low mem"
         if up.get("last_err") != "low mem":
             up["last_err"] = "low mem"
             _diag_write("upload low mem %d B" % pf)
-        _schedule(now)
+        _schedule(now, LOWIDF_RETRY)
         return
+    if up["url"].startswith("https"):
+        _rtc_sync(now)                   # certificate dates need the time
+        if not _tls_ready(now):
+            return
     if not _bad_full_left():
         up["state"] = "sending"
     read_uart()                          # drain NMEA before blocking
@@ -4641,7 +5095,7 @@ def upload_tick():
     finally:
         if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
             _set_freq(CPU_MHZ)
-        _heap_note("http_post")
+        _heap_note("post")
     read_uart()                          # catch up after a multi-second POST
     now = time.ticks_ms()
     print("upload", path, n, n_ok, code, py_heap()[0],
@@ -5025,19 +5479,41 @@ def _web_send(c, code, ctype, parts):
     if n:
         _web_out(c, mv[:n])
 
-def _web_page(c):
-    """WEB_PAGE from flash in WEB_CHUNK reads into one buffer. The page
-    itself polls /status.json and redraws its boxes."""
-    try:
-        f = open(WEB_PAGE, "rb")
-    except OSError:
-        _web_send(c, "404 Not Found", "text/plain",
-                  ("no %s on the board: run deploy.sh; data at "
-                   "/status.json" % WEB_PAGE,))
-        return
+def _web_gzip(req):
+    """True if the request's Accept-Encoding names gzip (every browser;
+    curl only with --compressed)."""
+    r = req.lower()
+    i = r.find(b"\r\naccept-encoding:")
+    if i < 0:
+        return False
+    j = r.find(b"\r\n", i + 2)
+    return b"gzip" in r[i:j if j >= 0 else len(r)]
+
+def _web_page(c, gz=False):
+    """WEB_PAGE from flash in WEB_CHUNK reads into one buffer: its gzip
+    (WEB_PAGE_GZ, ~9 KB instead of ~24 KB: a third of the sends) when the
+    client accepts gzip and deploy.sh put it there, else the plain page.
+    The page itself polls /status.json and redraws its boxes."""
+    path, f = WEB_PAGE_GZ, None
+    if gz:
+        try:
+            f = open(path, "rb")
+        except OSError:
+            pass
+    if f is None:
+        path = WEB_PAGE
+        try:
+            f = open(path, "rb")
+        except OSError:
+            _web_send(c, "404 Not Found", "text/plain",
+                      ("no %s on the board: run deploy.sh; data at "
+                       "/status.json" % WEB_PAGE,))
+            return
     try:
         _web_head(c, "200 OK", "text/html",
-                  "Content-Length: %d\r\n" % os.stat(WEB_PAGE)[6])
+                  "Content-Length: %d\r\n%s" % (
+                      os.stat(path)[6], "Content-Encoding: gzip\r\n"
+                      if path == WEB_PAGE_GZ else ""))
         buf = bytearray(WEB_CHUNK)
         mv = memoryview(buf)
         while True:
@@ -5065,7 +5541,7 @@ def _web_reply(c, req):
         _sv_fresh()
         _web_send(c, "200 OK", "application/json", _web_json_parts())
     elif path == b"/" or path.startswith(b"/?"):
-        _web_page(c)
+        _web_page(c, _web_gzip(req))
     else:
         _web_send(c, "404 Not Found", "text/plain", ("not found",))
 
