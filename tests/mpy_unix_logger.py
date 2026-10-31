@@ -144,7 +144,7 @@ except Exception as e:
     jd = None
 check("status JSON parts are valid JSON", jd is not None
       and jd.get("satellites") and "uptime" in jd)
-check("HTML parts", "".join(gl._web_html_parts()).endswith("</html>"))
+check("JSON parts stream", not isinstance(gl._web_json_parts(), list))
 check("UTC stamp", gl._stamp_at(1793256075)[0] == "2026-10-29T06:41:15Z")
 check("uptime counter", gl.uptime_s() >= 0)
 check("upload wait without holds", gl._upload_wait(time.ticks_ms()) == 0)
