@@ -2,6 +2,7 @@
 """CPython harness for gps_logger upload / crash / WiFi logic. Not deployed."""
 from __future__ import print_function
 
+import builtins
 import gc as real_gc
 import importlib
 import json
@@ -426,6 +427,7 @@ def _reload_logger():
         import gps_logger as m
     m.DIAG_FILE = os.path.join(diag_dir, "diag.log")   # never the host's /
     m.DIAG_OLD = os.path.join(diag_dir, "diag.1")
+    m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf")
     m.WEB = False                        # radio-sleep tests; WEB has its own
     m.HTTP_POST = lambda url, data, headers, timeout: _post(
         url, data=data, headers=headers, timeout=timeout)
@@ -604,6 +606,26 @@ try:
           any(op[0] == "show" for op in gl.oled.ops))
 except Exception as e:
     check("draw() talks to OLED when present", False, repr(e))
+
+# OLED-FLASH: the free flash on the screen comes through _flash_kb's 30 s
+# cache; draw() runs every REFRESH (500 ms) and statvfs walks the LittleFS
+_sv_calls = []
+_real_statvfs = os.statvfs
+os.statvfs = lambda p: _sv_calls.append(p) or _real_statvfs("/")
+gl._fl[:] = [None, None]
+gl.oled.ops[:] = []
+try:
+    for _ in range(6):
+        gl.draw()
+        _clock[0] += gl.REFRESH
+finally:
+    os.statvfs = _real_statvfs
+_flash_txt = [op[1][0] for op in gl.oled.ops
+              if op[0] == "text" and str(op[1][0]).startswith("Flash ")]
+check("OLED-FLASH: draw() every REFRESH reads statvfs once per 30 s, in kB",
+      len(_sv_calls) == 1 and len(_flash_txt) == 6
+      and _flash_txt[0] == "Flash %d kB" % gl._fl[0],
+      "%r %r" % (_sv_calls, _flash_txt[:2]))
 
 check("default DEVICE_ID is Dawarich-GPS-tracker",
       gl.DEVICE_ID == "Dawarich-GPS-tracker")
@@ -1261,6 +1283,26 @@ try:
           w["state"] == "connected" and w["ssid"] == "phone",
           "state=%s ssid=%s connects=%s" % (
               w["state"], w["ssid"], WLAN.connects))
+    # WR-a: a good scan that lists none of them: the boot round tries every
+    # configured network (12 s each, radio on), later rounds only every
+    # UNLISTED_EVERY rounds; a hidden one (never listed by name) every round
+    def wr_rounds(env_text, n):
+        start_wifi(env_text, [("unrelated", -40)], [])
+        tries = []
+        for _ in range(n):
+            WLAN.connects = []
+            gl.wifi["state"] = "not found"
+            gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"]
+            gl.wifi_tick()
+            drain_wifi()
+            tries.append([c[0] for c in WLAN.connects])
+        return tries
+    every = getattr(gl, "UNLISTED_EVERY", 4)
+    tries = wr_rounds(triple, every)
+    hid = wr_rounds(env_hid_home, 2)
+    check("WR-a: unlisted networks are tried at boot and every Nth round",
+          tries == [[]] * (every - 1) + [["home", "phone", "cabin"]]
+          and hid == [["home"], ["home"]], "%r %r" % (tries, hid))
     # logging continues
     gl.log_reset()
     gl.log["full"] = False
@@ -1429,13 +1471,14 @@ try:
     check("B2: count_points survives a 200 kB line",
           left == 2, "left=%s" % left)
     memerr = []
-    orig_rl = gl._readline
+    rl_name = "_rd_line" if hasattr(gl, "_rd_line") else "_readline"
+    orig_rl = getattr(gl, rl_name)
 
     def boom_line(f):
         memerr.append(1)
         raise MemoryError("heap")
 
-    gl._readline = boom_line
+    setattr(gl, rl_name, boom_line)
     try:
         gl.up_reset()
         check("B2: count_points/up_reset catch MemoryError (no reset)",
@@ -1443,12 +1486,12 @@ try:
     except MemoryError:
         check("B2: count_points/up_reset catch MemoryError (no reset)", False)
     finally:
-        gl._readline = orig_rl
+        setattr(gl, rl_name, orig_rl)
         gl.up["url"] = "https://dawarich.example.com"
         gl.up["key"] = "secret-key"
         gl.wifi["state"] = "connected"
 
-    gl._readline = boom_line
+    setattr(gl, rl_name, boom_line)
     try:
         pump()
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
@@ -1457,7 +1500,7 @@ try:
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
               False, "MemoryError escaped")
     finally:
-        gl._readline = orig_rl
+        setattr(gl, rl_name, orig_rl)
 
     # --- B3: hotspot (non-home) keeps logging + opportunistic upload ------
     def gps_fix(lat=52.5, speed=6.0):
@@ -1679,6 +1722,135 @@ try:
     check("TRK-7: quarantine copies only the point lines of a .trk",
           ok_bad and bad.count(b"\n") == 3 and b"#" not in bad,
           "ok=%s bad=%r" % (ok_bad, bad[:80]))
+
+    # TRK-END: the footer ends a .trk. A failed longer flush, then a shorter
+    # good one, leaves old point lines after "#END": dropped drift points
+    # that must not be uploaded; the file still counts as complete
+    end_dir = os.path.join(tmpdir, "trkend")
+    os.makedirs(end_dir)
+    gl.LOG_DIR = end_dir
+    te = os.path.join(end_dir, "20261005_130000.trk")
+    good = [trk_line(52.5 + i * 0.001, 13.4, "2026-10-05T13:00:%02dZ" % i)
+            for i in range(3)]
+    drift = [trk_line(53.9, 14.9, "2026-10-05T13:00:%02dZ" % (i + 10))
+             for i in range(4)]
+    with open(te, "wb") as f:
+        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+                 + "52.6,13.5,,,2026100").encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(te, 0)
+    te_left = gl.count_points()
+    online(end_dir)
+    with open(te, "wb") as f:
+        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+                 + gl.FOOTER).encode())
+    pump()
+    te_locs = locations()
+    check("TRK-END: reading stops at #END; what follows is not uploaded",
+          (n, n_ok, eof) == (3, 3, True) and te_left == 3
+          and len(te_locs) == 3 and not os.path.exists(te)
+          and all(loc["geometry"]["coordinates"][1] < 53 for loc in te_locs),
+          "n=%s n_ok=%s eof=%s left=%s posted=%d exists=%s" % (
+              n, n_ok, eof, te_left, len(te_locs), os.path.exists(te)))
+
+    # RB-INTO: a .trk is read with readinto into the one preallocated line
+    # buffer, not f.readline(LINE_MAX) (a new LINE_MAX bytes per line)
+    rb_p = os.path.join(end_dir, "20261005_140000.trk")
+    make_trk(rb_p, gl.UPLOAD_BATCH + 7)
+    io_calls = {"readline": 0, "readinto": 0, "foreign": 0}
+    rbuf = getattr(gl, "_rbuf", None)
+
+    class _CountFile(object):
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.f.close()
+
+        def readline(self, *a):
+            io_calls["readline"] += 1
+            return self.f.readline(*a)
+
+        def readinto(self, b):
+            io_calls["readinto"] += 1
+            if rbuf is None or (b is not rbuf
+                                and getattr(b, "obj", None) is not rbuf):
+                io_calls["foreign"] += 1
+            return self.f.readinto(b)
+
+        def __getattr__(self, k):
+            return getattr(self.f, k)
+    real_open_rb = builtins.open
+    builtins.open = lambda name, *a, **k: (
+        _CountFile(real_open_rb(name, *a, **k)) if name == rb_p
+        else real_open_rb(name, *a, **k))
+    try:
+        rb_res = gl.read_batch(rb_p, 0)
+        rb_res2 = gl.read_batch(rb_p, rb_res[3])
+    finally:
+        builtins.open = real_open_rb
+    check("RB-INTO: read_batch reads into the preallocated buffer, no readline",
+          io_calls["readline"] == 0 and io_calls["readinto"] > 0
+          and io_calls["foreign"] == 0
+          and rb_res[:2] == (gl.UPLOAD_BATCH, gl.UPLOAD_BATCH)
+          and rb_res2[:2] == (7, 7) and rb_res2[4], "%r %r %r" % (
+              io_calls, rb_res, rb_res2))
+
+    # RB-SAME: the .trk JSON is byte for byte what the old per-point
+    # "%.6f" / "%.1f" formatting gave (canonical bytes are copied as they
+    # are, anything else is formatted as before)
+    rows = [("52.512345", "13.400001", "10.0", "1.2", "20261005T120005Z"),
+            ("-33.800000", "-70.600000", "", "", "20261005T120006Z"),
+            ("47.5", "19", "123", "0.9", "20261005T120007Z"),
+            ("-0.000000", "0.000000", "-0.0", "", "20261005T120008Z"),
+            ("+47.100000", " 19.200000", "1e2", "inf", "20261005T120009Z"),
+            ("47.1234567", "019.123456", "8848.86", "2", "20261005T120010Z"),
+            ("90.000000", "-180.000000", "nan", "0.0", "20261005T120011Z"),
+            ("47.0", "19.0", "abc", "x", "20261005T120012Z")]
+    same_p = os.path.join(end_dir, "20261005_150000.trk")
+    with open(same_p, "wb") as f:
+        f.write((gl.HEADER + "".join(",".join(r) + "\n" for r in rows)
+                 + gl.FOOTER).encode())
+    want = []
+    for la, lo, el, hd, tc in rows:
+        ef = float(el) if el and el not in ("abc",) else None
+        if ef is not None and ef != ef or ef in (float("inf"),):
+            ef = None
+        hf = float(hd) if hd and hd != "x" else None
+        extra = ""
+        if ef is not None:
+            extra += '"altitude":%.1f,' % ef
+        if hf is not None and hf == hf and abs(hf) != float("inf"):
+            extra += '"horizontal_accuracy":%.1f,' % (hf * gl.HDOP_M)
+        iso = "%s-%s-%sT%s:%s:%sZ" % (tc[0:4], tc[4:6], tc[6:8], tc[9:11],
+                                      tc[11:13], tc[13:15])
+        want.append('{"type":"Feature","geometry":{"type":"Point",'
+                    '"coordinates":[%.6f,%.6f]},"properties":{'
+                    '"timestamp":"%s",%s"device_id":"%s"}}'
+                    % (float(lo), float(la), iso, extra, gl.DEVICE_ID))
+    want_b = ('{"locations":[' + ",".join(want) + "]}").encode()
+    n, n_ok, size, new_off, eof = gl.read_batch(same_p, 0)
+    got_b = bytes(gl._body[:size])
+    check("RB-SAME: .trk Overland JSON byte-identical to the old formatting",
+          (n, n_ok, eof) == (len(rows), len(rows), True) and got_b == want_b,
+          "%r\n%r" % (got_b[:300], want_b[:300]))
+
+    # RB-LONG: a point line of exactly LINE_MAX bytes is read, one byte
+    # longer is skipped whole, the points around it are kept
+    lm_p = os.path.join(end_dir, "20261005_160000.trk")
+    pt = trk_line(52.5, 13.4, "2026-10-05T16:00:00Z", hdop="1.0")
+    fit = " " * (gl.LINE_MAX - len(pt)) + pt
+    over = " " * (gl.LINE_MAX + 1 - len(pt)) + pt
+    with open(lm_p, "wb") as f:
+        f.write((gl.HEADER + pt + fit + over + "x" * 3000 + "\n" + pt
+                 + gl.FOOTER).encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(lm_p, 0)
+    check("RB-LONG: LINE_MAX line read, longer lines skipped, rest kept",
+          len(fit) == gl.LINE_MAX and (n, n_ok, eof) == (3, 3, True)
+          and new_off == os.path.getsize(lm_p), "n=%s n_ok=%s eof=%s %s" % (
+              n, n_ok, eof, new_off))
 
     gl.LOG_DIR = saved_dir
 
@@ -2152,6 +2324,32 @@ try:
     check("HID: repeated hidden-home fails do not grow backoff",
           (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
           "backoff=%s" % gl.wifi.get("roam_backoff"))
+
+    # WR-31: five neighbours' hidden APs taking turns as the strongest one:
+    # each hidden-home try drops the hotspot for >= 12 s. Failed hidden
+    # roams grow their own hold (10, 20, 40, 60 min); the visible-home
+    # check stays at ROAM_CHECK
+    w = start_wifi(env_hid_home, [("phone", -40)], ["phone"])
+    WLAN.ok = set(["phone"])
+    gl.st["speed"] = None
+    WLAN.connects = []
+    for i in range(24):                  # 2 h of ROAM_CHECKs
+        _clock[0] += gl.ROAM_CHECK
+        WLAN.scan_aps = [("", -50, bytes([0x20 + i % 5]) * 6),
+                         ("phone", -40)]
+        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        if WLAN.instances:
+            WLAN.instances[-1]._status = 3
+        gl.wifi["state"] = "connected"
+        gl.wifi["home"] = False
+        gl.wifi["ssid"] = "phone"
+        gl.wifi_tick()
+        drain_wifi()
+    hid_tries = len([c for c in WLAN.connects if c[0] == "home"])
+    check("WR-31: failed hidden-home roams back off (not every 5 min)",
+          1 <= hid_tries <= 6
+          and (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK,
+          "tries=%d backoff=%s" % (hid_tries, gl.wifi.get("roam_backoff")))
 
     # exponential roam backoff (wrong home PSK / unseen home)
     w = start_wifi(env_hot, [("PhoneHotspot", -40)], ["PhoneHotspot"])
@@ -2831,7 +3029,7 @@ try:
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
                   fix=False, lost_at=_clock[0] - gl.NEW_FILE_GAP * 1000 - 1,
                   last_flush=_clock[0], prev=(52.5, 13.4), new_seg=False,
-                  online=False)
+                  wfail=True, online=False)
     gl.st.update(valid=True, date="2026-10-05", time="19:00:00",
                  lat=52.6, lon=13.5, alt=10.0, pos_at=_clock[0],
                  hdop=1.0, hdop_at=_clock[0], status="A", quality=1, fixtype=3)
@@ -2941,6 +3139,34 @@ try:
           seen and seen[0] == 2,
           "seen=%s rtc=%s" % (seen, RTC.mem))
     _reset_cause[0] = 1
+
+    # BOOT-DOC: README, the diag docstring and the page say what main.py /
+    # run() do and what machine.reset_cause() means on MicroPython 1.29
+    # (ports/esp32/modmachine.c: 1 PWRON incl. brownout, 2 HARD incl.
+    # panic and machine.reset(), 3 WDT, 4 DEEPSLEEP, 5 SOFT; there is no 6)
+    with open(os.path.join(ROOT, "README.md")) as f:
+        readme = f.read()
+    with open(os.path.join(ROOT, "web.html")) as f:
+        page_boot = f.read()
+    guard = readme[readme.index("**Boot loop guard:**"):]
+    guard = " ".join(guard[:guard.index("\n\n**")].split())
+    import inspect
+    run_src = inspect.getsource(gl.run)
+    check("BOOT-DOC: boot loop guard text matches main.py and run()",
+          "time.sleep(1)" in run_src and "_boot_fail_bump()" in run_src
+          and boot_ns["BOOT_FAIL_MAX"] == 5 and "at 5" in guard
+          and [boot_ns["_boot_fail_delay"](n) for n in (1, 2, 7)]
+          == [5, 10, 30] and "5 s, 10 s" in guard and "30 s" in guard
+          and "after 1 s (no growing delay)" in guard
+          and "counted at the next boot, no delay" in guard
+          and gl.BOOT_OK_MS == 60000 and "60 s (`BOOT_OK_MS`)" in guard
+          and "panic" in guard, guard[:300])
+    check("BOOT-DOC: boot causes as MicroPython 1.29 numbers them (no 6)",
+          "6 crash" not in readme and "6 crash" not in gl._diag_boot.__doc__
+          and "2 hard reset" in readme and "5 soft reset" in readme
+          and "2 hard reset" in gl._diag_boot.__doc__
+          and 'var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", '
+              '3: "watchdog", 4: "deep sleep", 5: "soft reset"};' in page_boot)
 
     # K2-6: BOOT_OK_MS is counted from the first _loop iteration, not run()
     src = open(os.path.join(ROOT, "gps_logger.py")).read()
@@ -3522,8 +3748,11 @@ try:
     gl.handle(gsv_line)
     _clock[0] += gl.GPS_RETRY
     gl.gps_check(_clock[0])
-    check("UBX: a receiver that acknowledges is set up again every GPS_RETRY",
-          cfg_n() == 3 * n_frames and gl.st["setup_wait"] == gl.GPS_RETRY)
+    check("UBX: one that acknowledges and ignores: again after GPS_RETRY, "
+          "then doubling",
+          cfg_n() == 3 * n_frames and gl.st.get("ack_n") == 2
+          and gl.st["setup_wait"] == 2 * gl.GPS_RETRY,
+          "frames=%d wait=%d" % (cfg_n(), gl.st["setup_wait"]))
     _clock[0] += 10 * gl.GPS_RETRY_MAX
     gl.gps_check(_clock[0])
     check("UBX: a receiver that took it is never sent it again",
@@ -3674,6 +3903,14 @@ try:
     check("REVIEW3-2: an SSID missing from the scan is not retried",
           calls == ["home", "phone"] and w["ssid"] == "phone",
           "calls=%s" % calls)
+    # WR-30: a hidden home behind a strong blank AP gets that RSSI, so its
+    # failed first association (the C6 cold-boot 202) is retried at once
+    w, calls, out = rv_start_wifi(
+        rv_env + "SSID_HIDDEN=1\n", [("", -55, b"\x31" * 6), ("phone", -40)],
+        ["home", "phone"], fail_first=("home",))
+    check("WR-30: a hidden home behind a strong blank AP is retried at once",
+          calls == ["home", "home"] and w["ssid"] == "home"
+          and w["state"] == "connected", "calls=%s" % calls)
     gl.wifi_reset()
 
     # STAY: position-based stationary filter. Indoors the GPS speed is noise
@@ -3760,6 +3997,25 @@ try:
           gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
           "%.1f m" % gl._dist(a[0], a[1], 47.5, 19.0))
 
+    # RING: the departure ring is preallocated; a stay's state keeps no
+    # per-sample objects (as tuples of line, time and position the 90
+    # samples took ~20 kB of the board's heap and broke uploads)
+    def deep_size(o, seen=None):
+        seen = set() if seen is None else seen
+        if id(o) in seen:
+            return 0
+        seen.add(id(o))
+        n = sys.getsizeof(o)
+        if isinstance(o, dict):
+            n += sum(deep_size(k, seen) + deep_size(v, seen)
+                     for k, v in o.items())
+        elif isinstance(o, (list, tuple)):
+            n += sum(deep_size(v, seen) for v in o)
+        return n
+    still_size = deep_size(gl.log["still"])
+    check("RING: a 30 min stay's state stays small (no per-sample objects)",
+          sv_active() and still_size < 4000, "%d bytes" % still_size)
+
     # excursions that turn back do not end the stay
     n_before = len(sv_lines())
     for m in (30, 55, 80, 95, 70, 40, 10):           # beyond the drift box
@@ -3783,6 +4039,11 @@ try:
     check("STAY: the departure is written from the anchor, not from 150 m",
           bool(new) and sv_m(new[0]) < 15.0,
           repr(new[0] if new else None))
+    check("RING: the way out rebuilt from the ring is a regular track line",
+          bool(new) and len(new[0].split(",")) == 5
+          and new[0].split(",")[2:4] == ["100.0", "1.0"]
+          and len(new[0].split(",")[4]) == 17 and new[0].endswith("Z\n"),
+          repr(new[:2]))
 
     # walking (1.4 m/s) is never a stay, even with the speed reading low
     sv_reset()
@@ -3942,6 +4203,14 @@ try:
                              + 1)[0] == "2027-01-01T00:00:00Z"
     check("HB: UTC date arithmetic matches the calendar (year end, leap, 2100)",
           ok)
+    # the clock counts from 2020: a small int on MicroPython (< 2**30)
+    gl.st.update(date="2026-10-18", time="08:00:00")
+    s20 = gl._fix_s() if hasattr(gl, "_fix_s") else None
+    check("HB: internal seconds count from 2020 and stay below 2**30",
+          s20 is not None and 0 < s20 < 2 ** 30
+          and gl._stamp_s(s20)[0] == "2026-10-18T08:00:00Z"
+          and gl._fix_secs() == calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0)),
+          "s20=%s" % s20)
 
     # HDOP too dilute for 30 min after entering: anchor points keep coming
     sv_reset()
@@ -4077,6 +4346,53 @@ try:
     sv_drift(60, box=10.0, step=3.0)
     check("GAP: ... and the stay is entered on time",
           sv_active() is True)
+
+    # GAPFAR: an away stay, no fix for 2 min (a metro, a garage), then
+    # sitting still elsewhere: nothing recedes, so the stay never ended and
+    # nothing was written there (no heartbeat either: last sample far out).
+    # Own random source: later tests depend on rnd's sequence.
+    grnd = random.Random(2)
+
+    def g_drift(seconds, east=0.0, box=10.0, step=3.0):
+        e = n = 0.0
+        for _ in range(seconds):
+            e = max(-box, min(box, e + grnd.uniform(-step, step)))
+            n = max(-box, min(box, n + grnd.uniform(-step, step)))
+            sv_fix(east + e, n, 1.0)
+
+    sv_reset()
+    g_drift(150)
+    ok0 = sv_active()
+    for _ in range(120):
+        hb_fix(0, 0, nofix=True, speed=0.0)
+    n0 = len(sv_lines())
+    g_drift(10 * 60, east=3000.0, box=1.0, step=0.5)   # outdoors: still
+    a = gl.log["still"]["anchor"]
+    there = [l for l in sv_lines()[n0:] if sv_m(l) > 2900]
+    check("GAPFAR: back after a gap 3 km away, sitting still: the stay ends",
+          ok0 and (not sv_active() or gl._dist(a[0], a[1], 47.5, 19.0) > 2900)
+          and len(there) >= 1, "active=%s there=%d" % (sv_active(), len(there)))
+    check("GAPFAR: ... the new place starts from the first fix there",
+          bool(there) and there[0] == sv_lines()[n0], repr(there[:1]))
+    # 200 m out (no clear jump): STILL_EXIT_N samples in a row out there
+    sv_reset()
+    g_drift(150)
+    for _ in range(120):
+        hb_fix(0, 0, nofix=True, speed=0.0)
+    states = []
+    for k in range(gl.STILL_EXIT_N):
+        sv_fix(200.0 + k * 0.3, 0, 0.0)
+        states.append(sv_active())
+    check("GAPFAR: 200 m out after a gap: leaves after STILL_EXIT_N samples",
+          states == [True] * (gl.STILL_EXIT_N - 1) + [False], repr(states))
+    # a gap with the fix back at the stay keeps it
+    sv_reset()
+    g_drift(150)
+    for _ in range(120):
+        hb_fix(0, 0, nofix=True, speed=0.0)
+    g_drift(60)
+    check("GAPFAR: a gap with the fix back at the place keeps the stay",
+          sv_active())
 
     # ORDER: an anchor point due while the car drives off
     sv_reset()
@@ -4433,6 +4749,26 @@ try:
           mark is not None and 8 <= mark <= 10 and body.count("-\n") == 1,
           "mark=%s lines=%d" % (mark, len(body)))
 
+    # SEG2: two short losses while the lines are held (a walk) are two
+    # breaks; the second one used to merge into the first, still unwritten
+    sv_reset()
+    x = 0.0
+    for part in (30, 10, 10):
+        if x:
+            for _ in range(40):
+                hb_fix(0, 0, nofix=True, speed=5.0)  # 40 s without a fix
+                x += 1.4
+        for _ in range(part):
+            sv_fix(x, 0, 5.0)
+            x += 1.4
+    held = len(gl.log["batch"])
+    gl.flush()
+    with open(gl.log["file"]) as fh:
+        body = [l for l in fh if not l.startswith("#")]
+    marks = [i for i, l in enumerate(body) if l == "-\n"]
+    check("SEG2: two short losses within held lines give two breaks",
+          held >= 40 and marks == [30, 41], "held=%d marks=%s" % (held, marks))
+
     # FIXGAP: a fix back after a long gap closes the track; what a stay
     # still being proven holds moves on, nothing of it is written
     sv_reset()
@@ -4456,17 +4792,36 @@ try:
                                                          gl.log["file"]))
     check("FIXGAP: the held drift moved on in RAM, not to flash",
           held_before > 0 and len(gl.log["batch"]) >= held_before)
+    # (at a flush tick the new trip went on the moved lines without a break)
+    first_new = gl.log["batch"][-1]
+    gl.flush()
+    with open(gl.log["file"]) as fh:
+        body = [l for l in fh if not l.startswith("#")]
+    check("FIXGAP: the new trip goes after a break, not on the moved lines",
+          body.count("-\n") == 1 and body[-1] == first_new
+          and body[-2] == "-\n", repr(body[-3:]))
+    # a fix back elsewhere right after a flush: the drive held by its open
+    # window kept the batch non-empty, so the new trip went into the old
+    # file after a "-"; a loss over NEW_FILE_GAP is a new file
     sv_reset()
     gl.wifi.update(state="offline")
     for i in range(20):
         sv_fix(i * 6.0, 0, 22.0)
+    trip = gl.log["file"]
     for _ in range(gl.NEW_FILE_GAP + 10):
         hb_fix(0, 0, nofix=True)
     gl.log["last_flush"] = _clock[0]                # a flush just happened
-    gl.log["batch"].append("47.6,19.1,1.0,1.0,20261018T235959Z\n")
     sv_fix(500, 0, 22.0)
-    check("FIXGAP: right after a flush the track stays, with a new segment",
-          gl.log["new_seg"] is True and gl.log["prev"] is not None)
+    trip_pts = []
+    if os.path.exists(trip):
+        with open(trip) as fh:
+            trip_pts = [l for l in fh if l.count(",") == 4]
+    check("FIXGAP: a loss over NEW_FILE_GAP starts a new file, flush or not",
+          trip in gl.pending() and len(trip_pts) == 20
+          and gl.log["file"] not in (None, trip) and not gl.log["new_seg"]
+          and gl.log["prev"] is not None,
+          "file=%s pts=%d new_seg=%s" % (gl.log["file"], len(trip_pts),
+                                         gl.log["new_seg"]))
 
     sv_reset()
     sparse(20, 3, east_of=lambda s: s * 1.4)
@@ -4656,7 +5011,7 @@ try:
         lst = FakeSocketMod.made[-1]
         opened = (lst.bound == ("0.0.0.0", 80) and lst.blocking is False
                   and gl._web_sock is lst)
-        reqs = [FakeConn(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+        reqs = [FakeConn(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"),
                 FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n"),
                 FakeConn(b"GET /nope HTTP/1.1\r\n\r\n"),
                 FakeConn(b"", fail=True)]
@@ -4730,6 +5085,96 @@ try:
     check("WEB: _loop serves the page; wifi_stop closes it",
           "web_tick()" in inspect.getsource(gl._loop)
           and "_web_close()" in inspect.getsource(gl.wifi_stop))
+
+    # WEB-DEADLINE: one wall-clock limit per request (a client that sends
+    # or reads a byte at a time held the loop ~50 s: 2 s per recv/send);
+    # WEB-GET: only a GET is answered (an empty request got the 21 KB page);
+    # WEB-HOST: DNS rebinding guard on the Host header
+    class SlowConn(FakeConn):
+        def __init__(self, req, slow_recv=False, slow_send=False):
+            FakeConn.__init__(self, req)
+            self.slow_recv, self.slow_send, self.timeouts = (
+                slow_recv, slow_send, [])
+
+        def settimeout(self, t):
+            self.timeouts.append(t)
+
+        def recv(self, n):
+            if self.slow_recv:           # one byte a second
+                _clock[0] += 1000
+                n = 1
+            b, self.req = self.req[:n], self.req[n:]
+            return b
+
+        def sendall(self, b):
+            if self.slow_send:           # every send waits its whole timeout
+                _clock[0] += int(self.timeouts[-1] * 1000)
+            self.sent += bytes(b)
+
+    gl.socket = FakeSocketMod
+    gl.WEB = True
+    gl.WEB_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "web.html")
+    gl.wifi.update(state="connected", ip="192.168.1.60")
+    good = b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"
+
+    def serve(c):
+        lst = gl._web_sock or (gl.web_tick() or gl._web_sock)
+        lst.waiting.append(c)
+        t0 = _clock[0]
+        gl.web_tick()
+        return _clock[0] - t0
+
+    try:
+        gl._web_close()
+        slow_in = SlowConn(good, slow_recv=True)
+        t_in = serve(slow_in)
+        slow_out = SlowConn(good, slow_send=True)
+        t_out = serve(slow_out)
+        empty, post = FakeConn(b""), FakeConn(b"POST / HTTP/1.1\r\n\r\n")
+        serve(empty)
+        serve(post)
+        hosts = {}
+        for h in (b"evil.example", b"192.168.1.60:80", b"192.168.1.60",
+                  b"dawarich-gps-tracker.local", b"Dawarich-GPS-tracker",
+                  b"DAWARICH-GPS-TRACKER.LOCAL.", b"192.168.1.60.evil.example",
+                  b"evil.example:80", None):
+            c = FakeConn(b"GET /status.json HTTP/1.1\r\n"
+                         + (b"Host: " + h + b"\r\n" if h else b"")
+                         + b"Accept: */*\r\n\r\n")
+            serve(c)
+            hosts[h] = c.sent.split(b"\r\n", 1)[0]
+        low = FakeConn(b"GET / HTTP/1.1\r\nhost: evil.example\r\n\r\n")
+        serve(low)
+    finally:
+        gl._web_close()
+        gl.socket = real_socket
+        gl.WEB_PAGE = saved_page
+        gl.WEB = False
+        gl.wifi["state"] = "sleep"
+    check("WEB-DEADLINE: a client sending a byte a second is dropped at "
+          "WEB_DEADLINE, unanswered",
+          t_in <= gl.WEB_DEADLINE * 1000 and slow_in.sent == b""
+          and slow_in.closed, "%d ms %r" % (t_in, slow_in.sent[:60]))
+    check("WEB-DEADLINE: a slow reader gets at most WEB_DEADLINE s of sends, "
+          "timeouts cut to what is left",
+          t_out <= gl.WEB_DEADLINE * 1000
+          and 0 < len(slow_out.sent) < len(page_file)
+          and max(slow_out.timeouts) <= gl.WEB_TIMEOUT
+          and min(slow_out.timeouts) < gl.WEB_TIMEOUT and slow_out.closed,
+          "%d ms %d B %r" % (t_out, len(slow_out.sent), slow_out.timeouts))
+    check("WEB-GET: an empty or non-GET request is closed without a reply",
+          empty.sent == b"" and empty.closed and post.sent == b""
+          and post.closed, repr((empty.sent[:60], post.sent[:60])))
+    ok200, no = b"HTTP/1.0 200 OK", b"HTTP/1.0 403 Forbidden"
+    check("WEB-HOST: Host must be the board's IP, HOSTNAME[.local] or none",
+          hosts[b"evil.example"] == no and hosts[b"evil.example:80"] == no
+          and hosts[b"192.168.1.60.evil.example"] == no
+          and low.sent.startswith(no) and b"192.168.1.60" in low.sent
+          and all(hosts[h] == ok200 for h in (
+              b"192.168.1.60:80", b"192.168.1.60", None,
+              b"dawarich-gps-tracker.local", b"Dawarich-GPS-tracker",
+              b"DAWARICH-GPS-TRACKER.LOCAL.")), repr(hosts))
 
     # SATS: the satellite list from UBX-NAV-SVINFO, read out of the stream
     import struct
@@ -5029,6 +5474,31 @@ try:
     check("CPU: .env CPU_MHZ 160 / 0 taken, 100 and missing keep the default",
           (a, b, c, d) == (160, 0, 80, 80) and same,
           "%s %s %s %s same=%s" % (a, b, c, d, same))
+    # WR-d: one failed clock change (the drop-back after a POST) is tried
+    # again, not blacklisted for good (the board stayed at 160 MHz)
+    mach = sys.modules["machine"]
+    real_freq = mach.freq
+    fails = [1]
+
+    def flaky_freq(v=None):
+        if v is not None and fails[0]:
+            fails[0] -= 1
+            raise OSError("busy")
+        return real_freq(v)
+    mach.freq = flaky_freq
+    try:
+        gl._freq_bad[:] = []
+        real_freq(160000000)
+        gl._set_freq(80)
+        dropped = _freqs[-1] == 80000000 and 80 not in gl._freq_bad
+        fails[0] = 99
+        gl._set_freq(160)
+        capped = 160 in gl._freq_bad and fails[0] >= 99 - 5
+    finally:
+        mach.freq = real_freq
+        gl._freq_bad[:] = []
+    check("WR-d: a failed clock change is retried, refused ones capped",
+          dropped and capped, "%s %s %r" % (dropped, capped, _freqs[-3:]))
 
     # a round that finds no network: nothing to upload -> sleep; with a
     # track waiting -> the usual backoff, 15 s doubling to 10 min, until a
@@ -5047,10 +5517,10 @@ try:
     rounds, on_between = [], 0
     for _ in range(40 * 60 // 5):                  # 40 minutes
         _clock[0] += 5000
-        before = len(WLAN.connects)
-        gl.wifi_tick()
+        before = gl.wifi.get("rounds")   # (a good scan listing none of
+        gl.wifi_tick()                   # them tries none: no connect)
         drain_wifi()
-        if len(WLAN.connects) > before:
+        if gl.wifi.get("rounds") != before:
             rounds.append(_clock[0])
         on_between += bool(wl().active())
     check("SLEEP: ... the radio is off between the rounds",
@@ -5270,6 +5740,26 @@ try:
         check("PB_KEEPALIVE: .env KEEPALIVE_MODE / KEEPALIVE_PIN, bad ones kept",
               m1 == "scan" and p1 == 12 and gl.PB_MODE == "scan"
               and gl.PB_PIN == 12, "%s %s %s %s" % (m1, p1, gl.PB_MODE, gl.PB_PIN))
+        # WR-b: a pin the board already uses (GPS, I2C, boot-bypass, the
+        # C6's USB) is refused: pulsing it broke the GPS or the console
+        saved_c6 = gl.IS_C6
+        kept = []
+        try:
+            for v in (gl.GPS_TX, gl.GPS_RX, gl.I2C_SCL, gl.I2C_SDA, 25):
+                gl.PB_PIN = 26
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                kept.append(gl.PB_PIN)
+            gl.IS_C6 = True
+            for v in (10, 12, 13):
+                gl.PB_PIN = 2
+                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
+                kept.append(gl.PB_PIN)
+            gl._keepalive_env({"KEEPALIVE_PIN": "3"})
+            free = gl.PB_PIN
+        finally:
+            gl.IS_C6 = saved_c6
+        check("WR-b: KEEPALIVE_PIN on a GPS/I2C/boot/USB pin keeps the default",
+              kept == [26] * 5 + [2] * 3 and free == 3, "%r %r" % (kept, free))
         saved = gl.PB_KEEPALIVE
         try:
             gl._keepalive_env({"KEEPALIVE": "0"})
@@ -5302,6 +5792,63 @@ try:
         fh.write(b"\xef\xbb\xbfSSID=home\nWPA2=x\nGEO_URL=https://d\nAPI_KEY=k\n")
     check("BOM: a UTF-8 BOM before the first key is ignored",
           "SSID" in gl.load_env(bom) and len(gl._load_nets(gl.load_env(bom))) == 1)
+
+    # WR-11: a .env saved as ANSI (Notepad): UnicodeError at every boot ->
+    # boot-fail -> REPL. Now read as bytes: a non-UTF-8 SSID/WPA2 stays
+    # bytes (connect() takes them), any other such value is skipped
+    ansi = os.path.join(rv_dir, "env_ansi")
+    with open(ansi, "wb") as fh:
+        fh.write(b"SSID=K\xe1v\xe9z\xf3\nWPA2=jelsz\xf3\nGEO_URL=https://d\xe9\n"
+                 b"API_KEY=k\nDEVICE_ID=bike\n")
+    crash, env = None, {}
+    try:
+        env = gl.load_env(ansi)
+        nets = gl._load_nets(env)
+    except Exception as e:
+        crash, nets = e, []
+    raw = b"K\xe1v\xe9z\xf3"
+    ok_env = (crash is None and env.get("SSID") == raw
+              and env.get("WPA2") == b"jelsz\xf3" and "GEO_URL" not in env
+              and env.get("API_KEY") == "k" and env.get("DEVICE_ID") == "bike")
+    got = None
+    if nets:
+        real_scan = WLAN.scan
+        WLAN.scan = lambda self: [(raw, b"\x07" * 6, 1, -50, 4, False)]
+        try:
+            reset_wlan()
+            WLAN.ok = {raw}
+            gl.wifi_reset()
+            gl.wifi["nets"] = nets
+            gl.wifi["wlan"] = wa = WLAN(0)
+            wa.active(True)
+            gl._wifi_begin_round(wa)
+            for _ in range(10):
+                _clock[0] += 500
+                gl.wifi_tick()
+            got = (gl.wifi["state"], [c[:2] for c in WLAN.connects[:1]],
+                   gl._wifi_line())
+        except Exception as e:
+            crash = e
+        finally:
+            WLAN.scan = real_scan
+            gl.wifi_reset()
+    check("WR-11: a non-UTF-8 .env neither raises nor loses the network",
+          ok_env and got is not None and got[0] == "connected"
+          and got[1] == [(raw, b"jelsz\xf3")]
+          and got[2].startswith("WiFi K"), "%r %r %r" % (crash, env, got))
+
+    # WR-c: quotes and a comment on a comment-safe key: comment off first,
+    # then the quotes (IP="192.168.1.60" # static kept the quotes: DHCP)
+    qenv = os.path.join(rv_dir, "env_quote")
+    with open(qenv, "wb") as fh:
+        fh.write(b'SSID=home\nIP="192.168.1.60"  # static\n'
+                 b"GW='192.168.1.1' # router\nDEVICE_ID=\"bike\" # mine\n")
+    qn = gl._load_nets(gl.load_env(qenv))
+    check("WR-c: a quoted value with a comment loses both (static IP kept)",
+          qn and qn[0]["ip"] == ("192.168.1.60", "255.255.255.0",
+                                 "192.168.1.1", "192.168.1.1")
+          and gl._plain('"bike" # mine') == "bike",
+          repr(qn and qn[0]["ip"]))
 
     # REVIEW2-2: a timestamp taken just after now is age 0, not "very old"
     now = _clock[0]
@@ -5365,6 +5912,159 @@ except subprocess.CalledProcessError as e:
     smoke = e.output.decode(errors="replace")
 check("SMOKE: tests/mpy_unix_logger.py passes under CPython",
       "mpy logger smoke passed" in smoke, smoke[-300:])
+
+# WEB-LOOPBACK: the status page over real loopback sockets (slow, stalled,
+# empty, oversized, reset and deadline clients) on the unix port and CPython
+for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
+    if not interp:
+        print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
+        continue
+    try:
+        out = subprocess.check_output(
+            [interp, os.path.join(ROOT, "tests", "web_loopback.py")],
+            stderr=subprocess.STDOUT, timeout=60)
+        loop_out = out.decode()
+    except subprocess.CalledProcessError as e:
+        loop_out = e.output.decode(errors="replace")
+    except Exception as e:
+        loop_out = repr(e)
+    check("WEB-LOOPBACK: tests/web_loopback.py passes on " + tag,
+          "web loopback passed" in loop_out, loop_out[-600:])
+
+# DEPLOY: deploy.sh against a fake board (mpremote runs the board-side code
+# under CPython in a directory): files go to <name>.new, are checked by size
+# and SHA-256, then renamed over the old ones; low flash or a bad copy stops
+# it with the old files untouched (a cut copy left an unimportable module)
+FAKE_PY = r"""#!/usr/bin/env python3
+import sys
+a = sys.argv[1:]
+if a[:1] == ["-c"]:
+    sys.exit(0)
+out = a[a.index("-o") + 1]
+with open(a[-1], "rb") as f, open(out, "wb") as g:
+    g.write(b"MPY" + f.read())
+"""
+FAKE_SHIM = r"""
+import sys, os, types
+sys.implementation._machine = "Generic ESP32C6 module with ESP32C6"
+m = types.ModuleType("machine")
+class RTC:
+    def memory(self, b=None):
+        open(".rtc", "wb").write(b)
+m.RTC = RTC
+sys.modules["machine"] = m
+if os.environ.get("FAKE_FREE_BLOCKS"):
+    _blocks = int(os.environ["FAKE_FREE_BLOCKS"])
+    os.statvfs = lambda p: (4096, 4096, 512, _blocks, _blocks, 0, 0, 0, 0,
+                            255)
+"""
+FAKE_MPREMOTE = r"""#!/usr/bin/env python3
+import os, sys, json, subprocess
+dev, log = os.environ["FAKE_DEV"], os.environ["FAKE_LOG"]
+a = sys.argv[1:]
+assert a[0] == "connect", a
+cmds = [[]]
+for x in a[2:]:
+    if x == "+":
+        cmds.append([])
+    else:
+        cmds[-1].append(x)
+with open(log, "a") as f:
+    f.write(json.dumps(cmds) + "\n")
+shim = open(os.environ["FAKE_SHIM"]).read()
+for c in cmds:
+    if c[0] == "exec":
+        r = subprocess.run([sys.executable, "-c", shim + c[1]], cwd=dev)
+        if r.returncode:
+            sys.exit(1)
+    elif c[0] == "cp":
+        with open(c[1], "rb") as f:
+            data = f.read()
+        if os.environ.get("FAKE_TRUNC") == c[1]:
+            data = data[:len(data) // 2]
+        with open(os.path.join(dev, c[2].lstrip(":")), "wb") as f:
+            f.write(data)
+    elif c[0] == "ls":
+        print(sorted(os.listdir(dev)))
+"""
+dp_td = tempfile.mkdtemp(prefix="deploy-")
+
+
+def deploy_run(env_extra):
+    """deploy.sh in a fresh copy of the repo files against a fake board
+    that holds an older install: (rc, stdout, stderr, board dir, calls)."""
+    work = tempfile.mkdtemp(dir=dp_td)
+    for n in ("deploy.sh", "gps_logger.py", "main.py", "web.html"):
+        shutil.copy(os.path.join(ROOT, n), work)
+    os.makedirs(os.path.join(work, ".venv", "bin"))
+    for n, src in (("python", FAKE_PY), ("mpremote", FAKE_MPREMOTE),
+                   ("shim.py", FAKE_SHIM)):
+        path = os.path.join(work, ".venv", "bin", n)
+        with open(path, "w") as f:
+            f.write(src)
+        os.chmod(path, 0o755)
+    dev = os.path.join(work, "dev")
+    os.makedirs(dev)
+    for n, b in (("gps_logger.mpy", b"OLD MODULE"), ("main.py", b"old main"),
+                 ("web.html", b"old page"), ("gps_logger.py", b"stray"),
+                 ("web.html.new", b"left from a failed deploy")):
+        with open(os.path.join(dev, n), "wb") as f:
+            f.write(b)
+    env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
+               FAKE_LOG=os.path.join(work, "log"),
+               FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
+    env.update(env_extra)
+    r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
+                       capture_output=True, text=True, timeout=60)
+    try:
+        with open(env["FAKE_LOG"]) as f:
+            calls = [json.loads(line) for line in f]
+    except OSError:
+        calls = []
+    return r.returncode, r.stdout, r.stderr, dev, calls
+
+
+def dev_file(dev, n):
+    try:
+        with open(os.path.join(dev, n), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+if shutil.which("bash") and shutil.which("sha256sum"):
+    with open(os.path.join(ROOT, "gps_logger.py"), "rb") as f:
+        new_mpy = b"MPY" + f.read()
+    with open(os.path.join(ROOT, "web.html"), "rb") as f:
+        new_page = f.read()
+    rc, out, err, dev, calls = deploy_run({})
+    cps = [c for call in calls for c in call if c[0] == "cp"]
+    check("DEPLOY: copies to .new, checks, renames; old .new and stray .py go",
+          rc == 0 and dev_file(dev, "gps_logger.mpy") == new_mpy
+          and dev_file(dev, "web.html") == new_page
+          and dev_file(dev, "gps_logger.py") is None
+          and not [n for n in os.listdir(dev) if n.endswith(".new")]
+          and dev_file(dev, ".rtc") == b"0"
+          and len(cps) == 3 and all(c[2].endswith(".new") for c in cps)
+          and "Board: Generic ESP32C6" in out and "(rv32imc)" in out
+          and "Deployed to /dev/fakeACM0" in out,
+          "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
+    rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
+    check("DEPLOY: too little free flash -> stops before copying, old kept",
+          rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
+          and not [c for call in calls for c in call if c[0] == "cp"]
+          and "Not enough free flash" in err, "rc=%d %r" % (rc, err[-300:]))
+    rc, out, err, dev, calls = deploy_run({"FAKE_TRUNC": "gps_logger.mpy"})
+    check("DEPLOY: a cut copy fails the check -> old files kept, .new removed",
+          rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
+          and dev_file(dev, "main.py") == b"old main"
+          and not [n for n in os.listdir(dev) if n.endswith(".new")]
+          and "Copy check FAILED" in err
+          and "Deployed" not in out, "rc=%d %r" % (rc, err[-300:]))
+else:
+    print("SKIP  DEPLOY: no bash/sha256sum")
+shutil.rmtree(dp_td, ignore_errors=True)
+
 
 # --- tools/trk2gpx.py: .trk -> GPX 1.1 ------------------------------------
 import xml.etree.ElementTree as ET
@@ -5653,6 +6353,135 @@ for _ in range(4):
 check("GPS-18: >GSA_MAX GSA a second -> extra; one round of 4 does not",
       flood >= 1 and gl.st["extra"] == 0, "%d %d" % (flood, gl.st["extra"]))
 
+# SETUP-LATE: an overrun receiver that ACKs every frame 1.5 s late blocked
+# the loop 10-30 s and the NMEA read meanwhile was dropped (its start-up
+# banner too). Now GPS_SETUP_MAX at most, the rest goes out once, and what
+# is read meanwhile goes through the parser
+late = []
+real_write, real_any = UART.write, UART.any
+
+
+def late_write(self, data):
+    data = bytes(data)
+    _uart_tx.append(data)
+    if data[:3] == b"\xb5\x62\x06":
+        late.append((_clock[0] + 1500, gl._ubx(0x05, 0x01, data[2:4])))
+    return len(data)
+
+
+def late_any(self):
+    late.sort()
+    while late and late[0][0] <= _clock[0]:
+        _uart_rx.extend(late.pop(0)[1])
+    return len(_uart_rx)
+
+
+setup_max = getattr(gl, "GPS_SETUP_MAX", 4000)
+gl.reset()
+_uart_rx[:] = []
+_uart_tx[:] = []
+late.append((_clock[0] + 500, rv_nmea(
+    "GPTXT,01,01,02,u-blox ag - www.u-blox.com") + b"\r\n"))
+late.append((_clock[0] + 700, rv_nmea(
+    "GPRMC,120500.00,V,,,,,,,171026,,,N") + b"\r\n"))
+UART.write, UART.any = late_write, late_any
+t0 = _clock[0]
+try:
+    gl.gps_setup()
+finally:
+    UART.write, UART.any = real_write, real_any
+    late[:] = []
+took = _clock[0] - t0
+sent = [f.hex() for f in _uart_tx]
+msgs = [gl._ubx(0x06, 0x01, bytes((0xF0, m, r))).hex() for m, r in gl.GPS_MSGS]
+check("SETUP-LATE: late ACKs block GPS_SETUP_MAX at most, the rest goes once",
+      took <= setup_max + 400 and gl.st["setup_ok"] is False
+      and all(m in sent for m in msgs)
+      and gl._rate(1000 // gl.GPS_HZ).hex() not in sent,
+      "ms=%d ok=%r frames=%d" % (took, gl.st["setup_ok"], len(sent)))
+check("SETUP-LATE: NMEA read during the setup is parsed (banner = restart)",
+      gl.st["gps_boots"] == 1 and gl.st["ok"] >= 2 and gl.st["extra"] == 1,
+      "boots=%d ok=%d extra=%d" % (gl.st["gps_boots"], gl.st["ok"],
+                                   gl.st["extra"]))
+_uart_rx[:] = []
+
+# SETUP-CHECK: an acknowledged setup that did not take (still one fix a
+# second, or no GST: GPS_MAX_STD silently off) is sent again after
+# GPS_VERIFY; one that took (GPS_HZ fixes and GST) is left alone
+
+
+def verify_run(fixes, gst):
+    gl.reset()
+    _uart_rx[:] = []
+    gl.gps_setup()
+    _uart_tx[:] = []
+    for k in range(12):
+        for f in range(fixes):
+            t = "1206%02d.%02d" % (k, f * 20)
+            gl.handle(rv_nmea("GPGGA,%s,4730.000,N,01900.000,E,1,08,1.0,"
+                              "100.0,M,40.0,M,," % t))
+            gl.handle(rv_nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,90.0,"
+                              "171026,,,A" % t))
+        if gst:
+            gl.handle(rv_nmea("GPGST,1206%02d.00,20,,,,3.0,2.5,6.0" % k))
+        _clock[0] += 1000
+        gl.gps_check(_clock[0])
+    return len([f for f in _uart_tx if f[2:3] == b"\x06"])
+
+
+v_slow = verify_run(1, True)
+v_good = verify_run(gl.GPS_HZ, True)
+v_nogst = verify_run(gl.GPS_HZ, False)
+check("SETUP-CHECK: acknowledged but still 1 fix/s, or no GST -> set up again",
+      v_slow > 0 and v_nogst > 0 and v_good == 0,
+      "slow=%d nogst=%d good=%d" % (v_slow, v_nogst, v_good))
+
+# SETUP-BACKOFF: a receiver that acknowledges every setup but keeps sending
+# the sentences it turns off: GPS_RETRY, then doubling up to a cap
+gl.reset()
+_uart_rx[:] = []
+gl.gps_setup()
+times = []
+for _ in range(200):
+    _clock[0] += 1500
+    gl.handle(rv_nmea("GPVTG,,T,,M,0.0,N,0.0,K,A"))
+    n0 = len(_uart_tx)
+    gl.gps_check(_clock[0])
+    if any(f[2:3] == b"\x06" for f in _uart_tx[n0:]):
+        times.append(_clock[0])
+gaps = [(b2 - a2) // 1000 for a2, b2 in zip(times, times[1:])]
+cap = getattr(gl, "GPS_IGNORED_MAX", 60000) // 1000
+check("SETUP-BACKOFF: acknowledged but ignored -> retries double to a cap",
+      len(gaps) >= 4 and gaps[0] <= gl.GPS_RETRY // 1000 + 2
+      and gaps == sorted(gaps) and cap <= gaps[-1] <= cap + 2,
+      "gaps=%s" % gaps)
+gl.handle(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
+check("SETUP-BACKOFF: a receiver restart starts the backoff afresh",
+      gl.st.get("ack_n") == 0 and gl.st["setup_wait"] == gl.GPS_RETRY,
+      "%r %r" % (gl.st.get("ack_n"), gl.st["setup_wait"]))
+
+# SATS-ORDER: a satellite poll and a setup due in the same gps_check: the
+# setup first, the poll right after it (before, its answer was lost in the
+# setup and counted as a miss)
+gl.reset()
+_uart_rx[:] = []
+_uart_tx[:] = []
+pl = bytearray(8)
+pl[5] = 1
+pl += bytes((0, 7, 41, 60, 10, 0, 0, 0, 0x1F, 0, 0, 0))
+_uart_sat[0] = gl._ubx(0x01, 0x35, bytes(pl))
+try:
+    gl.st["setup_at"] = _clock[0] - 60000      # not acknowledged: due
+    gl.gps_check(_clock[0])
+    gl.read_uart()
+finally:
+    _uart_sat[0] = None
+cfg = [k for k, f in enumerate(_uart_tx) if f[2:3] == b"\x06"]
+poll = [k for k, f in enumerate(_uart_tx) if f[:4] == b"\xb5\x62\x01\x35"]
+check("SATS-ORDER: the poll goes after a setup due at the same time",
+      cfg and poll and poll[0] > cfg[-1] and gl.st["svs"] is not None
+      and gl.st["sv_miss"] == 0, "cfg=%r poll=%r" % (cfg[-1:], poll[:1]))
+
 # GPS-19: the rotation's first line is no status line: look in diag.1
 diag_clear()
 with open(gl.DIAG_OLD, "w") as f:
@@ -5664,6 +6493,62 @@ gl._diag_prev()
 check("GPS-19: previous run found in diag.1 behind a non-status line",
       gl.prev_run["up"] == 3494 and gl.prev_run["how"] == "status",
       repr(gl.prev_run))
+diag_clear()
+
+# DIAG-TAIL: status lines are ~180 B, so 160 B a line gave the page 13 of
+# WEB_DIAG lines, and right after a rotation only one; now the page takes
+# the rest from diag.1, and the tail is read in small pieces (one big read
+# needs a free block that big)
+def st_line(k):
+    return ("up %d utc 20261031T0530%02dZ nmea 99999/12 gpsboots 0 loops 0 "
+            "sats 21/13 fix 3D_fix hdop 0.88199996 points 40000 sent 39990 "
+            "wifi connected pulses 0 mem 27000 idf 157/20 heap 124" % (
+                60 * k, k % 60))
+
+
+diag_clear()
+with open(gl.DIAG_OLD, "w") as f:
+    f.write("".join(st_line(k) + "\n" for k in range(40)))
+with open(gl.DIAG_FILE, "w") as f:
+    f.write("".join(st_line(k) + "\n" for k in range(40, 80)))
+reads = []
+real_open = open
+
+
+class ReadLog(object):
+    def __init__(self, f):
+        self.f = f
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.f.close()
+
+    def read(self, n=-1):
+        reads.append(n)
+        return self.f.read(n)
+
+    def __getattr__(self, k):
+        return getattr(self.f, k)
+
+
+gl.open = lambda *a, **k: ReadLog(real_open(*a, **k))
+try:
+    tail = gl._diag_tail(gl.DIAG_FILE, gl.WEB_DIAG)
+finally:
+    del gl.open
+with open(gl.DIAG_FILE, "w") as f:
+    f.write("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10\n")
+page = gl._web_diag()
+check("DIAG-TAIL: WEB_DIAG lines of ~180 B, read in small pieces",
+      len(st_line(79)) > 175 and tail == [st_line(k) for k in range(65, 80)]
+      and reads and all(0 < n <= 1024 for n in reads),
+      "%d lines, reads %r" % (len(tail), reads))
+check("DIAG-TAIL: just after a rotation the page fills up from diag.1",
+      len(page) == gl.WEB_DIAG and page[-1].startswith("gps u-blox M10")
+      and page[0] == st_line(26) and page[-2] == st_line(39),
+      "%d %r" % (len(page), page[:1]))
 diag_clear()
 
 # GPS-20: a cut-off sentence glued to a whole one keeps the whole one
@@ -5701,13 +6586,47 @@ check("GPS: used from a fresh satellite list, else GGA",
 gl.reset()
 _uart_rx[:] = []
 ban = rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com") + b"\r\n"
-gl._buf = b"x" * 10
+_uart_rx.extend(b"x" * 10)               # a cut-off line before it
+gl.read_uart()
 _uart_rx.extend(ban[:12])
 gl.read_uart()
 _uart_rx.extend(ban[12:])
 gl.read_uart()
 check("GPS: a start-up banner split across two reads is counted",
       gl.st["banners"] == 1, gl.st["banners"])
+
+# UBX-JUNK: sync bytes in junk with a plausible length are no frame: the
+# bad checksum skips only them, and the NMEA they would have swallowed
+# (up to ~1 KB) is read
+gl.reset()
+_uart_rx[:] = []
+rmcs = b"".join(rv_nmea("GPRMC,1207%02d.00,V,,,,,,,171026,,,N" % k) + b"\r\n"
+                for k in range(3))
+_uart_rx.extend(b"\xff\xb5\x62\x01\x02\x40\x00" + rmcs)
+gl.read_uart()
+check("UBX-JUNK: a false UBX sync costs one error, not the NMEA behind it",
+      gl.st["ok"] == 3 and gl.st["err"] == 1,
+      "ok=%d err=%d" % (gl.st["ok"], gl.st["err"]))
+
+# RXBUF: lines and frames are read in place from one preallocated buffer
+# (a bytes buffer grown per read and sliced per line copied ~1 KB at a
+# time); a frame split over reads, a line after it and junk still work
+gl.reset()
+_uart_rx[:] = []
+frame = gl._ubx(0x01, 0x35, bytes(pl))
+data = rmcs + frame + rmcs
+for k in range(0, len(data), 7):
+    _uart_rx.extend(data[k:k + 7])
+    gl.read_uart()
+rx_ok = (gl.st["ok"], gl.st["err"], gl.st["svs"] is not None)
+_uart_rx.extend(b"\x00" * 300)               # junk: no newline in sight
+gl.read_uart()
+_uart_rx.extend(rmcs)
+gl.read_uart()
+check("RXBUF: a preallocated buffer, frames and lines across 7-byte reads",
+      isinstance(getattr(gl, "_rx", None), bytearray)
+      and rx_ok == (6, 0, True) and gl.st["ok"] == 9,
+      "%r ok=%d" % (rx_ok, gl.st["ok"]))
 
 
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
@@ -5915,6 +6834,196 @@ try:
     check("HIDDEN: a blank AP whose home try failed is not tried again",
           ok_before and not ok_after and ok_other,
           "%r %r %r" % (ok_before, ok_after, ok_other))
+
+    # WR-4: a failed roam to the hidden home blamed that blank AP until
+    # reboot (it may be our own router, briefly unreachable): the blame
+    # ends after BLANK_BAD_HOLD and on any hidden-home connect
+    gl.wifi_reset()
+    gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                        "hidden": True, "bssid": None, "ip": None}]
+    gl.wifi["wlan"] = wb = WLAN(0)
+    gl.wifi.update(blank_rssi=-50, blank_bssid=b"\x12" * 6, roaming=True)
+    gl._mark_failed("home", "test")
+    held = not gl._blank_home_ok()
+    _clock[0] += getattr(gl, "BLANK_BAD_HOLD", 3600000)
+    expired = gl._blank_home_ok()
+    gl.wifi["roaming"] = True
+    gl._mark_failed("home", "test")
+    again = not gl._blank_home_ok()
+    gl.wifi["ssid"] = "home"
+    gl._wifi_got_ip(wb)
+    cleared = gl._blank_home_ok()
+    check("WR-4: a blamed blank AP is cleared by time and by a home connect",
+          held and expired and again and cleared,
+          "%r %r %r %r" % (held, expired, again, cleared))
+
+    # WR-5: connected to the hidden home, its BSSID is learned (v1.29 has
+    # no config("bssid"): the one blank AP on the link's channel near its
+    # RSSI); then a stranger's hidden AP is no longer "home in range" (it
+    # vetoed departures), ours still is. Nothing learned: as before
+    hid_nets = [{"ssid": "home", "pw": "x", "home": True, "hidden": True,
+                 "bssid": None, "ip": None},
+                {"ssid": "hot", "pw": "y", "home": False, "hidden": False,
+                 "bssid": None, "ip": None}]
+    mine_b, neigh_b = b"\x41" * 6, b"\x42" * 6
+    w = rv_connect(["home"], [("", -55, mine_b), ("hot", -40)],
+                   nets=[dict(n) for n in hid_nets])
+    conn = gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "home"
+    gl.wifi_tick()                       # the learning scan
+    learned = list(gl.wifi.get("home_aps") or [])
+    gl._wifi_off(w, "sleep")
+    WLAN.scan_aps = [("", -40, neigh_b), ("hot", -40)]
+    stranger = gl.home_in_range()
+    WLAN.scan_aps = [("", -60, mine_b), ("", -40, neigh_b)]
+    ours = gl.home_in_range()
+    check("WR-5: the hidden home's BSSID is learned; strangers' blank APs "
+          "no longer count as home", conn and learned == [mine_b]
+          and stranger is False and ours is True,
+          "%r %r %r %r" % (conn, learned, stranger, ours))
+    w = rv_connect(["home"], [("", -55, mine_b), ("", -52, neigh_b),
+                              ("hot", -40)], nets=[dict(n) for n in hid_nets])
+    gl.wifi_tick()
+    amb = list(gl.wifi.get("home_aps") or [])
+    gl._wifi_off(w, "sleep")
+    WLAN.scan_aps = [("", -40, neigh_b)]
+    before = gl.home_in_range()
+    check("WR-5: two blank APs that fit: nothing learned, any counts as before",
+          amb == [] and before is True, "%r %r" % (amb, before))
+
+    # WR-29: no GEO_URL/API_KEY ("no .env") or a full .bad ("bad full"):
+    # the radio never went off away from home
+    w = rv_connect(["hot"], [("hot", -50)])
+    trk = os.path.join(rv_td, "20261031_100000.trk")
+    make_trk(trk, 3)
+    gl.up["url"] = None
+    for _ in range(gl.WIFI_IDLE // 1000 + 5):
+        _clock[0] += 1000
+        gl.upload_tick()
+        gl.wifi_tick()
+    noenv = (gl.up["state"], gl.wifi["state"])
+    gl.up["url"] = "https://dawarich.example.com"
+    now = _clock[0]
+    gl.up.update(state="bad full", next_at=now + gl.BACKOFF_START,
+                 hold={trk: now + gl.BACKOFF_MAX})
+    wait = gl._upload_wait(now)
+    gl.up["hold"] = {}
+    os.remove(trk)
+    check("WR-29: 'no .env' lets the radio sleep; 'bad full' waits for the hold",
+          noenv == ("no .env", "sleep") and wait >= gl.BACKOFF_MAX - 1000,
+          "%r %r" % (noenv, wait))
+
+    # WR-30: WEB, radio asleep: a keep-alive scan seeing the hidden home's
+    # learned BSSID starts a round (it only knew visible SSIDs)
+    gl.WEB, gl.PB_MODE = True, "scan"
+    w = rv_connect(["home"], [("", -55, mine_b), ("hot", -40)],
+                   nets=[dict(n) for n in hid_nets])
+    gl.wifi_tick()                       # learn
+    WLAN.ok, WLAN.scan_aps = set(), []
+    gl._wifi_off(w, "sleep")
+    WLAN.ok, WLAN.scan_aps = {"home"}, [("", -55, mine_b)]
+    t0, back = _clock[0], None
+    for _ in range(5 * 60):
+        _clock[0] += 1000
+        gl.keepalive_tick(_clock[0])
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            back = (_clock[0] - t0) // 1000
+            break
+    check("WR-30: a keep-alive scan seeing the hidden home's BSSID wakes it",
+          back is not None and back <= 60, "back after %r s" % back)
+
+    # WR-30: WEB on, gpio keep-alive (no scan sees home come back): a failed
+    # round searches on with the backoff for WEB_SEARCH, then sleeps; it
+    # dropped to WIFI_SLEEP (status page down 1 h) at once
+    gl.PB_MODE = "gpio"
+    w = rv_connect([], [])
+    for _ in range(60):
+        if gl.wifi["state"] != "connecting":
+            break
+        _clock[0] += 1000
+        gl.wifi_tick()
+    first = gl.wifi["state"]
+    WLAN.ok, WLAN.scan_aps = {"home"}, [("home", -50)]
+    t0, back = _clock[0], None
+    for _ in range(10 * 60):
+        _clock[0] += 1000
+        gl.wifi_tick()
+        if gl.wifi["state"] == "connected":
+            back = (_clock[0] - t0) // 1000
+            break
+    w = rv_connect([], [])
+    for _ in range(45 * 60 // 5):
+        _clock[0] += 5000
+        gl.wifi_tick()
+    check("WR-30: WEB without scan keep-alive: a failed round searches on, "
+          "then sleeps", first == "not found" and back is not None
+          and back <= 120 and gl.wifi["state"] == "sleep",
+          "%r %r %r" % (first, back, gl.wifi["state"]))
+    gl.WEB, gl.PB_MODE = False, "scan"
+
+    # WR-e: wifi_tick asked any(home) of every configured network on every
+    # loop pass: cached per nets list
+    class WrNets(list):
+        n = 0
+
+        def __iter__(self):
+            WrNets.n += 1
+            return list.__iter__(self)
+    w = rv_connect(["hot"], [("hot", -50)])
+    gl.wifi["nets"] = WrNets(gl.wifi["nets"])
+    for _ in range(50):
+        _clock[0] += 100
+        gl.wifi_tick()
+    check("WR-e: the 'any home network' flag is not rebuilt every pass",
+          WrNets.n <= 2 and gl.wifi["state"] == "connected", "%d" % WrNets.n)
+
+    # WR-3: the esp32 port raises RuntimeError ("Wifi Unknown Error 0x...")
+    # for an unmapped IDF error (no memory in a scan); every WLAN call site
+    # caught OSError only -> machine.reset(), five early ones -> REPL
+    def rt_err(*a, **k):
+        raise RuntimeError("Wifi Unknown Error 0x101")
+    names = ("scan", "active", "connect", "disconnect", "status", "ifconfig",
+             "config")
+    real_w = dict((k, WLAN.__dict__[k]) for k in names)
+    real_ctor = sys.modules["network"].WLAN
+    gl.PB_MODE, gl.PB_CONNECTED = "scan", True
+    w = rv_connect(["hot"], [("hot", -50)])
+    crashed = []
+
+    def rt_try(label, fn):
+        try:
+            fn()
+        except Exception as e:
+            crashed.append("%s %r" % (label, e))
+    for k in names:
+        setattr(WLAN, k, rt_err)
+    try:
+        _clock[0] += gl.PB_KEEPALIVE
+        rt_try("keepalive connected", lambda: gl.keepalive_tick(_clock[0]))
+        rt_try("wifi_tick connected", gl.wifi_tick)
+        gl.wifi["state"] = "sleep"
+        rt_try("home_in_range", gl.home_in_range)
+        _clock[0] += gl.PB_KEEPALIVE
+        rt_try("keepalive asleep", lambda: gl.keepalive_tick(_clock[0]))
+        gl.wifi["state"] = "not found"
+        gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"]
+        rt_try("wifi_tick round", gl.wifi_tick)
+        gl.wifi["state"] = "connecting"
+        rt_try("wifi_tick connecting", gl.wifi_tick)
+        rt_try("wifi_stop", gl.wifi_stop)
+        sys.modules["network"].WLAN = rt_err
+        gl._pb_w = None
+        rt_try("pb_wlan", gl._pb_wlan)
+        write_env(rv_td, "SSID=home\nWPA2=x\n")
+        gl.wifi_reset()
+        rt_try("wifi_start", gl.wifi_start)
+    finally:
+        for k in names:
+            setattr(WLAN, k, real_w[k])
+        sys.modules["network"].WLAN = real_ctor
+        gl._pb_w = None
+    check("WR-3: a RuntimeError from any WLAN call does not escape",
+          crashed == [] and gl.wifi["state"] == "error", repr(crashed))
 finally:
     (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, WLAN.ok, gl.PB_MODE,
      gl.PB_CONNECTED) = saved_rv
@@ -5969,6 +7078,31 @@ check("L-5: away stay, home without a fix -> the stay ends",
       active0 and not sv_active(), "active=%s" % sv_active())
 gl.wifi.update(state="offline", home=False)
 
+# L-5b: the home WiFi coming up just after a stay began (arriving home,
+# WiFi not yet connected) is no "home without a fix": the stay began
+# with a fix (it had none on record, read as none for STILL_GAP)
+sv_reset()
+gl.wifi["sleep_home"] = False            # (left over: not a home stay)
+hrnd = random.Random(5)
+for _ in range(300):
+    sv_fix(hrnd.uniform(-8, 8), hrnd.uniform(-8, 8), 1.0)
+    if sv_active():
+        break
+active0, home0 = sv_active(), gl.log["still"]["home"]
+gl.st["valid"] = False                   # indoors: no usable second since
+gl.wifi.update(state="connected", home=True)
+for _ in range(5):
+    hb_fix(0, 0, nofix=True, speed=0.0)
+kept = sv_active()
+for _ in range(gl.STILL_GAP // 1000):
+    hb_fix(0, 0, nofix=True, speed=0.0)
+check("L-5b: home WiFi just after a stay began keeps the stay",
+      active0 and not home0 and kept,
+      "active0=%s home0=%s kept=%s" % (active0, home0, kept))
+check("L-5b: ... and STILL_GAP without a fix still ends it",
+      not sv_active())
+gl.wifi.update(state="offline", home=False)
+
 # L-6: a drive whose fix is lost: little stays in RAM, and it is written
 sv_reset()
 for i in range(10 * 60):
@@ -5981,6 +7115,14 @@ for _ in range(gl.HOLD_RELEASE // 1000 + 30):
 check("L-6: after a drive at most a window waits in RAM; later written",
       in_ram <= 70 and len(gl.log["batch"]) == 0, "ram=%d then %d"
       % (in_ram, len(gl.log["batch"])))
+# L-6b: an open window that has spread out (a drive) holds nothing: before,
+# a flush kept up to a whole window of the drive in RAM
+sv_reset()
+for i in range(10 * 60 + 40):                # 40 s into a window
+    sv_fix(i * 15.0, 0, 54.0)
+gl.flush(gl._still_hold())
+check("L-6b: a flush during a drive leaves little of it in RAM",
+      len(gl.log["batch"]) <= 15, "ram=%d" % len(gl.log["batch"]))
 
 # L-12: the heartbeat comes after the queued seconds, in time order
 sv_reset()
@@ -6062,6 +7204,31 @@ check("U-10: an unreadable track is held, the next uploads, then .err",
       "posts=%d %r" % (len(_posts), os.listdir(up_td)))
 os.remove(bad_p + ".err")
 
+# POS-ERR: a batch with nothing to send whose .pos write fails is a flash
+# error, not an unreadable track: READ_ERR_MAX of them must not park it
+pe_p = os.path.join(up_td, "20261002_100000.trk")
+make_trk(pe_p, gl.UPLOAD_BATCH + 10,
+         times=["2026-10-05T00:00:%02dX" % (i % 60)
+                for i in range(gl.UPLOAD_BATCH + 10)])
+real_wo = gl.write_offset
+gl.write_offset = lambda path, off: (_ for _ in ()).throw(OSError(28))
+_posts[:] = []
+try:
+    for _ in range(gl.READ_ERR_MAX + 2):
+        gl.up["next_at"] = _clock[0]
+        gl.up["hold"] = {}
+        gl.upload_tick()
+        _clock[0] += 1000
+finally:
+    gl.write_offset = real_wo
+check("POS-ERR: a failing .pos write is 'fs err', the track is not parked",
+      os.path.exists(pe_p) and not os.path.exists(pe_p + ".err")
+      and gl.up["state"] == "fs err" and not _posts,
+      "state %s %r" % (gl.up["state"], os.listdir(up_td)))
+for x_ in (pe_p, pe_p + ".err"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
 # U-14: the quarantine copy lands but the offset write fails: no crash
 q_p = os.path.join(up_td, "20261003_100000.trk")
 make_trk(q_p, gl.UPLOAD_BATCH + 5)      # not EOF: the .pos is written
@@ -6094,6 +7261,33 @@ check("U-15: a .bad keeps draining after MAX_BAD_RETRY good batches",
       len(_posts) >= gl.MAX_BAD_RETRY + 3 and not os.path.exists(b_p),
       "posts=%d" % len(_posts))
 
+# FAIL4-BAD: rejected .bad batches are not in fail4 (reset only by a 2xx):
+# a normal track's 422 batch afterwards still goes to quarantine
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+fb_p = os.path.join(up_td, "20261004_110000.trk.bad")
+make_trk(fb_p, 3)
+_post_code[0] = 422
+for _ in range(gl.MAX_GLOBAL_PAYLOAD + 1):
+    gl.up["hold"] = {}
+    pump()
+    _clock[0] += 1000
+bad_posts = len(_posts)
+fn_p = os.path.join(up_td, "20261004_120000.trk")
+make_trk(fn_p, 3)
+pump()
+_post_code[0] = 201
+check("FAIL4-BAD: after rejected .bad batches a normal 422 is quarantined",
+      bad_posts == gl.MAX_GLOBAL_PAYLOAD + 1
+      and gl.up["state"] == "quarantine" and not os.path.exists(fn_p)
+      and pts_in(fn_p + ".bad") == 3,
+      "bad posts %d state %s fail4 %r" % (bad_posts, gl.up["state"],
+                                          gl.up.get("fail4")))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
 # U-16: at EOF the track goes without writing a .pos first (full flash)
 e_p = os.path.join(up_td, "20261005_100000.trk")
 make_trk(e_p, 3)
@@ -6123,9 +7317,14 @@ class RvSock:
         self.out += b
         return len(b)
 
-    def readline(self):
+    def readline(self, n=-1):
+        self.limits = getattr(self, "limits", []) + [n]
+        if self.rd >= len(self.resp) and getattr(self, "fail", None):
+            raise self.fail                  # reset / closed after the head
         i = self.resp.find(b"\n", self.rd)
         i = len(self.resp) if i < 0 else i + 1
+        if n is not None and n >= 0:
+            i = min(i, self.rd + n)
         line, self.rd = self.resp[self.rd:i], i
         return line
 
@@ -6165,6 +7364,13 @@ class RvTls:
             return s
 
 
+def tls_ctx_reset():
+    """Forget the SSLContext made once a boot (tests swap tls and CA_FILE)."""
+    c = getattr(gl, "_tls_ctx", None)
+    if c:
+        c[0] = None
+
+
 rv_sock = [None]
 fake_sockmod = types.ModuleType("socket")
 fake_sockmod.SOCK_STREAM = 1
@@ -6201,9 +7407,49 @@ try:
     with open(ca_path, "wb") as f:
         f.write(b"\x30\x82der")
     gl.CA_FILE = ca_path
+    tls_ctx_reset()                      # the context is made once a boot
     rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
     gl._raw_post("https://d.example", b"{}", {}, 15)
     ca_ctx = RvTls.made[-1]
+    # TLS-CTX: later POSTs reuse that context, CA_FILE is not read again
+    made0 = len(RvTls.made)
+    ca_reads = []
+    real_open_ = builtins.open
+
+    def _ca_open(name, *a, **k):
+        if name == ca_path:
+            ca_reads.append(name)
+        return real_open_(name, *a, **k)
+    builtins.open = _ca_open
+    try:
+        for _ in range(3):
+            rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+            gl._raw_post("https://d.example", b"{}", {}, 15)
+    finally:
+        builtins.open = real_open_
+    ctx_reused = (len(RvTls.made) == made0 and not ca_reads
+                  and RvTls.made[-1] is ca_ctx)
+    # TLS-CTX: a context that failed to be made is made again next time
+    tls_ctx_reset()
+    real_ctx_cls = RvTls.SSLContext
+
+    class _NoMemCtx(object):
+        def __init__(self, proto):
+            raise MemoryError("ctx")
+    RvTls.SSLContext = _NoMemCtx
+    try:
+        rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+        try:
+            gl._raw_post("https://d.example", b"{}", {}, 15)
+            ctx_fail = None
+        except MemoryError as e:
+            ctx_fail = e
+    finally:
+        RvTls.SSLContext = real_ctx_cls
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    r_again = gl._raw_post("https://d.example", b"{}", {}, 15)
+    ctx_retry = (ctx_fail is not None and r_again.status_code == 201
+                 and getattr(gl, "_tls_ctx", [None])[0] is RvTls.made[-1])
     rv_sock[0] = RvSock(b"", polls=10 ** 6)
     t0 = _clock[0]
     try:
@@ -6219,14 +7465,57 @@ finally:
         sys.modules["tls"] = real_mods[2]
     gl.read_uart = real_ru
     gl.CA_FILE = "/ca.der"
+    tls_ctx_reset()
 check("U-11: POST body in chunks, UART read while writing and waiting",
       ok_post, repr(rv_sock[0].out[:80]))
 check("U-17: a 301 is returned, not followed (no GET, no Bearer elsewhere)",
       r301.status_code == 301 and one_req)
 check("TLS: with CA_FILE on flash the server is verified",
       ca_ctx.verify_mode == RvTls.CERT_REQUIRED and ca_ctx.ca == b"\x30\x82der")
+check("TLS-CTX: one SSLContext for every POST, CA_FILE read once",
+      ctx_reused, "made %d->%d reads %r" % (made0, len(RvTls.made), ca_reads))
+check("TLS-CTX: a context that failed to be made is made on the next POST",
+      ctx_retry, repr(ctx_fail))
 check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
       to is not None and _clock[0] - t0 >= gl.HTTP_WAIT, repr(to))
+
+# HEAD-ERR: once the status line is in, an error in the header loop keeps
+# the 2xx (a reset there resent the batch: a duplicate); bounded reads
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+try:
+    head_res = []
+    for fail_ in (OSError(104), OSError(110), OSError(9)):
+        rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\nServer: x\r\n",
+                            polls=0)
+        rv_sock[0].fail = fail_
+        try:
+            head_res.append(gl._raw_post("https://d.example", b"{}", {},
+                                         15).status_code)
+        except OSError as e:
+            head_res.append(e)
+    # a header longer than a read, then one cut right before its CRLF:
+    # the pieces are neither headers nor the end of the head
+    long_v = b"a" * 400
+    cut = b"X-Cut: " + b"b" * (256 - 7)
+    rv_sock[0] = RvSock(b"HTTP/1.1 429 Too Many\r\nX-Long: " + long_v
+                        + b"\r\n" + cut + b"\r\nRetry-After: 9\r\n\r\n",
+                        polls=0)
+    r_long = gl._raw_post("https://d.example", b"{}", {}, 15)
+    limits = rv_sock[0].limits
+finally:
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = real_mods[2]
+    tls_ctx_reset()
+check("HEAD-ERR: reset/timeout/close in the headers keeps the 201",
+      head_res == [201, 201, 201], repr(head_res))
+check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
+      r_long.status_code == 429 and r_long.headers.get("Retry-After") == "9"
+      and limits and all(0 < n_ <= 256 for n_ in limits),
+      "%r %r" % (r_long.headers, limits[:4]))
 
 # TLS out of memory TLS_REBOOT_N times in a row at home: a clean reboot
 for n_ in os.listdir(up_td):
@@ -6248,6 +7537,108 @@ check("TLS: ENOMEM TLS_REBOOT_N times at home -> one controlled reboot",
       "resets=%d enomem=%d" % (len(_resets), gl.up["enomem"]))
 _post_raise[0] = None
 gl.wifi["home"] = False
+
+# ENOMEM-RUN: "in a row" means consecutive: another failure ends the run
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.wifi["home"] = True
+make_trk(os.path.join(up_td, "20261006_110000.trk"), 3)
+_resets[:] = []
+seq = ([OSError(12)] * (gl.TLS_REBOOT_N - 1) + [OSError(113)]
+       + [OSError(12)] * (gl.TLS_REBOOT_N - 1))
+try:
+    for e_ in seq:
+        _post_raise[0] = e_
+        try:
+            pump()
+        except SystemExit:
+            break
+        _clock[0] += 1000
+finally:
+    _post_raise[0] = None
+    gl.wifi["home"] = False
+check("ENOMEM-RUN: ENOMEMs split by a network error never reboot",
+      not _resets and gl.up["enomem"] == gl.TLS_REBOOT_N - 1,
+      "resets=%d enomem=%d" % (len(_resets), gl.up["enomem"]))
+
+# ENOMEM-LOWIDF: a low-idf episode away does not arm the ENOMEM reboot:
+# the first ordinary network error at home is just a retry
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261006_120000.trk"), 3)
+real_idf_ = gl.idf_heap
+_resets[:] = []
+try:
+    gl.wifi["home"] = False
+    gl.idf_heap = lambda: (30, 20)
+    pump()
+    lowidf_away = gl.up["state"]
+    gl.idf_heap = lambda: (157, 126)
+    gl.wifi["home"] = True
+    _post_raise[0] = OSError(113)
+    try:
+        pump()
+    except SystemExit:
+        pass
+finally:
+    gl.idf_heap = real_idf_
+    _post_raise[0] = None
+    gl.wifi["home"] = False
+check("ENOMEM-LOWIDF: low idf away, then a net error at home: no reboot",
+      lowidf_away == "low idf" and not _resets
+      and gl.up["state"] == "err net", "resets=%d state=%s" % (
+          len(_resets), gl.up["state"]))
+
+# ENOMEM-CODES: mbedTLS ALLOC_FAILED as modtls raises them
+gl._post_phase = getattr(gl, "_post_phase", [None])
+gl._post_phase[0] = "http"
+codes_ok = all(gl._enomem(OSError(c)) for c in (
+    12, -0x7F00, -0x2880, -0x4D80, -0x3F80, -0x3D10, -(0x2180 + 0x6A)))
+codes_no = not any(gl._enomem(OSError(c)) for c in (
+    16, 106, 113, 104, 110, -0x7200, -0x2700))
+check("ENOMEM-CODES: X509/ECP/PK and high+low ALLOC_FAILED codes count",
+      codes_ok and codes_no)
+gl._post_phase[0] = None
+# ... and 16 (MPI_ALLOC_FAILED after modtls, also EBUSY) only from the
+# TLS handshake
+class RvTls16(RvTls):
+    class SSLContext(RvTls.SSLContext):
+        def wrap_socket(self, s, server_hostname=None):
+            raise OSError(16)
+
+
+class RvSock16(RvSock):
+    def connect(self, addr):
+        raise OSError(16)
+
+
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.socket, gl.select = fake_sockmod, fake_sel
+real_hp = gl.HTTP_POST
+gl.HTTP_POST = gl._raw_post
+saved_tls = sys.modules.get("tls")
+try:
+    sys.modules["tls"] = RvTls16
+    tls_ctx_reset()
+    rv_sock[0] = RvSock(b"", polls=0)
+    gl._http_post(10)
+    in_tls = gl.up["enomem"]
+    rv_sock[0] = RvSock16(b"", polls=0)
+    gl._http_post(10)
+    in_connect = gl.up["enomem"]
+finally:
+    gl.HTTP_POST = real_hp
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if saved_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = saved_tls
+    tls_ctx_reset()
+check("ENOMEM-CODES: 16 counts from the TLS handshake, not from connect",
+      in_tls == 1 and in_connect == 0, "%r %r" % (in_tls, in_connect))
 
 # U-13: a request head over 512 B is read whole before the reply
 class RvConn:
@@ -6311,6 +7702,101 @@ finally:
     os.statvfs = real_statvfs
 check("WEB: free flash is read at most every 30 s", len(calls) == 2,
       repr(calls))
+
+# WEB-PIECES: no multi-KB piece or buffer on the web path (the Python heap's
+# largest free block can be ~2 KB): the diag tail goes out a line a piece,
+# read line by line, and a piece over WEB_CHUNK is sent in slices of itself
+wd_td = tempfile.mkdtemp(prefix="webdiag-")
+saved_diag_file = gl.DIAG_FILE
+gl.DIAG_FILE = os.path.join(wd_td, "diag.log")
+with open(gl.DIAG_FILE, "w") as f:
+    for i in range(60):
+        f.write("up %d utc - nmea 1/0 %s\n" % (i, "x" * 140))
+whole_reads = []
+
+
+class LinesOnly(object):
+    def __init__(self, f):
+        self.f = f
+
+    def seek(self, *a):
+        return self.f.seek(*a)
+
+    def readline(self):
+        return self.f.readline()
+
+    def read(self, *a):
+        whole_reads.append(a)
+        return self.f.read(*a)
+
+    def close(self):
+        self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.f.close()
+
+
+real_open = open
+gl.open = lambda p, *a, **k: LinesOnly(real_open(p, *a, **k))
+try:
+    pieces = list(gl._web_json_parts())
+finally:
+    del gl.open
+    gl.DIAG_FILE = saved_diag_file
+wd = json.loads("".join(pieces))
+check("WEB-PIECES: diag lines are pieces of their own, read in small blocks",
+      wd["diag"] == ["up %d utc - nmea 1/0 %s" % (i, "x" * 140)
+                     for i in range(45, 60)]
+      and max(len(p) for p in pieces) < 400
+      and all(r and r[0] <= 1024 for r in whole_reads),
+      "%d %r" % (max(len(p) for p in pieces), whole_reads))
+sends = []
+kinds = []
+
+
+class RvConnK(RvConnN):
+    def sendall(self, b):
+        kinds.append(type(b).__name__)
+        RvConnN.sendall(self, b)
+c = RvConnK(b"")
+gl._web_send(c, "200 OK", "text/plain", ("a" * 10, "b" * 3000, "c" * 10))
+check("WEB-PIECES: a piece over WEB_CHUNK goes out in WEB_CHUNK memoryview "
+      "slices; nothing over WEB_CHUNK is sent",
+      c.sent.partition(b"\r\n\r\n")[2] == b"a" * 10 + b"b" * 3000 + b"c" * 10
+      and sends[1:] == [10, 1024, 1024, 952, 10]
+      and set(kinds[1:]) == {"memoryview"}, "%r %r" % (sends, kinds))
+
+# WEB-FILES: the file counts of the page are listed at most every 10 s
+# (pending() and pending_bad() listed, sorted and built paths twice a poll)
+fc_td = tempfile.mkdtemp(prefix="webfiles-")
+for n in ("20261001_100000.trk", "20261001_110000.gpx",
+          "20261001_090000.trk.bad", "20261001_100000.trk.pos",
+          "20261001_120000.trk"):
+    open(os.path.join(fc_td, n), "w").close()
+saved_log_dir, saved_log_file = gl.LOG_DIR, gl.log["file"]
+gl.LOG_DIR = fc_td
+gl.log["file"] = fc_td + "/20261001_120000.trk"   # being written
+gl._fc[2] = None
+listings = []
+real_listdir = os.listdir
+os.listdir = lambda p: listings.append(p) or real_listdir(p)
+try:
+    r1 = dict(gl._web_rows())
+    r2 = dict(gl._web_rows())
+    open(os.path.join(fc_td, "20261001_130000.trk"), "w").close()
+    _clock[0] += 11000
+    r3 = dict(gl._web_rows())
+finally:
+    os.listdir = real_listdir
+    gl.LOG_DIR, gl.log["file"] = saved_log_dir, saved_log_file
+check("WEB-FILES: files / bad files counted at most every 10 s",
+      len(listings) == 2 and (r1["files"], r1["bad_files"]) == (2, 1)
+      and (r2["files"], r3["files"], r3["bad_files"]) == (2, 3, 1),
+      "%r %r %r %r" % (listings, (r1["files"], r1["bad_files"]),
+                       r2["files"], r3["files"]))
 
 
 # trk2gpx: .bad/.err files, damaged bytes, non-digit times
@@ -6452,7 +7938,7 @@ gl.DIAG = 0
 diag_clear()
 
 
-# LOWIDF: no TLS try below TLS_MIN_KB; at home a clean reboot instead
+# LOWIDF: no TLS try below TLS_MIN_KB; at home gc.collect() and wait first
 online(up_td)
 gl.up["url"], gl.up["key"] = "https://d.example", "k"
 make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
@@ -6469,12 +7955,105 @@ try:
         pump()
     except SystemExit:
         pass
-    home = (len(_posts), len(_resets))
+    home = (len(_posts), len(_resets), gl.up["state"],
+            gl.up["next_at"] - _clock[0])
 finally:
     gl.idf_heap = real_idf
     gl.wifi["home"] = False
-check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home it reboots",
-      away == (0, "low idf", 0) and home == (0, 1), "%r %r" % (away, home))
+check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home too at first",
+      away == (0, "low idf", 0)
+      and home == (0, 0, "low idf", getattr(gl, "LOWIDF_RETRY", -1)),
+      "%r %r" % (away, home))
+
+# LOWIDF-WAIT: at home the reboot comes only after LOWIDF_WAIT of low idf
+# with tracks waiting, and it tells the next boot (LOWIDF_MARK)
+wait_ms = getattr(gl, "LOWIDF_WAIT", 300000)
+mark = getattr(gl, "LOWIDF_MARK", os.path.join(diag_dir, "lowidf"))
+if os.path.exists(mark):
+    os.remove(mark)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+gl.idf_heap = lambda: (30, 20)
+gl.wifi["home"] = True
+_posts[:] = []
+_resets[:] = []
+steps = []
+try:
+    for dt in (0, wait_ms // 2, wait_ms // 2 - 1000, 2000):
+        _clock[0] += dt
+        try:
+            pump()
+        except SystemExit:
+            pass
+        steps.append(len(_resets))
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF-WAIT: at home a reboot only after LOWIDF_WAIT of low idf",
+      steps == [0, 0, 0, 1] and not _posts and os.path.exists(mark),
+      "%r posts %d mark %s" % (steps, len(_posts), os.path.exists(mark)))
+
+# LOWIDF-RATE: after a low-idf reboot the next one waits LOWIDF_REBOOT_GAP
+online(up_td)                            # up_reset at boot takes the mark
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
+gap_ms = getattr(gl, "LOWIDF_REBOOT_GAP", 1800000)
+took = (gl.up.get("lowidf_boot"), os.path.exists(mark))
+saved_up = list(gl._up)
+gl._up[0], gl._up[1] = 0, _clock[0]      # just booted
+gl.idf_heap = lambda: (30, 20)
+gl.wifi["home"] = True
+_resets[:] = []
+t_boot = _clock[0]
+t_reboot = None
+retry_ms = getattr(gl, "LOWIDF_RETRY", 30000)
+try:
+    while _clock[0] - t_boot < gap_ms + 4 * retry_ms:
+        try:
+            pump()                       # low idf the whole time
+        except SystemExit:
+            t_reboot = _clock[0] - t_boot
+            break
+        _clock[0] += retry_ms
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+    gl._up[:] = saved_up
+check("LOWIDF-RATE: at most one low-idf reboot per LOWIDF_REBOOT_GAP",
+      took == (True, False) and t_reboot is not None
+      and gap_ms <= t_reboot <= gap_ms + retry_ms,
+      "%r %r" % (took, t_reboot))
+if os.path.exists(mark):
+    os.remove(mark)
+
+# LOWIDF-BACK: the IDF heap recovering ends the episode; a new one starts
+# its LOWIDF_WAIT again
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(os.path.join(up_td, "20261007_100000.trk"), gl.UPLOAD_BATCH * 3)
+low_now = [True]
+gl.idf_heap = lambda: (30, 20) if low_now[0] else (157, 126)
+gl.wifi["home"] = True
+_resets[:] = []
+_posts[:] = []
+try:
+    for dt, low_ in ((0, True),          # low: episode starts
+                     (wait_ms - 1000, False),    # back: a POST goes
+                     (2000, True),       # low again: a new episode
+                     (wait_ms - 1000, True)):
+        _clock[0] += dt
+        low_now[0] = low_
+        try:
+            pump()
+        except SystemExit:
+            pass
+finally:
+    gl.idf_heap = real_idf
+    gl.wifi["home"] = False
+check("LOWIDF-BACK: a recovered IDF heap restarts the LOWIDF_WAIT",
+      not _resets and len(_posts) == 1, "resets %d posts %d" % (
+          len(_resets), len(_posts)))
 
 # LOWIDF-GC: a grown, now empty Python heap area goes back on gc.collect()
 # (MicroPython 1.29 frees empty split-heap areas in the sweep): check again
@@ -6506,8 +8085,46 @@ check("LOWIDF-GC: low IDF heap -> gc.collect() first, then the upload goes",
       len(_posts) >= 1 and not _resets and gl.up["state"] != "low idf",
       "%d posts %d resets %r" % (len(_posts), len(_resets), gl.up["state"]))
 
+# LOWPY: under TLS_MIN_PY_KB of free Python heap after the collect the POST
+# waits ("low mem"): its allocations would grow the heap into the IDF block
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+lp_p = os.path.join(up_td, "20261007_120000.trk")
+make_trk(lp_p, 3)
+real_idf_info = getattr(gl, "_idf_info", None)
+real_mem_free = gl.gc.mem_free
+gl._idf_info = lambda: (157 * 1024, 126 * 1024)
+gl.idf_heap = lambda: (157, 126)
+gl.gc.mem_free = lambda: 126 * 1024 + 8000
+_posts[:] = []
+diag_clear()
+gl.DIAG = 60000
+try:
+    pump()
+    low = (len(_posts), gl.up["state"], os.path.exists(lp_p))
+    gl.gc.mem_free = lambda: 126 * 1024 + 20000
+    pump()
+    ok_ = (len(_posts), os.path.exists(lp_p))
+finally:
+    gl.gc.mem_free = real_mem_free
+    gl.idf_heap = real_idf
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+lp_diag = [l for l in diag_lines() if l.startswith("upload low mem")]
+diag_clear()
+check("LOWPY: below TLS_MIN_PY_KB free Python heap the POST waits, then goes",
+      low == (0, "low mem", True) and ok_ == (1, False)
+      and lp_diag == ["upload low mem 8000 B"], "%r %r %r" % (low, ok_,
+                                                               lp_diag))
+
 # HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
-# diag showed a flat "mem" while the heap doubled into the IDF heap
+# diag showed a flat "mem" while the heap doubled into the IDF heap.
+# HEAP-B: to the byte, from esp32.idf_heap_info (not the KB-floored block)
+real_idf_info = getattr(gl, "_idf_info", None)
+gl._idf_info = lambda: (157 * 1024 + 300, 102400 + 700)
 gl.idf_heap = lambda: (157, 100)
 lines = []
 real_dw = gl._diag_write
@@ -6518,11 +8135,110 @@ try:
     st_mem = dict(gl._web_rows())["mem"]
 finally:
     gl.idf_heap = real_idf
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
     gl._diag_write = real_dw
 check("HEAP: free and size of the Python heap without the IDF block",
-      ph == (123456 - 102400, (65432 + 123456 - 102400) // 1024)
-      and " mem 21056 " in lines[0] and lines[0].endswith(" heap 84")
-      and st_mem == 21056, "%r %r" % (ph, lines))
+      ph[1] == (65432 + 123456 - 103100) // 1024
+      and " mem %d " % ph[0] in lines[0] and lines[0].endswith(" heap 83")
+      and " idf 157/100 " in lines[0] and st_mem == ph[0],
+      "%r %r" % (ph, lines))
+check("HEAP-B: the IDF block comes off to the byte, not KB-floored",
+      ph[0] == 123456 - 103100, "%r" % (ph,))
+
+# HEAP-LINE: the upload console line shows the Python heap's own free bytes
+# HEAP-GREW: a diag line names the upload step that grew the Python heap
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+hg_p = os.path.join(up_td, "20261008_100000.trk")
+make_trk(hg_p, 3)
+heap_kb = [124]
+real_mem_free, real_mem_alloc = gl.gc.mem_free, gl.gc.mem_alloc
+gl.gc.mem_free = lambda: 30000 + 102900
+gl.gc.mem_alloc = lambda: heap_kb[0] * 1024 - 30000
+gl._idf_info = lambda: (157 * 1024, 102900)
+real_rb_ = gl.read_batch
+
+
+def _rb_grows(path, off=0):
+    heap_kb[0] = 248                     # the read grew the heap
+    return real_rb_(path, off)
+
+
+gl.read_batch = _rb_grows
+printed = []
+real_print = (print if not isinstance(__builtins__, dict)
+              else __builtins__["print"])
+
+
+def _cap_print(*a, **k):
+    printed.append(" ".join(str(x) for x in a))
+
+
+diag_clear()
+gl.DIAG = 60000
+if isinstance(__builtins__, dict):
+    __builtins__["print"] = _cap_print
+else:
+    __builtins__.print = _cap_print
+try:
+    pump()
+finally:
+    if isinstance(__builtins__, dict):
+        __builtins__["print"] = real_print
+    else:
+        __builtins__.print = real_print
+    gl.read_batch = real_rb_
+up_lines = [l for l in printed if l.startswith("upload " + hg_p)]
+check("HEAP-LINE: the upload line prints py_heap()[0], not gc.mem_free()",
+      len(up_lines) == 1 and up_lines[0].split()[5] == "30000", repr(up_lines))
+grew = [l for l in diag_lines() if l.startswith("heap grew")]
+diag_clear()
+# ... and in the TLS handshake of the real POST
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
+
+class RvTlsGrow(RvTls):
+    class SSLContext(RvTls.SSLContext):
+        def wrap_socket(self, s, server_hostname=None):
+            heap_kb[0] = 300
+            return s
+
+
+heap_kb[0] = 248
+gl.socket, gl.select = fake_sockmod, fake_sel
+saved_tls = sys.modules.get("tls")
+sys.modules["tls"] = RvTlsGrow
+tls_ctx_reset()
+real_hp = gl.HTTP_POST
+gl.HTTP_POST = gl._raw_post
+try:
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    make_trk(hg_p, 3)
+    pump()
+finally:
+    gl.HTTP_POST = real_hp
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if saved_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = saved_tls
+    tls_ctx_reset()
+    gl.gc.mem_free, gl.gc.mem_alloc = real_mem_free, real_mem_alloc
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+grew = grew + [l for l in diag_lines() if l.startswith("heap grew")]
+diag_clear()
+check("HEAP-GREW: diag names the step that grew the heap (read, TLS)",
+      grew == ["heap grew in read_batch to 248 KB",
+               "heap grew in tls_wrap to 300 KB"]
+      and not os.path.exists(hg_p), repr(grew))
 
 
 # GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon
@@ -6539,6 +8255,91 @@ gl.gps_check(_clock[0])
 sent = len([f for f in _uart_tx if f[2:3] == b"\x06"]) > 0
 check("GPS-STORM-END: after the storm the setup comes within ~15 s, not 30-60",
       storm_wait == gl.GPS_STORM_WAIT and sent, "%r %r" % (storm_wait, sent))
+
+# STORM-END-NOACK: the last storm setup got no ACK, but the receiver took
+# the blind burst (no extra sentence): quiet after the storm, it is still
+# set up within GPS_RETRY, not after the doubled GPS_STORM_WAIT
+gl.reset()
+for _ in range(gl.GPS_FLAP_RESTARTS + 1):
+    _clock[0] += 3000
+    gl.handle(banner)
+_uart_ack[0] = False
+try:
+    gl.gps_setup()
+finally:
+    _uart_ack[0] = True
+noack = (gl.st["setup_ok"], gl.st["extra"], gl.st["setup_wait"])
+_uart_tx[:] = []
+_clock[0] += gl.GPS_STORM_QUIET + gl.GPS_RETRY + 500
+gl.gps_check(_clock[0])
+sent = len([f for f in _uart_tx if f[2:3] == b"\x06"]) > 0
+check("STORM-END-NOACK: unacknowledged last storm setup, quiet -> set up soon",
+      noack == (False, 0, gl.GPS_STORM_WAIT) and sent, "%r %r" % (noack, sent))
+
+# STORM-FIRST: the restart that makes it a storm already gets the storm wait
+gl.reset()
+for _ in range(gl.GPS_FLAP_RESTARTS):
+    _clock[0] += 5000
+    gl.handle(banner)
+check("STORM-FIRST: the restart that declares the storm waits GPS_STORM_WAIT",
+      gl.st["loops"] == 1 and gl.st["setup_wait"] == gl.GPS_STORM_WAIT,
+      "loops=%d wait=%d" % (gl.st["loops"], gl.st["setup_wait"]))
+
+# WRAP-GPS: ticks_ms wraps every 2**30 ms; the storm mark, old restart
+# times and a satellite list must not read as fresh again 12.4 days later
+TPW = 1 << 30
+saved_td = time.ticks_diff
+time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
+try:
+    gl.reset()
+    for _ in range(2 * gl.GPS_FLAP_RESTARTS - 1):   # a storm + 4 restarts
+        _clock[0] += 3000
+        gl.handle(banner)
+    gl.st.update(svs=[(k, 30, 40, 100, True, False, 0) for k in range(9)],
+                 svs_at=_clock[0], used=7)
+    base = _clock[0]
+    loops0 = gl.st["loops"]
+    for dt in (gl.GPS_FLAP_WINDOW + 10000,
+               getattr(gl, "TICKS_CAP", 86400000) + 10000):
+        _clock[0] = base + dt
+        gl.gps_check(_clock[0])
+    _clock[0] = base + TPW + 5000            # all would read 5-30 s old
+    used = gl.sv_used()
+    gl.handle(banner)
+    wrapped = (gl.st["setup_wait"], gl.st["loops"] - loops0, used)
+finally:
+    time.ticks_diff = saved_td
+check("WRAP-GPS: storm mark, restart times, satellite list end, not wrap",
+      wrapped == (gl.GPS_RETRY, 0, 7), repr(wrapped))
+
+# LOOP-DIAG: a banner-only reset loop wrote a diag line every
+# GPS_LOOP_WINDOW (12.6 KB an hour): now the first warning, a count every
+# GPS_LOOP_SAY and one when it ends; every window is still counted
+diag_clear()
+gl.DIAG = 60000
+gl.reset()
+_uart_rx[:] = []
+for _ in range(40):
+    for _ in range(3):
+        _uart_rx.extend(b"$GPTXT,01,01,02,u\xff\xff\xff")
+        gl.read_uart()
+    _clock[0] += gl.GPS_LOOP_WINDOW
+    gl.gps_check(_clock[0])
+for k in range(3):
+    _uart_rx.extend(rv_nmea("GPRMC,1208%02d.00,V,,,,,,,171026,,,N" % k)
+                    + b"\r\n")
+gl.read_uart()
+_clock[0] += gl.GPS_LOOP_WINDOW
+gl.gps_check(_clock[0])
+loop_lines = [l for l in diag_lines() if l.startswith("gps reset loop")]
+check("LOOP-DIAG: first warning, then one line per GPS_LOOP_SAY and at the end",
+      gl.st["loops"] == 40 and loop_lines
+      == ["gps reset loop 3 banners, no NMEA",
+          "gps reset loop 30 more windows", "gps reset loop 9 more windows"],
+      "loops=%d %d lines %r" % (gl.st["loops"], len(loop_lines),
+                                loop_lines[:3]))
+gl.DIAG = 0
+diag_clear()
 
 
 # PAGE: web.html draws the boxes from /status.json (node runs its view())
@@ -6574,7 +8375,10 @@ check("PAGE: JSON is generated piece by piece (no list in RAM)",
 import shutil
 import subprocess
 node = shutil.which("node")
-if node is None:
+if node is None and os.environ.get("CI") == "true":
+    check("PAGE: node is installed (CI runs the page checks, never skips)",
+          False)
+elif node is None:
     print("SKIP  PAGE: node not installed")
 else:
     here = os.path.dirname(os.path.abspath(__file__))
@@ -6594,10 +8398,10 @@ else:
           and "<small>SATS</small><b>1<em>/2</em>" in tm
           and "<small>HDOP</small><b>0.88</b>" in tm
           and "<small>UPLINK</small><b>120<em>pts</em>" in tm
-          and '<div class="warn wf"><small>WIFI</small><b><span class="wb"><i class="on" '
-              'style="height:25%"></i><i class="on" style="height:50%"></i><i class="" '
-              'style="height:75%"></i><i class="" style="height:100%"></i></span>'
-              'FAIR<em>-75 dBm</em>' in tm
+          and '<div class="warn"><small>WIFI</small><b><svg class="wi" viewBox="0 0 24 18">'
+              '<circle cx="12" cy="15.5" r="2"/><path class="on" d="M8.5 12.5A5 5 0 0 1 15.5 12.5"/>'
+              '<path d="M5.6 9.6A9 9 0 0 1 18.4 9.6"/><path d="M2.8 6.8A13 13 0 0 1 21.2 6.8"/>'
+              '</svg>50<em>%</em><em class="db">-75 dBm</em></b></div>' in tm
           and "<small>NMEA BAD</small>" in tm, tm[:400])
     check("PAGE: no fix amber, WiFi off shows the state, map says NO FIX",
           '<div class="warn"><small>FIX</small><b>WAITING</b>' in tm2
@@ -6632,10 +8436,51 @@ else:
           and lg.index("BOOT &middot; WATCHDOG &middot; PREVIOUS RUN 10 MIN 00 S")
               < lg.index("3D FIX &middot; 13/21 SATS &middot; 4 PTS")
           and '<span class="err">IDF 20 KB</span>' in lg, lg[:500])
-    check("PAGE: WiFi quality words from RSSI; favicon; map fills wide screens",
-          v.get("wq") == [[4, "EXCELLENT", ""], [3, "GOOD", ""], [2, "FAIR", "warn"],
-                          [1, "WEAK", "bad"], [0, "NO SIGNAL", "bad"], None],
+    # PAGE-WIFI: an arc icon (0-3 arcs lit) and the quality in per cent,
+    # 2 x (RSSI + 100) clamped; amber below -67 dBm, red below -80; no words
+    check("PAGE-WIFI: arcs, quality % and tone from RSSI",
+          v.get("wq") == [[3, 100, ""], [3, 80, ""], [2, 74, ""], [2, 66, ""],
+                          [1, 64, "warn"], [1, 40, "warn"], [0, 38, "bad"],
+                          [0, 0, "bad"], [0, 0, "bad"], None],
           repr(v.get("wq")))
+    check("PAGE-WIFI: Systems line 'ssid · 50% (-75 dBm)', no quality words",
+          "&lt;x&gt; &middot; 50% (-75 dBm)<em>" in sy
+          and not any(w in tm + sy for w in ("GOOD", "FAIR", "WEAK",
+                                             "EXCELLENT", "NO SIGNAL")),
+          sy[:600])
+    # PAGE-NULL: south/west coordinates, Python None in diag lines, quotes
+    check("PAGE-NULL: S/W coordinates as absolute values",
+          v.get("coordSW", "").startswith("33.85678&deg; S  151.21530&deg; W")
+          and v.get("coordNE", "") == "47.10000&deg; N  18.40000&deg; E",
+          repr((v.get("coordSW"), v.get("coordNE"))))
+    check("PAGE-NULL: diag 'sats 0/None' reads -/0, 'idf None' and 'cause "
+          "None' read -",
+          "-/0 SATS" in v.get("logNone", "") and "IDF - KB" in v.get("logNone", "")
+          and "None" not in v.get("logNone", "") + v.get("bootNone", "")
+          and "CAUSE -" in v.get("bootNone", ""),
+          repr((v.get("logNone"), v.get("bootNone"))))
+    check("PAGE-NULL: an empty status.json shows - (no None/null/NaN)",
+          'PY HEAP FREE<span class="">- / - KB</span>' in v.get("nullSys", "")
+          and 'WIFI<span class="">-<em>' in v.get("nullSys", "")
+          and not any(w in v.get("nullSys", "") for w in (
+              "None", "null", "NaN", "undefined")),
+          v.get("nullSys", "")[:600])
+    check("PAGE-NULL: esc() also escapes \" and '",
+          v.get("esc") == "&lt;a href=&quot;x&quot; title=&#39;y&#39;&gt;"
+                          "&amp;&lt;/a&gt;", repr(v.get("esc")))
+    dom = v.get("dom", {})
+    check("PAGE-DOM: tick/paint/placeMap/stale on a stub document",
+          dom.get("first") and dom.get("painted") and dom.get("mapClass") == "map"
+          and dom.get("tilesWide") == 55 and dom.get("tilesNarrow") == 25
+          and dom.get("kept") and dom.get("live") == "LIVE"
+          and dom.get("body") == "" and dom.get("timer") == 15000
+          and dom.get("acc") == "36px"
+          and dom.get("transform", "").startswith("translate(-")
+          and dom.get("staleBody") == "off"
+          and dom.get("staleLive") == "OFFLINE &middot; 0 S AGO"
+          and dom.get("nofix") == "map nofix" and dom.get("timer2") == 30000
+          and dom.get("brokenBody") == "off" and dom.get("never") == "NO ANSWER",
+          repr(dom))
     check("PAGE: satellite table and map tile maths",
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"

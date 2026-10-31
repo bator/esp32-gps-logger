@@ -45,8 +45,10 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .tm small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}
 .tm b{display:block;font-size:22px;color:#fff;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tm b em,.sys em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
-.wb{display:inline-flex;align-items:flex-end;gap:2px;height:15px;margin-right:7px;vertical-align:-1px}
-.wb i{width:4px;border-radius:1px;background:var(--l)}.wb i.on{background:currentColor}
+.wi{width:25px;height:19px;margin-right:8px;vertical-align:-1px;color:var(--a);fill:none;stroke-width:2.4;stroke-linecap:round;filter:drop-shadow(0 0 4px currentColor)}
+.wi path{stroke:rgba(116,135,174,.28)}.wi .on{stroke:currentColor}.wi circle{fill:currentColor;stroke:none}
+.tm b em.db{margin-left:10px}
+.tm .warn .wi,.tm .bad .wi{color:inherit}
 .tm .ok b{color:var(--ok);text-shadow:0 0 12px rgba(52,211,153,.5)}
 .tm .warn b,.sys .warn{color:var(--warn)}.tm .bad b,.sys .bad{color:var(--bad)}
 .g{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;margin-top:12px}
@@ -84,7 +86,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .svt{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
 .svt td{padding:3px 6px;border-top:1px solid var(--l);text-align:right}
 .svt td:first-child{text-align:left}.svt .u td{color:var(--m)}
-@media(max-width:760px){.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.wf b{font-size:14px}.wf em{display:none}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+@media(max-width:760px){.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -118,7 +120,9 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 </div>
 <script>
 var GNSS = {GPS: 0, SBAS: 1, Galileo: 2, BeiDou: 3, QZSS: 5, GLONASS: 6};
-var BOOT = {1: "power on", 2: "hard reset", 3: "watchdog", 4: "deep sleep", 5: "soft reset"};
+// machine.reset_cause() of MicroPython 1.29 on the ESP32: 1 also a brownout,
+// 2 also machine.reset() and a panic, 0 a USB/JTAG or unknown reset
+var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", 3: "watchdog", 4: "deep sleep", 5: "soft reset"};
 var TLS_KB = 48;                        // TLS_MIN_KB in gps_logger.py
 var POINT_B = 46;                       // bytes per .trk point
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
@@ -133,8 +137,10 @@ function esc(v) {
   if (v === null || v === undefined) return "-";
   if (v === true) return "yes";
   if (v === false) return "no";
-  return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
+function nn(s) { return s === undefined || s === "" || s === "None" || s === "-" ? null : s; }   // Python None in a text
 function two(n) { return (n < 10 ? "0" : "") + n; }
 function hms(s) {                       // as _hms() in gps_logger.py
   if (s === null || s === undefined) return "-";
@@ -155,15 +161,16 @@ function tile(lat, lon, z) {            // slippy-map tile and pixel offset in i
   return {x: Math.floor(x), y: Math.floor(y), fx: (x - Math.floor(x)) * 256, fy: (y - Math.floor(y)) * 256,
     mpp: 156543.03 * Math.cos(r) / n};
 }
-function wifiQ(rssi) {                 // [bars 0-4, word, tone] for an RSSI in dBm
+function wifiQ(rssi) {                 // [arcs 0-3, quality %, tone] for an RSSI in dBm
   if (rssi === null || rssi === undefined) return null;
-  return rssi >= -55 ? [4, "EXCELLENT", ""] : rssi >= -67 ? [3, "GOOD", ""] : rssi >= -75 ? [2, "FAIR", "warn"] :
-    rssi >= -85 ? [1, "WEAK", "bad"] : [0, "NO SIGNAL", "bad"];
+  return [rssi >= -60 ? 3 : rssi >= -67 ? 2 : rssi >= -80 ? 1 : 0, Math.max(0, Math.min(100, Math.round(2 * (rssi + 100)))),
+    rssi >= -67 ? "" : rssi >= -80 ? "warn" : "bad"];
 }
-function wifiBars(n) {
-  var h = '<span class="wb">';
-  for (var i = 1; i <= 4; i++) h += '<i class="' + (i <= n ? "on" : "") + '" style="height:' + i * 25 + '%"></i>';
-  return h + "</span>";
+var ARCS = ["M8.5 12.5A5 5 0 0 1 15.5 12.5", "M5.6 9.6A9 9 0 0 1 18.4 9.6", "M2.8 6.8A13 13 0 0 1 21.2 6.8"];
+function wifiIcon(n) {                  // a dot and three arcs, n lit
+  var h = '<svg class="wi" viewBox="0 0 24 18"><circle cx="12" cy="15.5" r="2"/>';
+  for (var i = 0; i < 3; i++) h += '<path' + (i < n ? ' class="on"' : "") + ' d="' + ARCS[i] + '"/>';
+  return h + "</svg>";
 }
 function cell(label, value, unit, tone) {
   return '<div class="' + (tone || "") + '"><small>' + label + "</small><b>" + value + (unit ? "<em>" + unit + "</em>" : "") +
@@ -189,18 +196,18 @@ function clock(utc, up) {
 function logLine(l) {
   var m = STATUS.exec(l), t = "--:--", kind = "", text;
   if (m) {
-    var fix = m[8].replace(/_/g, " "), sv = m[7].split("/");
+    var fix = m[8].replace(/_/g, " "), sv = m[7].split("/"), big = nn(m[16]);
     t = clock(m[2], +m[1]);
     kind = fixTone(fix) === "ok" ? "ok" : "warn";
-    text = esc(fix.toUpperCase()) + " &middot; " + esc(sv[1]) + "/" + esc(sv[0]) + " SATS" +
+    text = esc(fix.toUpperCase()) + " &middot; " + esc(nn(sv[1])) + "/" + esc(nn(sv[0])) + " SATS" +
       (+m[10] ? " &middot; " + num(m[10]) + " PTS" : "") + " &middot; " +
-      (+m[16] < TLS_KB ? '<span class="err">IDF ' + esc(m[16]) + " KB</span>" : "IDF " + esc(m[16]) + " KB");
+      (big !== null && +big < TLS_KB ? '<span class="err">IDF ' + esc(big) + " KB</span>" : "IDF " + esc(big) + " KB");
     return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";
   }
   var b = /^boot cause (\S+) prev_up (\S+)/.exec(l);
   if (b) {
     kind = "boot";
-    text = "BOOT &middot; " + esc((BOOT[b[1]] || "cause " + b[1]).toUpperCase()) +
+    text = "BOOT &middot; " + esc((BOOT[b[1]] || "cause " + (nn(b[1]) || "-")).toUpperCase()) +
       (b[2] === "-" ? "" : " &middot; PREVIOUS RUN " + esc(hms(+b[2]).toUpperCase()));
   } else if (/^gps /.test(l) && !/^gps reset loop/.test(l)) {
     kind = "info";
@@ -215,18 +222,19 @@ function logLine(l) {
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it)
 function view(d) {
   var v = {}, svs = d.satellites || [], used = 0, fix = d.fix || "-", dot = " &middot; ";
-  var sats = String(d.sats || "- / -").replace("None", "-").split(" / ");   // "seen / used"
+  var sats = String(d.sats || "- / -").replace(/None/g, "-").split(" / ");   // "seen / used"
   var nm = String(d.nmea || "0 / 0").split(" / "), ok = +nm[0], bad = +nm[1];
   var pct = ok + bad ? bad * 100 / (ok + bad) : 0;
   var ws = String(d.wifi || "").split(" "), ssid = ws.slice(1).join(" ");
-  var q = String(d.idf || "").split(" / "), fr = +q[0], big = +q[1], pk = Math.round((d.mem || 0) / 1024);
+  var q = String(d.idf || "").split(" / "), fr = +q[0], big = +q[1];
+  var pk = typeof d.mem === "number" ? Math.round(d.mem / 1024) : null;
   var hd = typeof d.hdop === "number" ? d.hdop : null, q4 = wifiQ(d.rssi);
   v.up = "UP " + esc(hms(d.uptime).toUpperCase());
   v.tm = cell("FIX", esc(fix.replace(" fix", "")).toUpperCase(), "", fixTone(fix)) +
     cell("SATS", esc(sats[1]), "/" + esc(sats[0])) +
     cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "") +
     cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 ? "warn" : "") +
-    (q4 ? cell("WIFI", wifiBars(q4[0]) + q4[1], d.rssi + " dBm", (q4[2] + " wf").trim()) :
+    (q4 ? cell("WIFI", wifiIcon(q4[0]) + q4[1] + '<em>%</em><em class="db">' + d.rssi + " dBm</em>", "", q4[2]) :
       cell("WIFI", esc(ws[0]).toUpperCase())) +
     cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : "");
   var dots = "", bars = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
@@ -255,8 +263,8 @@ function view(d) {
   var fk = d.flash_kb, pr = d.prev_run ? String(d.prev_run) : "";
   v.sys = line("IDF BLOCK", isNaN(big) ? "-" : big + " KB<em>of " + fr + " free</em>", big < TLS_KB ? "bad" : "") +
     (isNaN(big) ? "" : meter(big / 160, big < TLS_KB ? "bad" : "", TLS_KB / 160)) +
-    line("PY HEAP FREE", pk + " / " + esc(d.heap_kb) + " KB", pk < 8 ? "warn" : "") +
-    (d.heap_kb ? meter(pk / d.heap_kb) : "") +
+    line("PY HEAP FREE", esc(pk) + " / " + esc(d.heap_kb) + " KB", pk !== null && pk < 8 ? "warn" : "") +
+    (d.heap_kb && pk !== null ? meter(pk / d.heap_kb) : "") +
     line("FLASH FREE", fk === null || fk === undefined ? "-" : (fk / 1024).toFixed(1) + " MB<em>&asymp;" +
       num(Math.floor(fk * 1024 / POINT_B / 1000)) + "k pts</em>") +
     line("UPLINK", esc(d.upload).toUpperCase() + "<em>" + num(d.sent) + " sent" + dot + num(d.files) + " files" + dot +
@@ -266,7 +274,7 @@ function view(d) {
     line("RECEIVER", esc(comma > 0 ? rx.slice(0, comma) : rx).toUpperCase() + "<em>" + num(d.gps_boots) + " rst" + dot +
       num(d.gps_loops) + " loops" + dot + "setup " + (d.setup_ok === true ? "ok" : d.setup_ok === false ? "no" : "-") +
       "</em>", d.gps_loops > 0 || d.setup_ok === false ? "warn" : "") +
-    line("WIFI", esc(ssid || ws[0]) + (q4 ? " &middot; " + q4[1] + " (" + d.rssi + " dBm)" : "") + "<em>" + num(d.pulses) +
+    line("WIFI", esc(ssid || nn(ws[0])) + (q4 ? " &middot; " + q4[1] + "% (" + d.rssi + " dBm)" : "") + "<em>" + num(d.pulses) +
       " keep-alive</em>", q4 ? q4[2] : "") +
     line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() + (pr ? "<em>prev " + esc(pr) + "</em>" : ""),
       d.boot_cause === 3 || /crash/.test(pr) ? "warn" : "") +
@@ -277,7 +285,8 @@ function view(d) {
   v.log = log || '<span class="t">THE DIAGNOSTIC LOG IS EMPTY</span>';
   var p = String(d.position || "").split(", ");
   v.coord = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ?
-    (+p[0]).toFixed(5) + "&deg; N  " + (+p[1]).toFixed(5) + "&deg; E" +
+    Math.abs(+p[0]).toFixed(5) + "&deg; " + (+p[0] < 0 ? "S" : "N") + "  " +
+    Math.abs(+p[1]).toFixed(5) + "&deg; " + (+p[1] < 0 ? "W" : "E") +
     (hd === null ? "" : dot + "&plusmn;" + (hd * UERE).toFixed(1) + " m") :
     "NO FIX &middot; " + esc(fix).toUpperCase();
   return v;

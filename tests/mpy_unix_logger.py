@@ -137,6 +137,23 @@ except Exception as e:
     crash = e
 check("non-UTF-8 SSID scan", crash is None and len(sl["aps"]) == 1)
 
+# the departure ring (array module, single-precision offsets) rebuilds the
+# way out as regular track lines
+gl.log["still"] = sl = gl._still_state()
+sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
+gl.st.update(valid=True, date="2026-10-29", alt=123.4, hdop=1.2,
+             hdop_at=time.ticks_ms(), fixtype=3)
+for k in range(5):
+    gl.st["time"] = "06:41:%02d" % (15 + k)
+    gl._ring_add(sl, time.ticks_ms(), (47.5, 19.0 + k * 0.0002), k * 15.0)
+check("seconds since 2020 are small ints", 0 < gl._fix_s() < 2 ** 30)
+gl._still_leave()
+b = gl.log["batch"]
+check("departure ring way out", len(b) == 5 and b[0]
+      == "47.500000,19.000000,123.4,1.2,20261029T064115Z\n"
+      and b[4] == "47.500000,19.000800,123.4,1.2,20261029T064119Z\n")
+gl.log_reset()
+
 try:
     jd = json.loads("".join(gl._web_json_parts()))
 except Exception as e:
@@ -148,6 +165,28 @@ check("JSON parts stream", not isinstance(gl._web_json_parts(), list))
 check("UTC stamp", gl._stamp_at(1793256075)[0] == "2026-10-29T06:41:15Z")
 check("uptime counter", gl.uptime_s() >= 0)
 check("upload wait without holds", gl._upload_wait(time.ticks_ms()) == 0)
+
+# read_batch parses a .trk in place (bytearray.find/count, float() of a
+# memoryview, bytes %): the MicroPython side of the CPython suite
+trk = "/tmp/gps-logger-smoke-%d.trk" % time.ticks_ms()
+with open(trk, "wb") as f:
+    f.write(b"#TRK1\n47.500000,19.000000,100.0,0.9,20261029T101500Z\n-\n"
+            b"47.5,19.1,,,20261029T101501Z\n" + b"x" * 700 + b"\n"
+            b"47.6,19.\xff1,,,20261029T101502Z\n"
+            b"47.7,19.2,,,2026102XT101503Z\n#END\n"
+            b"48.0,20.0,,,20261029T101504Z\n")
+try:
+    n, n_ok, size, new_off, eof = gl.read_batch(trk, 0)
+    locs = json.loads(bytes(gl._body[:size]))["locations"]
+finally:
+    import os
+    os.remove(trk)
+check("read_batch .trk in place", (n, n_ok, eof) == (4, 2, True)
+      and locs[0]["geometry"]["coordinates"] == [19.0, 47.5]
+      and locs[0]["properties"]["timestamp"] == "2026-10-29T10:15:00Z"
+      and locs[0]["properties"]["horizontal_accuracy"] == 4.5
+      and locs[1]["properties"]["timestamp"] == "2026-10-29T10:15:01Z"
+      and "altitude" not in locs[1]["properties"])
 
 if fails:
     raise SystemExit("mpy logger smoke FAILED: %s" % ", ".join(fails))
