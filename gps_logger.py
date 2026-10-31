@@ -3442,9 +3442,17 @@ def _io_write(s, b):
         i += n
         t0 = time.ticks_ms()
 
-def _tls_wrap(s, host):
-    """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
-    with CA_FILE on flash (a DER root certificate), verifying the server."""
+_tls_ctx = [None]                        # the one SSLContext, made once
+
+def _tls_context():
+    """The SSLContext every POST wraps its socket with: made (and CA_FILE
+    read) on first use and kept. It is the biggest single Python heap
+    block of a POST; made per POST it came at the worst time (and could
+    grow the heap into the IDF block TLS needs). Not kept if making it
+    failed, so the next POST tries again."""
+    ctx = _tls_ctx[0]
+    if ctx is not None:
+        return ctx
     try:
         import tls
     except ImportError:
@@ -3461,7 +3469,13 @@ def _tls_wrap(s, host):
         ctx.load_verify_locations(cadata=ca)
     else:
         ctx.verify_mode = tls.CERT_NONE
-    return ctx.wrap_socket(s, server_hostname=host)
+    _tls_ctx[0] = ctx
+    return ctx
+
+def _tls_wrap(s, host):
+    """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
+    with CA_FILE on flash (a DER root certificate), verifying the server."""
+    return _tls_context().wrap_socket(s, server_hostname=host)
 
 _guard = {"t": None, "until": None, "sock": None, "hits": 0}
 

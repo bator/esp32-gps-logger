@@ -6165,6 +6165,13 @@ class RvTls:
             return s
 
 
+def tls_ctx_reset():
+    """Forget the SSLContext made once a boot (tests swap tls and CA_FILE)."""
+    c = getattr(gl, "_tls_ctx", None)
+    if c:
+        c[0] = None
+
+
 rv_sock = [None]
 fake_sockmod = types.ModuleType("socket")
 fake_sockmod.SOCK_STREAM = 1
@@ -6201,9 +6208,49 @@ try:
     with open(ca_path, "wb") as f:
         f.write(b"\x30\x82der")
     gl.CA_FILE = ca_path
+    tls_ctx_reset()                      # the context is made once a boot
     rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
     gl._raw_post("https://d.example", b"{}", {}, 15)
     ca_ctx = RvTls.made[-1]
+    # TLS-CTX: later POSTs reuse that context, CA_FILE is not read again
+    made0 = len(RvTls.made)
+    ca_reads = []
+    real_open_ = builtins.open
+
+    def _ca_open(name, *a, **k):
+        if name == ca_path:
+            ca_reads.append(name)
+        return real_open_(name, *a, **k)
+    builtins.open = _ca_open
+    try:
+        for _ in range(3):
+            rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+            gl._raw_post("https://d.example", b"{}", {}, 15)
+    finally:
+        builtins.open = real_open_
+    ctx_reused = (len(RvTls.made) == made0 and not ca_reads
+                  and RvTls.made[-1] is ca_ctx)
+    # TLS-CTX: a context that failed to be made is made again next time
+    tls_ctx_reset()
+    real_ctx_cls = RvTls.SSLContext
+
+    class _NoMemCtx(object):
+        def __init__(self, proto):
+            raise MemoryError("ctx")
+    RvTls.SSLContext = _NoMemCtx
+    try:
+        rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+        try:
+            gl._raw_post("https://d.example", b"{}", {}, 15)
+            ctx_fail = None
+        except MemoryError as e:
+            ctx_fail = e
+    finally:
+        RvTls.SSLContext = real_ctx_cls
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    r_again = gl._raw_post("https://d.example", b"{}", {}, 15)
+    ctx_retry = (ctx_fail is not None and r_again.status_code == 201
+                 and getattr(gl, "_tls_ctx", [None])[0] is RvTls.made[-1])
     rv_sock[0] = RvSock(b"", polls=10 ** 6)
     t0 = _clock[0]
     try:
@@ -6219,12 +6266,17 @@ finally:
         sys.modules["tls"] = real_mods[2]
     gl.read_uart = real_ru
     gl.CA_FILE = "/ca.der"
+    tls_ctx_reset()
 check("U-11: POST body in chunks, UART read while writing and waiting",
       ok_post, repr(rv_sock[0].out[:80]))
 check("U-17: a 301 is returned, not followed (no GET, no Bearer elsewhere)",
       r301.status_code == 301 and one_req)
 check("TLS: with CA_FILE on flash the server is verified",
       ca_ctx.verify_mode == RvTls.CERT_REQUIRED and ca_ctx.ca == b"\x30\x82der")
+check("TLS-CTX: one SSLContext for every POST, CA_FILE read once",
+      ctx_reused, "made %d->%d reads %r" % (made0, len(RvTls.made), ca_reads))
+check("TLS-CTX: a context that failed to be made is made on the next POST",
+      ctx_retry, repr(ctx_fail))
 check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
       to is not None and _clock[0] - t0 >= gl.HTTP_WAIT, repr(to))
 
