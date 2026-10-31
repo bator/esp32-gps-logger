@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v7
       # preinstalled on the ubuntu-24.04 runner image
       - run: shellcheck --version
-      - run: shellcheck deploy.sh
+      - run: shellcheck deploy.sh tools/build_firmware.sh
 
   mpy-cross:
     name: mpy-cross (${{ matrix.march }})
