@@ -199,6 +199,18 @@ LOST_GRACE = 5000                        # ms to let IDF auto-reconnect after dr
 ROAM_CHECK = 300000                      # ms between home-roam scans on hotspot
 ROAM_BACKOFF_MAX = 3600000               # ms cap on roam retry (60 min)
 ROAM_MIN_RSSI = -75                      # do not jump to a weak home AP
+BLANK_BAD_HOLD = 3600000                 # ms a blank AP whose hidden-home
+                                         # try failed is not tried again
+HOME_AP_MAX = 4                          # BSSIDs of the hidden home learned
+                                         # while connected to it (RAM only)
+LEARN_RSSI = 8                           # dB: the one blank AP on the link's
+                                         # channel this close to its RSSI
+UNLISTED_EVERY = 4                       # rounds: a network a good scan did
+                                         # not list is tried every Nth round
+WEB_SEARCH = 1800000                     # ms: WEB on and no scan keep-alive:
+                                         # failed rounds search on (backoff)
+                                         # this long before the radio sleeps
+FREQ_TRIES = 3                           # machine.freq() tries per change
 LINE_MAX = 512                           # bounded track-line readline
 BOOT_OK_MS = 60000                       # clear boot-fail after this of _loop
 
@@ -790,16 +802,22 @@ _freq_bad = []                           # clocks this board refused
 
 def _set_freq(mhz):
     """CPU clock: 80 MHz saves ~15-25 mA on the ESP32 against 240 (the UART
-    runs off the fixed APB clock, WiFi needs 80 or more). Unsupported on
-    this board or value: left alone, with a console line once."""
+    runs off the fixed APB clock, WiFi needs 80 or more). A failed change
+    is tried again (FREQ_TRIES in all): one passing error blacklisted the
+    clock for good, and a failed drop-back after a POST left the board at
+    the upload clock. Refused every time: left alone, a console line once."""
     if not mhz or mhz in _freq_bad:
         return
-    try:
-        if machine.freq() != mhz * 1000000:
-            machine.freq(mhz * 1000000)
-    except Exception as e:
-        _freq_bad.append(mhz)
-        print("cpu freq", mhz, repr(e))
+    for _ in range(FREQ_TRIES):
+        try:
+            if machine.freq() != mhz * 1000000:
+                machine.freq(mhz * 1000000)
+            return
+        except Exception as e:
+            err = e
+        time.sleep_ms(10)
+    _freq_bad.append(mhz)
+    print("cpu freq", mhz, repr(err))
 
 def _mhz_env(env, key, default):
     v = _plain(env.get(key))
@@ -1170,26 +1188,48 @@ def _wdt_keepalive():
 # Connect is a state machine in wifi_tick (one status poll per loop), so
 # GPS sampling is not blocked. Scan once per round; try strongest visible
 # known SSID (deduped by SSID). Remaining configured nets are tried in config
-# order after visible ones, so a missed scan does not block fallback.
+# order after visible ones when the scan failed, when hidden, and every
+# UNLISTED_EVERY rounds, so a missed scan does not block fallback for long.
+
+WLAN_ERR = (OSError, RuntimeError)       # the esp32 port raises RuntimeError
+                                         # ("Wifi Unknown Error 0x...") for an
+                                         # unmapped IDF error (no memory)
 
 def load_env(path):
-    """KEY=VALUE lines -> dict. Surrounding quotes are stripped."""
+    """KEY=VALUE lines -> dict. Surrounding quotes are stripped.
+
+    Read as bytes: a .env saved as ANSI (Notepad) raised UnicodeError at
+    every boot. A value that is not UTF-8 stays bytes for SSID/WPA2 keys
+    (connect() takes bytes) and is skipped for the others; never raises."""
     env = {}
     try:
-        with open(path) as f:
+        with open(path, "rb") as f:
             for line in f:
-                if line[:1] == "\ufeff":
-                    line = line[1:]          # UTF-8 BOM (Windows Notepad)
+                if line[:3] == b"\xef\xbb\xbf":
+                    line = line[3:]          # UTF-8 BOM (Windows Notepad)
                 line = line.strip()
-                if not line or line[0] == "#" or "=" not in line:
+                if not line or line[:1] == b"#" or b"=" not in line:
                     continue
-                k, v = line.split("=", 1)
+                k, v = line.split(b"=", 1)
                 k, v = k.strip(), v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                if (len(v) >= 2 and v[:1] == v[-1:]
+                        and v[:1] in (b'"', b"'")):
                     v = v[1:-1]
+                try:
+                    k = k.decode()
+                except UnicodeError:
+                    continue
+                try:
+                    v = v.decode()
+                except UnicodeError:
+                    if k[:4] not in ("SSID", "WPA2"):
+                        print("env", k, "not UTF-8, skipped")
+                        continue
                 env[k] = v
     except OSError:
         pass                             # no .env on the device
+    except Exception as e:
+        print("env", repr(e))
     return env
 
 def _plain(v):
@@ -1200,7 +1240,10 @@ def _plain(v):
     if v is None:
         return None
     i = v.find("#")
-    return (v if i < 0 else v[:i]).strip()
+    v = (v if i < 0 else v[:i]).strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1].strip()              # IP="192.168.1.60" # static
+    return v
 
 def _truthy(v):
     if v is None:
@@ -1292,10 +1335,21 @@ def _load_nets(env):
         if t is not None:
             home = t
         hidden = bool(_truthy(env.get(hidk)))
-        nets.append({"ssid": s, "pw": "" if p is None else p,
-                     "home": home, "hidden": hidden, "bssid": None,
-                     "ip": _static_ip(env, ipkeys)})
+        n = {"ssid": s, "pw": "" if p is None else p,
+             "home": home, "hidden": hidden, "bssid": None,
+             "ip": _static_ip(env, ipkeys)}
+        if isinstance(s, bytes):
+            # not UTF-8 (an ANSI .env): the radio gets the bytes as they
+            # are, the screen and the page one char per byte
+            n["raw"] = s
+            n["ssid"] = "".join(chr(c) for c in s)
+        nets.append(n)
     return nets
+
+def _ssid_b(n):
+    """A configured network's SSID as the radio sees it (bytes)."""
+    r = n.get("raw")
+    return r if r is not None else n["ssid"].encode()
 
 wifi = {}
 
@@ -1311,6 +1365,8 @@ def wifi_reset():
                 pb_at=time.ticks_ms(), pb_scans=0,
                 wake=False, wake_at=None,
                 blank_rssi=None, blank_bssid=None, blank_bad=[],
+                home_aps=[], learn=False, hid_wait=ROAM_CHECK, hid_at=None,
+                rounds=0, down_at=None, hh=None,
                 seen_at=None, seen_wait=SEEN_WAIT, pb_conn_at=time.ticks_ms())
 
 def _set_hostname(name):
@@ -1319,14 +1375,16 @@ def _set_hostname(name):
     try:
         network.hostname(name)
         return
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (AttributeError, OSError, TypeError, ValueError,
+            RuntimeError):
         pass
     w = wifi.get("wlan")
     if w is None:
         return
     try:
         w.config(dhcp_hostname=name)
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (AttributeError, OSError, TypeError, ValueError,
+            RuntimeError):
         pass
 
 def _recently_failed(ssid, now):
@@ -1337,31 +1395,46 @@ def _mark_failed(ssid, why=""):
     wifi["failed"][ssid] = time.ticks_ms()
     print("wifi fail", ssid, why)
     if wifi.get("roaming") and _net_home(ssid):
-        # Hidden home: keep 5 min. A neighbour's empty-SSID AP can trigger
-        # a try; growing backoff would delay a real visible-home switch.
         if not _net_hidden(ssid):
             b = wifi.get("roam_backoff") or ROAM_CHECK
             wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
         else:
-            # that empty-SSID AP is a neighbour's, not ours: do not drop
-            # the hotspot for it every ROAM_CHECK
-            bad = wifi["blank_bad"]
+            # Hidden home: roam_backoff stays (it would delay a visible
+            # home switch); hidden tries get their own growing hold, so
+            # many neighbours' empty-SSID APs do not drop the hotspot every
+            # ROAM_CHECK. That AP is skipped for BLANK_BAD_HOLD (it may be
+            # ours, briefly unreachable: not until reboot).
+            now = wifi["failed"][ssid]
+            b = wifi.get("hid_wait") or ROAM_CHECK
+            wifi["hid_wait"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
+            wifi["hid_at"] = now
             b = wifi.get("blank_bssid")
-            if b is not None and b not in bad:
-                bad.append(b)
-                del bad[:-4]
+            if b is not None and not _blank_bad(b, now):
+                bad = [x for x in wifi["blank_bad"]
+                       if _age(now, x[1]) < BLANK_BAD_HOLD]
+                bad.append((b, now))
+                wifi["blank_bad"] = bad[-4:]
         wifi["roaming"] = False
+
+def _blank_bad(bssid, now):
+    """A hidden-home try on this empty-SSID AP failed within BLANK_BAD_HOLD."""
+    for b, t in wifi.get("blank_bad") or ():
+        if b == bssid and _age(now, t) < BLANK_BAD_HOLD:
+            return True
+    return False
 
 def _scan_known(w):
     """Visible known nets, strongest BSSID per SSID, or None if scan fails.
     Hidden APs are listed with an empty SSID; the strongest blank RSSI is
-    a hint that *some* hidden AP is nearby (not necessarily ours)."""
+    a hint that *some* hidden AP is nearby (not necessarily ours). Once
+    the hidden home's BSSIDs are learned (_learn_home), only those count."""
     by = {}
     for n in wifi["nets"]:
-        by[n["ssid"].encode()] = n
+        by[_ssid_b(n)] = n
+    mine = wifi.get("home_aps") or ()
     try:
         aps = w.scan()
-    except OSError:
+    except WLAN_ERR:
         wifi["blank_rssi"] = None
         wifi["blank_bssid"] = None
         return None
@@ -1377,6 +1450,8 @@ def _scan_known(w):
         rssi = rec[3]
         bssid = rec[1] if len(rec) > 1 else None
         if not ssid:
+            if mine and bssid not in mine:
+                continue                 # a neighbour's hidden AP
             if blank_rssi is None or rssi > blank_rssi:
                 blank_rssi, blank_bssid = rssi, bssid
             continue
@@ -1403,13 +1478,13 @@ def home_in_range():
     for it and off again when it slept). None when that cannot be told
     (no home network configured, a connect in progress, scan failed)."""
     w = wifi.get("wlan")
-    if w is None or not any(n.get("home") for n in wifi.get("nets") or []):
+    if w is None or not _has_home():
         return None
     state = wifi["state"]
     if state == "connected" and wifi.get("home"):
         try:
             r = w.status("rssi")
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             r = None
         if r is not None:
             return r >= ROAM_MIN_RSSI
@@ -1421,13 +1496,13 @@ def home_in_range():
         if off:
             w.active(True)
         found = _scan_known(w)
-    except OSError:
+    except WLAN_ERR:
         found = None
     finally:
         if off:
             try:
                 w.active(False)
-            except OSError:
+            except WLAN_ERR:
                 pass
     if found is None:
         return None
@@ -1450,17 +1525,73 @@ def _home_veto(now, sl):
         return True
     return False
 
+def _has_home():
+    """Any home network configured (cached per nets list: wifi_tick asks
+    every loop pass)."""
+    nets = wifi.get("nets") or []
+    c = wifi.get("hh")
+    if c is None or c[0] is not nets:
+        c = wifi["hh"] = (nets, any(n.get("home") for n in nets))
+    return c[1]
+
 def _blank_home_ok():
-    """True if a hidden home is configured and a strong empty-SSID AP was seen."""
+    """True if a hidden home is configured and a strong empty-SSID AP was
+    seen (one of its learned BSSIDs, once known: _scan_known)."""
     r = wifi.get("blank_rssi")
     if r is None or r < ROAM_MIN_RSSI:
         return False
-    if wifi.get("blank_bssid") in wifi.get("blank_bad", ()):
+    if _blank_bad(wifi.get("blank_bssid"), time.ticks_ms()):
         return False                     # a hidden-home try there failed
     for n in wifi.get("nets") or []:
         if n.get("home") and n.get("hidden"):
             return True
     return False
+
+def _learn_home(w):
+    """Connected to the hidden home: note its BSSID, so a neighbour's
+    empty-SSID AP no longer counts as home (_scan_known). v1.29 has no
+    config("bssid") getter: then a scan while connected, and the one blank
+    AP on the link's channel within LEARN_RSSI dB of its RSSI is ours.
+    Several such APs (or none): nothing learned, as before."""
+    wifi["learn"] = False
+    b = None
+    try:
+        b = bytes(w.config("bssid"))
+    except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+    if not b:
+        try:
+            ch = w.config("channel")
+        except (OSError, ValueError, TypeError, RuntimeError):
+            ch = None
+        try:
+            r = w.status("rssi")
+        except (OSError, ValueError, RuntimeError):
+            r = None
+        feed()
+        read_uart()
+        try:
+            aps = w.scan()
+        except WLAN_ERR:
+            return
+        feed()
+        for rec in aps:
+            if rec[0] or (ch is not None and rec[2] != ch):
+                continue
+            if r is not None and abs(rec[3] - r) > LEARN_RSSI:
+                continue
+            if b is not None:
+                return                   # two of them: cannot tell
+            b = bytes(rec[1])
+    if not b:
+        return
+    aps = wifi["home_aps"]
+    if b in aps:
+        aps.remove(b)
+    else:
+        print("wifi home ap learned")
+    aps.insert(0, b)
+    del aps[HOME_AP_MAX:]
 
 def _hidden_home_target(now, arrival=False):
     """Hidden home when a strong empty-SSID AP was seen.
@@ -1471,6 +1602,9 @@ def _hidden_home_target(now, arrival=False):
         return None
     if not _blank_home_ok():
         return None
+    at = wifi.get("hid_at")
+    if at is not None and _age(now, at) < (wifi.get("hid_wait") or ROAM_CHECK):
+        return None                      # a hidden-home roam failed lately
     for n in wifi.get("nets") or []:
         if (n.get("home") and n.get("hidden")
                 and n["ssid"] != wifi.get("ssid")
@@ -1481,15 +1615,29 @@ def _hidden_home_target(now, arrival=False):
     return None
 
 def _candidate_order(w):
-    """Visible strongest first (deduped), then unscanned nets in config order."""
+    """Visible strongest first (deduped), then unscanned nets in config
+    order: all of them when the scan failed, else only hidden ones (a scan
+    never lists them by name) and, every UNLISTED_EVERY rounds (the first
+    one too), the rest (a scan can miss an AP). Each try of a network that
+    is not there costs CONNECT_TIMEOUT with the radio on."""
     now = time.ticks_ms()
     scanned = _scan_known(w)
+    rounds = wifi.get("rounds") or 0
+    wifi["rounds"] = rounds + 1
     if scanned is None:
         cands = [dict(n) for n in wifi["nets"]]
     else:
         seen = set(n["ssid"] for n in scanned)
+        every = rounds % UNLISTED_EVERY == 0
         cands = scanned + [dict(n) for n in wifi["nets"]
-                           if n["ssid"] not in seen]
+                           if n["ssid"] not in seen
+                           and (every or n.get("hidden"))]
+    if _blank_home_ok():
+        # a hidden home with a strong blank AP gets the scan's RSSI, so a
+        # failed first association is retried at once (_wifi_failed)
+        for n in cands:
+            if n.get("home") and n.get("hidden") and n.get("rssi") is None:
+                n["rssi"] = wifi["blank_rssi"]
     good, bad = [], []
     for n in cands:
         (bad if _recently_failed(n["ssid"], now) else good).append(n)
@@ -1501,7 +1649,7 @@ def _candidate_order(w):
             rssi = n.get("rssi")
             if n.get("home") and rssi is not None and rssi >= ROAM_MIN_RSSI:
                 homes.append(n)
-            elif n.get("home") and n.get("hidden") and rssi is None and blank:
+            elif n.get("home") and n.get("hidden") and blank:
                 homes.append(n)
             else:
                 rest.append(n)
@@ -1513,20 +1661,20 @@ def _wifi_clear(w):
     """Drop the last association so the next status() is not a stale reason."""
     try:
         w.disconnect()
-    except OSError:
+    except WLAN_ERR:
         pass
     try:
         w.active(False)
         w.active(True)
         _set_hostname(HOSTNAME)
-    except OSError:
+    except WLAN_ERR:
         pass
     t0 = time.ticks_ms()
     while time.ticks_diff(time.ticks_ms(), t0) < CLEAR_WAIT:
         feed()
         try:
             s = w.status()
-        except OSError:
+        except WLAN_ERR:
             break
         if s == network.STAT_IDLE or s == network.STAT_CONNECTING:
             break
@@ -1545,7 +1693,7 @@ def _wifi_ip(w, net):
                                        wifi.get("nets") or []):
             w.ifconfig("dhcp")
             wifi["static"] = False
-    except (OSError, ValueError, TypeError) as e:
+    except (OSError, ValueError, TypeError, RuntimeError) as e:
         print("wifi ip", repr(e))
 
 def _wifi_connect(w, net):
@@ -1558,20 +1706,21 @@ def _wifi_connect(w, net):
     print("wifi try", net["ssid"])
     try:
         wifi["prev_status"] = w.status()
-    except OSError:
+    except WLAN_ERR:
         wifi["prev_status"] = None
     _wifi_clear(w)
     _wifi_ip(w, net)
+    ssid = net.get("raw") or net["ssid"]
     try:
         bssid = net.get("bssid")
         if bssid:
             try:
-                w.connect(net["ssid"], net["pw"], bssid=bssid)
+                w.connect(ssid, net["pw"], bssid=bssid)
             except TypeError:
-                w.connect(net["ssid"], net["pw"])
+                w.connect(ssid, net["pw"])
         else:
-            w.connect(net["ssid"], net["pw"])
-    except OSError as e:
+            w.connect(ssid, net["pw"])
+    except WLAN_ERR as e:
         _mark_failed(net["ssid"], "connect %r" % (e,))
         return _wifi_next(w)
     wifi["tries"] += 1
@@ -1593,13 +1742,22 @@ def _wifi_got_ip(w):
     wifi["state"] = "connected"
     try:
         wifi["ip"] = w.ifconfig()[0]
-    except OSError:
+    except WLAN_ERR:
         wifi["ip"] = None
     try:
         wifi["rssi"] = w.status("rssi")
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         wifi["rssi"] = None
     wifi["home"] = _net_home(wifi.get("ssid"))
+    wifi["down_at"] = None
+    if wifi["home"] and _net_hidden(wifi.get("ssid")):
+        # our hidden home answered: no blank AP stays blamed for an
+        # earlier failed try, hidden roams are due again, and its BSSID is
+        # learned on the next wifi_tick (_learn_home)
+        wifi["blank_bad"] = []
+        wifi["hid_wait"] = ROAM_CHECK
+        wifi["hid_at"] = None
+        wifi["learn"] = True
     wifi["sleep_home"] = False
     wifi["idle_at"] = time.ticks_ms()
     wifi["failed"].pop(wifi.get("ssid"), None)
@@ -1647,8 +1805,11 @@ def _wifi_round_failed(w):
     """No network in this round. With points to upload, search on with the
     usual growing backoff (15 s to 10 min) until one connects, the radio
     off between rounds (_wifi_begin_round turns it on); with nothing to
-    upload, sleep."""
-    if _all_uploaded():
+    upload, sleep (not yet while _web_search)."""
+    now = time.ticks_ms()
+    if wifi.get("down_at") is None:
+        wifi["down_at"] = now
+    if _all_uploaded() and not _web_search(now):
         _wifi_off(w, "sleep")
         return
     _radio_off(w)
@@ -1657,14 +1818,27 @@ def _wifi_round_failed(w):
     wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
     wifi["last_check"] = time.ticks_ms()
 
+def _web_search(now):
+    """The status page is on (at home, or WEB_AWAY) and no keep-alive scan
+    can see the home network come back (_home_seen): a failed round keeps
+    searching with the "not found" backoff for WEB_SEARCH after the link
+    went down, instead of sleeping WIFI_SLEEP (1 h, page down) at once
+    (a router restart, a board booting faster than the router)."""
+    if not WEB or not (WEB_AWAY or _has_home()):
+        return False
+    if PB_KEEPALIVE and PB_MODE == "scan":
+        return False
+    at = wifi.get("down_at")
+    return at is not None and _age(now, at) < WEB_SEARCH
+
 def _radio_off(w):
     try:
         w.disconnect()
-    except OSError:
+    except WLAN_ERR:
         pass
     try:
         w.active(False)
-    except OSError:
+    except WLAN_ERR:
         pass
 
 def _wifi_off(w, state):
@@ -1688,9 +1862,10 @@ def _upload_wait(now):
     state = str(up.get("state") or "")
     d = time.ticks_diff(up["next_at"], now)
     wait = d if 0 < d <= UP_WAIT_MAX else 0
-    if state.startswith("err") or state in ("fs err", "low mem", "bad full",
-                                            "low idf"):
+    if state.startswith("err") or state in ("fs err", "low mem", "low idf"):
         return wait
+    # "bad full": the rejected track is held (BACKOFF_MAX), its 15 s
+    # next_at is no reason to keep the radio on: the holds below decide
     held = up.get("hold") or {}
     if not held:
         return 0
@@ -1725,7 +1900,7 @@ def _wifi_begin_round(w):
         if not w.active():
             w.active(True)               # after _wifi_off
             _set_hostname(HOSTNAME)
-    except OSError:
+    except WLAN_ERR:
         pass
     wifi["cand"] = _candidate_order(w)
     wifi["cand_i"] = 0
@@ -1740,8 +1915,8 @@ def _radio_idle_ok():
     open anchor file (and its RAM) waits. That file is closed every
     STILL_FILE while connected and wakes the hourly round (_all_uploaded),
     so the radio and a phone hotspot do not idle on for the whole stay."""
-    if _all_uploaded():
-        return True
+    if _all_uploaded() or up.get("state") == "no .env":
+        return True                      # (no GEO_URL/API_KEY: never sends)
     sl = log["still"]
     return bool(sl["active"] and not sl["home"] and not pending())
 
@@ -1776,7 +1951,7 @@ def _wifi_poll(w):
     elapsed = time.ticks_diff(now, started)
     try:
         s = w.status()
-    except OSError:
+    except WLAN_ERR:
         return _wifi_next(w)
     if s == network.STAT_GOT_IP:
         return _wifi_got_ip(w)
@@ -1892,9 +2067,16 @@ def _keepalive_env(env):
     v = _plain(env.get("KEEPALIVE_PIN"))
     if v:
         try:
-            PB_PIN = int(v)
+            n = int(v)
         except ValueError:
+            n = None
+        if n is None or n < 0:
             print("KEEPALIVE_PIN invalid, using", PB_PIN)
+        elif _pin_taken(n):
+            print("KEEPALIVE_PIN", n, "is in use (GPS, I2C, boot-bypass",
+                  "or USB), using", PB_PIN)
+        else:
+            PB_PIN = n
     v = _plain(env.get("KEEPALIVE_CONNECTED"))
     if v:
         t = _truthy(v)
@@ -1903,6 +2085,16 @@ def _keepalive_env(env):
                   1 if PB_CONNECTED else 0)
         else:
             PB_CONNECTED = t
+
+def _pin_taken(n):
+    """A pin the board already uses: GPS UART, I2C (OLED), main.py's
+    boot-bypass pin (10 on the C6, 25 on the ESP32) and, on the C6, the
+    USB D-/D+ pins 12/13 (the console). Pulsing one of them breaks it."""
+    if n in (GPS_TX, GPS_RX, I2C_SCL, I2C_SDA):
+        return True
+    if IS_C6:
+        return n in (10, 12, 13)
+    return n == 25
 
 _pb_pin = None
 
@@ -1936,12 +2128,12 @@ def _pb_pulse_radio(w, scan):
             aps = w.scan()
             _stay_scan(aps)
             _home_seen(aps)
-    except OSError:
+    except WLAN_ERR:
         pass
     finally:
         try:
             w.active(False)
-        except OSError:
+        except WLAN_ERR:
             pass
 
 def keepalive_tick(now):
@@ -1980,7 +2172,7 @@ def keepalive_tick(now):
         if conn:
             try:
                 _stay_scan(w.scan())     # connected: scan, keep the link
-            except OSError:
+            except WLAN_ERR:
                 pass
         else:
             _pb_pulse_radio(w, PB_MODE == "scan")
@@ -1996,7 +2188,7 @@ def _pb_wlan():
     if _pb_w is None:
         try:
             _pb_w = network.WLAN(network.STA_IF)
-        except OSError:
+        except WLAN_ERR:
             return None
     return _pb_w
 
@@ -2010,15 +2202,17 @@ def _home_seen(aps):
     state = wifi["state"]
     if not WEB or state not in ("sleep", "not found"):
         return
-    homes = [n["ssid"].encode() for n in wifi.get("nets") or []
-             if n.get("home")]
+    homes = [_ssid_b(n) for n in wifi.get("nets") or [] if n.get("home")]
     if not homes:
         return
+    mine = wifi.get("home_aps") or ()    # the hidden home's learned BSSIDs
     for rec in aps:
+        if rec[3] < ROAM_MIN_RSSI:
+            continue
         raw = rec[0]
         if not isinstance(raw, bytes):
             raw = raw.encode()
-        if raw in homes and rec[3] >= ROAM_MIN_RSSI:
+        if (raw and raw in homes) or (not raw and rec[1] in mine):
             break
     else:
         return
@@ -2041,6 +2235,7 @@ def wifi_start():
     CPU_MHZ_UPLOAD = _mhz_env(env, "CPU_MHZ_UP", CPU_MHZ_UPLOAD)
     _set_freq(CPU_MHZ)
     wifi["nets"] = _load_nets(env)
+    _has_home()                          # cached for wifi_tick
     if wifi["nets"]:
         wifi["ssid"] = wifi["nets"][0]["ssid"]
         wifi["pw"] = wifi["nets"][0]["pw"]
@@ -2064,7 +2259,7 @@ def wifi_start():
         w = wifi["wlan"] = network.WLAN(network.STA_IF)
         _set_hostname(HOSTNAME)
         w.active(True)
-    except OSError:
+    except WLAN_ERR:
         wifi["state"] = "error"
         return
     _wifi_begin_round(w)
@@ -2079,21 +2274,22 @@ def wifi_tick():
     now = time.ticks_ms()
     try:
         s = w.status()
-    except OSError:
+    except WLAN_ERR:
         s = None
     if s == network.STAT_GOT_IP:
         if wifi["state"] != "connected":
             _wifi_got_ip(w)
         else:
+            if wifi.get("learn"):
+                _learn_home(w)
             if _age(now, wifi["last_check"]) >= WIFI_CHECK:
                 try:
                     wifi["rssi"] = w.status("rssi")
-                except (OSError, ValueError):
+                except (OSError, ValueError, RuntimeError):
                     wifi["rssi"] = None
                 wifi["last_check"] = now
             interval = wifi.get("roam_backoff") or ROAM_CHECK
-            if (not wifi.get("home")
-                    and any(n.get("home") for n in wifi.get("nets") or [])):
+            if not wifi.get("home") and _has_home():
                 spd = st.get("speed")
                 moving = (has_fix(now) and spd is not None and spd >= 5
                           and not (log.get("still") or {}).get("active"))
@@ -2157,8 +2353,7 @@ def wifi_tick():
             if _age(now, wifi["idle_at"]) < WIFI_IDLE:
                 return
             wifi["idle_at"] = now
-            if _all_uploaded() and not (WEB and (WEB_AWAY or any(
-                    n.get("home") for n in wifi.get("nets") or []))):
+            if _all_uploaded() and not (WEB and (WEB_AWAY or _has_home())):
                 wifi["wake_at"] = None
                 return
         wifi["wake"] = False
@@ -2179,7 +2374,7 @@ def wifi_stop():
     try:
         w.disconnect()
         w.active(False)
-    except OSError:
+    except WLAN_ERR:
         pass
     wifi["state"] = "off"
     wifi["home"] = False
