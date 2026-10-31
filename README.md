@@ -173,9 +173,15 @@ PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 ```
 
 The script asks the board which chip it is, compiles `gps_logger.py` to
-`gps_logger.mpy` for it, copies it with `main.py` and the status page
-`web.html`, removes a stray
-`gps_logger.py`, clears the boot-fail counter and resets the board.
+`gps_logger.mpy` for it and checks the free flash (it stops with `Not
+enough free flash` when the new files would not fit next to the old ones).
+It copies `gps_logger.mpy`, `main.py` and the status page `web.html` as
+`<name>.new`, checks their size and SHA-256 on the board, and only then
+renames them over the old files; a failed check (`Copy check FAILED`)
+removes the `.new` files and keeps the old install, so a copy cut short on
+a nearly full flash can no longer leave an unimportable module. Then it
+removes a stray `gps_logger.py`, clears the boot-fail counter and resets
+the board.
 
 The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, and
@@ -219,10 +225,23 @@ the device.
 for 10 minutes, then the chip resets, so a stray Ctrl-C in the field does not
 leave the device in the REPL for good.
 
-**Boot loop guard:** repeated import, crash or watchdog resets at boot get an
-increasing delay (5 s, 10 s, … 30 s); after 5 the board stays in the REPL. The
-counter (RTC memory, `/boot_fail` as fallback) is cleared after ~60 s of a
-healthy main loop, by `deploy.sh` or by a power cycle. By hand:
+**Boot loop guard:** failed starts are counted (RTC memory, `/boot_fail` as
+fallback); at 5 the board stays in the REPL instead of starting the logger.
+What counts, and what follows:
+
+- an import failure of `gps_logger`, or an exception escaping `run()`: the
+  count goes up, then `main.py` waits 5 s per failure so far (5 s, 10 s, …
+  at most 30 s) and resets;
+- a crash inside `run()` (the main loop): the count goes up, the batch is
+  flushed, a `crash` line goes to the diagnostic log and the board resets
+  after 1 s (no growing delay);
+- a watchdog reset (boot cause 3): counted at the next boot, no delay.
+
+A panic or a brownout is not counted: MicroPython 1.29 reports a panic as
+boot cause 2 (hard reset), the same as the logger's own `machine.reset()`
+(after a crash, the TLS memory reboot, `mpremote reset`), and a brownout as
+1 (power on). The counter is cleared after 60 s (`BOOT_OK_MS`) of a healthy
+main loop, by `deploy.sh` or by a power cycle. By hand:
 `mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
 
 **Getting tracks:** they live in `/gpx/`. With the boot bypass held:
@@ -264,7 +283,7 @@ minute. After a walk, plug the board in and read it:
 
 | Field | Meaning |
 |-------|---------|
-| `boot cause N` | Why the chip started: 1 power-on (also a power bank switching back on), 3 watchdog, 5 soft or esptool reset, 6 crash (panic, brownout) |
+| `boot cause N` | Why the chip started (`machine.reset_cause()` of MicroPython 1.29): 1 power-on (also a brownout, or a power bank switching back on), 2 hard reset (the logger's own reset after a crash or for TLS memory, `mpremote reset`, a panic), 3 watchdog, 4 deep sleep, 5 soft reset (Ctrl-D), 0 other (e.g. a reset over USB-JTAG) |
 | `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; `0` = under a minute, `-` = no log) |
 | `up` | Seconds since boot (summed from tick differences, so it does not wrap after 12.4 days) |
 | `utc` | GPS time, `-` until the receiver has one |
@@ -290,17 +309,21 @@ and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
 page is a dark telemetry view. On top, a darkened OpenStreetMap map is
 centred on the position, with a glowing dot, an accuracy ring (HDOP x
-2.5 m) and the coordinates; without a fix it says `NO FIX`. Over its lower
-edge a strip shows fix, satellites used/seen, HDOP, points waiting for
-upload, WiFi signal and the share of bad NMEA sentences. Below:
+2.5 m) and the coordinates (N/S, E/W); without a fix it says `NO FIX`. Over
+its lower edge a strip shows fix, satellites used/seen, HDOP, points waiting
+for upload, WiFi signal and the share of bad NMEA sentences. The WiFi cell
+is an arc icon (0–3 arcs lit) and the link quality in per cent, 2 x (RSSI +
+100) capped at 0–100 (-63 dBm = 74 %), with the dBm beside it on a wide
+screen; amber below -67 dBm, red below -80 dBm. Below:
 - a radar-style sky plot (centre = overhead, edge = horizon, north up;
   colour = system: GPS blue, Galileo green, BeiDou amber, GLONASS pink;
   filled = in the fix, hollow = not used);
 - one signal bar per satellite (lines at 15/30/45 dBHz);
 - *Systems*: the largest IDF heap block, with a mark at the 48 KB TLS
   needs, then the Python heap, free flash, upload state and counters,
-  points logged and stay, receiver restarts and setup, WiFi and keep-alive
-  pulses, boot cause with the previous run, chip temperature and GPS time;
+  points logged and stay, receiver restarts and setup, WiFi (`ssid · 74%
+  (-63 dBm)`) and keep-alive pulses, boot cause with the previous run, chip
+  temperature and GPS time;
 - the *Event log*: the diagnostic log, newest on top, with the minute
   status lines as rows (local time, fix, satellites, points, IDF block, red
   below 48 KB) and boots, upload errors and receiver lines as events;
@@ -315,12 +338,22 @@ only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
 panels fade and `LIVE` turns into `OFFLINE · 2 MIN 10 S AGO`. HDOP is
 rounded to two decimals on the page; the JSON keeps the receiver's value.
-The board sends the file in 1 KB reads and the JSON piece by piece, so a
-page view needs ~2 KB of Python heap (building the whole page used to need
-~20 KB, enough to double the Python heap into the IDF heap TLS needs). It is
-plain HTTP without a password: keep it on your own network. The request
-head is read whole (up to 2 KB), the reply goes out in small pieces with
-the GPS read in between, and the free flash is measured at most every 30 s. For the page
+The board sends the file in 1 KB reads and the JSON piece by piece (a
+diagnostic line a piece, gathered into 1 KB sends), so a page view needs
+~2 KB of Python heap (building the whole page used to need ~20 KB, enough
+to double the Python heap into the IDF heap TLS needs). It is plain HTTP
+without a password: keep it on your own network. Against DNS rebinding (a
+page of another site that points its own name at the board) a request
+whose `Host` is not the board's IP, `HOSTNAME` or `HOSTNAME.local` gets
+`403`: open the page by IP or as `http://<HOSTNAME>.local/` (a name the
+router's DNS gives it, e.g. `….lan`, is refused too). Only a `GET` is
+answered; an empty or cut-off request is just closed. The request head is
+read whole (up to 2 KB), the reply goes out in small pieces with the GPS
+read in between; each receive or send may wait 2 s (`WEB_TIMEOUT`) and the
+whole request 5 s (`WEB_DEADLINE`), then the client is dropped, so a slow
+phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
+measured at most every 30 s (also for the OLED) and the waiting files are
+counted at most every 10 s. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
 `WEB=0` in `.env` turns both off. On the other networks the radio sleeps
 a few seconds after the last upload, so the page is up only briefly; with
@@ -733,16 +766,29 @@ every pull request:
   `tests/mpy_unix_check.py` and `tests/mpy_unix_logger.py` (imports
   `gps_logger.py` with stub `machine`/`network` modules and runs its pure
   paths) on a cached MicroPython 1.29 unix build; the smoke also runs
-  under CPython.
+  under CPython. It also runs:
+  - `tests/web_loopback.py` on the unix build and CPython: the status page
+    over real loopback sockets (a normal request, a foreign `Host`, an
+    empty, an oversized, a stalled and a trickling request, a client
+    resetting mid-reply, a reply past the request deadline);
+  - `node tests/web_page_test.js`: `web.html`'s view on generated
+    `status.json`, and the whole page script (`tick`, `paint`, `placeMap`,
+    `stale`) against a stub document. With `CI=true` (GitHub Actions) a
+    missing `node` is a FAIL, not a SKIP;
+  - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
+    board-side code under CPython): copy, check and rename, too little
+    flash, a cut copy.
 - `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
-- `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py` and
-  `tests/mpy_unix_logger.py`.
+- `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`,
+  `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
+- `shellcheck deploy.sh`.
 
 The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
-.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py
+.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
+shellcheck deploy.sh
 .venv/bin/python -m mpy_cross -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
 MICROPYTHON=/path/to/micropython python3 tests/test_gps_logger.py
 ```

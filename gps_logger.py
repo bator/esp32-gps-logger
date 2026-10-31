@@ -50,7 +50,9 @@ DIAG_OLD = "/diag.1"                     # on a walk, read it back over USB
 DIAG_MAX = 32768                         # bytes, then DIAG_FILE -> DIAG_OLD
 WEB = True                               # status page on port WEB_PORT; the
 WEB_PORT = 80                            # radio stays on at home for it
-WEB_TIMEOUT = 2                          # s a client may take (.env WEB=0)
+                                         # (.env WEB=0)
+WEB_TIMEOUT = 2                          # s one recv/send may wait
+WEB_DEADLINE = 5                         # s a whole request may take
 WEB_REQ_MAX = 2048                       # bytes of a request head read
 WEB_CHUNK = 1024                         # reply bytes per send
 WEB_REFRESH = 15                         # s between status.json polls of
@@ -937,10 +939,12 @@ def _hms(secs):
     return "%d d %02d h" % (secs // 86400, secs // 3600 % 24)
 
 def _diag_boot():
-    """First line after a boot: why the chip (re)started (1 power-on, also a
-    power bank switching back on; 3 WDT; 4 deep sleep; 5 soft or esptool
-    reset; 6 crash: panic, brownout) and how long the run before lasted
-    (prev_up s, to within DIAG; from that run's last lines, read first)."""
+    """First line after a boot: why the chip (re)started, machine.reset_cause()
+    of MicroPython 1.29 (1 power-on, also a brownout or a power bank
+    switching back on; 2 hard reset: machine.reset(), also a panic; 3 WDT;
+    4 deep sleep; 5 soft reset; 0 other, e.g. USB-JTAG) and how long the run
+    before lasted (prev_up s, to within DIAG; from that run's last lines,
+    read first)."""
     _diag_prev()
     try:
         cause = machine.reset_cause()
@@ -3803,7 +3807,9 @@ def _low_mem(now):
 # A small HTTP page on the LAN while the radio is connected (at home, or
 # everywhere with WEB_AWAY, it stays connected for it, see wifi_tick):
 # http://<ip>/ and /status.json.
-# Served from the main loop, one client at a time, at most WEB_TIMEOUT s.
+# Served from the main loop, one client at a time: each recv/send waits at
+# most WEB_TIMEOUT s and the whole request at most WEB_DEADLINE s (a slow
+# client used to hold the loop for ~50 s: 2 s per 1 KB send).
 
 _web_sock = None
 
@@ -3855,7 +3861,30 @@ def _web_close():
         _web_sock = None
 
 def _web_diag():
-    return _diag_tail(DIAG_FILE, WEB_DIAG)
+    """The last WEB_DIAG diag lines, read line by line from near the end of
+    the file (200 B a line back: a status line is ~150-170): _diag_tail's
+    one read of the tail was a ~2.4 KB string, more than the largest free
+    block of a busy heap."""
+    lines = []
+    try:
+        size = _file_size(DIAG_FILE) or 0
+        f = open(DIAG_FILE)
+        try:
+            if size > 200 * WEB_DIAG:
+                f.seek(size - 200 * WEB_DIAG)
+                f.readline()             # a partial line
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                lines.append(line.rstrip("\r\n"))
+                if len(lines) > WEB_DIAG:
+                    lines.pop(0)
+        finally:
+            f.close()
+    except (OSError, ValueError):
+        pass
+    return lines
 
 def _prev_text():
     if prev_run["up"] is None:
@@ -3879,6 +3908,7 @@ def _web_rows():
     except Exception:
         cause = None
     flash = _flash_kb()
+    files, bad = _file_counts()
     heap = py_heap()
     still = log.get("still") or {}
     return [
@@ -3894,8 +3924,8 @@ def _web_rows():
         ("setup_ok", st["setup_ok"]),
         ("points", log["points"]),
         ("left", up["left"]),
-        ("files", len(pending())),
-        ("bad_files", len(pending_bad())),
+        ("files", files),
+        ("bad_files", bad),
         ("sent", up["sent"]),
         ("upload", up["state"]),
         ("upload_err", up["err"]),
@@ -3930,6 +3960,33 @@ def _flash_kb():
         _fl[0] = None
     _fl[1] = now
     return _fl[0]
+
+_fc = [0, 0, None]                       # (files, bad files, ticks)
+
+def _file_counts():
+    """(track files waiting, .bad files) for the page, counted at most every
+    10 s: pending() and pending_bad() list, sort and build the paths of the
+    whole log directory, twice per poll. ilistdir counts without a list."""
+    now = time.ticks_ms()
+    if _fc[2] is not None and _age(now, _fc[2]) < 10000:
+        return _fc[0], _fc[1]
+    n = bad = 0
+    cur = log["file"]
+    try:
+        if hasattr(os, "ilistdir"):
+            names = (e[0] for e in os.ilistdir(LOG_DIR))
+        else:                            # CPython (tests)
+            names = iter(os.listdir(LOG_DIR))
+        for name in names:
+            if name.endswith((".gpx", ".trk")):
+                if cur is None or cur != LOG_DIR + "/" + name:
+                    n += 1
+            elif name.endswith((".gpx.bad", ".trk.bad")):
+                bad += 1
+    except OSError:
+        pass
+    _fc[0], _fc[1], _fc[2] = n, bad, now
+    return n, bad
 
 def _sv_fresh():
     """Before a page: a satellite list older than SV_FRESH is asked for
@@ -3968,7 +4025,12 @@ def _web_json_parts():
     """The JSON in small pieces (no 8 KB string and its encoded copy)."""
     yield '{"device":' + json.dumps(DEVICE_ID) + ',"refresh_s":%d' % (
         WEB_REFRESH)
-    yield ',"diag":' + json.dumps(_web_diag()) + ',"satellites":['
+    yield ',"diag":['
+    sep = ""
+    for line in _web_diag():             # one piece a line (no ~3 KB string)
+        yield sep + json.dumps(line)
+        sep = ","
+    yield '],"satellites":['
     sep = ""
     for v in _sv_list():
         yield sep + json.dumps({
@@ -3984,43 +4046,94 @@ def _web_json_parts():
 def _web_json():
     return "".join(_web_json_parts())
 
+_web_end = [None]                        # ticks_ms deadline of the request
+
+def _web_left(c):
+    """Before each recv/send: past the request's WEB_DEADLINE raise
+    ETIMEDOUT (the client is dropped), else cut the socket timeout to what
+    is left of it, at most WEB_TIMEOUT. (No deadline outside web_tick.)"""
+    if _web_end[0] is None:
+        c.settimeout(WEB_TIMEOUT)
+        return
+    left = time.ticks_diff(_web_end[0], time.ticks_ms())
+    if left <= 0:
+        raise OSError(110)               # ETIMEDOUT
+    c.settimeout(min(left, WEB_TIMEOUT * 1000) / 1000)
+
+def _web_out(c, b):
+    _web_left(c)
+    c.sendall(b)
+
 def _web_read(c):
     """The request head: recv until the blank line, at most WEB_REQ_MAX
     bytes. One recv(512) left the rest of a long request (cookies) unread,
     and closing a socket with unread data sends an RST that cut the reply
     short."""
     data = b""
-    t0 = time.ticks_ms()
     while len(data) < WEB_REQ_MAX and b"\r\n\r\n" not in data:
+        _web_left(c)
         b = c.recv(512)
         if not b:
             break
         data += b
-        if _age(time.ticks_ms(), t0) >= WEB_TIMEOUT * 1000:
-            break
     return data
 
+def _web_host_ok(req):
+    """DNS rebinding guard: a page of another site that got its name
+    pointed at the board sends that name as Host. Allowed: no Host, the
+    board's IP, HOSTNAME or HOSTNAME.local (any case, with a port)."""
+    i = req.find(b"\r\nHost:")
+    if i < 0:
+        i = req.find(b"\r\nhost:")
+    if i < 0:
+        return True
+    j = req.find(b"\r\n", i + 7)
+    h = req[i + 7:j if j >= 0 else len(req)].strip()
+    k = h.rfind(b":")
+    if k >= 0 and b"]" not in h[k:]:
+        h = h[:k]
+    try:
+        h = h.decode().lower()
+    except UnicodeError:
+        return False
+    if h.endswith("."):
+        h = h[:-1]
+    name = HOSTNAME.lower()
+    return h in (wifi.get("ip") or "", name, name + ".local")
+
 def _web_head(c, code, ctype, extra=""):
-    c.sendall(("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n%s"
-               "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (
-                   code, ctype, extra)).encode())
+    _web_out(c, ("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n%s"
+                 "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (
+                     code, ctype, extra)).encode())
 
 def _web_send(c, code, ctype, parts):
     """A generated reply, piece by piece: never the whole body in RAM.
     Without a Content-Length the closed connection ends it (HTTP/1.0).
-    ~1 KB per send: one send per small piece waited for an ACK each
-    (measured: 7 KB took 5 s and the next requests timed out)."""
+    ~1 KB per send, gathered in one fixed WEB_CHUNK buffer: one send per
+    small piece waited for an ACK each (measured: 7 KB took 5 s and the
+    next requests timed out). A piece longer than WEB_CHUNK goes out in
+    WEB_CHUNK slices of itself, not copied."""
     _web_head(c, code, ctype)
-    buf = bytearray()
+    buf = bytearray(WEB_CHUNK)
+    mv = memoryview(buf)
+    n = 0
     for p in parts:
         b = p.encode()
-        if buf and len(buf) + len(b) > WEB_CHUNK:
-            c.sendall(buf)
-            buf = bytearray()
+        k = len(b)
+        if n and n + k > WEB_CHUNK:
+            _web_out(c, mv[:n])
+            n = 0
             read_uart()                  # a slow client costs no NMEA
-        buf += b
-    if buf:
-        c.sendall(buf)
+        if k > WEB_CHUNK:
+            bv = memoryview(b)
+            for i in range(0, k, WEB_CHUNK):
+                _web_out(c, bv[i:i + WEB_CHUNK])
+                read_uart()
+            continue
+        mv[n:n + k] = b
+        n += k
+    if n:
+        _web_out(c, mv[:n])
 
 def _web_page(c):
     """WEB_PAGE from flash in WEB_CHUNK reads into one buffer. The page
@@ -4041,12 +4154,21 @@ def _web_page(c):
             n = f.readinto(buf)
             if not n:
                 break
-            c.sendall(mv[:n])
+            _web_out(c, mv[:n])
             read_uart()
     finally:
         f.close()
 
 def _web_reply(c, req):
+    """Only a GET is answered: an empty or cut-off request (a closed tab, a
+    port scan) used to fall back to "/" and get the whole page."""
+    if not req.startswith(b"GET "):
+        return
+    if not _web_host_ok(req):
+        _web_send(c, "403 Forbidden", "text/plain",
+                  ("open http://%s/ (or %s.local)" % (
+                      wifi.get("ip") or "<board ip>", HOSTNAME),))
+        return
     parts = req.split(b" ", 2)
     path = parts[1] if len(parts) > 1 else b"/"
     if path.startswith(b"/status.json"):
@@ -4058,7 +4180,8 @@ def _web_reply(c, req):
         _web_send(c, "404 Not Found", "text/plain", ("not found",))
 
 def web_tick():
-    """Listen while connected, close otherwise; answer one waiting client."""
+    """Listen while connected, close otherwise; answer one waiting client
+    within WEB_DEADLINE."""
     if not WEB or wifi["state"] != "connected":
         _web_close()
         return
@@ -4070,14 +4193,15 @@ def web_tick():
         c = _web_sock.accept()[0]
     except OSError:
         return                           # nobody waiting (EAGAIN)
+    _web_end[0] = time.ticks_add(time.ticks_ms(), WEB_DEADLINE * 1000)
     try:
-        c.settimeout(WEB_TIMEOUT)
         req = _web_read(c)
         read_uart()
         _web_reply(c, req)
     except (OSError, MemoryError) as e:
         print("web client", repr(e))
     finally:
+        _web_end[0] = None
         try:
             c.close()
         except OSError:
@@ -4142,12 +4266,11 @@ def draw():
         oled.fill_rect(0, 0, 128, 8, 1)
         oled.text("GPS Logger", 0, 0, 0)
         oled.text("|/-\\"[st["spin"] % 4], 120, 0, 0)
-        room = free()
         for row, line in enumerate((
                 _wifi_line(),
                 "GPS " + status(),
                 _mode_line(),
-                "Flash " + _fmt("%d kB", None if room is None else room // 1024),
+                "Flash " + _fmt("%d kB", _flash_kb()),   # cached 30 s
                 "Points left " + _short(up["left"]))):
             oled.text(line, 0, 10 + row * 11)
         oled.show()

@@ -26,7 +26,17 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pyflakes
-      - run: python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py
+      - run: python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # preinstalled on the ubuntu-24.04 runner image
+      - run: shellcheck --version
+      - run: shellcheck deploy.sh
 
   mpy-cross:
     name: mpy-cross (${{ matrix.march }})
@@ -54,6 +64,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # the page checks run web.html's script in node (a missing node is a
+      # FAIL in CI, see tests/test_gps_logger.py PAGE)
+      - run: node --version
 
       # MicroPython unix port: only built on a cache miss (~1-2 min), then
       # restored in a few seconds. Lets the suite run tests/mpy_unix_check.py.
