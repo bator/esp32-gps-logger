@@ -2831,7 +2831,7 @@ try:
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
                   fix=False, lost_at=_clock[0] - gl.NEW_FILE_GAP * 1000 - 1,
                   last_flush=_clock[0], prev=(52.5, 13.4), new_seg=False,
-                  online=False)
+                  wfail=True, online=False)
     gl.st.update(valid=True, date="2026-10-05", time="19:00:00",
                  lat=52.6, lon=13.5, alt=10.0, pos_at=_clock[0],
                  hdop=1.0, hdop_at=_clock[0], status="A", quality=1, fixtype=3)
@@ -3760,6 +3760,25 @@ try:
           gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
           "%.1f m" % gl._dist(a[0], a[1], 47.5, 19.0))
 
+    # RING: the departure ring is preallocated; a stay's state keeps no
+    # per-sample objects (as tuples of line, time and position the 90
+    # samples took ~20 kB of the board's heap and broke uploads)
+    def deep_size(o, seen=None):
+        seen = set() if seen is None else seen
+        if id(o) in seen:
+            return 0
+        seen.add(id(o))
+        n = sys.getsizeof(o)
+        if isinstance(o, dict):
+            n += sum(deep_size(k, seen) + deep_size(v, seen)
+                     for k, v in o.items())
+        elif isinstance(o, (list, tuple)):
+            n += sum(deep_size(v, seen) for v in o)
+        return n
+    still_size = deep_size(gl.log["still"])
+    check("RING: a 30 min stay's state stays small (no per-sample objects)",
+          sv_active() and still_size < 4000, "%d bytes" % still_size)
+
     # excursions that turn back do not end the stay
     n_before = len(sv_lines())
     for m in (30, 55, 80, 95, 70, 40, 10):           # beyond the drift box
@@ -3783,6 +3802,11 @@ try:
     check("STAY: the departure is written from the anchor, not from 150 m",
           bool(new) and sv_m(new[0]) < 15.0,
           repr(new[0] if new else None))
+    check("RING: the way out rebuilt from the ring is a regular track line",
+          bool(new) and len(new[0].split(",")) == 5
+          and new[0].split(",")[2:4] == ["100.0", "1.0"]
+          and len(new[0].split(",")[4]) == 17 and new[0].endswith("Z\n"),
+          repr(new[:2]))
 
     # walking (1.4 m/s) is never a stay, even with the speed reading low
     sv_reset()
@@ -3942,6 +3966,14 @@ try:
                              + 1)[0] == "2027-01-01T00:00:00Z"
     check("HB: UTC date arithmetic matches the calendar (year end, leap, 2100)",
           ok)
+    # the clock counts from 2020: a small int on MicroPython (< 2**30)
+    gl.st.update(date="2026-10-18", time="08:00:00")
+    s20 = gl._fix_s() if hasattr(gl, "_fix_s") else None
+    check("HB: internal seconds count from 2020 and stay below 2**30",
+          s20 is not None and 0 < s20 < 2 ** 30
+          and gl._stamp_s(s20)[0] == "2026-10-18T08:00:00Z"
+          and gl._fix_secs() == calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0)),
+          "s20=%s" % s20)
 
     # HDOP too dilute for 30 min after entering: anchor points keep coming
     sv_reset()
@@ -4077,6 +4109,53 @@ try:
     sv_drift(60, box=10.0, step=3.0)
     check("GAP: ... and the stay is entered on time",
           sv_active() is True)
+
+    # GAPFAR: an away stay, no fix for 2 min (a metro, a garage), then
+    # sitting still elsewhere: nothing recedes, so the stay never ended and
+    # nothing was written there (no heartbeat either: last sample far out).
+    # Own random source: later tests depend on rnd's sequence.
+    grnd = random.Random(2)
+
+    def g_drift(seconds, east=0.0, box=10.0, step=3.0):
+        e = n = 0.0
+        for _ in range(seconds):
+            e = max(-box, min(box, e + grnd.uniform(-step, step)))
+            n = max(-box, min(box, n + grnd.uniform(-step, step)))
+            sv_fix(east + e, n, 1.0)
+
+    sv_reset()
+    g_drift(150)
+    ok0 = sv_active()
+    for _ in range(120):
+        hb_fix(0, 0, nofix=True, speed=0.0)
+    n0 = len(sv_lines())
+    g_drift(10 * 60, east=3000.0, box=1.0, step=0.5)   # outdoors: still
+    a = gl.log["still"]["anchor"]
+    there = [l for l in sv_lines()[n0:] if sv_m(l) > 2900]
+    check("GAPFAR: back after a gap 3 km away, sitting still: the stay ends",
+          ok0 and (not sv_active() or gl._dist(a[0], a[1], 47.5, 19.0) > 2900)
+          and len(there) >= 1, "active=%s there=%d" % (sv_active(), len(there)))
+    check("GAPFAR: ... the new place starts from the first fix there",
+          bool(there) and there[0] == sv_lines()[n0], repr(there[:1]))
+    # 200 m out (no clear jump): STILL_EXIT_N samples in a row out there
+    sv_reset()
+    g_drift(150)
+    for _ in range(120):
+        hb_fix(0, 0, nofix=True, speed=0.0)
+    states = []
+    for k in range(gl.STILL_EXIT_N):
+        sv_fix(200.0 + k * 0.3, 0, 0.0)
+        states.append(sv_active())
+    check("GAPFAR: 200 m out after a gap: leaves after STILL_EXIT_N samples",
+          states == [True] * (gl.STILL_EXIT_N - 1) + [False], repr(states))
+    # a gap with the fix back at the stay keeps it
+    sv_reset()
+    g_drift(150)
+    for _ in range(120):
+        hb_fix(0, 0, nofix=True, speed=0.0)
+    g_drift(60)
+    check("GAPFAR: a gap with the fix back at the place keeps the stay",
+          sv_active())
 
     # ORDER: an anchor point due while the car drives off
     sv_reset()
@@ -4433,6 +4512,26 @@ try:
           mark is not None and 8 <= mark <= 10 and body.count("-\n") == 1,
           "mark=%s lines=%d" % (mark, len(body)))
 
+    # SEG2: two short losses while the lines are held (a walk) are two
+    # breaks; the second one used to merge into the first, still unwritten
+    sv_reset()
+    x = 0.0
+    for part in (30, 10, 10):
+        if x:
+            for _ in range(40):
+                hb_fix(0, 0, nofix=True, speed=5.0)  # 40 s without a fix
+                x += 1.4
+        for _ in range(part):
+            sv_fix(x, 0, 5.0)
+            x += 1.4
+    held = len(gl.log["batch"])
+    gl.flush()
+    with open(gl.log["file"]) as fh:
+        body = [l for l in fh if not l.startswith("#")]
+    marks = [i for i, l in enumerate(body) if l == "-\n"]
+    check("SEG2: two short losses within held lines give two breaks",
+          held >= 40 and marks == [30, 41], "held=%d marks=%s" % (held, marks))
+
     # FIXGAP: a fix back after a long gap closes the track; what a stay
     # still being proven holds moves on, nothing of it is written
     sv_reset()
@@ -4456,17 +4555,36 @@ try:
                                                          gl.log["file"]))
     check("FIXGAP: the held drift moved on in RAM, not to flash",
           held_before > 0 and len(gl.log["batch"]) >= held_before)
+    # (at a flush tick the new trip went on the moved lines without a break)
+    first_new = gl.log["batch"][-1]
+    gl.flush()
+    with open(gl.log["file"]) as fh:
+        body = [l for l in fh if not l.startswith("#")]
+    check("FIXGAP: the new trip goes after a break, not on the moved lines",
+          body.count("-\n") == 1 and body[-1] == first_new
+          and body[-2] == "-\n", repr(body[-3:]))
+    # a fix back elsewhere right after a flush: the drive held by its open
+    # window kept the batch non-empty, so the new trip went into the old
+    # file after a "-"; a loss over NEW_FILE_GAP is a new file
     sv_reset()
     gl.wifi.update(state="offline")
     for i in range(20):
         sv_fix(i * 6.0, 0, 22.0)
+    trip = gl.log["file"]
     for _ in range(gl.NEW_FILE_GAP + 10):
         hb_fix(0, 0, nofix=True)
     gl.log["last_flush"] = _clock[0]                # a flush just happened
-    gl.log["batch"].append("47.6,19.1,1.0,1.0,20261018T235959Z\n")
     sv_fix(500, 0, 22.0)
-    check("FIXGAP: right after a flush the track stays, with a new segment",
-          gl.log["new_seg"] is True and gl.log["prev"] is not None)
+    trip_pts = []
+    if os.path.exists(trip):
+        with open(trip) as fh:
+            trip_pts = [l for l in fh if l.count(",") == 4]
+    check("FIXGAP: a loss over NEW_FILE_GAP starts a new file, flush or not",
+          trip in gl.pending() and len(trip_pts) == 20
+          and gl.log["file"] not in (None, trip) and not gl.log["new_seg"]
+          and gl.log["prev"] is not None,
+          "file=%s pts=%d new_seg=%s" % (gl.log["file"], len(trip_pts),
+                                         gl.log["new_seg"]))
 
     sv_reset()
     sparse(20, 3, east_of=lambda s: s * 1.4)
@@ -5969,6 +6087,31 @@ check("L-5: away stay, home without a fix -> the stay ends",
       active0 and not sv_active(), "active=%s" % sv_active())
 gl.wifi.update(state="offline", home=False)
 
+# L-5b: the home WiFi coming up just after a stay began (arriving home,
+# WiFi not yet connected) is no "home without a fix": the stay began
+# with a fix (it had none on record, read as none for STILL_GAP)
+sv_reset()
+gl.wifi["sleep_home"] = False            # (left over: not a home stay)
+hrnd = random.Random(5)
+for _ in range(300):
+    sv_fix(hrnd.uniform(-8, 8), hrnd.uniform(-8, 8), 1.0)
+    if sv_active():
+        break
+active0, home0 = sv_active(), gl.log["still"]["home"]
+gl.st["valid"] = False                   # indoors: no usable second since
+gl.wifi.update(state="connected", home=True)
+for _ in range(5):
+    hb_fix(0, 0, nofix=True, speed=0.0)
+kept = sv_active()
+for _ in range(gl.STILL_GAP // 1000):
+    hb_fix(0, 0, nofix=True, speed=0.0)
+check("L-5b: home WiFi just after a stay began keeps the stay",
+      active0 and not home0 and kept,
+      "active0=%s home0=%s kept=%s" % (active0, home0, kept))
+check("L-5b: ... and STILL_GAP without a fix still ends it",
+      not sv_active())
+gl.wifi.update(state="offline", home=False)
+
 # L-6: a drive whose fix is lost: little stays in RAM, and it is written
 sv_reset()
 for i in range(10 * 60):
@@ -5981,6 +6124,14 @@ for _ in range(gl.HOLD_RELEASE // 1000 + 30):
 check("L-6: after a drive at most a window waits in RAM; later written",
       in_ram <= 70 and len(gl.log["batch"]) == 0, "ram=%d then %d"
       % (in_ram, len(gl.log["batch"])))
+# L-6b: an open window that has spread out (a drive) holds nothing: before,
+# a flush kept up to a whole window of the drive in RAM
+sv_reset()
+for i in range(10 * 60 + 40):                # 40 s into a window
+    sv_fix(i * 15.0, 0, 54.0)
+gl.flush(gl._still_hold())
+check("L-6b: a flush during a drive leaves little of it in RAM",
+      len(gl.log["batch"]) <= 15, "ram=%d" % len(gl.log["batch"]))
 
 # L-12: the heartbeat comes after the queued seconds, in time order
 sv_reset()
