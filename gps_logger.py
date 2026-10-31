@@ -3127,27 +3127,69 @@ def write_offset(path, off):
         f.write("%d\n" % off)
     os.rename(tmp, path + ".pos")
 
-def _readline(f):
-    """One track line, at most LINE_MAX bytes. Over-long lines are drained to
-    the next newline and returned as b'' (skip). None means true EOF."""
-    try:
-        line = f.readline(LINE_MAX)
-    except MemoryError:
-        gc.collect()
-        raise
-    if not line:
-        return None
-    if len(line) == LINE_MAX and not line.endswith(b"\n"):
-        while True:
-            try:
-                chunk = f.readline(LINE_MAX)
-            except MemoryError:
-                gc.collect()
-                break
-            if not chunk or chunk.endswith(b"\n"):
-                break
-        return b""
-    return line
+# Track files are read line by line into one buffer (readinto), never a
+# new bytes object per line: f.readline(LINE_MAX) allocated LINE_MAX bytes
+# for each line, and the upload reads at the worst moment for the heap.
+_rbuf = bytearray(LINE_MAX)
+_rmv = memoryview(_rbuf)
+_rd = [0, 0, 0, 0]                       # file offset of _rbuf[0], line start,
+                                         # line end, bytes in _rbuf
+
+def _rd_open(off):
+    _rd[0] = off
+    _rd[1] = _rd[2] = _rd[3] = 0
+
+def _rd_fill(f):
+    """Fill _rbuf from f's position: the bytes read (fewer only at EOF)."""
+    n = 0
+    while n < LINE_MAX:
+        k = f.readinto(_rmv[n:] if n else _rbuf)
+        if not k:
+            break
+        n += k
+    return n
+
+def _rd_line(f):
+    """Next line of f (opened with _rd_open) in _rbuf[_rd[1]:_rd[2]], its
+    newline included (none on a cut-off last line); it starts at file
+    offset _rd[0] + _rd[1]. False at EOF. A line over LINE_MAX bytes is
+    drained to its newline and comes back empty (_rd[1] == _rd[2])."""
+    a, n = _rd[2], _rd[3]
+    i = _rbuf.find(b"\n", a, n)
+    if i < 0:
+        _rd[0] += a                      # refill from this line's start
+        f.seek(_rd[0])
+        n = _rd_fill(f)
+        a = 0
+        i = _rbuf.find(b"\n", 0, n)
+        if i < 0 and n == LINE_MAX:
+            while True:                  # over-long: drain it, skip it
+                _rd[0] += n
+                n = _rd_fill(f)
+                i = _rbuf.find(b"\n", 0, n)
+                if i >= 0 or not n:
+                    break
+            _rd[3] = n
+            _rd[1] = _rd[2] = i + 1 if i >= 0 else 0
+            return True
+        _rd[3] = n
+        if i < 0:
+            _rd[1] = 0
+            _rd[2] = n
+            return n > 0                 # a cut-off last line, or EOF
+    _rd[1] = a
+    _rd[2] = i + 1
+    return True
+
+def _rd_point(a, b, gpx):
+    """_rbuf[a:b] is a point line (see _is_point)."""
+    if gpx:
+        return _rbuf.find(b"<trkpt", a, min(a + 6, b)) == a
+    return (_rbuf[b - 1] == 10 and _rbuf[a] != 35
+            and _rbuf.count(b",", a, b) == 4)
+
+def _rd_footer(a, b):
+    return b - a == len(_FOOT) and _rbuf.find(_FOOT, a, b) == a
 
 def count_points():
     """Points still to upload in all track files, the one being recorded
@@ -3167,16 +3209,17 @@ def count_points():
         try:
             off = read_offset(path)
             with open(path, "rb") as f:
-                if off:
-                    f.seek(off)
-                while True:
-                    line = _readline(f)
-                    if line is None or (not gpx and line == _FOOT):
+                _rd_open(off)
+                while _rd_line(f):
+                    a, b = _rd[1], _rd[2]
+                    if a == b:
+                        continue
+                    if not gpx and _rd_footer(a, b):
                         break
                     nlines += 1
                     if nlines & 63 == 0:
                         feed()
-                    if _is_point(line, gpx):
+                    if _rd_point(a, b, gpx):
                         total += 1
         except (OSError, MemoryError) as e:
             print("count", path, repr(e))
@@ -3278,75 +3321,230 @@ def _point(line, gpx):
 
 _FOOT = FOOTER.encode()
 
+# Overland JSON of one point, written into _body piece by piece
+_J_START = b'{"locations":['
+_J_PT = b'{"type":"Feature","geometry":{"type":"Point","coordinates":['
+_J_TS = b']},"properties":{"timestamp":"'
+_J_ALT = b'"altitude":'
+_J_ACC = b'"horizontal_accuracy":'
+_J_FIX = len(_J_PT) + 1 + len(_J_TS) + 20 + 2   # "," time '",'
+_ISO = (0, 1, 2, 3, -45, 4, 5, -45, 6, 7, 8, 9, 10, -58, 11, 12, -58, 13,
+        14, 15)                          # YYYYMMDDTHHMMSSZ -> ISO (-c: chr c)
+_TDIG = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)
+_pt = [0] * 11                           # the parsed .trk point (_trk_point)
+_dev = [None, b""]                       # DEVICE_ID, its JSON tail
+
+def _tail():
+    if _dev[0] != DEVICE_ID:
+        _dev[0] = DEVICE_ID
+        _dev[1] = ('"device_id":"%s"}}' % DEVICE_ID).encode()
+    return _dev[1]
+
+def _fnum(a, b):
+    try:
+        return float(_rmv[a:b])
+    except ValueError:
+        return None
+
+def _canon(a, b, dec, imax):
+    """_rbuf[a:b] reads exactly as "%.<dec>f" prints it, with at most imax
+    integer digits (so the float round trip is exact)."""
+    if b - a < dec + 2:
+        return False
+    if _rbuf[a] == 45:                   # -
+        a += 1
+    d = b - dec - 1
+    k = d - a
+    if k < 1 or k > imax or _rbuf[d] != 46 or (k > 1 and _rbuf[a] == 48):
+        return False
+    for i in range(a, b):
+        if i != d and not 48 <= _rbuf[i] <= 57:
+            return False
+    return True
+
+def _ptnum(i, a, b, v, fmt, dec, imax):
+    """A number field of _pt: the file's own bytes when they already read
+    as fmt prints them, else fmt % v. -> its length."""
+    _pt[i] = a
+    _pt[i + 1] = b
+    if _canon(a, b, dec, imax):
+        _pt[i + 2] = None
+        return b - a
+    t = fmt % v
+    _pt[i + 2] = t
+    return len(t)
+
+def _utf8(a, b):
+    try:
+        bytes(_rmv[a:b]).decode()
+        return True
+    except UnicodeError:
+        return False
+
+def _trk_point(a, b):
+    """Parse the .trk line _rbuf[a:b] in place into _pt -> -1 (not a point
+    line), 0 (a point, not valid) or the length of its Overland JSON.
+    Same rules as _point and the checks in read_batch."""
+    rb = _rbuf
+    e = b - 1
+    if rb[e] != 10 or rb[a] == 35:
+        return -1
+    c1 = rb.find(b",", a, e)
+    c2 = rb.find(b",", c1 + 1, e) if c1 >= 0 else -1
+    c3 = rb.find(b",", c2 + 1, e) if c2 >= 0 else -1
+    c4 = rb.find(b",", c3 + 1, e) if c3 >= 0 else -1
+    if c4 < 0 or rb.find(b",", c4 + 1, e) >= 0:
+        return -1
+    t = c4 + 1
+    if e - t != 16 or rb[t + 8] != 84 or rb[t + 15] != 90:  # T Z
+        return 0
+    for k in _TDIG:
+        if not 48 <= rb[t + k] <= 57:
+            return 0
+    y = (rb[t] - 48) * 1000 + (rb[t + 1] - 48) * 100 + (rb[t + 2] - 48) * 10
+    if not 2020 <= y + rb[t + 3] - 48 <= 2099:
+        return 0
+    lat, lon = _fnum(a, c1), _fnum(c1 + 1, c2)
+    if (lat is None or lon is None or not _finite(lat) or not _finite(lon)
+            or abs(lat) > 90 or abs(lon) > 180):
+        return 0
+    _pt[6] = t
+    need = (_J_FIX + len(_tail()) + _ptnum(0, c1 + 1, c2, lon, b"%.6f", 6, 3)
+            + _ptnum(3, a, c1, lat, b"%.6f", 6, 3))
+    _pt[7] = _pt[10] = None
+    if c3 > c2 + 1:                      # ele
+        v = _fnum(c2 + 1, c3)
+        if v is None:
+            if not _utf8(c2 + 1, c3):    # as the old line.decode() did
+                return 0
+        elif _finite(v):
+            need += len(_J_ALT) + 1 + _ptnum(7, c2 + 1, c3, v, b"%.1f", 1, 6)
+    if c4 > c3 + 1:                      # hdop
+        v = _fnum(c3 + 1, c4)
+        if v is None:
+            if not _utf8(c3 + 1, c4):
+                return 0
+        elif _finite(v):
+            _pt[10] = b"%.1f" % (v * HDOP_M)
+            need += len(_J_ACC) + 1 + len(_pt[10])
+    return need
+
+def _span(pos, i):
+    t = _pt[i + 2]
+    if t is not None:
+        return _put(pos, t)
+    for k in range(_pt[i], _pt[i + 1]):  # byte by byte: no slice object
+        _body[pos] = _rbuf[k]
+        pos += 1
+    return pos
+
+def _trk_put(pos):
+    """Write the point in _pt (from _trk_point) to _body at pos."""
+    pos = _span(_put(pos, _J_PT), 0)     # lon
+    _body[pos] = 44                      # ,
+    pos = _put(_span(pos + 1, 3), _J_TS)  # lat
+    t = _pt[6]
+    for k in _ISO:
+        _body[pos] = _rbuf[t + k] if k >= 0 else -k
+        pos += 1
+    pos = _put(pos, b'",')
+    if _pt[7] is not None:
+        pos = _span(_put(pos, _J_ALT), 7)
+        _body[pos] = 44
+        pos += 1
+    if _pt[10] is not None:
+        pos = _put(_put(pos, _J_ACC), _pt[10])
+        _body[pos] = 44
+        pos += 1
+    return _put(pos, _tail())
+
+def _gpx_loc(line):
+    """Overland JSON of one legacy .gpx point line, or None if not valid."""
+    try:
+        p = _point(line, True)
+    except UnicodeError:
+        return None
+    lat_f = lon_f = None
+    if p is not None:
+        lat_f, lon_f = _float(p[0]), _float(p[1])
+    if not (p is not None and lat_f is not None and lon_f is not None
+            and _finite(lat_f) and _finite(lon_f)
+            and abs(lat_f) <= 90 and abs(lon_f) <= 180
+            and _valid_time(p[2])):
+        return None
+    ele_f = _float(p[3]) if p[3] else None
+    if ele_f is not None and not _finite(ele_f):
+        ele_f = None
+    hdop_f = _float(p[4]) if p[4] else None
+    extra = ""
+    if ele_f is not None:
+        extra += '"altitude":%.1f,' % ele_f
+    if hdop_f is not None and _finite(hdop_f):
+        extra += '"horizontal_accuracy":%.1f,' % (hdop_f * HDOP_M)
+    return ('{"type":"Feature","geometry":{"type":"Point",'
+            '"coordinates":[%.6f,%.6f]},"properties":{'
+            '"timestamp":"%s",%s"device_id":"%s"}}'
+            % (lon_f, lat_f, p[2], extra, DEVICE_ID)).encode()
+
 def read_batch(path, off=0):
     """Fill _body with up to UPLOAD_BATCH valid points from byte offset off
     as Overland JSON -> (n, n_ok, body_len, new_off, eof).
     Truncated / non-numeric / inf / over-long points are skipped.
-    A valid point that does not fit is left unread (seek back, eof=False)."""
+    A valid point that does not fit is left unread (eof=False). A .trk is
+    parsed in _rbuf and written straight into _body: a few small objects
+    per point (the float checks), not ~25 and a line buffer."""
     gpx = not _is_trk(path)
-    n, n_ok, pos, sep = 0, 0, _put(0, b'{"locations":['), b""
+    n, n_ok, pos, sep = 0, 0, _put(0, _J_START), 0
     nlines, eof = 0, False
     with open(path, "rb") as f:
-        if off:
-            f.seek(off)
+        _rd_open(off)
         while True:
-            line_start = f.tell()
-            line = _readline(f)
-            if line is None or (not gpx and line == _FOOT):
+            if not _rd_line(f):
+                eof = True
+                break
+            a, b = _rd[1], _rd[2]
+            nlines += 1
+            if nlines & 63 == 0:
+                feed()
+            if a == b:
+                continue
+            loc = None
+            if gpx:
+                line = bytes(_rmv[a:b])
+                if not _is_point(line, True):
+                    continue
+                loc = _gpx_loc(line)
+                need = len(loc) if loc else 0
+            elif _rd_footer(a, b):
                 # the footer ends a .trk: bytes after it are left over from
                 # a longer flush that failed (a later, shorter one wrote its
                 # footer before them), lines the logger dropped
                 eof = True
                 break
-            nlines += 1
-            if nlines & 63 == 0:
-                feed()
-            if not line or not _is_point(line, gpx):
-                continue
+            else:
+                need = _trk_point(a, b)
+                if need < 0:
+                    continue
             n += 1
-            try:
-                p = _point(line, gpx)
-            except UnicodeError:
-                p = None
-            lat_f = lon_f = None
-            if p is not None:
-                lat_f, lon_f = _float(p[0]), _float(p[1])
-            ok = (p is not None and lat_f is not None and lon_f is not None
-                  and _finite(lat_f) and _finite(lon_f)
-                  and abs(lat_f) <= 90 and abs(lon_f) <= 180
-                  and _valid_time(p[2]))
-            loc = None
-            if ok:
-                ele_f = _float(p[3]) if p[3] else None
-                if ele_f is not None and not _finite(ele_f):
-                    ele_f = None
-                hdop_f = _float(p[4]) if p[4] else None
-                extra = ""
-                if ele_f is not None:
-                    extra += '"altitude":%.1f,' % ele_f
-                if hdop_f is not None and _finite(hdop_f):
-                    extra += '"horizontal_accuracy":%.1f,' % (hdop_f * HDOP_M)
-                loc = ('{"type":"Feature","geometry":{"type":"Point",'
-                       '"coordinates":[%.6f,%.6f]},"properties":{'
-                       '"timestamp":"%s",%s"device_id":"%s"}}'
-                       % (lon_f, lat_f, p[2], extra, DEVICE_ID)).encode()
-                need = len(sep) + len(loc)
-                if pos + need + 2 > len(_body):
-                    if n_ok == 0:
-                        print("point too large", len(loc))
-                        loc = None
-                    else:
-                        f.seek(line_start)
-                        n -= 1
-                        eof = False
-                        break
-            if loc:
-                pos = _put(_put(pos, sep), loc)
-                sep = b","
+            if need and pos + sep + need + 2 > len(_body):
+                if n_ok == 0:
+                    print("point too large", need)
+                    need = 0
+                else:
+                    _rd[2] = a           # leave it unread
+                    n -= 1
+                    eof = False
+                    break
+            if need:
+                if sep:
+                    _body[pos] = 44      # ,
+                    pos += 1
+                pos = _put(pos, loc) if gpx else _trk_put(pos)
+                sep = 1
                 n_ok += 1
             if n >= UPLOAD_BATCH:
                 break
-        new_off = f.tell()
+        new_off = _rd[0] + _rd[2]
     if not sep:
         return n, 0, 0, new_off, eof
     return n, n_ok, _put(pos, b"]}"), new_off, eof
@@ -3381,14 +3579,11 @@ def _append_bad(path, off, new_off):
     gpx = not _is_trk(path)
     try:
         with open(path, "rb") as src, open(bad, "ab") as dst:
-            if off:
-                src.seek(off)
-            while src.tell() < new_off:
-                line = _readline(src)
-                if line is None:
-                    break
-                if _is_point(line, gpx):
-                    dst.write(line)
+            _rd_open(off)
+            while _rd[0] + _rd[2] < new_off and _rd_line(src):
+                a, b = _rd[1], _rd[2]
+                if a < b and _rd_point(a, b, gpx):
+                    dst.write(_rmv[a:b])
     except (OSError, MemoryError) as e:
         print("quarantine", repr(e))
         gc.collect()

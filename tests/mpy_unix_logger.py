@@ -149,6 +149,28 @@ check("UTC stamp", gl._stamp_at(1793256075)[0] == "2026-10-29T06:41:15Z")
 check("uptime counter", gl.uptime_s() >= 0)
 check("upload wait without holds", gl._upload_wait(time.ticks_ms()) == 0)
 
+# read_batch parses a .trk in place (bytearray.find/count, float() of a
+# memoryview, bytes %): the MicroPython side of the CPython suite
+trk = "/tmp/gps-logger-smoke-%d.trk" % time.ticks_ms()
+with open(trk, "wb") as f:
+    f.write(b"#TRK1\n47.500000,19.000000,100.0,0.9,20261029T101500Z\n-\n"
+            b"47.5,19.1,,,20261029T101501Z\n" + b"x" * 700 + b"\n"
+            b"47.6,19.\xff1,,,20261029T101502Z\n"
+            b"47.7,19.2,,,2026102XT101503Z\n#END\n"
+            b"48.0,20.0,,,20261029T101504Z\n")
+try:
+    n, n_ok, size, new_off, eof = gl.read_batch(trk, 0)
+    locs = json.loads(bytes(gl._body[:size]))["locations"]
+finally:
+    import os
+    os.remove(trk)
+check("read_batch .trk in place", (n, n_ok, eof) == (4, 2, True)
+      and locs[0]["geometry"]["coordinates"] == [19.0, 47.5]
+      and locs[0]["properties"]["timestamp"] == "2026-10-29T10:15:00Z"
+      and locs[0]["properties"]["horizontal_accuracy"] == 4.5
+      and locs[1]["properties"]["timestamp"] == "2026-10-29T10:15:01Z"
+      and "altitude" not in locs[1]["properties"])
+
 if fails:
     raise SystemExit("mpy logger smoke FAILED: %s" % ", ".join(fails))
 print("mpy logger smoke passed")

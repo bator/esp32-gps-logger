@@ -2,6 +2,7 @@
 """CPython harness for gps_logger upload / crash / WiFi logic. Not deployed."""
 from __future__ import print_function
 
+import builtins
 import gc as real_gc
 import importlib
 import json
@@ -1430,13 +1431,14 @@ try:
     check("B2: count_points survives a 200 kB line",
           left == 2, "left=%s" % left)
     memerr = []
-    orig_rl = gl._readline
+    rl_name = "_rd_line" if hasattr(gl, "_rd_line") else "_readline"
+    orig_rl = getattr(gl, rl_name)
 
     def boom_line(f):
         memerr.append(1)
         raise MemoryError("heap")
 
-    gl._readline = boom_line
+    setattr(gl, rl_name, boom_line)
     try:
         gl.up_reset()
         check("B2: count_points/up_reset catch MemoryError (no reset)",
@@ -1444,12 +1446,12 @@ try:
     except MemoryError:
         check("B2: count_points/up_reset catch MemoryError (no reset)", False)
     finally:
-        gl._readline = orig_rl
+        setattr(gl, rl_name, orig_rl)
         gl.up["url"] = "https://dawarich.example.com"
         gl.up["key"] = "secret-key"
         gl.wifi["state"] = "connected"
 
-    gl._readline = boom_line
+    setattr(gl, rl_name, boom_line)
     try:
         pump()
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
@@ -1458,7 +1460,7 @@ try:
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
               False, "MemoryError escaped")
     finally:
-        gl._readline = orig_rl
+        setattr(gl, rl_name, orig_rl)
 
     # --- B3: hotspot (non-home) keeps logging + opportunistic upload ------
     def gps_fix(lat=52.5, speed=6.0):
@@ -1709,6 +1711,106 @@ try:
           and all(loc["geometry"]["coordinates"][1] < 53 for loc in te_locs),
           "n=%s n_ok=%s eof=%s left=%s posted=%d exists=%s" % (
               n, n_ok, eof, te_left, len(te_locs), os.path.exists(te)))
+
+    # RB-INTO: a .trk is read with readinto into the one preallocated line
+    # buffer, not f.readline(LINE_MAX) (a new LINE_MAX bytes per line)
+    rb_p = os.path.join(end_dir, "20261005_140000.trk")
+    make_trk(rb_p, gl.UPLOAD_BATCH + 7)
+    io_calls = {"readline": 0, "readinto": 0, "foreign": 0}
+    rbuf = getattr(gl, "_rbuf", None)
+
+    class _CountFile(object):
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.f.close()
+
+        def readline(self, *a):
+            io_calls["readline"] += 1
+            return self.f.readline(*a)
+
+        def readinto(self, b):
+            io_calls["readinto"] += 1
+            if rbuf is None or (b is not rbuf
+                                and getattr(b, "obj", None) is not rbuf):
+                io_calls["foreign"] += 1
+            return self.f.readinto(b)
+
+        def __getattr__(self, k):
+            return getattr(self.f, k)
+    real_open_rb = builtins.open
+    builtins.open = lambda name, *a, **k: (
+        _CountFile(real_open_rb(name, *a, **k)) if name == rb_p
+        else real_open_rb(name, *a, **k))
+    try:
+        rb_res = gl.read_batch(rb_p, 0)
+        rb_res2 = gl.read_batch(rb_p, rb_res[3])
+    finally:
+        builtins.open = real_open_rb
+    check("RB-INTO: read_batch reads into the preallocated buffer, no readline",
+          io_calls["readline"] == 0 and io_calls["readinto"] > 0
+          and io_calls["foreign"] == 0
+          and rb_res[:2] == (gl.UPLOAD_BATCH, gl.UPLOAD_BATCH)
+          and rb_res2[:2] == (7, 7) and rb_res2[4], "%r %r %r" % (
+              io_calls, rb_res, rb_res2))
+
+    # RB-SAME: the .trk JSON is byte for byte what the old per-point
+    # "%.6f" / "%.1f" formatting gave (canonical bytes are copied as they
+    # are, anything else is formatted as before)
+    rows = [("52.512345", "13.400001", "10.0", "1.2", "20261005T120005Z"),
+            ("-33.800000", "-70.600000", "", "", "20261005T120006Z"),
+            ("47.5", "19", "123", "0.9", "20261005T120007Z"),
+            ("-0.000000", "0.000000", "-0.0", "", "20261005T120008Z"),
+            ("+47.100000", " 19.200000", "1e2", "inf", "20261005T120009Z"),
+            ("47.1234567", "019.123456", "8848.86", "2", "20261005T120010Z"),
+            ("90.000000", "-180.000000", "nan", "0.0", "20261005T120011Z"),
+            ("47.0", "19.0", "abc", "x", "20261005T120012Z")]
+    same_p = os.path.join(end_dir, "20261005_150000.trk")
+    with open(same_p, "wb") as f:
+        f.write((gl.HEADER + "".join(",".join(r) + "\n" for r in rows)
+                 + gl.FOOTER).encode())
+    want = []
+    for la, lo, el, hd, tc in rows:
+        ef = float(el) if el and el not in ("abc",) else None
+        if ef is not None and ef != ef or ef in (float("inf"),):
+            ef = None
+        hf = float(hd) if hd and hd != "x" else None
+        extra = ""
+        if ef is not None:
+            extra += '"altitude":%.1f,' % ef
+        if hf is not None and hf == hf and abs(hf) != float("inf"):
+            extra += '"horizontal_accuracy":%.1f,' % (hf * gl.HDOP_M)
+        iso = "%s-%s-%sT%s:%s:%sZ" % (tc[0:4], tc[4:6], tc[6:8], tc[9:11],
+                                      tc[11:13], tc[13:15])
+        want.append('{"type":"Feature","geometry":{"type":"Point",'
+                    '"coordinates":[%.6f,%.6f]},"properties":{'
+                    '"timestamp":"%s",%s"device_id":"%s"}}'
+                    % (float(lo), float(la), iso, extra, gl.DEVICE_ID))
+    want_b = ('{"locations":[' + ",".join(want) + "]}").encode()
+    n, n_ok, size, new_off, eof = gl.read_batch(same_p, 0)
+    got_b = bytes(gl._body[:size])
+    check("RB-SAME: .trk Overland JSON byte-identical to the old formatting",
+          (n, n_ok, eof) == (len(rows), len(rows), True) and got_b == want_b,
+          "%r\n%r" % (got_b[:300], want_b[:300]))
+
+    # RB-LONG: a point line of exactly LINE_MAX bytes is read, one byte
+    # longer is skipped whole, the points around it are kept
+    lm_p = os.path.join(end_dir, "20261005_160000.trk")
+    pt = trk_line(52.5, 13.4, "2026-10-05T16:00:00Z", hdop="1.0")
+    fit = " " * (gl.LINE_MAX - len(pt)) + pt
+    over = " " * (gl.LINE_MAX + 1 - len(pt)) + pt
+    with open(lm_p, "wb") as f:
+        f.write((gl.HEADER + pt + fit + over + "x" * 3000 + "\n" + pt
+                 + gl.FOOTER).encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(lm_p, 0)
+    check("RB-LONG: LINE_MAX line read, longer lines skipped, rest kept",
+          len(fit) == gl.LINE_MAX and (n, n_ok, eof) == (3, 3, True)
+          and new_off == os.path.getsize(lm_p), "n=%s n_ok=%s eof=%s %s" % (
+              n, n_ok, eof, new_off))
 
     gl.LOG_DIR = saved_dir
 
