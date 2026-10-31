@@ -209,6 +209,93 @@ except OverflowError as e:
 check("departure ring keeps times after 2088", ok)
 gl.log_reset()
 
+
+# UBX-NAV-PVT: one struct.unpack_from on the frame's memoryview (as
+# read_uart hands it over), the weighted integer mean, and track lines
+# written from the integers: on single precision 47.4979123 is a float
+# ~0.4 m off, the line still says 47.497912
+import struct
+
+saved_svs = gl.st["svs"]
+
+
+def pvt_frame(sec, nano, lat_i, lon_i, hacc_mm, mps=0.0):
+    p = struct.pack("<IHBBBBBBIiBBBBiiiiIIiiiiiIIHH4xihH",
+                    0, 2026, 10, 31, 12, 0, sec, 7, 40, nano, 3, 1, 0, 14,
+                    lon_i, lat_i, 140000, 123460, hacc_mm, 2500, 0, 0, 0,
+                    int(mps * 1000), 0, 300, 500000, 120, 0, 0, 0, 0)
+    return gl._ubx(0x01, 0x07, p)
+
+
+gl.reset()
+gl.log_reset()
+for k in range(5):
+    gl._ubx_frame(memoryview(pvt_frame(0, k * 200000000, 474979123 + k,
+                                       -3141593 - k, 1250 + 250 * k, 1.44)))
+gl._ubx_frame(memoryview(pvt_frame(1, 0, 474979123, -3141593, 1500)))
+ws = [1.0 / ((1250 + 250 * k) / 1000.0) ** 2 for k in range(5)]
+want_i = 474979123 + gl._round(sum(w * k for k, w in zip(range(5), ws))
+                               / sum(ws))
+check("NAV-PVT parsed from a memoryview (one unpack_from)",
+      gl.st["valid"] and gl.st["lat_i"] == want_i
+      and gl.st["lon_i"] == -3141593 - (want_i - 474979123)
+      and gl.st["epochs"] == 5 and gl.st["used"] == 14
+      and abs(gl.st["hacc"] - 1.75) < 1e-6)
+s = gl._sample_line(time.ticks_ms(), None, None)
+check("NAV-PVT line from the integers (no float grid)", s is not None
+      and s[1] == "47.497912,-0.314159,123.5,1.8,1.4,20261031T120000Z\n")
+if s is not None:
+    print("pvt line", repr(s[1]))
+check("integer coordinates: halves away from zero, no -0",
+      [gl._i7(v) for v in (-5, -4, 5, 474979125, -1512152967)]
+      == ["-0.000001", "0.000000", "0.000001", "47.497913", "-151.215297"])
+
+
+# the departure ring with NAV-PVT seconds (integers) and NMEA ones mixed,
+# rebuilt into a TRK2 and a TRK1 file: the very lines _sample_line wrote
+def ring_mixed(fmt):
+    gl.reset()
+    gl.log_reset()
+    gl.log["fmt"] = fmt
+    gl.log["batch"] = ["x"]
+    gl.log["still"] = sl = gl._still_state()
+    sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
+    want = []
+    for k in range(gl.STILL_DEP_MAX + 7):
+        now = time.ticks_ms()
+        tm = "10:%02d:%02d" % (k // 60, k % 60)
+        if k % 3:
+            li, lo = 474979123 + 271 * k, -3141593 - 314 * k
+            gl.st.update(valid=True, date="2026-10-31", time=tm, fixtype=3,
+                         lat_i=li, lon_i=lo, lat=li / 10000000,
+                         lon=lo / 10000000, hacc=0.45 + k % 7 * 1.25,
+                         mps=(k % 5 * 0.45) or None, alt=123.45 + k,
+                         hdop=None, std=None)
+        else:
+            gl.st.update(valid=True, date="2026-10-31", time=tm, fixtype=3,
+                         lat_i=None, lon_i=None, hacc=None, mps=None,
+                         lat=47.49791234567 + k * 0.0000271828,
+                         lon=-0.31415 - k * 0.0000314159, alt=-0.04,
+                         hdop=1.25 + k % 3, hdop_at=now, std=None)
+        want.append(gl._sample_line(now, None, None)[1])
+        gl._ring_add(sl, now, (gl.st["lat"], gl.st["lon"]), 10.0 + k)
+    gl.log["batch"] = []
+    gl.log["file"] = "/nonexistent-gps-logger-smoke/x.trk"
+    gl._still_leave()
+    got = gl.log["batch"]
+    want = want[-gl.STILL_DEP_MAX:]
+    bad = [(w, g) for w, g in zip(want, got) if w != g]
+    if bad or len(got) != len(want):
+        print("ring mixed", fmt, len(got), len(want), bad[:2])
+    gl.log_reset()
+    return not bad and len(got) == len(want)
+
+
+check("departure ring rebuilds NAV-PVT (TRK2) and mixed lines exactly",
+      ring_mixed(2) and ring_mixed(1))
+gl.reset()
+gl.st["svs"] = saved_svs
+
 try:
     jd = json.loads("".join(gl._web_json_parts()))
 except Exception as e:

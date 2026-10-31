@@ -23,9 +23,14 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
   second would zigzag there.
 - **The receiver is tuned too** (UBX-CFG-NAV5): portable filter (car and
   foot alike), 3D fixes only, satellites below 10° ignored, static hold below 0.5 m/s.
+- **Binary fixes on a u-blox M8/M10.** There the logger reads UBX-NAV-PVT
+  instead of NMEA: positions in integers of 1e-7 degrees (no
+  single-precision grid of ~0.4 m), the receiver's own accuracy estimate
+  (averaged with it as the weight, and uploaded as the point's accuracy),
+  speed. Older receivers (NEO-6M) keep the NMEA path.
 - **Bad fixes are skipped.** Samples with HDOP above 5, or whose own error
-  estimate (GST) is above 20 m, are not used. This also hides the first,
-  wandering fixes after a cold start.
+  estimate (GST) is above 20 m, are not used (NAV-PVT: an accuracy estimate
+  above 20 m). This also hides the first, wandering fixes after a cold start.
 - **No zigzag while parked.** A position-based stay filter detects standing
   still. The indoor drift is never written. Away from home the stay shows up
   as one anchor point every 5 minutes; at home nothing is written.
@@ -119,6 +124,7 @@ HOSTNAME=Dawarich-GPS-tracker
 # KEEPALIVE_MODE=scan
 # CPU_MHZ=80
 # GPS_MODEL=0
+# GPS_PVT=auto
 # DIAG=60
 # WEB=1
 # WEB_AWAY=0
@@ -141,13 +147,14 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
+| `GPS_PVT` | `auto` (default): on a u-blox M8/M10 (from UBX-MON-VER) fixes come as UBX-NAV-PVT, NMEA off; `0`: NMEA on every receiver. See [GPS](#gps). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
 | `WEB_AWAY` | `1`/`0`: with `WEB` on, the radio stays on for the page on the non-home networks too (e.g. a phone hotspot), instead of sleeping once all is uploaded. Default 0. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `GPS_PVT`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Values may be quoted. On the keys above the comment goes first, then the
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
@@ -262,6 +269,8 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | Line | Meaning |
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
+| `gps setup pvt ok` / `no ack` | The NAV-PVT setup (u-blox M8/M10) acknowledged or not answered |
+| `gps pvt no NAV-PVT - NMEA` / `gps pvt refused - NMEA` | 10 s after an acknowledged NAV-PVT setup no NAV-PVT came, or the receiver NAKed its message frame: NMEA for the rest of the boot (also in the diagnostic log as `gps pvt …, NMEA this boot`) |
 | `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
 | `gps setup unverified: no fix` | 30 minutes after an acknowledged setup still no fix to check it by: no verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
@@ -335,7 +344,9 @@ changed), one status line a minute, a `stay left wifi` line when an away
 stay ends without a fix (see [Stays](#stays)), `gps reset loop …` lines
 (when the receiver keeps restarting, so they can be set against where you
 were), `gps setup not taken: …` (at most one per 10 minutes,
-`GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `upload err …`
+`GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `gps pvt no
+NAV-PVT, NMEA this boot` / `gps pvt refused, NMEA this boot` (NAV-PVT given
+up, see [GPS](#gps)), `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
 used, `clock set <UTC>` once a boot when the board clock is set from the
@@ -363,11 +374,11 @@ page shows the last 15 lines (`WEB_DIAG`), right after the switch to
 | `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; `0` = under a minute, `-` = no log) |
 | `up` | Seconds since boot (summed from tick differences, so it does not wrap after 12.4 days) |
 | `utc` | GPS time, `-` until the receiver has one |
-| `nmea ok/bad` | Valid and broken NMEA sentences so far |
+| `nmea ok/bad` | Valid and broken NMEA sentences so far (they stop growing on the NAV-PVT path, until a receiver restart) |
 | `gpsboots` / `loops` | Receiver restarts and reset-loop warnings so far |
 | `sats seen/used` | Satellites with a signal (from the receiver's satellite list, polled once a minute) and used in the fix |
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
-| `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
+| `hdop`, `points`, `sent` | Last HDOP (`None` on the NAV-PVT path: its accuracy is `hacc` in `/status.json`), points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
 | `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`); at home, if it stays low for 5 minutes with tracks waiting, the board reboots cleanly (at most once per 30 minutes) |
 
@@ -377,16 +388,20 @@ WiFi it serves a page at `http://<board ip>/` (e.g.
 `/status.json`: fix, satellites seen/used ("used" from the satellite list:
 GGA stops at 12) and the satellite list with its age (system and number,
 e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`, `SBAS 123`; signal in
-dBHz, elevation, azimuth, used), HDOP, GPS time, position, NMEA counts, the
-receiver model, receiver restarts; points logged, waiting and uploaded,
+dBHz, elevation, azimuth, used), HDOP, the horizontal accuracy `hacc` (m,
+NAV-PVT only), the fix source `fix_src` (`pvt` / `nmea`), GPS time,
+position, NMEA counts, UBX frames `ubx` (good / broken: a bad checksum, or
+a NAV-PVT of a wrong length), the receiver model, receiver restarts; points logged, waiting and uploaded,
 quarantined `.bad` files, upload state, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON), boot cause, chip temperature, free Python heap
 and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
 page is a dark telemetry view. On top, a darkened OpenStreetMap map is
-centred on the position, with a glowing dot, an accuracy ring (HDOP x
-2.5 m) and the coordinates (N/S, E/W); without a fix it says `NO FIX`. Over
-its lower edge a strip shows fix, satellites used/seen, HDOP, points waiting
+centred on the position, with a glowing dot, an accuracy ring (NAV-PVT's
+accuracy as it is, else HDOP x 2.5 m) and the coordinates (N/S, E/W) with
+± that accuracy; without a fix it says `NO FIX`. Over its lower edge a strip
+shows fix, satellites used/seen, `ACC ±N m` (NAV-PVT; amber over 20 m) or
+HDOP, points waiting
 for upload, WiFi signal and the share of bad NMEA sentences. The WiFi cell
 is an arc icon (0–3 arcs lit) and the link quality in per cent, 2 x (RSSI +
 100) capped at 0–100 (-63 dBm = 74 %), with the dBm beside it on a wide
@@ -397,7 +412,8 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
 - one signal bar per satellite (lines at 15/30/45 dBHz);
 - *Systems*: the largest IDF heap block, with a mark at the 48 KB TLS
   needs, then the Python heap, free flash, upload state and counters,
-  points logged and stay, receiver restarts and setup, WiFi (`ssid · 74%
+  points logged and stay, receiver restarts and setup, the fix source
+  (`NAV-PVT` / `NMEA`) with the UBX frame counts, WiFi (`ssid · 74%
   (-63 dBm)`) and keep-alive pulses, boot cause with the previous run, chip
   temperature and GPS time;
 - the *Event log*: the diagnostic log, newest on top, with the minute
@@ -455,6 +471,29 @@ console line.
   B/s, and it dropped sentences and the satellite list; now ~850 B/s. More
   than 8 `GSA` in a second (`GSA_MAX`) means the receiver did not take the
   rate, and it is set up again. The setup is not saved in the receiver.
+- **NAV-PVT on a u-blox M8/M10** (`.env` `GPS_PVT=auto`, the default).
+  Once UBX-MON-VER names the receiver (hardware `000A0000` M10 or
+  `00080000` M8, else by `PROTVER`: 23 and later like the M10, 15–22 like
+  the M8, older ones such as the NEO-6M keep NMEA), the setup asks for
+  UBX-NAV-PVT every epoch and turns every NMEA sentence off: 100 bytes a
+  fix, 500 B/s at 5 Hz instead of ~850. An M10 gets one UBX-CFG-VALSET to
+  RAM with the `CFG-MSGOUT-*_UART1` keys (`UBX_NAV_PVT` 1; `NMEA_ID_GGA`,
+  `RMC`, `GSA`, `GST`, `GSV`, `GLL`, `VTG` 0; key ids from the u-blox M10 SPG
+  5.10 interface description, UBX-21035062), an M8 the legacy UBX-CFG-MSG
+  per message; rate and NAV5 frames are the same as on the NMEA path. The
+  boot setup is the NMEA one (the model is not known yet); MON-VER answers
+  within the first second and the NAV-PVT setup follows within 5 s. The
+  check after the setup counts NAV-PVT epochs (they come without a fix
+  too) and needs no `GST`; an NMEA sentence turned off that still comes
+  counts as not taken. No NAV-PVT at all 10 s after an acknowledged setup
+  (`GPS_VERIFY`), or a NAK of the message frame: NAV-PVT is given up for the
+  boot (`gps pvt …, NMEA this boot` in the diagnostic log) and the NMEA setup
+  follows. A restarted receiver is back at its NMEA defaults: its banner
+  counts as before, its NMEA seconds keep the track going, and the next
+  setup turns NAV-PVT on again (the model is kept over the restart and
+  asked anew). The satellite list (UBX-NAV-SAT) and MON-VER polls work the
+  same. Each frame is read with one `struct.unpack_from` on the receive
+  buffer.
 - **Setup retries.** It is sent again while the receiver still sends the
   sentences it turns off, and also while the setup is not acknowledged (an
   ACK lost, a silent receiver that took the blind burst), less and less
@@ -521,6 +560,24 @@ console line.
 - **Midnight.** Only `RMC` carries the date. A second that runs back past
   midnight without its own `RMC` has no date, so it is not a fix rather than
   a day off.
+- **NAV-PVT averaging.** A NAV-PVT epoch is a fix when `gnssFixOK` is set,
+  `invalidLlh` is not and the fix type is 2D or 3D (as a `GGA` fix is today;
+  NAV5 asks for 3D only, a 2D fix omits the altitude). Its position stays
+  an integer in 1e-7 degrees: the fixes of a second are averaged as integer
+  offsets from its first fix, weighted by 1/hAcc² (the receiver's
+  horizontal accuracy estimate; 0 counts as 1 mm), and fixes above
+  `PVT_MAX_HACC` count only in a second without a better one. Above
+  `AVG_MAX_SPEED` the point is the second's first fix, as on the NMEA path.
+  The second keeps its mean hAcc (or the first fix's), altitude (`hMSL`)
+  and ground speed. Every epoch carries its date (when `validDate`), so
+  midnight needs nothing special. The track line is printed from the
+  integers (rounded half away from zero to 6 decimals), so the
+  single-precision float of the board (~3.8e-6 degrees, ~0.4 m at 47°)
+  no longer quantizes the points.
+- **Clock.** The board clock (for TLS certificate dates) is set from
+  NAV-PVT time only when it is valid and fully resolved and its accuracy is
+  under 1 s (`PVT_MAX_TACC`); then it needs no position fix (indoors at
+  home), unlike the NMEA path.
 
 ### Points and track files
 
@@ -530,7 +587,9 @@ console line.
 - **Filter.** Skipped: fresh HDOP above 5, or a GST estimate above 20 m (the
   larger of latitude and longitude, 1σ). A cold start can show a good HDOP
   while the position walks in from far away (measured: 230 m, over 65 s); GST
-  catches it. 2D fixes omit altitude. A fix dated before 2020 or from 2088
+  catches it. A NAV-PVT second instead: its accuracy estimate above 20 m
+  (`PVT_MAX_HACC`); HDOP and GST apply only to NMEA seconds. 2D fixes omit
+  altitude. A fix dated before 2020 or from 2088
   on is not used at all: a receiver past a GPS week rollover reports 1999
   (read as 2099) or 2000.
 - **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
@@ -539,6 +598,18 @@ console line.
   stops at the footer: bytes after it are left over from a longer write
   that failed (points the logger had dropped), and the file counts as
   complete. Older `.gpx` files are still uploaded.
+- **TRK2.** A file opened while the fixes come from NAV-PVT has a `#TRK2`
+  header and `lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ` lines (~51 bytes): acc
+  the horizontal accuracy in m, speed in m/s (one decimal each, empty when
+  unknown). The time stays the last field of every line, as the writer and
+  the readers rely on that. A file keeps its format for life: NMEA seconds
+  in a TRK2 file (a receiver restart) are written with acc = HDOP x 5 and no
+  speed, NAV-PVT seconds in a TRK1 file (opened before the receiver was
+  known) with hdop = acc / 5. Readers (upload, point count, `.bad` copies,
+  `trk2gpx.py`) tell the two by the line itself (4 or 5 commas). The
+  departure ring keeps the fields of both formats and the integer position,
+  so a rebuilt way out is byte for byte the line that would have been
+  written.
 - **Power-loss safe.** Points are written in batches every 60 s. Each write
   replaces the footer with the new points plus the footer; LittleFS commits
   on close, so a power cut leaves the old or the new version. A line cut off
@@ -762,6 +833,15 @@ home.
 
 - Finished files go oldest first, 50 points per POST, to
   `<GEO_URL>/api/v1/overland/batches`. The file being recorded is never sent.
+- **Fields.** Each point is a GeoJSON feature with `timestamp`, `altitude`,
+  `horizontal_accuracy` and `device_id` properties; a TRK2 point also has
+  `speed` (m/s). `horizontal_accuracy` is HDOP x 5 m (`HDOP_M`) for a TRK1
+  line and the receiver's own estimate for a TRK2 line. Dawarich's Overland
+  importer (`app/services/overland/params.rb`) stores `horizontal_accuracy`
+  as `accuracy`, `speed` as `velocity`, `altitude` and `vertical_accuracy`;
+  a `course` would land only in the raw data, so it is not stored or sent
+  (neither is the vertical accuracy, to keep the lines short). A TRK1
+  body is the same as before.
 - Progress is a `<file>.pos` byte offset, written atomically. It advances
   only after HTTP 2xx or a durable copy to `<file>.bad`, so an interrupted
   POST is resent (Dawarich deduplicates).
@@ -886,8 +966,12 @@ with a NEO-6M; most never need changing.
 | `GPS_VERIFY_MAX` / `GPS_NOT_TAKEN_SAY` | 30 min / 10 min | Longest the check waits for 3 valid seconds; least time between `gps setup not taken` lines in the diagnostic log |
 | `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
-| `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP |
-| `GPS_MAX_STD` | 20 m | Skip samples with a worse GST error estimate |
+| `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP (NMEA) |
+| `GPS_MAX_STD` | 20 m | Skip samples with a worse GST error estimate (NMEA) |
+| `GPS_PVT` | `True` (auto) | UBX-NAV-PVT instead of NMEA on a u-blox M8/M10 (`.env` `GPS_PVT`: `auto` / `0`) |
+| `PVT_MAX_HACC` | 20 m | Skip NAV-PVT seconds with a worse horizontal accuracy estimate; fixes above it count in a second's mean only when it has no better one |
+| `PVT_MAX_TACC` | 1 s | NAV-PVT time at least this accurate (and valid, fully resolved) sets the board clock |
+| `HDOP_M` | 5 m | Metres per HDOP unit: TRK1 `horizontal_accuracy`, and the conversion between a TRK1 hdop and a TRK2 acc |
 | `MIN_MOVE` | 1 m | Distance from the last point before a new one (`.env` `MIN_MOVE`). Standing still the receiver's static hold (below 0.5 m/s) and the 5-fix average keep the position from creeping past it |
 | `SAMPLE` | 1 s | Sampling interval when no averaged second is available (tests) |
 
