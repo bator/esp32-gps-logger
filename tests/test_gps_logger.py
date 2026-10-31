@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import builtins
 import gc as real_gc
+import hashlib
 import importlib
 import json
 import os
@@ -174,11 +175,22 @@ class SSD1306_I2C(object):
 
 class RTC(object):
     mem = b""
+    dt = (2000, 1, 1, 5, 0, 0, 0, 0)     # the clock at boot (no RTC battery)
+    sets = []
 
     def memory(self, data=None):
         if data is None:
             return RTC.mem
         RTC.mem = data if isinstance(data, bytes) else bytes(data)
+        return None
+
+    def datetime(self, t=None):
+        # v1.29: (year, month, day, weekday, hours, minutes, seconds,
+        # subseconds); weekday 0 = Monday
+        if t is None:
+            return RTC.dt
+        RTC.dt = tuple(t)
+        RTC.sets.append(tuple(t))
         return None
 
 
@@ -356,6 +368,23 @@ def _sleep_ms(ms):
     _clock[0] += int(ms)
 
 
+class _TlsCtx(object):
+    """MicroPython's tls.SSLContext: up_reset() makes one at boot and
+    upload_tick checks it before a POST (CPython's ssl refuses CERT_NONE
+    while check_hostname is on)."""
+    made = []
+
+    def __init__(self, proto):
+        self.verify_mode, self.ca = None, None
+        _TlsCtx.made.append(self)
+
+    def load_verify_locations(self, cadata=None):
+        self.ca = cadata
+
+    def wrap_socket(self, s, server_hostname=None):
+        return s
+
+
 def _install_mocks():
     machine = types.ModuleType("machine")
     machine.Pin = Pin
@@ -402,6 +431,11 @@ def _install_mocks():
     req = types.ModuleType("requests")
     req.post = _post
     sys.modules["requests"] = req
+
+    tls = types.ModuleType("tls")
+    tls.PROTOCOL_TLS_CLIENT, tls.CERT_NONE, tls.CERT_REQUIRED = 2, 0, 2
+    tls.SSLContext = _TlsCtx
+    sys.modules["tls"] = tls
 
     fake_gc = types.ModuleType("gc")
     fake_gc.threshold = lambda *a, **k: None
@@ -5024,6 +5058,33 @@ try:
             lst.waiting.append(c)
             gl.web_tick()
         gl.web_tick()                        # nobody waiting: no error
+        # WEB-GZIP: web.html.gz (deploy.sh) to a client accepting gzip
+        import gzip
+        gz_td = tempfile.mkdtemp(prefix="webgz-")
+        gz_file = gzip.compress(page_file)
+        with open(os.path.join(gz_td, "web.html.gz"), "wb") as f:
+            f.write(gz_file)
+        saved_gz = getattr(gl, "WEB_PAGE_GZ", None)
+        gl.WEB_PAGE_GZ = os.path.join(gz_td, "web.html.gz")
+        gz_reqs = [
+            FakeConn(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n"
+                     b"Accept-Encoding: gzip, deflate, br\r\n\r\n"),
+            FakeConn(b"GET /?x HTTP/1.1\r\naccept-encoding: GZIP\r\n\r\n"),
+            FakeConn(b"GET / HTTP/1.1\r\nAccept-Encoding: identity\r\n"
+                     b"X-Note: gzip\r\n\r\n"),
+            FakeConn(b"GET / HTTP/1.1\r\n\r\n")]
+        for c in gz_reqs:
+            lst.waiting.append(c)
+            gl.web_tick()
+        gl.WEB_PAGE_GZ = os.path.join(gz_td, "missing.gz")
+        gz_none = FakeConn(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n")
+        lst.waiting.append(gz_none)
+        gl.web_tick()
+        if saved_gz is None:
+            del gl.WEB_PAGE_GZ
+        else:
+            gl.WEB_PAGE_GZ = saved_gz
+        shutil.rmtree(gz_td, ignore_errors=True)
         head, _, html = reqs[0].sent.partition(b"\r\n\r\n")
         jhead, _, jbody = reqs[1].sent.partition(b"\r\n\r\n")
         try:
@@ -5062,6 +5123,20 @@ try:
           and (b"Content-Length: %d" % len(page_file)) in head
           and html == page_file and reqs[0].closed
           and reqs[0].timeout == gl.WEB_TIMEOUT, repr(reqs[0].sent[:300]))
+    gz_got = [c.sent.partition(b"\r\n\r\n") for c in gz_reqs + [gz_none]]
+    check("WEB-GZIP: Accept-Encoding gzip (any case) gets web.html.gz, "
+          "Content-Encoding and its length",
+          all(h.startswith(b"HTTP/1.0 200 OK") and b"text/html" in h
+              and b"\r\nContent-Encoding: gzip\r\n" in h
+              and (b"Content-Length: %d\r\n" % len(gz_file)) in h
+              and b == gz_file for h, _, b in gz_got[:2]),
+          repr([g[0][:200] for g in gz_got[:2]]))
+    check("WEB-GZIP: no gzip in Accept-Encoding, or no .gz on the board -> "
+          "the plain page",
+          all(b"Content-Encoding" not in h and b == page_file
+              and (b"Content-Length: %d\r\n" % len(page_file)) in h
+              for h, _, b in gz_got[2:]),
+          repr([g[0][:200] for g in gz_got[2:]]))
     check("WEB: no web.html on the board -> 404 naming deploy.sh and the JSON",
           nopage.sent.startswith(b"HTTP/1.0 404") and b"deploy.sh" in
           nopage.sent and b"/status.json" in nopage.sent,
@@ -5914,14 +5989,22 @@ check("SMOKE: tests/mpy_unix_logger.py passes under CPython",
       "mpy logger smoke passed" in smoke, smoke[-300:])
 
 # WEB-LOOPBACK: the status page over real loopback sockets (slow, stalled,
-# empty, oversized, reset and deadline clients) on the unix port and CPython
+# empty, oversized, reset and deadline clients, gzip) on the unix port and
+# CPython
+import gzip
+lb_td = tempfile.mkdtemp(prefix="loopgz-")
+lb_gz = os.path.join(lb_td, "web.html.gz")
+with open(os.path.join(ROOT, "web.html"), "rb") as f:
+    lb_page = f.read()
+with open(lb_gz, "wb") as f:
+    f.write(gzip.compress(lb_page, 9))
 for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
     if not interp:
         print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
         continue
     try:
         out = subprocess.check_output(
-            [interp, os.path.join(ROOT, "tests", "web_loopback.py")],
+            [interp, os.path.join(ROOT, "tests", "web_loopback.py"), lb_gz],
             stderr=subprocess.STDOUT, timeout=60)
         loop_out = out.decode()
     except subprocess.CalledProcessError as e:
@@ -5930,6 +6013,10 @@ for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
         loop_out = repr(e)
     check("WEB-LOOPBACK: tests/web_loopback.py passes on " + tag,
           "web loopback passed" in loop_out, loop_out[-600:])
+    check("WEB-LOOPBACK-GZIP: a client accepting gzip gets web.html.gz on "
+          + tag, "ok   GET / with Accept-Encoding gzip" in loop_out,
+          loop_out[-600:])
+shutil.rmtree(lb_td, ignore_errors=True)
 
 # DEPLOY: deploy.sh against a fake board (mpremote runs the board-side code
 # under CPython in a directory): files go to <name>.new, are checked by size
@@ -5974,6 +6061,9 @@ with open(log, "a") as f:
 shim = open(os.environ["FAKE_SHIM"]).read()
 for c in cmds:
     if c[0] == "exec":
+        if os.environ.get("FAKE_GARBLE") and "gps_frozen" in c[1]:
+            print("could not enter raw repl")    # no frozen/plain answer
+            sys.exit(1)
         r = subprocess.run([sys.executable, "-c", shim + c[1]], cwd=dev)
         if r.returncode:
             sys.exit(1)
@@ -6010,9 +6100,14 @@ def deploy_run(env_extra):
                  ("web.html.new", b"left from a failed deploy")):
         with open(os.path.join(dev, n), "wb") as f:
             f.write(b)
-    if env_extra.get("FAKE_FROZEN"):             # firmware with the logger in
+    fz = env_extra.get("FAKE_FROZEN")           # firmware with the logger in:
+    if fz:                                      # built from this gps_logger.py
+        with open(os.path.join(work, "gps_logger.py"), "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
         with open(os.path.join(dev, "gps_frozen.py"), "w") as f:
-            f.write('COMMIT = "abc1234"\n')
+            f.write('COMMIT = "abc1234"\n')     # "old": no SHA (first builds)
+            if fz != "old":
+                f.write('SHA = "%s"\n' % (sha if fz != "stale" else "0" * 64))
     env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
@@ -6035,6 +6130,14 @@ def dev_file(dev, n):
         return None
 
 
+def gunzip(b):
+    import gzip
+    try:
+        return gzip.decompress(b)
+    except Exception:
+        return None
+
+
 if shutil.which("bash") and shutil.which("sha256sum"):
     with open(os.path.join(ROOT, "gps_logger.py"), "rb") as f:
         new_mpy = b"MPY" + f.read()
@@ -6048,10 +6151,14 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and dev_file(dev, "gps_logger.py") is None
           and not [n for n in os.listdir(dev) if n.endswith(".new")]
           and dev_file(dev, ".rtc") == b"0"
-          and len(cps) == 3 and all(c[2].endswith(".new") for c in cps)
+          and len(cps) == 4 and all(c[2].endswith(".new") for c in cps)
           and "Board: Generic ESP32C6" in out and "(rv32imc)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
+    check("DEPLOY-GZIP: web.html.gz (gzip -9 -n of web.html) goes up too",
+          gunzip(dev_file(dev, "web.html.gz") or b"") == new_page
+          and (dev_file(dev, "web.html.gz") or b"")[4:8] == b"\0\0\0\0"
+          and ["cp", "web.html.gz", ":web.html.gz.new"] in cps, repr(cps))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
     check("DEPLOY: too little free flash -> stops before copying, old kept",
           rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
@@ -6064,17 +6171,181 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [n for n in os.listdir(dev) if n.endswith(".new")]
           and "Copy check FAILED" in err
           and "Deployed" not in out, "rc=%d %r" % (rc, err[-300:]))
-    rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": "1"})
+    rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": "match"})
     cps = [c for call in calls for c in call if c[0] == "cp"]
-    check("DEPLOY: frozen firmware -> main.py and web.html only, the .mpy goes",
+    check("DEPLOY: frozen firmware -> main.py and the page only, the .mpy goes",
           rc == 0 and dev_file(dev, "gps_logger.mpy") is None
+          and dev_file(dev, "gps_logger.py") is None
           and dev_file(dev, "web.html") == new_page
-          and sorted(c[1] for c in cps) == ["main.py", "web.html"]
+          and gunzip(dev_file(dev, "web.html.gz") or b"") == new_page
+          and sorted(c[1] for c in cps) == ["main.py", "web.html",
+                                            "web.html.gz"]
           and "frozen in (abc1234)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
+    # DEPLOY-STALE: the frozen logger is not this gps_logger.py (or a first
+    # build without SHA): stop before copying, unless FORCE=1
+    stale = []
+    for fz in ("stale", "old"):
+        rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": fz})
+        stale.append(rc != 0 and "tools/build_firmware.sh --flash" in err
+                     and not [c for call in calls for c in call
+                              if c[0] == "cp"]
+                     and dev_file(dev, "main.py") == b"old main"
+                     and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE")
+    rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": "stale",
+                                           "FORCE": "1"})
+    stale.append(rc == 0 and dev_file(dev, "main.py") != b"old main"
+                 and dev_file(dev, "gps_logger.mpy") is None
+                 and "FORCE=1" in err and "Deployed" in out)
+    check("DEPLOY-STALE: frozen logger != gps_logger.py (or no SHA) stops; "
+          "FORCE=1 deploys", stale == [True, True, True],
+          "%r rc=%d %r %r" % (stale, rc, out[-200:], err[-300:]))
+    # DEPLOY-UNSURE: no clear frozen/plain answer -> stop, nothing installed
+    rc, out, err, dev, calls = deploy_run({"FAKE_GARBLE": "1"})
+    check("DEPLOY-UNSURE: no frozen/plain answer -> exit 1, no .mpy built or "
+          "copied", rc != 0 and "Could not tell" in err
+          and not [c for call in calls for c in call if c[0] == "cp"]
+          and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
+          and not os.path.exists(os.path.join(os.path.dirname(dev),
+                                              "gps_logger.mpy")),
+          "rc=%d %r %r" % (rc, out[-200:], err[-200:]))
+    # DEPLOY-FORCE-MPY: the emergency path installs the .mpy over the frozen
+    rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": "stale",
+                                           "FORCE_MPY": "1"})
+    check("DEPLOY-FORCE-MPY: FORCE_MPY=1 installs gps_logger.mpy on frozen "
+          "firmware, loudly", rc == 0 and dev_file(dev, "gps_logger.mpy")
+          == new_mpy and dev_file(dev, "gps_logger.py") is None
+          and "WARNING: FORCE_MPY=1" in out and "Deployed" in out,
+          "rc=%d %r %r" % (rc, out[-300:], err[-200:]))
 else:
     print("SKIP  DEPLOY: no bash/sha256sum")
+
+# BUILD: tools/build_firmware.sh with a fake ESP-IDF, MicroPython tree,
+# esptool and mpremote: the marker module records the SHA-256 of the frozen
+# gps_logger.py and a -dirty commit; --flash touches nothing on the board
+# before (or instead of) a successful write (it removed gps_logger.mpy
+# first: a failed check left a stock board without a logger)
+FAKE_ESPTOOL = r"""#!/usr/bin/env python3
+import os, sys, json
+a = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(json.dumps(["esptool"] + a) + "\n")
+if "read_flash" in a:
+    i = a.index("read_flash")
+    with open(a[i + 3], "wb") as f:
+        f.write(os.environ.get("FAKE_PT", "PT").encode()
+                if a[i + 1] == "0x8000" else b"APP")
+if "write_flash" in a and os.environ.get("FAKE_WRITE_FAIL"):
+    sys.exit(2)
+"""
+FAKE_BUILD_MPREMOTE = r"""#!/usr/bin/env python3
+import os, sys, json
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(json.dumps(["mpremote"] + sys.argv[1:]) + "\n")
+print("board ready")
+"""
+FAKE_PORT_MK = ("all:\n\tmkdir -p build-$(BOARD)/partition_table\n"
+                "\tprintf BIN > build-$(BOARD)/micropython.bin\n"
+                "\tprintf PT > build-$(BOARD)/partition_table/"
+                "partition-table.bin\n")
+
+
+def build_run(args, env_extra, dirty=False):
+    """tools/build_firmware.sh in a fresh git repo with fakes:
+    (rc, stdout, stderr, work dir, calls)."""
+    work = tempfile.mkdtemp(dir=dp_td)
+    os.makedirs(os.path.join(work, "tools"))
+    shutil.copy(os.path.join(ROOT, "tools", "build_firmware.sh"),
+                os.path.join(work, "tools"))
+    shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
+    fake = os.path.join(work, "fake")
+    for d in ("bin", "idf", "mpy/mpy-cross", "mpy/ports/esp32"):
+        os.makedirs(os.path.join(fake, d))
+    os.makedirs(os.path.join(work, ".venv", "bin"))
+    for path, src in (("fake/bin/esptool.py", FAKE_ESPTOOL),
+                      (".venv/bin/mpremote", FAKE_BUILD_MPREMOTE),
+                      ("fake/idf/export.sh", ""),
+                      ("fake/mpy/mpy-cross/Makefile", "all:\n\t@true\n"),
+                      ("fake/mpy/ports/esp32/Makefile", FAKE_PORT_MK)):
+        with open(os.path.join(work, path), "w") as f:
+            f.write(src)
+        os.chmod(os.path.join(work, path), 0o755)
+    git = ["git", "-C", work, "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(git + ["init", "-q"], check=True)
+    subprocess.run(git + ["add", "gps_logger.py"], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "x"], check=True)
+    if dirty:
+        with open(os.path.join(work, "gps_logger.py"), "a") as f:
+            f.write("# changed\n")
+    env = dict(os.environ, IDF_DIR=os.path.join(fake, "idf"),
+               MPY_DIR=os.path.join(fake, "mpy"), PORT="/dev/fakeACM0",
+               FAKE_LOG=os.path.join(work, "log"),
+               PATH=os.path.join(fake, "bin") + os.pathsep
+               + os.environ.get("PATH", ""))
+    env.update(env_extra)
+    r = subprocess.run(["bash", os.path.join(work, "tools",
+                                             "build_firmware.sh")] + args,
+                       env=env, capture_output=True, text=True, timeout=120)
+    try:
+        with open(env["FAKE_LOG"]) as f:
+            calls = [json.loads(line) for line in f]
+    except OSError:
+        calls = []
+    return r.returncode, r.stdout, r.stderr, work, calls
+
+
+def frozen_marker(work):
+    m = {}
+    try:
+        with open(os.path.join(work, "firmware", "gps_frozen.py")) as f:
+            exec(f.read(), m)
+    except (OSError, SyntaxError):
+        pass
+    return m
+
+
+if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
+    marks = []
+    for dirty in (False, True):
+        rc, out, err, work, calls = build_run([], {}, dirty=dirty)
+        with open(os.path.join(work, "gps_logger.py"), "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        head = subprocess.run(["git", "-C", work, "rev-parse", "--short",
+                               "HEAD"], capture_output=True,
+                              text=True).stdout.strip()
+        m = frozen_marker(work)
+        marks.append(rc == 0 and m.get("SHA") == sha and m.get("COMMIT")
+                     == head + ("-dirty" if dirty else "")
+                     and not calls)
+    check("BUILD-MARKER: gps_frozen has the SHA-256 of the frozen "
+          "gps_logger.py, COMMIT -dirty with changes", marks == [True, True],
+          "%r rc=%d %r %r" % (marks, rc, out[-200:], err[-300:]))
+    rc, out, err, work, calls = build_run(["--flash"], {"FAKE_PT": "OTHER"})
+    check("BUILD-FLASH: a partition table mismatch stops before anything "
+          "on the board is touched",
+          rc != 0 and "partition table differs" in err
+          and not [c for c in calls if c[0] == "mpremote"]
+          and not [c for c in calls if "write_flash" in c],
+          "rc=%d %r %r" % (rc, calls, err[-200:]))
+    rc, out, err, work, calls = build_run(["--flash"],
+                                          {"FAKE_WRITE_FAIL": "1"})
+    check("BUILD-FLASH: a failed write leaves the board's files alone",
+          rc != 0 and not [c for c in calls if c[0] == "mpremote"]
+          and [c for c in calls if "write_flash" in c],
+          "rc=%d %r" % (rc, calls))
+    rc, out, err, work, calls = build_run(["--flash"], {})
+    steps = [c[c.index("read_flash") + 1] if "read_flash" in c else
+             "write" if "write_flash" in c else c[0] for c in calls]
+    check("BUILD-FLASH: check, backup, write; no REPL step; deploy.sh named "
+          "for the cleanup and after a rollback",
+          rc == 0 and steps == ["0x8000", "0x10000", "write"]
+          and "./deploy.sh" in out
+          and "write_flash 0x10000" in out
+          and out.rstrip().endswith(", then ./deploy.sh"),
+          "rc=%d %r %r %r" % (rc, steps, out[-300:], err[-200:]))
+else:
+    print("SKIP  BUILD: no bash/sha256sum/git/make")
 shutil.rmtree(dp_td, ignore_errors=True)
 
 
@@ -7394,6 +7665,7 @@ fake_sel.poll = lambda: RvPoll(rv_sock[0])
 real_mods = (gl.socket, gl.select, sys.modules.get("tls"))
 gl.socket, gl.select = fake_sockmod, fake_sel
 sys.modules["tls"] = RvTls
+tls_ctx_reset()                          # up_reset() made one with the mock
 uart_reads = [0]
 real_ru = gl.read_uart
 gl.read_uart = lambda: uart_reads.__setitem__(0, uart_reads[0] + 1)
@@ -7528,6 +7800,195 @@ check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
       r_long.status_code == 429 and r_long.headers.get("Retry-After") == "9"
       and limits and all(0 < n_ <= 256 for n_ in limits),
       "%r %r" % (r_long.headers, limits[:4]))
+
+
+def ctx_now():
+    """(verify_mode, ca) of the SSLContext kept, or None."""
+    c = getattr(gl, "_tls_ctx", [None])[0]
+    return None if c is None else (c.verify_mode, c.ca)
+
+
+# TLS-CTX-BOOT: up_reset() makes the SSLContext at boot, before the WiFi
+# starts (made at the first POST it could grow the heap and pin that area)
+n_made0 = len(_TlsCtx.made)
+tls_ctx_reset()
+online(up_td)
+boot_ctx = getattr(gl, "_tls_ctx", [None])[0]
+n_made1 = len(_TlsCtx.made)
+gl.socket, gl.select = fake_sockmod, fake_sel
+try:
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    gl._raw_post("https://d.example", b"{}", {}, 15)
+finally:
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+import inspect
+run_src = inspect.getsource(gl.run)
+check("TLS-CTX-BOOT: up_reset() makes the SSLContext before the WiFi; the "
+      "POST uses it", n_made1 == n_made0 + 1 and boot_ctx is not None
+      and boot_ctx is _TlsCtx.made[-1] and len(_TlsCtx.made) == n_made1
+      and run_src.index("up_reset()") < run_src.index("wifi_start()"),
+      "%d %d %d" % (n_made0, n_made1, len(_TlsCtx.made)))
+
+# TLS-CA: a CA_FILE that cannot be read (not ENOENT) or is empty: no POST
+# ("ca err", a diag line, a fixed retry), never an unverified context;
+# TLS-CA-NEW: a CA_FILE added, replaced (other size) or removed is picked
+# up at the next POST, no reboot
+ca_td = tempfile.mkdtemp(prefix="ca-")
+ca_p = os.path.join(ca_td, "ca.der")
+os.mkdir(ca_p)                           # open() fails: EISDIR, not ENOENT
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.CA_FILE = ca_p
+tls_ctx_reset()
+_posts[:] = []
+diag_clear()
+gl.DIAG = 60000
+try:
+    make_trk(os.path.join(up_td, "20261009_100000.trk"), 3)
+    pump()
+    ca_r1 = (len(_posts), gl.up["state"], gl.up["next_at"] - _clock[0],
+             ctx_now())
+    os.rmdir(ca_p)
+    open(ca_p, "wb").close()             # empty: a cut copy, not "no CA"
+    pump()
+    ca_r2 = (len(_posts), gl.up["state"], ctx_now())
+    with open(ca_p, "wb") as f:
+        f.write(b"\x30\x82der")
+    pump()
+    ca_r3 = (len(_posts), gl.up["state"], ctx_now())
+    with open(ca_p, "wb") as f:
+        f.write(b"\x30\x82other der")
+    make_trk(os.path.join(up_td, "20261009_110000.trk"), 3)
+    pump()
+    ca_r4 = (len(_posts), ctx_now())
+    os.remove(ca_p)
+    make_trk(os.path.join(up_td, "20261009_120000.trk"), 3)
+    pump()
+    ca_r5 = (len(_posts), ctx_now())
+finally:
+    gl.CA_FILE = "/ca.der"
+    tls_ctx_reset()
+    gl.DIAG = 0
+    shutil.rmtree(ca_td, ignore_errors=True)
+ca_diag = [l for l in diag_lines() if l.startswith("upload ca err")]
+diag_clear()
+check("TLS-CA: unreadable or empty CA_FILE -> no POST, 'ca err', retry after "
+      "LOWIDF_RETRY, no unverified context",
+      ca_r1 == (0, "ca err", gl.LOWIDF_RETRY, None)
+      and ca_r2 == (0, "ca err", None) and len(ca_diag) == 2,
+      "%r %r %r" % (ca_r1, ca_r2, ca_diag))
+check("TLS-CA-NEW: a readable CA_FILE verifies; replaced or removed it is "
+      "read again without a reboot",
+      ca_r3 == (1, "ok", (2, b"\x30\x82der"))
+      and ca_r4 == (2, (2, b"\x30\x82other der")) and ca_r5 == (3, (0, None)),
+      "%r %r %r" % (ca_r3, ca_r4, ca_r5))
+
+# TLS-CA-OOM: modtls reports a failed allocation parsing the CA as
+# ValueError("invalid cert"): out of memory only while the context is made
+# and the IDF heap is low; else a bad file ("ca err", not in the ENOMEM run)
+ca_td = tempfile.mkdtemp(prefix="ca-")
+ca_p = os.path.join(ca_td, "ca.der")
+with open(ca_p, "wb") as f:
+    f.write(b"\x30\x82der")
+
+
+class _BadCaTls(object):
+    PROTOCOL_TLS_CLIENT, CERT_NONE, CERT_REQUIRED = 2, 0, 2
+
+    class SSLContext(_TlsCtx):
+        def load_verify_locations(self, cadata=None):
+            raise ValueError("invalid cert")
+
+
+online(up_td)
+saved_tls = sys.modules.get("tls")
+sys.modules["tls"] = _BadCaTls
+gl.CA_FILE = ca_p
+tls_ctx_reset()
+real_idf = gl.idf_heap
+oom_res = []
+try:
+    tr = getattr(gl, "_tls_ready", None)
+    for idf in ((30, 20), (157, 126)):
+        gl.idf_heap = lambda idf=idf: idf
+        gl.up["enomem"] = 2
+        ok_ = tr(_clock[0]) if tr else None
+        oom_res.append((ok_, gl.up["state"], gl.up["enomem"], ctx_now()))
+    gl._post_phase[0] = "http"
+    gl.idf_heap = lambda: (30, 20)
+    later = gl._enomem(ValueError("invalid cert"))
+finally:
+    gl._post_phase[0] = None
+    gl.idf_heap = real_idf
+    sys.modules["tls"] = saved_tls
+    gl.CA_FILE = "/ca.der"
+    tls_ctx_reset()
+    shutil.rmtree(ca_td, ignore_errors=True)
+check("TLS-CA-OOM: ValueError making the context counts as out of memory "
+      "only with the IDF heap low",
+      oom_res == [(False, "low mem", 3, None), (False, "ca err", 0, None)]
+      and later is False, "%r %r" % (oom_res, later))
+
+# RTC: mbedTLS checks certificate dates against the board clock (2000-01-01
+# at boot): set it from a valid GPS fix before a POST, once, again only when
+# it drifted more than RTC_DRIFT s; no fix or a date outside 2020-2087: no
+import datetime as _dt
+saved_st = dict((k, gl.st.get(k)) for k in ("valid", "date", "time", "lat",
+                                              "pos_at"))
+rtc_res = []
+rs = getattr(gl, "_rtc_sync", None)
+try:
+    def _fix(date, time_, valid=True):
+        gl.st.update(valid=valid, date=date, time=time_, lat=47.1,
+                     pos_at=_clock[0])
+    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
+    if hasattr(gl, "_rtc_set"):
+        gl._rtc_set[0] = False
+    wd = _dt.date(2026, 10, 31).weekday()
+    _fix("2026-10-31", "12:00:00")
+    if rs:
+        rs(_clock[0])
+        rs(_clock[0])                    # set already: nothing
+        RTC.dt = (2026, 10, 31, wd, 12, 0, 3, 0)
+        rs(_clock[0])                    # 3 s off: kept
+        RTC.dt = (2026, 10, 31, wd, 11, 59, 50, 0)
+        rs(_clock[0])                    # 10 s off: set again
+    rtc_res.append(RTC.sets[:])
+    RTC.sets[:] = []
+    if hasattr(gl, "_rtc_set"):
+        gl._rtc_set[0] = False
+    for args in (("2026-10-31", "12:00:00", False), ("2099-01-01", "00:00:00"),
+                 ("2019-12-31", "23:59:59"), (None, None)):
+        _fix(*args)
+        if rs:
+            rs(_clock[0])
+    rtc_res.append(RTC.sets[:])
+    # through upload_tick: the clock is set before the POST
+    online(up_td)
+    gl.up["url"], gl.up["key"] = "https://d.example", "k"
+    make_trk(os.path.join(up_td, "20261031_120000.trk"), 3)
+    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
+    if hasattr(gl, "_rtc_set"):
+        gl._rtc_set[0] = False
+    _fix("2026-10-31", "12:00:00")
+    _posts[:] = []
+    diag_clear()
+    gl.DIAG = 60000
+    pump()
+    rtc_res.append((RTC.sets[:], len(_posts),
+                    [l for l in diag_lines() if l.startswith("clock set")]))
+finally:
+    gl.st.update(saved_st)
+    gl.DIAG = 0
+    diag_clear()
+check("RTC: the board clock is set from the GPS fix once, again past "
+      "RTC_DRIFT", rtc_res[0] == [(2026, 10, 31, wd, 12, 0, 0, 0)] * 2,
+      repr(rtc_res[0]))
+check("RTC: no valid fix or a date outside 2020-2087 leaves the clock",
+      rtc_res[1] == [], repr(rtc_res[1]))
+check("RTC: upload_tick sets the clock before the POST (one diag line)",
+      rtc_res[2] == ([(2026, 10, 31, wd, 12, 0, 0, 0)], 1,
+                     ["clock set 2026-10-31T12:00:00Z"]), repr(rtc_res[2]))
 
 # TLS out of memory TLS_REBOOT_N times in a row at home: a clean reboot
 for n_ in os.listdir(up_td):
@@ -7905,7 +8366,8 @@ try:
     finally:
         gl._guard_start = real_gs
         gl.socket, gl.select = real_mods[0], real_mods[1]
-        sys.modules.pop("tls", None)
+        sys.modules["tls"] = real_mods[2]
+        tls_ctx_reset()
     check("POST-3: each POST is guarded and the guard is off afterwards",
           armed == [gl.HTTP_MAX] and gl._guard["until"] is None, repr(armed))
 finally:
@@ -7929,6 +8391,30 @@ check("POST-4: upload errors in the diag log, one line per kind",
       errs == ["upload err OSError(116)", "upload err OSError(113)",
                "upload err OSError(113)"], repr(errs))
 _post_raise[0] = None
+
+# POST-5: the guard closing the socket while the headers are read keeps the
+# 2xx; the next, unrelated error must not report "aborted after 60 s"
+diag_clear()
+real_hp = gl.HTTP_POST
+
+
+def _post_guarded(url, data, headers, timeout):
+    gl._guard["hits"] += 1               # fired in the header loop
+    return FakeResp(201)
+
+
+gl.HTTP_POST = _post_guarded
+try:
+    g_code = gl._http_post(10)[0]
+finally:
+    gl.HTTP_POST = real_hp
+_post_raise[0] = OSError(-202)           # a DNS failure, seconds later
+gl._http_post(10)
+_post_raise[0] = None
+g_lines = [l for l in diag_lines() if l.startswith("upload")]
+check("POST-5: a guard hit on a 2xx is no 'aborted' line for the next error",
+      g_code == 201 and g_lines == ["upload err OSError(-202)"],
+      repr(g_lines))
 
 # GPS-STORM: while it loops, setups are GPS_STORM_WAIT apart; diag lines
 diag_clear()
@@ -8114,6 +8600,10 @@ gl.DIAG = 60000
 try:
     pump()
     low = (len(_posts), gl.up["state"], os.path.exists(lp_p))
+    lp_waits = [gl.up["next_at"] - _clock[0]]
+    for _ in range(2):
+        pump()
+        lp_waits.append(gl.up["next_at"] - _clock[0])
     gl.gc.mem_free = lambda: 126 * 1024 + 20000
     pump()
     ok_ = (len(_posts), os.path.exists(lp_p))
@@ -8131,6 +8621,22 @@ check("LOWPY: below TLS_MIN_PY_KB free Python heap the POST waits, then goes",
       low == (0, "low mem", True) and ok_ == (1, False)
       and lp_diag == ["upload low mem 8000 B"], "%r %r %r" % (low, ok_,
                                                                lp_diag))
+check("LOWPY-RETRY: low mem retries after LOWIDF_RETRY each time (no "
+      "doubling backoff)", lp_waits == [gl.LOWIDF_RETRY] * 3, repr(lp_waits))
+# LOWPY-FROZEN: with the logger frozen in (gps_frozen) the POST needs less
+import importlib.util
+sys.modules["gps_frozen"] = types.ModuleType("gps_frozen")
+try:
+    spec_ = importlib.util.spec_from_file_location(
+        "gps_logger_frozen_probe", os.path.join(ROOT, "gps_logger.py"))
+    probe = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(probe)
+    fz_ = (getattr(probe, "FROZEN", None), probe.TLS_MIN_PY_KB)
+finally:
+    del sys.modules["gps_frozen"]
+check("LOWPY-FROZEN: TLS_MIN_PY_KB is 8 on frozen firmware, 12 otherwise",
+      fz_ == (True, 8) and (getattr(gl, "FROZEN", None), gl.TLS_MIN_PY_KB)
+      == (False, 12), "%r %r" % (fz_, gl.TLS_MIN_PY_KB))
 
 # HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
 # diag showed a flat "mem" while the heap doubled into the IDF heap.
@@ -8252,6 +8758,50 @@ check("HEAP-GREW: diag names the step that grew the heap (read, TLS)",
                "heap grew in tls_wrap to 300 KB"]
       and not os.path.exists(hg_p), repr(grew))
 
+# HEAP-LABELS: the connect phase and the whole POST have labels of their own
+# (both were "http_post")
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
+
+class RvSockGrow(RvSock):
+    def connect(self, addr):
+        heap_kb[0] = 260                 # the TCP connect grew it
+        RvSock.connect(self, addr)
+
+    def readline(self, n=-1):
+        heap_kb[0] = 280                 # the answer grew it
+        return RvSock.readline(self, n)
+
+
+heap_kb[0] = 248
+gl.gc.mem_free = lambda: 30000 + 102900
+gl.gc.mem_alloc = lambda: heap_kb[0] * 1024 - 30000
+gl._idf_info = lambda: (157 * 1024, 102900)
+gl.socket, gl.select = fake_sockmod, fake_sel
+real_hp = gl.HTTP_POST
+gl.HTTP_POST = gl._raw_post
+diag_clear()
+gl.DIAG = 60000
+try:
+    rv_sock[0] = RvSockGrow(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    make_trk(hg_p, 3)
+    pump()
+finally:
+    gl.HTTP_POST = real_hp
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    gl.gc.mem_free, gl.gc.mem_alloc = real_mem_free, real_mem_alloc
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+grew = [l for l in diag_lines() if l.startswith("heap grew")]
+diag_clear()
+check("HEAP-LABELS: diag says 'connect' and 'post', not 'http_post' twice",
+      grew == ["heap grew in connect to 260 KB",
+               "heap grew in post to 280 KB"], repr(grew))
+
 
 # GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon
 gl.reset()
@@ -8371,7 +8921,7 @@ gl._web_diag = lambda: ["up 60 utc 20261031T053014Z nmea 9/1 gpsboots 0 "
                          "loops 0 sats 21/13 fix 3D_fix hdop 0.9 points 4 "
                          "sent 0 wifi connected pulses 0 mem 27000 idf "
                          "157/20 heap 124", "boot cause 3 prev_up 600 mhz 80",
-                         "up 60 <b>"]
+                         "upload ca err OSError(5)", "up 60 <b>"]
 _idf_saved = gl.idf_heap
 gl.idf_heap = lambda: (157, 144)
 page_json = gl._web_json()
@@ -8448,6 +8998,8 @@ else:
           and lg.index("BOOT &middot; WATCHDOG &middot; PREVIOUS RUN 10 MIN 00 S")
               < lg.index("3D FIX &middot; 13/21 SATS &middot; 4 PTS")
           and '<span class="err">IDF 20 KB</span>' in lg, lg[:500])
+    check("PAGE: Event log - an unreadable CA_FILE ('upload ca err') is red",
+          '<span class="err">UPLOAD CA ERR OSERROR(5)</span>' in lg, lg[:600])
     # PAGE-WIFI: an arc icon (0-3 arcs lit) and the quality in per cent,
     # 2 x (RSSI + 100) clamped; amber below -67 dBm, red below -80; no words
     check("PAGE-WIFI: arcs, quality % and tone from RSSI",

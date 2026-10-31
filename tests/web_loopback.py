@@ -3,7 +3,9 @@
 # are slow, send nothing, send too much, reset mid-reply or outlast the
 # request deadline. Single-threaded: a client's bytes wait in the kernel
 # until web_tick reads them.
-# Run: /path/to/micropython tests/web_loopback.py   (or python3)
+# Run: /path/to/micropython tests/web_loopback.py [web.html.gz]  (or python3)
+# With a gzip of web.html as the argument, a client that accepts gzip must
+# get that file (tests/test_gps_logger.py passes one).
 import sys
 import json
 import time
@@ -80,6 +82,8 @@ gl.DIAG = 0
 gl.DIAG_FILE = "/nonexistent-gps-logger-loopback/diag.log"
 gl.LOG_DIR = "/nonexistent-gps-logger-loopback"
 gl.WEB_PAGE = root + "/web.html"
+gz_path = sys.argv[1] if len(sys.argv) > 1 else None
+gl.WEB_PAGE_GZ = gz_path or "/nonexistent-gps-logger-loopback/web.html.gz"
 gl.WEB = True
 gl.WEB_DEADLINE = 1                     # s, short for the test
 gl.WEB_TIMEOUT = 0.4
@@ -208,6 +212,19 @@ tick()
 got = read_all(s)
 check("GET / sends web.html whole", got.split(b"\r\n\r\n", 1)[-1] == page
       and got.startswith(b"HTTP/1.0 200 OK"), got[:80])
+if gz_path:
+    f = open(gz_path, "rb")
+    gz_page = f.read()
+    f.close()
+    s = client(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+               b"Accept-Encoding: gzip, deflate\r\n\r\n" % port)
+    tick()
+    got = read_all(s)
+    gh, _, gb = got.partition(b"\r\n\r\n")
+    check("GET / with Accept-Encoding gzip sends web.html.gz whole",
+          gb == gz_page and b"\r\nContent-Encoding: gzip\r\n" in gh
+          and (b"Content-Length: %d\r\n" % len(gz_page)) in gh,
+          (gh[:200], len(gb), len(gz_page)))
 s = client(b"GET /status.json HTTP/1.1\r\nHost: localhost\r\n\r\n")
 tick()
 got = read_all(s)

@@ -213,7 +213,7 @@ function logLine(l) {
     kind = "info";
     text = "RECEIVER &middot; " + esc(l.slice(4).toUpperCase());
   } else {
-    kind = /^(crash|reboot|upload (err|aborted|low idf))/.test(l) ? "err" : /^gps reset loop/.test(l) ? "warn" : "";
+    kind = /^(crash|reboot|upload (err|aborted|low idf|ca err))/.test(l) ? "err" : /^gps reset loop/.test(l) ? "warn" : "";
     text = esc(l.toUpperCase());
   }
   return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";

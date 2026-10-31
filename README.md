@@ -179,13 +179,16 @@ PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 The script asks the board which chip it is, compiles `gps_logger.py` to
 `gps_logger.mpy` for it and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
-It copies `gps_logger.mpy`, `main.py` and the status page `web.html` as
+It makes `web.html.gz` (`gzip -9 -n web.html`: ~9 KB instead of ~24 KB,
+what browsers get) and copies `gps_logger.mpy`, `main.py`, the status page
+`web.html` and `web.html.gz` as
 `<name>.new`, checks their size and SHA-256 on the board, and only then
 renames them over the old files; a failed check (`Copy check FAILED`)
 removes the `.new` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module. Then it
 removes a stray `gps_logger.py`, clears the boot-fail counter and resets
-the board.
+the board. When it cannot tell whether the firmware has the logger frozen
+in (no clear answer from the board), it stops instead of guessing.
 
 The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, and
@@ -213,17 +216,36 @@ It needs ESP-IDF v5.5.2 and a MicroPython v1.29.0 tree (by default
 ```bash
 tools/build_firmware.sh                          # build only
 PORT=/dev/ttyACM0 tools/build_firmware.sh --flash
-PORT=/dev/ttyACM0 ./deploy.sh                    # main.py and web.html
+PORT=/dev/ttyACM0 ./deploy.sh                    # main.py and the page
 ```
 
-`--flash` refuses to flash when the board's partition table differs from
-the build's. Otherwise it backs up the app partition to `firmware/`,
-removes the `gps_logger.mpy` that would shadow the frozen module, and
-writes only the app at 0x10000: the bootloader, the partition table and the
-file system (`.env`, tracks) stay as they are. The firmware also carries a
-small `gps_frozen` module. When `deploy.sh` finds it, it copies only
-`main.py` and `web.html` and removes a stray `gps_logger.mpy`. A logger
-change then means building and flashing the firmware again. To roll back,
+Freezing does not stop the Python heap from growing into the IDF heap
+(MicroPython's split heap stays on); it leaves so much of the 64 KB heap
+free that an allocation rarely has to.
+
+`--flash` first checks the board's partition table and refuses to flash
+when it differs from the build's. Then it backs up the app partition to
+`firmware/` and writes only the app at 0x10000: the bootloader, the
+partition table and the file system (`.env`, tracks) stay as they are.
+Nothing on the file system is touched before the write, so a failed check
+or write leaves the board as it was. Run `./deploy.sh` right after: it
+removes the old `gps_logger.mpy` (until then it shadows the frozen module
+and runs as before) and any stray `gps_logger.py` (`''` comes first in
+`sys.path`), and clears the boot-fail counter. Right after esptool's reset
+the raw REPL may not answer for a while; if `deploy.sh` cannot reach the
+board, run it again.
+
+The firmware also carries a small `gps_frozen` module with the commit
+(`-dirty` when the tree had uncommitted changes) and the SHA-256 of the
+frozen `gps_logger.py`. When `deploy.sh` finds it, it copies only `main.py`
+and the page and removes a stray `gps_logger.mpy`, but first compares that
+SHA-256 with the repo's `gps_logger.py`: when they differ (or a firmware
+built before the SHA was recorded) it stops and asks for
+`tools/build_firmware.sh --flash`; `FORCE=1 ./deploy.sh` deploys main.py
+and the page anyway. A logger change means building and flashing the
+firmware again. In an emergency `FORCE_MPY=1 ./deploy.sh` installs
+`gps_logger.mpy` on a frozen firmware too, with a warning: it shadows the
+frozen module and takes its ~60 KB of Python heap again. To roll back,
 write the backup with the `esptool.py` command `--flash` prints, then run
 `./deploy.sh`.
 
@@ -312,9 +334,12 @@ line a minute, a `stay left wifi` line when an away stay ends without a fix
 (see [Stays](#stays)), `gps reset loop …` lines (when the receiver keeps
 restarting, so they can be set against where you were), `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
-when a POST waits for memory, `heap grew in <step> to N KB` when the
-Python heap grew during an upload step (`read_batch`, `tls_wrap`,
-`http_post`: the step that took IDF heap), a `reboot tls memory` or
+when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
+used, `clock set <UTC>` once a boot when the board clock is set from the
+GPS, `heap grew in <step> to N KB` when the
+Python heap grew during an upload step (`read_batch`, `connect`,
+`tls_wrap`, `post`, the whole POST: the step that took IDF heap), a
+`reboot tls memory` or
 `reboot low idf N KB S s` line before such a reboot, and a `crash` line
 before a crash reset. A reset loop that goes on writes its first warning,
 then `gps reset loop N more windows` every 5 minutes (`GPS_LOOP_SAY`) and
@@ -380,7 +405,11 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
 it the page shows the grid and the system font. The page is a file on the
-board (`/web.html`, copied by `deploy.sh`) and loads once; then it asks
+board (`/web.html`, copied by `deploy.sh`) and loads once; a browser
+(`Accept-Encoding: gzip`) gets `/web.html.gz` instead, ~9 KB instead of
+~24 KB, so it loads in a third of the sends; clients without gzip (curl
+without `--compressed`) and a board without the `.gz` get `web.html`. Copy
+both when you change the page by hand (or remove `/web.html.gz`); then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
 only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
@@ -398,7 +427,8 @@ router's DNS gives it, e.g. `….lan`, is refused too). Only a `GET` is
 answered; an empty or cut-off request is just closed. The request head is
 read whole (up to 2 KB), the reply goes out in small pieces with the GPS
 read in between; each receive or send may wait 2 s (`WEB_TIMEOUT`) and the
-whole request 5 s (`WEB_DEADLINE`), then the client is dropped, so a slow
+whole request 5 s (`WEB_DEADLINE`, which also cuts the waits short near
+its end), then the client is dropped, so a slow
 phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
 measured at most every 30 s (also for the OLED) and the waiting files are
 counted at most every 10 s. For the page
@@ -734,14 +764,29 @@ check for a visible home.
   DER root certificate at `/ca.der` (`CA_FILE`; the one your server's chain
   ends in) turns verification on. With an `http://` `GEO_URL` the logger
   warns that everything goes in the clear. The `SSLContext` (and the
-  certificate) is made once, on the first POST, and reused.
+  certificate) is made once at boot, before the WiFi starts (made at the
+  first POST it could grow the Python heap and keep that area), and reused.
+  Only a missing `/ca.der` means no verification: one that cannot be read,
+  is empty or is not a valid certificate stops the POSTs (state `ca err`,
+  `upload ca err …` in the diagnostic log, retried every 30 s), never a
+  silent fall back. A `/ca.der` added, removed or replaced by one of another
+  size is picked up at the next POST; one of the same size takes a reboot.
+  mbedTLS checks the certificate's dates and the board clock starts at
+  2000-01-01 at every boot, so before a POST the logger sets it from a
+  valid GPS fix (a date in 2020–2087): once a boot (`clock set …` in the
+  diagnostic log), again only when it drifted more than 5 s
+  (`RTC_DRIFT`). With `/ca.der` and no fix since the boot, verified POSTs
+  fail until there is one.
 - **TLS memory:** five TLS allocation failures in a row at home
   (`TLS_REBOOT_N`; any other error ends the run) restart the board cleanly
   (`reboot tls memory` in the diagnostic log): the IDF heap stays
   fragmented otherwise. Counted: `MemoryError`, `ENOMEM` and the mbedTLS
   `*_ALLOC_FAILED` codes (SSL, X509, ECP, PK, …, also combined with a
   low-level code); `OSError(16)`, which is how `MPI_ALLOC_FAILED` arrives
-  but also `EBUSY`, only from the TLS handshake.
+  but also `EBUSY`, only from the TLS handshake; `ValueError("invalid
+  cert")`, which is how a failed allocation parsing `/ca.der` arrives, only
+  while the `SSLContext` is made with the IDF heap's largest block under
+  `TLS_MIN_KB` (else the file is bad: `ca err`).
 - **Low IDF heap:** below `TLS_MIN_KB` no POST is tried; the upload runs
   `gc.collect()` and checks again every 30 s at home (`LOWIDF_RETRY`). Only
   if it stays low for 5 minutes (`LOWIDF_WAIT`) with tracks waiting does
@@ -757,8 +802,12 @@ check for a visible home.
   the area emptied and was freed again. So the page streams its replies,
   and before giving up on TLS (`TLS_MIN_KB`) the upload runs `gc.collect()`,
   which returns an empty grown area, and measures again. It also wants
-  12 KB of free Python heap then (`TLS_MIN_PY_KB`; else `low mem` and a
-  retry): the socket and TLS objects must fit without growing the heap.
+  12 KB of free Python heap then, 8 KB on the frozen firmware
+  (`TLS_MIN_PY_KB`; else `low mem` and a retry every 30 s,
+  `LOWIDF_RETRY`): the socket and TLS objects must fit without growing the
+  heap. A POST itself takes a few KB (sockets, header lines; the
+  `SSLContext`, ~3 KB, is made at boot); frozen, no module bytecode
+  fragments the heap, so 8 KB leaves room.
   `gc.mem_free()` counts that largest IDF block (in bytes) as free Python
   heap, so the diag, the page and the upload line subtract it to the byte
   (`mem`, `heap`), and `heap grew in <step>` names the upload step during
@@ -860,10 +909,11 @@ with a NEO-6M; most never need changing.
 | `HTTP_WAIT` / `HTTP_CHUNK` | 30 s / 1 KB | Wait for the server's answer, body piece; the UART is read between |
 | `HTTP_LINE` / `HTTP_LINES` | 256 B / 64 | Bytes per read of an answer line; reads of the answer's head at most |
 | `HTTP_MAX` | 60 s | Wall clock for one POST: the guard timer feeds the WDT, then closes the socket |
-| `CA_FILE` | `/ca.der` | DER root certificate; if present, the server is verified |
+| `CA_FILE` | `/ca.der` | DER root certificate; if present, the server is verified (unreadable: no POST) |
+| `RTC_DRIFT` | 5 s | Board clock vs GPS time before the clock is set again (certificate dates) |
 | `TLS_REBOOT_N` | 5 | TLS allocation failures in a row (at home) before a clean reboot |
 | `TLS_MIN_KB` | 48 KB | Largest IDF heap block a POST needs; below it no try (`gc.collect()` and wait) |
-| `TLS_MIN_PY_KB` | 12 KB | Free Python heap a POST needs after `gc.collect()`; below it the POST waits |
+| `TLS_MIN_PY_KB` | 12 KB (frozen: 8 KB) | Free Python heap a POST needs after `gc.collect()`; below it the POST waits `LOWIDF_RETRY` |
 | `LOWIDF_RETRY` / `LOWIDF_WAIT` | 30 s / 5 min | Checks while the IDF block is low (at home); how long it may stay low with tracks waiting before a clean reboot |
 | `LOWIDF_REBOOT_GAP` / `LOWIDF_MARK` | 30 min / `/lowidf` | At most one low-idf reboot this often; the file that tells the next boot |
 | `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err` |
@@ -880,8 +930,9 @@ with a NEO-6M; most never need changing.
 | `BOOT_OK_MS` | 60 s | Healthy loop time that clears the boot-fail counter |
 | `STATUS` | 10 min | Console `status` line interval |
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
-| `WEB` / `WEB_PORT` / `WEB_TIMEOUT` | on / 80 / 2 s | Status page (`.env` `WEB`), its port, how long one client may take |
-| `WEB_PAGE` / `WEB_REFRESH` | `/web.html` / 15 s | The page file on the board; how often it polls `/status.json` |
+| `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
+| `WEB_TIMEOUT` / `WEB_DEADLINE` | 2 s / 5 s | How long one receive or send may wait; how long a whole request may take |
+| `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |
@@ -904,25 +955,30 @@ every pull request:
   - `tests/web_loopback.py` on the unix build and CPython: the status page
     over real loopback sockets (a normal request, a foreign `Host`, an
     empty, an oversized, a stalled and a trickling request, a client
-    resetting mid-reply, a reply past the request deadline);
+    resetting mid-reply, a reply past the request deadline, the gzipped
+    page for a client that accepts it);
   - `node tests/web_page_test.js`: `web.html`'s view on generated
     `status.json`, and the whole page script (`tick`, `paint`, `placeMap`,
     `stale`) against a stub document. With `CI=true` (GitHub Actions) a
     missing `node` is a FAIL, not a SKIP;
   - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
     board-side code under CPython): copy, check and rename, too little
-    flash, a cut copy.
+    flash, a cut copy, frozen firmware (stale, `FORCE`, `FORCE_MPY`, no
+    clear answer);
+  - `tools/build_firmware.sh` with a fake ESP-IDF, MicroPython tree,
+    `esptool.py` and `mpremote`: the `gps_frozen` marker, and `--flash`
+    touching nothing on the board before a successful write.
 - `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
 - `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`,
   `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
-- `shellcheck deploy.sh`.
+- `shellcheck deploy.sh tools/build_firmware.sh`.
 
 The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
 .venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
-shellcheck deploy.sh
+shellcheck deploy.sh tools/build_firmware.sh
 .venv/bin/python -m mpy_cross -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
 MICROPYTHON=/path/to/micropython python3 tests/test_gps_logger.py
 ```

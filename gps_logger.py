@@ -4,6 +4,11 @@ try:
     import esp32                         # mcu_temperature() on C3/C6/S2/S3
 except ImportError:
     esp32 = None
+try:
+    __import__("gps_frozen")             # firmware of tools/build_firmware.sh:
+    FROZEN = True                        # this module's bytecode is in flash
+except ImportError:
+    FROZEN = False
 
 # Collect garbage early and often. When an allocation doesn't fit, the ESP32
 # port grows the Python heap with the largest free IDF block (~60 kB) instead,
@@ -69,6 +74,8 @@ WEB_CHUNK = 1024                         # reply bytes per send
 WEB_REFRESH = 15                         # s between status.json polls of
                                          # the page (WEB_PAGE)
 WEB_PAGE = "/web.html"                   # the status page, served as is
+WEB_PAGE_GZ = "/web.html.gz"             # its gzip (deploy.sh), sent instead
+                                         # to a client that accepts gzip
 WEB_DIAG = 15                            # diag.log lines on the page
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
                                          # for the page on the other networks too
@@ -248,6 +255,7 @@ HTTP_MAX = 60000                         # ms wall clock for one POST: a timer
                                          # closes the socket (a hung TLS call
                                          # reset the board by the WDT)
 CA_FILE = "/ca.der"                      # if present: verify the server
+                                         # (unreadable or empty: no POST)
 TLS_MIN_KB = 48                          # largest IDF heap block a TLS POST
                                          # needs (measured: at 20 KB every
                                          # handshake failed); below it no
@@ -258,11 +266,19 @@ LOWIDF_WAIT = 300000                     # ms low at home with tracks waiting:
 LOWIDF_REBOOT_GAP = 1800000              # ms: at most one such reboot this
                                          # often (LOWIDF_MARK spans the boot)
 LOWIDF_MARK = "/lowidf"                  # written just before that reboot
-TLS_MIN_PY_KB = 12                       # free Python heap a POST needs after
+TLS_MIN_PY_KB = 8 if FROZEN else 12      # free Python heap a POST needs after
                                          # gc.collect(); below it the POST
-                                         # waits: the socket and TLS objects
-                                         # would grow the heap into the IDF
-                                         # block TLS needs
+                                         # waits (LOWIDF_RETRY): the socket
+                                         # and TLS objects would grow the
+                                         # heap into the IDF block TLS needs.
+                                         # The SSLContext (~3 KB) is made at
+                                         # boot, a POST itself takes a few KB
+                                         # (sockets, header lines); frozen,
+                                         # no module bytecode fragments the
+                                         # heap, so 8 KB leaves room
+RTC_DRIFT = 5                            # s the board clock may be off the GPS
+                                         # time before it is set again
+                                         # (mbedTLS checks certificate dates)
 TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
                                          # home): a clean reboot, the IDF heap
                                          # stays fragmented otherwise
@@ -3622,6 +3638,13 @@ def up_reset():
               enomem=0, last_err=None, guard_hits=_guard["hits"],
               lowidf_at=None, lowidf_seen=None,
               lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
+    # the SSLContext now, in the boot's heap before the WiFi starts (made
+    # at the first POST it could grow the heap and pin that area)
+    _tls_ctx[0] = None
+    try:
+        _tls_context()
+    except Exception as e:               # the first POST tries again
+        print("tls context", repr(e))
     try:
         names = os.listdir(LOG_DIR)
     except OSError:
@@ -4241,14 +4264,30 @@ def _io_write(s, b):
         i += n
         t0 = time.ticks_ms()
 
-_tls_ctx = [None]                        # the one SSLContext, made once
+_tls_ctx = [None, None]                  # the one SSLContext, and the size
+                                         # of the CA_FILE it was made with
+                                         # (None: there was none)
+
+def _ca_size():
+    """Size of CA_FILE, None if there is none (ENOENT). Any other error
+    raises: no POST then, never an unverified one."""
+    try:
+        return os.stat(CA_FILE)[6]
+    except OSError as e:
+        if _enoent(e):
+            return None
+        raise
 
 def _tls_context():
     """The SSLContext every POST wraps its socket with: made (and CA_FILE
-    read) on first use and kept. It is the biggest single Python heap
-    block of a POST; made per POST it came at the worst time (and could
-    grow the heap into the IDF block TLS needs). Not kept if making it
-    failed, so the next POST tries again."""
+    read) once, by up_reset() at boot before the WiFi starts, and kept. It
+    is the biggest single Python heap block of a POST; made at the first
+    POST it came at the worst time (and could grow the heap into the IDF
+    block TLS needs, and keep that area for the rest of the run). Not
+    kept if making it failed, so the next POST tries again.
+    Without CA_FILE (ENOENT only) the server is not verified; a CA_FILE
+    that cannot be read, or is empty, raises: no POST, never a silent
+    fall back to an unverified one."""
     ctx = _tls_ctx[0]
     if ctx is not None:
         return ctx
@@ -4256,20 +4295,95 @@ def _tls_context():
         import tls
     except ImportError:
         import ssl as tls
-    ctx = tls.SSLContext(tls.PROTOCOL_TLS_CLIENT)
     ca = None
     try:
         with open(CA_FILE, "rb") as f:
             ca = f.read()
-    except OSError:
-        pass
-    if ca:
+    except OSError as e:
+        if not _enoent(e):
+            raise
+    if ca is not None and not ca:
+        raise ValueError("empty " + CA_FILE)
+    ph = _post_phase[0]
+    _post_phase[0] = "ctx"               # modtls reports an allocation that
+    ctx = tls.SSLContext(tls.PROTOCOL_TLS_CLIENT)   # fails parsing the CA
+    if ca:                               # as ValueError("invalid cert")
         ctx.verify_mode = tls.CERT_REQUIRED
         ctx.load_verify_locations(cadata=ca)
     else:
         ctx.verify_mode = tls.CERT_NONE
-    _tls_ctx[0] = ctx
+    _post_phase[0] = ph
+    _tls_ctx[0], _tls_ctx[1] = ctx, (len(ca) if ca else None)
     return ctx
+
+def _tls_ready(now):
+    """Before a POST over https: the SSLContext, made again when CA_FILE
+    changed size since (added, removed, replaced by one of another size;
+    one of the same size takes a reboot). False (no POST, retried after
+    LOWIDF_RETRY) when it cannot be made: state "ca err" and a diag line,
+    or, out of memory, "low mem" counted in the run TLS_REBOOT_N ends."""
+    _post_phase[0] = None
+    try:
+        if _tls_ctx[0] is not None and _ca_size() != _tls_ctx[1]:
+            _tls_ctx[0] = None
+            gc.collect()
+            print("upload: %s changed, new TLS context" % CA_FILE)
+        _tls_context()
+        return True
+    except Exception as e:               # (MemoryError too)
+        oom = _enomem(e)
+        up["enomem"] = up.get("enomem", 0) + 1 if oom else 0
+        up["err"] += 1
+        up["state"] = "low mem" if oom else "ca err"
+        err = repr(e)[:60]
+        print("upload ca", err)
+        if err != up.get("last_err"):
+            up["last_err"] = err
+            _diag_write("upload ca err %s" % err)
+        gc.collect()
+        _schedule(now, LOWIDF_RETRY)
+        if oom:
+            _tls_reboot()
+        return False
+    finally:
+        _post_phase[0] = None
+
+_rtc_set = [False]                       # board clock set from the GPS once
+
+def _rtc_sync(now):
+    """mbedTLS checks the server certificate's dates against the board
+    clock, which starts at 2000-01-01 each boot: with CA_FILE every
+    verified POST failed. Set it from the GPS fix (valid, a date in
+    2020-2087) before a POST: once a boot, again only when it drifted more
+    than RTC_DRIFT s. Seconds since 2020 (small ints)."""
+    if not has_fix(now):
+        return
+    s = _fix_s()
+    if s is None:
+        return
+    s += _age(now, st["pos_at"]) // 1000
+    d = s // 86400
+    y, m, dd = _civil(d + EPOCH_DAYS)
+    if not 2020 <= y <= 2087:
+        return
+    rtc = machine.RTC()
+    try:
+        if _rtc_set[0]:
+            t = rtc.datetime()
+            c = ((_days(t[0], t[1], t[2]) - EPOCH_DAYS) * 86400
+                 + t[4] * 3600 + t[5] * 60 + t[6])
+            if -RTC_DRIFT <= c - s <= RTC_DRIFT:
+                return
+        r = s % 86400
+        # weekday 0 = Monday; 2020-01-01 was a Wednesday
+        rtc.datetime((y, m, dd, (d + 2) % 7, r // 3600, r // 60 % 60,
+                      r % 60, 0))
+    except Exception as e:               # no RTC: the POST still goes
+        print("rtc", repr(e))
+        return
+    if not _rtc_set[0]:
+        _diag_write("clock set %s" % _stamp_s(s)[0])
+    _rtc_set[0] = True
 
 def _tls_wrap(s, host):
     """TLS like micropython-lib requests (tls.SSLContext, CERT_NONE), or,
@@ -4311,7 +4425,8 @@ def _guard_start(sock, ms):
 def _guard_stop():
     _guard["until"] = _guard["sock"] = None
 
-_post_phase = [None]                     # "connect", "tls", "http" in a POST
+_post_phase = [None]                     # "connect", "tls", "http" in a POST,
+                                         # "ctx" while the SSLContext is made
 
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
@@ -4334,7 +4449,7 @@ def _raw_post(url, data, headers, timeout):
         s.settimeout(timeout)
         s.connect(ai[-1])
         if proto == "https":
-            _heap_note("http_post")
+            _heap_note("connect")
             _post_phase[0] = "tls"       # the handshake
             s = _tls_wrap(s, host)
             _heap_note("tls_wrap")
@@ -4398,9 +4513,17 @@ def _enomem(e):
     """TLS out of memory: MemoryError, ENOMEM (modtls raises SSL_ALLOC_FAILED
     as it) or an mbedTLS ALLOC_FAILED code. modtls turns -1..-255 into a
     positive errno, so MPI (-0x10) arrives as 16, which is also EBUSY, and
-    ASN1 (-0x6A) as 106: those count only from the TLS handshake."""
+    ASN1 (-0x6A) as 106: those count only from the TLS handshake. A
+    failed allocation parsing CA_FILE comes as ValueError("invalid cert"):
+    out of memory only while the SSLContext is made, and only with the
+    IDF heap's largest block under TLS_MIN_KB (else the file is bad)."""
     if isinstance(e, MemoryError):
         return True
+    if isinstance(e, ValueError):
+        if _post_phase[0] != "ctx":
+            return False
+        big = idf_heap()[1]
+        return big is None or big < TLS_MIN_KB
     a = getattr(e, "args", None) or (None,)
     n = a[0]
     if not isinstance(n, int):
@@ -4430,6 +4553,9 @@ def _http_post(size):
         retry = _retry_after_ms(r)
         up["enomem"] = 0
         up["last_err"] = None
+        # the guard may have closed the socket while the headers were read
+        # (the status kept): not a sign of the next error's abort
+        up["guard_hits"] = _guard["hits"]
     except MemoryError:
         up["enomem"] = up.get("enomem", 0) + 1
         raise
@@ -4617,13 +4743,19 @@ def upload_tick():
     if pf < TLS_MIN_PY_KB * 1024:
         # an allocation that does not fit after a GC grows the heap by up
         # to its own size, out of the IDF block TLS needs: wait instead
+        # (a fixed retry: the doubling backoff waited up to BACKOFF_MAX
+        # for a heap that is back after the next collect)
         up["err"] += 1
         up["state"] = "low mem"
         if up.get("last_err") != "low mem":
             up["last_err"] = "low mem"
             _diag_write("upload low mem %d B" % pf)
-        _schedule(now)
+        _schedule(now, LOWIDF_RETRY)
         return
+    if up["url"].startswith("https"):
+        _rtc_sync(now)                   # certificate dates need the time
+        if not _tls_ready(now):
+            return
     if not _bad_full_left():
         up["state"] = "sending"
     read_uart()                          # drain NMEA before blocking
@@ -4641,7 +4773,7 @@ def upload_tick():
     finally:
         if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
             _set_freq(CPU_MHZ)
-        _heap_note("http_post")
+        _heap_note("post")
     read_uart()                          # catch up after a multi-second POST
     now = time.ticks_ms()
     print("upload", path, n, n_ok, code, py_heap()[0],
@@ -5025,19 +5157,41 @@ def _web_send(c, code, ctype, parts):
     if n:
         _web_out(c, mv[:n])
 
-def _web_page(c):
-    """WEB_PAGE from flash in WEB_CHUNK reads into one buffer. The page
-    itself polls /status.json and redraws its boxes."""
-    try:
-        f = open(WEB_PAGE, "rb")
-    except OSError:
-        _web_send(c, "404 Not Found", "text/plain",
-                  ("no %s on the board: run deploy.sh; data at "
-                   "/status.json" % WEB_PAGE,))
-        return
+def _web_gzip(req):
+    """True if the request's Accept-Encoding names gzip (every browser;
+    curl only with --compressed)."""
+    r = req.lower()
+    i = r.find(b"\r\naccept-encoding:")
+    if i < 0:
+        return False
+    j = r.find(b"\r\n", i + 2)
+    return b"gzip" in r[i:j if j >= 0 else len(r)]
+
+def _web_page(c, gz=False):
+    """WEB_PAGE from flash in WEB_CHUNK reads into one buffer: its gzip
+    (WEB_PAGE_GZ, ~9 KB instead of ~24 KB: a third of the sends) when the
+    client accepts gzip and deploy.sh put it there, else the plain page.
+    The page itself polls /status.json and redraws its boxes."""
+    path, f = WEB_PAGE_GZ, None
+    if gz:
+        try:
+            f = open(path, "rb")
+        except OSError:
+            pass
+    if f is None:
+        path = WEB_PAGE
+        try:
+            f = open(path, "rb")
+        except OSError:
+            _web_send(c, "404 Not Found", "text/plain",
+                      ("no %s on the board: run deploy.sh; data at "
+                       "/status.json" % WEB_PAGE,))
+            return
     try:
         _web_head(c, "200 OK", "text/html",
-                  "Content-Length: %d\r\n" % os.stat(WEB_PAGE)[6])
+                  "Content-Length: %d\r\n%s" % (
+                      os.stat(path)[6], "Content-Encoding: gzip\r\n"
+                      if path == WEB_PAGE_GZ else ""))
         buf = bytearray(WEB_CHUNK)
         mv = memoryview(buf)
         while True:
@@ -5065,7 +5219,7 @@ def _web_reply(c, req):
         _sv_fresh()
         _web_send(c, "200 OK", "application/json", _web_json_parts())
     elif path == b"/" or path.startswith(b"/?"):
-        _web_page(c)
+        _web_page(c, _web_gzip(req))
     else:
         _web_send(c, "404 Not Found", "text/plain", ("not found",))
 

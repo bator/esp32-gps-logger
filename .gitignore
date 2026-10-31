@@ -224,3 +224,6 @@ __marimo__/
 
 # Custom firmware build output and app backups (tools/build_firmware.sh)
 firmware/
+
+# gzipped status page made by deploy.sh
+web.html.gz
