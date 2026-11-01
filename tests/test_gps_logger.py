@@ -7120,6 +7120,23 @@ try:
                                   "2026-10-28 12:59:42Z)", repr(rows))
 
     import inspect
+    resets = {f: inspect.getsource(getattr(gl, f)) for f in (
+        "_tls_reboot", "_lowidf_reboot", "_ota_check", "_ota_health")}
+    gl._uptime_saved = gl.uptime_s
+    diag_clear()
+    gl.uptime_s = lambda now=None: 151
+    try:
+        gl._diag_write("up 65 utc 20261101T132141Z nmea 1/0 x")
+        gl._diag_final()
+        gl._diag_write("ota 86fb9c8 installed (was 8416d67), rebooting")
+        pf, _, tf = prev_after(open(gl.DIAG_FILE).read())
+    finally:
+        gl.uptime_s = gl._uptime_saved
+    check("UPTIME: a deliberate reset (OTA, TLS memory, low IDF, rollback) "
+          "writes a status line first: the next boot sees the whole run",
+          pf["up"] == 151 and pf["how"] == "status"
+          and all(src.index("_diag_final()") < src.index("machine.reset()")
+                  for src in resets.values()), repr((pf, tf)))
     loop_src = inspect.getsource(gl._loop)
     check("DIAG: _loop writes a line every DIAG ms",
           "_diag(now)" in loop_src and "DIAG" in loop_src)
@@ -10884,6 +10901,35 @@ else:
           and "NMEA BAD" not in tm3 and "<small>NMEA BAD</small>" in tm
           and "15/22 SATS &middot; &plusmn;2.3 M &middot; IDF 208 KB"
           in v3.get("log", ""), tm3[-300:] + v3.get("log", "")[:300])
+    # BOOT: when this run started (local time) and how long the one before
+    # it lasted, until when; FIRMWARE: the build date, the commit after it
+    jb = json.loads(page_json)
+    now_ = time.time()
+    jb.update(uptime=10492, boot_cause=2, prev_uptime=150,
+              prev_run="2 min 30 s (last line x)",
+              prev_end=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                     time.gmtime(now_ - 10492 - 30)),
+              fw="86fb9c8", fw_build=1793548800, ota="current")
+    rb_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
+                          os.path.join(here, "..", "web.html")],
+                         input=json.dumps(jb), capture_output=True, text=True)
+    syb = json.loads(rb_.stdout).get("sys", "")
+
+    def _hm(t):
+        return time.strftime("%H:%M", time.localtime(t))
+
+    boots = [">BOOT<span class=\"\">HARD RESET &middot; %s<em>up 2 h 54 min "
+             "&middot; previous run 2 min 30 s, until %s</em>" % (_hm(x),
+                                                                _hm(x - 30))
+             for x in (now_ - 10492, now_ - 10492 - 60)]
+    fwl = (">FIRMWARE<span class=\"\">%s<em>up to date &middot; 86fb9c8</em>"
+           % time.strftime("%Y-%m-%d %H:%M", time.localtime(1793548800)))
+    check("PAGE-BOOT: BOOT shows the boot's local time, the uptime and the "
+          "previous run up to when; FIRMWARE the build date, 'up to date' "
+          "and the commit",
+          any(b_ in syb for b_ in boots) and fwl in syb
+          and json.loads(rb_.stdout).get("unlabeled") == [],
+          syb[syb.find(">BOOT<"):syb.find(">CHIP<")])
     check("PAGE-PVT: Systems shows the fix source and the UBX frame counts",
           '>FIX SOURCE<span class="">NAV-PVT<em>ubx 500 ok &middot; 2 bad'
           '</em>' in sy3 and v3.get("unlabeled") == []

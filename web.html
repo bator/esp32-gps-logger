@@ -168,7 +168,7 @@ var ZOOM = 17;
 // every status.json key the page shows (tests check none is missing)
 var SHOWN = ("fix sats hdop hacc fix_src ubx utc position pos6 nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
-  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota").split(" ");
+  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
 var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime"];
@@ -182,6 +182,13 @@ function esc(v) {
 }
 function nn(s) { return s === undefined || s === "" || s === "None" || s === "-" ? null : s; }   // Python None in a text
 function two(n) { return (n < 10 ? "0" : "") + n; }
+function prevText(d) {                  // the run before this boot
+  var t = typeof d.prev_uptime === "number" ? hms(d.prev_uptime) : String(d.prev_run);
+  if (/crash/.test(d.prev_run)) return t + ", ended by a crash";
+  if (/^under/.test(d.prev_run)) return String(d.prev_run);
+  var e = d.prev_end ? Date.parse(d.prev_end) : NaN;
+  return t + (isNaN(e) ? "" : ", until " + when(e));
+}
 function hms(s) {                       // as _hms() in gps_logger.py
   if (s === null || s === undefined) return "-";
   s = Math.floor(s);
@@ -350,9 +357,15 @@ function view(d, prev) {
     line("FIX SOURCE", src + "<em>ubx " + esc(ub[0]) + " ok" + dot + esc(ub[1]) + " bad</em>") +
     line("WIFI", esc(ssid || nn(ws[0])) + (q4 ? " &middot; " + q4[1] + "% (" + d.rssi + " dBm)" : "") + "<em>" + num(d.pulses) +
       " keep-alive</em>", q4 ? q4[2] : "") +
-    line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() + (pr ? "<em>prev " + esc(pr) + "</em>" : ""),
+    // when this run started (local time) and how long the one before it
+    // lasted, up to when (its last line); not "prev 1 min" next to nothing
+    line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() +
+      (typeof d.uptime === "number" ? " &middot; " + when(Date.now() - d.uptime * 1000) : "") +
+      "<em>up " + hms(d.uptime) + (pr ? dot + "previous run " + esc(prevText(d)) : "") + "</em>",
       d.boot_cause === 3 || /crash/.test(pr) ? "warn" : "") +
-    (d.fw === undefined ? "" : line("FIRMWARE", esc(d.fw) + "<em>ota " + esc(d.ota) + "</em>",
+    // the build's date (the commit time) is the version; the commit after it
+    (d.fw === undefined ? "" : line("FIRMWARE", (d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw)) +
+      "<em>" + esc(OTA[d.ota] || "ota " + d.ota) + (d.fw_build > 0 ? dot + esc(d.fw) : "") + "</em>",
       /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : "")) +
     line("CHIP", (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz" +
       (d.utc ? "<em>" + esc(String(d.utc).slice(11, 19)) + " UTC</em>" : ""));
@@ -508,6 +521,14 @@ function tripsOf(pts) {
   return out;
 }
 function hm(ms) { var d = new Date(ms); return two(d.getHours()) + ":" + two(d.getMinutes()); }
+// local "HH:MM" today, "MM-DD HH:MM" another day, "YYYY-MM-DD HH:MM" with year
+function when(ms, year) {
+  var d = new Date(ms), n = new Date(), day = two(d.getMonth() + 1) + "-" + two(d.getDate()) + " ";
+  if (year) return d.getFullYear() + "-" + day + hm(ms);
+  return d.toDateString() === n.toDateString() ? hm(ms) : day + hm(ms);
+}
+var OTA = {current: "up to date", ok: "updated", idle: "not checked yet", checking: "checking",
+  downloading: "downloading", "rolled back": "rolled back"};
 function dur(ms) { var m = Math.round(ms / 60000); return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + two(m % 60) + " min"; }
 // the timeline: a dot and a solid line per trip (distance, time, mean
 // speed), a hollow dot and a dashed line per stop; on: the trip shown on
