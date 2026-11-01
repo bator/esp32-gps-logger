@@ -15,7 +15,7 @@
 <style>
 :root{--b:#060b16;--l:#16233d;--t:#d6e2ff;--m:#7487ae;--a:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
 body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-serif}
-.tm,.sys,.term,.p h2,.hud,.coord,.legend,.svt{font-family:"JetBrains Mono",ui-monospace,monospace}
+.tm,.none,.term,.p h2,.hud,.coord,.legend,.svt{font-family:"JetBrains Mono",ui-monospace,monospace}
 /* map */
 .map{position:relative;height:360px;overflow:hidden;background:#0a1222}
 .tiles{position:absolute;left:50%;top:42%;filter:invert(1) hue-rotate(195deg) saturate(.35) brightness(.62) contrast(1.15)}
@@ -48,13 +48,13 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .tm div{background:rgba(10,19,38,.9);padding:11px 12px;min-width:0}
 .tm small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}
 .tm b{display:block;font-size:22px;color:#fff;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tm b em,.sys em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
+.tm b em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
 .wi{width:25px;height:19px;margin-right:8px;vertical-align:-1px;color:var(--a);fill:none;stroke-width:2.4;stroke-linecap:round;filter:drop-shadow(0 0 4px currentColor)}
 .wi path{stroke:rgba(116,135,174,.28)}.wi .on{stroke:currentColor}.wi circle{fill:currentColor;stroke:none}
 .tm b em.db{margin-left:10px}
 .tm .warn .wi,.tm .bad .wi{color:inherit}
 .tm .ok b{color:var(--ok);text-shadow:0 0 12px rgba(52,211,153,.5)}
-.tm .warn b,.sys .warn{color:var(--warn)}.tm .bad b,.sys .bad{color:var(--bad)}
+.tm .warn b{color:var(--warn)}.tm .bad b{color:var(--bad)}
 .g{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;margin-top:12px}
 .p{background:linear-gradient(180deg,rgba(18,32,60,.75),rgba(9,16,32,.85));border:1px solid var(--l);border-radius:14px;padding:14px}
 .p h2{font-size:10.5px;font-weight:600;letter-spacing:.16em;color:var(--m);margin:0 0 10px;text-transform:uppercase}
@@ -75,13 +75,48 @@ circle.u{fill:none;filter:none;opacity:.7}
 .r i{flex:1;min-height:2px;background:linear-gradient(0deg,var(--s),transparent 140%);box-shadow:0 0 6px var(--s)}
 .r .u{opacity:.25;box-shadow:none}
 /* systems */
-.sys{font-size:12px;color:var(--m);display:flex;justify-content:space-between;gap:10px;margin-top:9px}
-.sys:first-child{margin-top:0}
-.sys span{color:#fff;text-align:right}
-.bar{position:relative;height:6px;background:var(--l);border-radius:3px;margin-top:6px}
-.bar i{display:block;height:100%;border-radius:3px;background:var(--a);box-shadow:0 0 8px var(--a)}
-.bar.bad i{background:var(--bad);box-shadow:0 0 8px var(--bad)}
-.bar b{position:absolute;top:-3px;width:2px;height:12px;background:var(--warn)}
+
+.none{font-size:12px;color:var(--m)}
+/* Systems, after the "Drone Airframe Diagnostics" layout: readiness rows,
+   a storage module, uplink cells, a device table */
+.sx{--g:#7fe39a;--wo:#ff8a4c;--xr:#ff5d5d;--lab:#8a96ad;--ln:rgba(255,255,255,.07);padding:18px 18px 16px}
+.sx-t{font:500 19px Inter,sans-serif;letter-spacing:.04em;color:#fff;margin:0}
+.sx-s{font:500 11px Inter,sans-serif;letter-spacing:.08em;color:var(--lab);margin:4px 0 0;text-transform:uppercase}
+.sx-h{display:flex;align-items:center;justify-content:space-between;margin:20px 0 10px;font:500 12px Inter,sans-serif;letter-spacing:.07em;color:#dfe6f3;text-transform:uppercase}
+.sx-h span{display:flex;align-items:center;gap:8px}
+.sx svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;flex:none}
+.sx-h b{font:500 19px Inter,sans-serif;color:#fff;letter-spacing:0}
+.sx-seg{display:flex;gap:4px;margin:2px 0 10px}
+.sx-seg i{flex:1;height:6px;border-radius:1px;background:var(--g);box-shadow:0 0 8px rgba(127,227,154,.7)}
+.sx-seg.warn i{background:var(--wo);box-shadow:0 0 8px rgba(255,138,76,.6)}.sx-seg.bad i{background:var(--xr);box-shadow:0 0 8px rgba(255,93,93,.6)}
+.sx-seg i.off{background:#3a4458;box-shadow:none}
+.sx-r{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--ln);font:500 12px Inter,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#dfe6f3}
+.sx-r:last-of-type{border-bottom:0}
+.sx-r span{display:flex;align-items:center;gap:10px;min-width:0}
+.sx-r em{font-style:normal;color:var(--lab);letter-spacing:.03em;text-transform:none;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sx-r i{width:7px;height:7px;border-radius:50%;background:var(--g);box-shadow:0 0 6px var(--g);flex:none}
+.sx-r b{font-weight:500;color:var(--g);white-space:nowrap}
+.sx .warn i,.sx-r.warn i{background:var(--wo);box-shadow:0 0 6px var(--wo)}.sx-r.bad i{background:var(--xr);box-shadow:0 0 6px var(--xr)}
+.sx-r.warn b,.sx .warn>b,.sx b.warn{color:var(--wo)}.sx-r.bad b,.sx .bad>b,.sx b.bad{color:var(--xr)}
+.sx-m{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;background:rgba(255,255,255,.035);border:1px solid var(--ln);border-radius:10px;padding:16px}
+.sx-big{font:500 40px Inter,sans-serif;color:var(--g);text-shadow:0 0 18px rgba(127,227,154,.35);line-height:1;white-space:nowrap}
+.sx .sx-big small{display:inline;font:500 22px Inter,sans-serif;letter-spacing:0;color:inherit;text-transform:none}
+.sx-big.warn{color:var(--wo);text-shadow:none}.sx-big.bad{color:var(--xr);text-shadow:none}
+.sx-bl{font:500 11px Inter,sans-serif;letter-spacing:.08em;color:var(--lab);margin-top:8px;text-transform:uppercase}
+.sx-4{display:grid;grid-template-columns:1fr 1fr;row-gap:14px}
+.sx-4 div{padding-left:12px;border-left:1px solid var(--ln)}
+.sx small{display:block;font:500 10.5px Inter,sans-serif;letter-spacing:.07em;color:var(--lab);text-transform:uppercase}
+.sx-4 b,.sx-c b{display:block;font:500 17px Inter,sans-serif;color:#fff;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sx b em{font:400 12px Inter,sans-serif;color:var(--lab);font-style:normal;margin-left:3px}
+.sx-cs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.sx-c{background:rgba(255,255,255,.045);border-radius:6px;padding:12px 10px;min-width:0;color:var(--lab)}
+.sx-c svg{width:14px;height:14px;margin-bottom:8px}
+.sx-c b.ok{color:var(--g)}
+.sx-k{width:100%;border-collapse:collapse}
+.sx-k td{padding:7px 0;font:500 12px Inter,sans-serif;letter-spacing:.06em;color:var(--lab);text-transform:uppercase}
+.sx-k td+td{text-align:right;color:#fff;letter-spacing:.02em;text-transform:none;font-size:14px}
+.sx-k td.warn{color:var(--wo)}
+.sx-chip{display:inline-block;border:1px solid rgba(127,227,154,.45);background:rgba(127,227,154,.08);color:var(--g);font:600 10.5px Inter,sans-serif;letter-spacing:.06em;padding:4px 7px;border-radius:3px;margin-left:8px;vertical-align:1px;text-transform:uppercase}
 /* log + satellite table */
 .term{font-size:12.5px;line-height:1.75;color:#9fb3da;overflow-x:auto;white-space:nowrap}
 .term .t{color:var(--m)}.term .ok{color:var(--ok)}.term .boot{color:var(--a)}.term .err{color:var(--bad)}.term .warn{color:var(--warn)}.term .info{color:#c4b5fd}
@@ -143,7 +178,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
     </div>
     <div class="col">
       <div class="p"><h2 id="bh">Signal &middot; dBHz</h2><div class="r" id="bars"></div></div>
-      <div class="p"><h2>Systems</h2><div id="sys"></div></div>
+      <div class="p sx" id="sys"></div>
     </div>
   </div>
   <div class="g">
@@ -161,7 +196,7 @@ var GNSS = {GPS: 0, SBAS: 1, Galileo: 2, BeiDou: 3, QZSS: 5, GLONASS: 6};
 // 2 also machine.reset() and a panic, 0 a USB/JTAG or unknown reset
 var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", 3: "watchdog", 4: "deep sleep", 5: "soft reset"};
 var TLS_KB = 48;                        // TLS_MIN_KB in gps_logger.py
-var POINT_B = 8;                        // bytes per .trb point (~7 on a 1 Hz drive; .trk ~46-51)
+var POINT_B = 7;                        // bytes per .trb point (7.0-7.3 on a 1 Hz drive; .trk ~46-51)
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
 var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
@@ -223,14 +258,6 @@ function cell(label, value, unit, tone) {
   return '<div class="' + (tone || "") + '"><small>' + label + "</small><b>" + value + (unit ? "<em>" + unit + "</em>" : "") +
     "</b></div>";
 }
-function line(label, value, tone) {
-  return '<div class="sys">' + label + '<span class="' + (tone || "") + '">' + value + "</span></div>";
-}
-function meter(frac, tone, mark) {
-  return '<div class="bar ' + (tone || "") + '"><i style="width:' + Math.max(0, Math.min(100, Math.round(frac * 100))) + '%"></i>' +
-    (mark === undefined ? "" : '<b style="left:' + Math.round(mark * 100) + '%"></b>') + "</div>";
-}
-
 // Event log: the diag tail, newest on top. Status lines (one a minute) are
 // a row of numbers, everything else an event.
 var STATUS = /^up (\d+) utc (\S+) nmea (\d+)\/(\d+) gpsboots (\d+) loops (\d+) sats (\S+) fix (\S+) hdop (\S+) points (\d+) sent (\d+) wifi (\S+) pulses (\d+) mem (\d+) idf (\S+)\/(\S+)/;
@@ -282,6 +309,33 @@ function gpsLink(d, prev) {
     junk: tone === "bad" && d.rx_age_s !== null && d.rx_age_s !== undefined && d.rx_age_s <= GPS_SILENT_S};
 }
 
+// Systems panel pieces (line icons as in the picked design)
+var ICON = {
+  ready: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v9h9"/></svg>',
+  store: '<svg viewBox="0 0 24 24"><rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 10v4"/></svg>',
+  link: '<svg viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M2 9a14 14 0 0 1 20 0"/></svg>',
+  chip: '<svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></svg>',
+  net: '<svg viewBox="0 0 24 24"><path d="M3 20h18M6 16V8M12 16V4M18 16v-6"/></svg>',
+  sig: '<svg viewBox="0 0 24 24"><path d="M4 18h2M9 18v-4M14 18V9M19 18V5"/></svg>',
+  clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+};
+function sxHead(icon, title, right) {
+  return '<div class="sx-h"><span>' + ICON[icon] + title + "</span>" + (right ? "<b>" + right + "</b>" : "") + "</div>";
+}
+// one subsystem: [name, detail, tone ("" nominal, "warn", "bad"), word when nominal]
+function sxRow(r) {
+  return '<div class="sx-r ' + r[2] + '"><span><i></i>' + r[0] + " <em>" + r[1] + "</em></span><b>" +
+    (r[2] === "bad" ? "Error" : r[2] === "warn" ? "Warn" : r[3] || "Nominal") + "</b></div>";
+}
+function sxCell(icon, label, value, tone) {        // label: HTML
+  return '<div class="sx-c">' + ICON[icon] + "<small>" + label + '</small><b class="' + (tone || "") + '">' + value + "</b></div>";
+}
+// how long the free flash holds a 1 Hz drive (POINT_B a point)
+function sxLeft(kb) {
+  var h = kb * 1024 / POINT_B / 3600;
+  return h >= 48 ? ["&asymp;" + Math.floor(h / 24), "days"] : ["&asymp;" + Math.floor(h), "h"];
+}
+
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it;
 // prev: the poll before, for rates)
 function view(d, prev) {
@@ -329,7 +383,7 @@ function view(d, prev) {
       "</td><td>" + (s.used ? "&#9679;" : "") + "</td></tr>";
   }
   v.dots = dots;
-  v.bars = bars || '<span class="sys">NO SATELLITE LIST YET</span>';
+  v.bars = bars || '<span class="none">NO SATELLITE LIST YET</span>';
   v.skyh = "Sky &middot; " + used + " locked / " + svs.length + " tracked";
   v.bh = "Signal &middot; dBHz" + (d.satellites_age_s === null || d.satellites_age_s === undefined ? "" :
     " &middot; list " + hms(d.satellites_age_s) + " old");
@@ -337,38 +391,60 @@ function view(d, prev) {
   v.svt = tbl;
   var rx = String(d.receiver || "unknown receiver"), comma = rx.indexOf(", ");
   var fk = d.flash_kb, pr = d.prev_run ? String(d.prev_run) : "";
-  v.sys = line("IDF BLOCK", isNaN(big) ? "-" : big + " KB<em>of " + fr + " free</em>", big < TLS_KB ? "bad" : "") +
-    (isNaN(big) ? "" : meter(big / 160, big < TLS_KB ? "bad" : "", TLS_KB / 160)) +
-    line("PY HEAP FREE", esc(pk) + " / " + esc(d.heap_kb) + " KB", pk !== null && pk < 8 ? "warn" : "") +
-    (d.heap_kb && pk !== null ? meter(pk / d.heap_kb) : "") +
-    line("FLASH FREE", fk === null || fk === undefined ? "-" : (fk / 1024).toFixed(1) + " MB<em>&asymp;" +
-      num(Math.floor(fk * 1024 / POINT_B / 1000)) + "k pts</em>") +
-    line("UPLINK", esc(d.upload).toUpperCase() + "<em>" + num(d.sent) + " sent" + dot + num(d.files) + " files" + dot +
-      num(d.upload_err) + " err" + dot + num(d.bad_files) + " bad</em>",
-      d.bad_files > 0 ? "bad" : d.upload_err > 0 || /err|low/.test(d.upload || "") ? "warn" : "") +
-    (d.upload_age_s === undefined ? "" : line("LAST UPLOAD", (ua === null ? "none since boot" : hms(ua) + " ago") +
-      "<em>" + num(d.left) + " pts waiting</em>", late ? "warn" : "")) +
-    (gl ? line("GPS LINK", (gl.rate === null ? "-" : num(Math.round(gl.rate)) + " B/s") + "<em>last frame " +
-      (d.good_age_s === null ? "never" : hms(d.good_age_s) + " ago") + dot + bytes(d.rx_bytes) + " read</em>", gl.tone) : "") +
-    line("TRACK", num(d.points) + " pts logged" + (d.stay === "yes" ? "<em>staying</em>" : "")) +
-    line("RECEIVER", esc(comma > 0 ? rx.slice(0, comma) : rx).toUpperCase() + "<em>" + num(d.gps_boots) + " rst" + dot +
-      num(d.gps_loops) + " loops" + dot + "setup " + (d.setup_ok === true ? "ok" : d.setup_ok === false ? "no" : "-") +
-      "</em>", d.gps_loops > 0 || d.setup_ok === false ? "warn" : "") +
-    line("FIX SOURCE", src + "<em>ubx " + esc(ub[0]) + " ok" + dot + esc(ub[1]) + " bad</em>") +
-    line("WIFI", esc(ssid || nn(ws[0])) + (q4 ? " &middot; " + q4[1] + "% (" + d.rssi + " dBm)" : "") + "<em>" + num(d.pulses) +
-      " keep-alive</em>", q4 ? q4[2] : "") +
-    // when this run started (local time) and how long the one before it
-    // lasted, up to when (its last line); not "prev 1 min" next to nothing
-    line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() +
-      (typeof d.uptime === "number" ? " &middot; " + when(Date.now() - d.uptime * 1000) : "") +
-      "<em>up " + hms(d.uptime) + (pr ? dot + "previous run " + esc(prevText(d)) : "") + "</em>",
-      d.boot_cause === 3 || /crash/.test(pr) ? "warn" : "") +
-    // the build's date (the commit time) is the version; the commit after it
-    (d.fw === undefined ? "" : line("FIRMWARE", (d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw)) +
-      "<em>" + esc(OTA[d.ota] || "ota " + d.ota) + (d.fw_build > 0 ? dot + esc(d.fw) : "") + "</em>",
-      /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : "")) +
-    line("CHIP", (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz" +
-      (d.utc ? "<em>" + esc(String(d.utc).slice(11, 19)) + " UTC</em>" : ""));
+  // Systems: readiness (the share of subsystems nominal), a storage module
+  // (the drive the free flash holds), uplink cells and the device; counters
+  // that are 0 are left out
+  var utone = d.bad_files > 0 ? "bad" : d.upload_err > 0 || late || /err|low/.test(d.upload || "") ? "warn" : "";
+  var subs = [
+    ["GPS receiver", esc(comma > 0 ? rx.slice(0, comma) : rx) + dot + esc(fix) + dot + esc(sats[1]) + "/" + esc(sats[0]) + " sats" +
+      (d.setup_ok === false ? dot + "setup failed" : "") + (d.gps_loops > 0 ? dot + num(d.gps_loops) + " loops" : ""),
+      fix.indexOf("3D") === 0 && !(d.gps_loops > 0) && d.setup_ok !== false ? "" : "warn"],
+    ["Upload", esc(d.upload) + (d.sent ? dot + num(d.sent) + " sent" : "") + (d.upload_err ? dot + num(d.upload_err) + " err" : "") +
+      (d.bad_files ? dot + num(d.bad_files) + " bad" : ""), utone],
+    ["Memory", "IDF " + (isNaN(big) ? "-" : big + " KB") + (q.length > 1 && !isNaN(fr) ? " of " + fr : "") + dot + "heap " + esc(pk) + "/" + esc(d.heap_kb) + " KB",
+      big < TLS_KB ? "bad" : pk !== null && pk < 8 ? "warn" : ""]
+  ];
+  if (gl)                               // (a firmware without the counters: none)
+    subs.splice(1, 0, ["GPS link", (gl.rate === null ? "" : num(Math.round(gl.rate)) + " B/s" + dot) +
+      (d.good_age_s === null ? "no frame yet" : "frame " + hms(d.good_age_s) + " ago") + dot + src +
+      (d.fix_src === "pvt" ? " " + esc(ub[0]) + "/" + esc(ub[1]) + " ubx" : "") +
+      (d.gps_boots > 0 ? dot + num(d.gps_boots) + " restarts" : "") + dot + bytes(d.rx_bytes) + " read", gl.tone]);
+  if (d.fw !== undefined)
+    subs.push(["Firmware", d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw),
+      /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : "", esc(OTA[d.ota] || "ota " + d.ota)]);
+  var nom = 0, worst = "";
+  for (var k = 0; k < subs.length; k++) {
+    if (!subs[k][2]) nom++;
+    else if (worst !== "bad") worst = subs[k][2];
+  }
+  var rd = Math.round(nom * 100 / subs.length), lit = Math.round(rd / 10), seg = "";
+  for (k = 0; k < 10; k++) seg += k < lit ? "<i></i>" : '<i class="off"></i>';
+  var left = fk === null || fk === undefined ? ["-", ""] : sxLeft(fk);
+  var sig = q4 ? q4[1] + "% " + (q4[2] === "bad" ? "poor" : q4[2] ? "weak" : q4[0] === 3 ? "strong" : "good") : "-";
+  v.sys = '<p class="sx-t">LOGGER SYSTEM STATUS</p><p class="sx-s">Real-time diagnostics &amp; health' +
+      (d.fw === undefined ? "" : dot + esc(d.fw)) + "</p>" +
+    sxHead("ready", "System readiness", rd + "%") + '<div class="sx-seg ' + worst + '">' + seg + "</div>" +
+    subs.map(sxRow).join("") +
+    sxHead("store", "Storage module") +
+    '<div class="sx-m"><div><div class="sx-big' + (fk !== null && fk !== undefined && fk < 1024 ? " warn" : "") + '">' + left[0] +
+      "<small> " + left[1] + '</small></div><div class="sx-bl">Offline driving left</div></div><div class="sx-4">' +
+      "<div><small>Free</small><b>" + (fk === null || fk === undefined ? "-" : (fk / 1024).toFixed(1) + "<em>MB</em>") + "</b></div>" +
+      "<div><small>Waiting</small><b" + (late ? ' class="warn"' : "") + ">" + num(d.left) + "<em>pts</em></b></div>" +
+      "<div><small>Logged</small><b>" + num(d.points) + "<em>pts</em>" + (d.stay === "yes" ? "<em>staying</em>" : "") + "</b></div>" +
+      "<div><small>Files</small><b" + (d.bad_files > 0 ? ' class="bad"' : "") + ">" + num(d.files) +
+        (d.bad_files ? "<em>+" + num(d.bad_files) + " bad</em>" : "<em>waiting</em>") + "</b></div></div></div>" +
+    sxHead("link", "Uplink") + '<div class="sx-cs">' +
+      sxCell("net", "Network", esc(ssid || nn(ws[0])) + (d.pulses ? "<em>" + num(d.pulses) + " keep-alive</em>" : "")) +
+      sxCell("sig", "Signal" + (q4 ? dot + esc(d.rssi) + " dBm" : ""), sig, q4 ? (q4[2] || "ok") : "") +
+      sxCell("clock", "Last upload", ua === null || ua === undefined ? (d.upload_age_s === undefined ? "-" : "none yet") : hms(ua) + " ago",
+        late ? "warn" : "") + "</div>" +
+    sxHead("chip", "Device") + '<table class="sx-k">' +
+      "<tr><td>Running</td><td>" + hms(d.uptime) + (typeof d.uptime === "number" ?
+        '<span class="sx-chip">since ' + when(Date.now() - d.uptime * 1000) + "</span>" : "") + "</td></tr>" +
+      "<tr><td>Last boot</td><td" + (d.boot_cause === 3 ? ' class="warn"' : "") + ">" + esc(BOOT[d.boot_cause] || d.boot_cause) + "</td></tr>" +
+      (pr ? "<tr><td>Previous run</td><td" + (/crash/.test(pr) ? ' class="warn"' : "") + ">" + esc(prevText(d)) + "</td></tr>" : "") +
+      "<tr><td>Chip</td><td>" + (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz</td></tr>" +
+      (d.utc ? "<tr><td>GPS time</td><td>" + esc(String(d.utc).slice(11, 19)) + " UTC</td></tr>" : "") + "</table>";
   var lines = d.diag || [], log = "";
   for (var j = lines.length - 1; j >= 0; j--) log += logLine(lines[j]);
   v.log = log || '<span class="t">THE DIAGNOSTIC LOG IS EMPTY</span>';

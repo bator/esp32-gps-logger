@@ -319,10 +319,10 @@ diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not
 one rolled back by a power-off (the cable pulled) is tried again. A boot
 without a pending note confirms the running image. Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
-The status page shows the running build under *Systems*: `FIRMWARE` is the
-build's date (the commit time, `fw_build` in the JSON, local time), then
-the OTA state (`up to date`, `updated`, `checking`, `rolled back`, …) and
-the commit.
+The status page shows the running build under *Systems*: the `FIRMWARE` row
+gives the build's date (the commit time, `fw_build` in the JSON, local
+time) and the OTA state (`up to date`, `updated`, `checking`, `rolled back`,
+…); the commit is in the panel's subtitle.
 
 After the migration, `--flash` over USB still works. It backs up both slots
 (after an OTA the second one runs), writes the first slot and erases
@@ -496,15 +496,26 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
   colour = system: GPS blue, Galileo green, BeiDou amber, GLONASS pink;
   filled = in the fix, hollow = not used);
 - one signal bar per satellite (lines at 15/30/45 dBHz);
-- *Systems*: the largest IDF heap block, with a mark at the 48 KB TLS
-  needs, then the Python heap, free flash, upload state and counters,
-  points logged and stay, receiver restarts and setup, the fix source
-  (`NAV-PVT` / `NMEA`) with the UBX frame counts, WiFi (`ssid · 74%
-  (-63 dBm)`) and keep-alive pulses, `BOOT`: the cause and when this run
-  started (local time; `up` how long ago), then how long the run before it
-  lasted and until when (`HARD RESET · 14:23`, `up 2 h 54 min · previous
-  run 2 min 30 s, until 14:23`), `FIRMWARE` (the build date), chip
-  temperature and GPS time;
+- *Systems* (`LOGGER SYSTEM STATUS`, laid out after a drone diagnostics
+  design: uppercase labels, a segmented bar, status words):
+  - *System readiness*: the share of subsystems nominal as a 10-segment bar
+    (green, amber with a warning, red with an error), then a row each with
+    its detail and `NOMINAL` / `WARN` / `ERROR`: `GPS RECEIVER` (model, fix,
+    satellites used/seen; amber without a 3D fix, a failed setup or reset
+    loops), `GPS LINK` (B/s, the last whole frame, the fix source with the
+    UBX counts, restarts, bytes read), `UPLOAD` (state, sent, errors, `.bad`
+    files), `MEMORY` (the largest IDF block, red under the 48 KB TLS needs,
+    and the Python heap), `FIRMWARE` (the build date, the OTA state);
+  - *Storage module*: how long the free flash holds a 1 Hz drive (`≈18
+    days`, at 7 bytes a `.trb` point), free MB, points waiting (amber over
+    30 min), points logged, track files waiting and `.bad` files;
+  - *Uplink*: the network (and keep-alive pulses), the signal (`86%
+    strong`, the dBm in its label: strong / good / weak / poor by the same
+    tones as the strip) and the last accepted upload;
+  - *Device*: how long it has run and since when (local time), the boot
+    cause, the run before it and until when, chip temperature and clock,
+    GPS time.
+  Counters that are 0 are left out of the rows;
 - the *Event log*: the diagnostic log, newest on top, with the minute
   status lines as rows (local time, fix, satellites, points, IDF block, red
   below 48 KB) and boots, upload errors and receiver lines as events;
@@ -526,10 +537,10 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
   ~240;
 - a folded satellite table (signal, elevation, azimuth, used).
 
-*Systems* also shows `GPS LINK` (bytes a second between two polls, the age
-of the last whole frame; amber after 3 s, red after 10 s) and `LAST UPLOAD`
-(amber, also the strip's `UPLINK`, when points have waited over 30 min
-without an accepted batch). While the receiver sends nothing whole for over
+The `GPS LINK` row (bytes a second between two polls, the age of the last
+whole frame) turns amber after 3 s, red after 10 s; the waiting points and
+the last upload turn amber (also the strip's `UPLINK`) when points have
+waited over 30 min without an accepted batch. While the receiver sends nothing whole for over
 10 s, a red banner above the strip says `GPS SILENT · 42 S` and whether
 bytes still arrive (wiring or baud rate) or nothing does (power or the TX
 wire): useful while moving the wires with the page open.

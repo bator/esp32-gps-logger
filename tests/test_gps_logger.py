@@ -10918,23 +10918,23 @@ else:
     def _hm(t):
         return time.strftime("%H:%M", time.localtime(t))
 
-    boots = [">BOOT<span class=\"\">HARD RESET &middot; %s<em>up 2 h 54 min "
-             "&middot; previous run 2 min 30 s, until %s</em>" % (_hm(x),
-                                                                _hm(x - 30))
+    boots = ['<tr><td>Running</td><td>2 h 54 min<span class="sx-chip">since '
+             '%s</span></td></tr><tr><td>Last boot</td><td>hard reset</td>'
+             '</tr><tr><td>Previous run</td><td>2 min 30 s, until %s</td>'
+             '</tr>' % (_hm(x), _hm(x - 30))
              for x in (now_ - 10492, now_ - 10492 - 60)]
-    fwl = (">FIRMWARE<span class=\"\">%s<em>up to date &middot; 86fb9c8</em>"
+    fwl = ('<i></i>Firmware <em>%s</em></span><b>up to date</b>'
            % time.strftime("%Y-%m-%d %H:%M", time.localtime(1793548800)))
-    check("PAGE-BOOT: BOOT shows the boot's local time, the uptime and the "
-          "previous run up to when; FIRMWARE the build date, 'up to date' "
-          "and the commit",
+    check("PAGE-BOOT: Device shows the uptime with the boot's local time, "
+          "the cause and the previous run up to when; Firmware the build "
+          "date and 'up to date', the commit in the subtitle",
           any(b_ in syb for b_ in boots) and fwl in syb
+          and "health &middot; 86fb9c8</p>" in syb
           and json.loads(rb_.stdout).get("unlabeled") == [],
-          syb[syb.find(">BOOT<"):syb.find(">CHIP<")])
+          syb[syb.find("Firmware"):syb.find("Chip")])
     check("PAGE-PVT: Systems shows the fix source and the UBX frame counts",
-          '>FIX SOURCE<span class="">NAV-PVT<em>ubx 500 ok &middot; 2 bad'
-          '</em>' in sy3 and v3.get("unlabeled") == []
-          and '>FIX SOURCE<span class="">-<em>ubx 0 ok' in v.get("sys", ""),
-          sy3[-900:])
+          "&middot; NAV-PVT 500/2 ubx" in sy3 and v3.get("unlabeled") == []
+          and " ubx" not in v.get("sys", ""), sy3[:1500])
     check("PAGE: telemetry strip - fix, sats, HDOP, uplink, WiFi, NMEA bad",
           '<div class="ok"><small>FIX</small><b>3D</b></div>' in tm
           and "<small>SATS</small><b>1<em>/2</em>" in tm
@@ -10965,12 +10965,19 @@ else:
           and '<i class="g1 u" style="height:0%" title="SBAS 5 - dBHz">'
           in v.get("bars", ""), v.get("bars", "")[:300])
     sy = v.get("sys", "")
-    check("PAGE: Systems - every JSON key shown, escaped, IDF bar with mark",
-          v.get("unlabeled") == [] and ">IDF BLOCK<" in sy
-          and '<b style="left:30%">' in sy and "&lt;x&gt;" in sy
-          and "<x>" not in sy and ">UPLINK<" in sy and "IDLE" in sy
-          and ">RECEIVER<" in sy and ">BOOT<" in sy,
-          repr(v.get("unlabeled")) + sy[:300])
+    check("PAGE: Systems - every JSON key shown, escaped; readiness, "
+          "storage, uplink and device sections; a silent GPS link an error",
+          v.get("unlabeled") == [] and "System readiness</span><b>60%</b>" in sy
+          and '<div class="sx-seg bad">' + "<i></i>" * 6 in sy
+          and "Storage module" in sy and "Uplink" in sy and "Device" in sy
+          and "&lt;x&gt;" in sy and "<x>" not in sy
+          and "Upload <em>idle" in sy and "GPS receiver <em>" in sy
+          and '<div class="sx-r bad"><span><i></i>GPS link <em>no frame yet'
+              in sy and "<b>Error</b>" in sy
+          and '<div class="sx-r "><span><i></i>Memory <em>IDF 144 KB of 157'
+              in sy,
+          repr(v.get("unlabeled")) + sy[sy.find("Upload <em>") - 300:
+                                         sy.find("Storage module")])
     lg = v.get("log", "")
     check("PAGE: Event log - newest first, status rows, events, red low IDF",
           lg.startswith('<div><span class="t">--:--</span>  <span class="">'
@@ -10987,11 +10994,11 @@ else:
                           [1, 64, "warn"], [1, 40, "warn"], [0, 38, "bad"],
                           [0, 0, "bad"], [0, 0, "bad"], None],
           repr(v.get("wq")))
-    check("PAGE-WIFI: Systems line 'ssid · 50% (-75 dBm)', no quality words",
-          "&lt;x&gt; &middot; 50% (-75 dBm)<em>" in sy
-          and not any(w in tm + sy for w in ("GOOD", "FAIR", "WEAK",
-                                             "EXCELLENT", "NO SIGNAL")),
-          sy[:600])
+    check("PAGE-WIFI: Uplink cells - the network, the signal in % with a "
+          "word by its tone and the dBm",
+          "<small>Network</small><b class=\"\">&lt;x&gt;" in sy
+          and '<small>Signal &middot; -75 dBm</small><b class="warn">50% weak'
+              in sy, sy[sy.find("Network"):sy.find("Last upload")])
     # PAGE-NULL: south/west coordinates, Python None in diag lines, quotes
     check("PAGE-NULL: S/W coordinates as absolute values",
           v.get("coordSW", "").startswith("33.85678&deg; S  151.21530&deg; W")
@@ -11004,8 +11011,9 @@ else:
           and "CAUSE -" in v.get("bootNone", ""),
           repr((v.get("logNone"), v.get("bootNone"))))
     check("PAGE-NULL: an empty status.json shows - (no None/null/NaN)",
-          'PY HEAP FREE<span class="">- / - KB</span>' in v.get("nullSys", "")
-          and 'WIFI<span class="">-<em>' in v.get("nullSys", "")
+          "heap -/- KB" in v.get("nullSys", "")
+          and '<small>Network</small><b class="">-</b>' in v.get("nullSys", "")
+          and "GPS link" not in v.get("nullSys", "")
           and not any(w in v.get("nullSys", "") for w in (
               "None", "null", "NaN", "undefined")),
           v.get("nullSys", "")[:600])
@@ -11060,21 +11068,25 @@ else:
           ft.get("glOk") == "" and ft.get("glDead", "").startswith(
               "GPS SILENT &middot; 42 S<em>nothing from the receiver")
           and ft.get("alert", "").startswith("GPS SILENT &middot; 1 MIN 00 S")
-          and '>GPS LINK<span class="">400 B/s<em>last frame 0 s ago '
-              '&middot; 48.8 KB read</em>' in ft.get("sysOk", "")
-          and '>GPS LINK<span class="bad">-<em>last frame 42 s ago'
-              in ft.get("sysDead", "")
-          and "GPS LINK" not in ft.get("sysNone", "-"),
+          and '<div class="sx-r "><span><i></i>GPS link <em>400 B/s &middot; '
+              'frame 0 s ago' in ft.get("sysOk", "")
+          and "48.8 KB read</em>" in ft.get("sysOk", "")
+          and '<div class="sx-r bad"><span><i></i>GPS link <em>frame 42 s '
+              'ago' in ft.get("sysDead", "")
+          and "GPS link" not in ft.get("sysNone", "-"),
           repr((ft.get("glDead"), ft.get("sysOk", "")[-400:])))
     check("PAGE-UPLOAD: LAST UPLOAD line; amber (and the strip) when points "
           "wait over 30 min",
-          '>LAST UPLOAD<span class="">30 s ago<em>0 pts waiting</em>'
+          '<small>Last upload</small><b class="">30 s ago</b>'
+          in ft.get("sysOk", "") and "<small>Waiting</small><b>0<em>pts"
           in ft.get("sysOk", "")
-          and '>LAST UPLOAD<span class="warn">1 h 06 min ago<em>50 pts '
-              'waiting</em>' in ft.get("sysDead", "")
+          and '<small>Last upload</small><b class="warn">1 h 06 min ago</b>'
+              in ft.get("sysDead", "")
+          and '<small>Waiting</small><b class="warn">50<em>pts'
+              in ft.get("sysDead", "")
           and '<div class="warn"><small>UPLINK</small><b>50<em>pts' in
               ft.get("tmDead", "")
-          and "LAST UPLOAD" not in ft.get("sysNone", "-"),
+          and "<small>Last upload</small><b class=\"\">-</b>" in ft.get("sysNone", "-"),
           repr(ft.get("sysDead", "")[-500:]))
     pd = ft.get("pastDays") or ["?"]
     check("PAGE-DAYS: the days oldest first (bad, duplicate and today's "
