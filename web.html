@@ -437,8 +437,9 @@ function histDue() { return !hist.busy && !hist.done && Date.now() - hist.at >= 
 // The day: today or one of the board's days (the JSON's days, UTC names
 // read as local days), stepped with the arrows
 var boardDays = [];
-function dayList(days) {               // -> YYYYMMDD days oldest first, today last
-  var today = utcDay(Date.now()), out = [];
+function localYmd(ms) { var d = new Date(ms); return d.getFullYear() + two(d.getMonth() + 1) + two(d.getDate()); }
+function dayList(days) {               // -> YYYYMMDD days oldest first, today (local) last
+  var today = localYmd(Date.now()), out = [];
   for (var i = 0; i < (days || []).length; i++) {
     var s = String(days[i]);
     if (/^\d{8}$/.test(s) && s < today && out.indexOf(s) < 0) out.push(s);
@@ -447,15 +448,23 @@ function dayList(days) {               // -> YYYYMMDD days oldest first, today l
   out.push(today);
   return out;
 }
+// the shown day's place in the list; a day the board has since deleted
+// sits between its neighbours (x.5), so both arrows still lead somewhere
+function dayIdx(ds) {
+  var cur = sel || ds[ds.length - 1], i = ds.indexOf(cur), n = 0;
+  if (i >= 0) return i;
+  while (n < ds.length && ds[n] < cur) n++;
+  return n - .5;
+}
 function step(dir) {
-  var ds = dayList(boardDays), i = ds.indexOf(sel || ds[ds.length - 1]), j = Math.max(0, Math.min(ds.length - 1, i + dir));
-  if (j !== i) pick(j === ds.length - 1 ? "" : ds[j]);
+  var ds = dayList(boardDays), i = dayIdx(ds), j = dir < 0 ? Math.ceil(i) - 1 : Math.floor(i) + 1;
+  if (j >= 0 && j < ds.length) pick(j === ds.length - 1 ? "" : ds[j]);
 }
 function navPaint() {
-  var ds = dayList(boardDays), i = ds.indexOf(sel || ds[ds.length - 1]);
+  var ds = dayList(boardDays), i = dayIdx(ds);
   document.getElementById("dname").innerHTML = hist.past ? dayName() : "TODAY";
   document.getElementById("dprev").disabled = i <= 0;
-  document.getElementById("dnext").disabled = i < 0 || i >= ds.length - 1;
+  document.getElementById("dnext").disabled = i >= ds.length - 1;
 }
 function pick(day) {
   sel = day || null;
@@ -550,7 +559,8 @@ var STAT_KEY = "gps-static", stat = {on: false, s: []};
 try { var _st = JSON.parse(localStorage.getItem(STAT_KEY)); if (_st && _st.s) stat = _st; } catch (e) {}
 function statSave() { try { localStorage.setItem(STAT_KEY, JSON.stringify(stat)); } catch (e) {} }
 function statAdd(d, now) {
-  if (!stat.on) return;
+  // only a fix the receiver just sent (a frozen one would shrink the CEP)
+  if (!stat.on || (d.good_age_s !== undefined && (d.good_age_s === null || d.good_age_s > GPS_OK_S))) return;
   var p = String(d.pos6 || d.position || "").split(", ");
   if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) return;
   stat.s.push([now, +p[0], +p[1], typeof d.hacc === "number" ? d.hacc : null]);

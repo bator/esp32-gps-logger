@@ -3759,6 +3759,24 @@ try:
     epoch("120121.00")
     check("GST: without GST (another receiver) only HDOP decides",
           gl.st["std"] is None and gl._usable(_clock[0]))
+    # REV-5: at 1 Hz GST comes once per 5 epochs (and one may be lost):
+    # the seconds between keep its estimate for GST_HOLD, not None (that
+    # let 4 of 5 seconds of a converging cold start through)
+    gl.reset()
+    gst_second("120130.00", 150.0)
+    _clock[0] += 1000
+    epoch("120131.00")
+    _clock[0] += 1000
+    epoch("120132.00")
+    held = (gl.st["std"], gl._usable(_clock[0]))
+    _clock[0] += getattr(gl, "GST_HOLD", 6000) + 1000
+    epoch("120133.00")
+    _clock[0] += 1000
+    epoch("120134.00")
+    check("REV-5: a second without GST keeps the last estimate (GST_HOLD), "
+          "then only HDOP decides",
+          held == (150.0, False) and gl._usable(_clock[0]),
+          repr((held, gl.st.get("std"))))
 
     # UBX: a receiver still booting at setup stays at 1 Hz -> sent again,
     # less and less often; one that took it is left alone
@@ -6160,12 +6178,12 @@ try:
               gl.PB_MODE == "scan" and ons[0] - o0 == 1
               and gl.wifi["pb_scans"] == 6, "mode=%s" % gl.PB_MODE)
         gl.PB_MODE = "radio"
-        gl._keepalive_env({"KEEPALIVE_MODE": "Scan", "KEEPALIVE_PIN": "12"})
+        gl._keepalive_env({"KEEPALIVE_MODE": "Scan", "KEEPALIVE_PIN": "14"})
         m1, p1 = gl.PB_MODE, gl.PB_PIN
         gl._keepalive_env({"KEEPALIVE_MODE": "laser", "KEEPALIVE_PIN": "x"})
         check("PB_KEEPALIVE: .env KEEPALIVE_MODE / KEEPALIVE_PIN, bad ones kept",
-              m1 == "scan" and p1 == 12 and gl.PB_MODE == "scan"
-              and gl.PB_PIN == 12, "%s %s %s %s" % (m1, p1, gl.PB_MODE, gl.PB_PIN))
+              m1 == "scan" and p1 == 14 and gl.PB_MODE == "scan"
+              and gl.PB_PIN == 14, "%s %s %s %s" % (m1, p1, gl.PB_MODE, gl.PB_PIN))
         # WR-b: a pin the board already uses (GPS, I2C, boot-bypass, the
         # C6's USB) is refused: pulsing it broke the GPS or the console
         saved_c6 = gl.IS_C6
@@ -6858,7 +6876,7 @@ try:
     gl.log_reset()
     gl.up_reset()
     _reset_cause[0] = 6
-    gl._up[:] = [0, 0]                   # uptime from tick 0
+    gl._up[:] = [0, 0, 0]                # uptime from tick 0
     gl._diag_boot()
     _reset_cause[0] = 1
     gl.st.update(ok=120, err=3, gps_boots=2, loops=1, used=7,
@@ -7386,7 +7404,7 @@ TPW = 1 << 30
 saved_t = (time.ticks_ms, time.ticks_diff)
 time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
 try:
-    gl._up[:] = [0, TPW - 1000]
+    gl._up[:] = [0, TPW - 1000, 0]
     ups = []
     for k in range(1, 15):
         ups.append(gl.uptime_s((TPW - 1000 + k * 86400000) & (TPW - 1)))
@@ -10165,7 +10183,7 @@ make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
 gap_ms = getattr(gl, "LOWIDF_REBOOT_GAP", 1800000)
 took = (gl.up.get("lowidf_boot"), os.path.exists(mark))
 saved_up = list(gl._up)
-gl._up[0], gl._up[1] = 0, _clock[0]      # just booted
+gl._up[:] = [0, _clock[0], 0]           # just booted
 gl.idf_heap = lambda: (30, 20)
 gl.wifi["home"] = True
 _resets[:] = []
@@ -10637,7 +10655,7 @@ diag_clear()
 gl.reset()
 gl.up_reset()
 gl.wifi_reset()
-gl.st.update(rx=_clock[0], valid=True, fixtype=3, quality=1,
+gl.st.update(rx=_clock[0], pos_at=_clock[0], valid=True, fixtype=3, quality=1,
              hdop=0.88199996, lat=47.1, lon=18.4)
 gl.st["svs"] = [(16, 26, 0, 90, True, False, 0),
                 (11, 12, 90, 250, False, False, 3),
@@ -10660,7 +10678,7 @@ gl.wifi.update(state="off", ssid=None, rssi=None)
 gl.st["svs"] = None
 page_json2 = gl._web_json()
 # a NAV-PVT second (new feature): hAcc, the fix source, UBX frame counts
-gl.st.update(valid=True, fixtype=3, quality=1, hdop=None, lat=47.1,
+gl.st.update(pos_at=_clock[0], valid=True, fixtype=3, quality=1, hdop=None, lat=47.1,
              lon=18.4, lat_i=471000000, lon_i=184000000, hacc=30.04,
              fix_src="pvt", ubx_ok=500, ubx_bad=2)
 gl._web_diag = lambda: ["up 120 utc 20261031T130241Z nmea 72/0 gpsboots 0 "
@@ -10910,6 +10928,16 @@ else:
           and ft.get("hlMap") == 2 and ft.get("hlLine") is True
           and ft.get("hlOff") == 1,
           repr((ft.get("kpis"), ft.get("kpisLong"), ft.get("hlMap"))))
+    check("REV-1: the static test skips a fix older than GPS_OK_S (or none)",
+          ft.get("statFresh") == [47.1], repr(ft.get("statFresh")))
+    check("REV-4: today is the local date (Budapest 00:30 = Nov 2), Nov 1 "
+          "a past day",
+          ft.get("tz") == [-60, ["20261031", "20261101", "20261102"]],
+          repr(ft.get("tz")))
+    check("REV-10: a deleted shown day keeps both arrows (to its neighbours)",
+          ft.get("pruned") == [[False, False, True],
+                               ["20261028", "20261030"]],
+          repr(ft.get("pruned")))
     gx = ft.get("gpx", "")
     check("PAGE-GPX: GPX 1.1, a segment per 5 min gap, ele when known, "
           "escaped name",
@@ -11003,7 +11031,7 @@ check("WEB-LINK: rx_bytes counts every byte, good_age_s only whole frames",
 
 # WEB-POS6: the position at the track line's precision for the static test:
 # NAV-PVT's integer 1e-7 degrees exactly, NMEA's float to 6 decimals
-gl.st.update(valid=True, lat=47.1853612, lon=18.4273049, lat_i=471853612,
+gl.st.update(pos_at=_clock[0], valid=True, lat=47.1853612, lon=18.4273049, lat_i=471853612,
              lon_i=184273049)
 p_pvt = json.loads(gl._web_json())
 gl.st.update(lat_i=None, lon_i=None)
@@ -11089,6 +11117,278 @@ check("C6-UART: C6 GPS on UART1 tx=18 rx=19, ESP32 on UART2 tx=17 rx=16",
       and c6_pins[4][0][:1] == (1,) and c6_pins[4][1].get("tx") == 18
       and c6_pins[4][1].get("rx") == 19
       and wr_pins == (False, 2, 17, 16), "%r %r" % (c6_pins, wr_pins))
+
+# --- review fixes (REV-n: the n-th finding of the 2026-11-01 review) ------
+
+_rev_dir = tempfile.mkdtemp()
+gl.wifi_reset()
+gl.LOG_DIR = _rev_dir
+gl.log_reset()
+gl.up_reset()
+
+# REV-1: a silent receiver keeps its last second's valid flag; the page
+# got that position as live (and the static test recorded it)
+gl.reset()
+gl.st.update(rx=_clock[0], pos_at=_clock[0], valid=True, fixtype=3,
+             lat=47.1, lon=18.4)
+r1a = json.loads(gl._web_json())
+_clock[0] += gl.NO_DATA + 1000
+r1b = json.loads(gl._web_json())
+gl.reset()
+check("REV-1: no position once the last second is older than NO_DATA",
+      r1a["position"] == "47.10000, 18.40000" and r1a["pos6"] is not None
+      and r1b["fix"] == "No data!" and r1b["position"] is None
+      and r1b["pos6"] is None, repr((r1a.get("position"), r1b.get("fix"),
+                                     r1b.get("position"))))
+
+# REV-2: the home link dropping (a router restart) during a home stay
+# keeps the stay a home stay (at_home() reads sleep_home off-line)
+class _LostW(object):
+    def status(self, arg=None):
+        if arg:
+            raise OSError(1)
+        return 0                         # STAT_IDLE: the link is gone
+    def isconnected(self):
+        return False
+r2 = []
+for active in (True, False):
+    gl.wifi_reset()
+    gl.log_reset()
+    gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                        "hidden": False, "bssid": None, "ip": None}]
+    gl.wifi.update(wlan=_LostW(), state="connected", ssid="home", home=True,
+                   last_check=_clock[0])
+    gl.log["still"]["active"] = active
+    gl.wifi_tick()
+    r2.append((gl.wifi["state"], bool(gl.at_home())))
+gl.wifi_reset()
+gl.log_reset()
+check("REV-2: link lost at home: a home stay stays at home, no stay is not",
+      r2 == [("lost", True), ("lost", False)], repr(r2))
+
+# REV-3: a track file whose writes keep failing (a bad block) is left after
+# WFAIL_SWITCH failures; the batch goes on in a new file, the old uploads
+_r3 = tempfile.mkdtemp()
+gl.LOG_DIR = _r3
+gl.log_reset()
+gl.start_file("20261101_100000")
+gl.log["batch"].extend(trk_line(47.1, 18.4, "2026-11-01T10:00:%02dZ" % i)
+                       for i in range(3))
+gl.flush()
+f3 = gl.log["file"]
+_open3 = builtins.open
+def _bad_open(name, mode="r", *a, **k):
+    if name == f3 and mode != "rb":
+        raise OSError(5)
+    return _open3(name, mode, *a, **k)
+builtins.open = _bad_open
+try:
+    for r in range(getattr(gl, "WFAIL_SWITCH", 3)):
+        gl.log["batch"].append(trk_line(47.2, 18.4,
+                                        "2026-11-01T10:05:%02dZ" % r))
+        gl.flush()
+finally:
+    builtins.open = _open3
+f3b = gl.log["file"]
+gl.flush()
+new3 = pts_in(f3b) if f3b != f3 and os.path.exists(f3b) else None
+pend3 = [os.path.basename(x) for x in gl.pending()]
+check("REV-3: after WFAIL_SWITCH failed writes a new file takes the batch; "
+      "the old one (3 points) is left to upload",
+      f3b != f3 and new3 == 3 and pts_in(f3) == 3
+      and os.path.basename(f3) in pend3 and not gl.log["batch"],
+      repr((f3, f3b, new3, pend3)))
+gl.LOG_DIR = _rev_dir
+gl.log_reset()
+shutil.rmtree(_r3, ignore_errors=True)
+
+# REV-6/7: a scan that raises MemoryError, or returns [] (v1.29 does on a
+# failed esp_wifi_scan_start), is a failed scan: no crash, None
+class _ScanW(object):
+    def __init__(self, how):
+        self.how = how
+    def scan(self):
+        if self.how == "mem":
+            raise MemoryError("scan")
+        return []
+    def active(self, x=None):
+        return True
+gl.wifi_reset()
+gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                    "hidden": False, "bssid": None, "ip": None}]
+r6 = []
+for how in ("mem", "empty"):
+    try:
+        r6.append(gl._scan_known(_ScanW(how)))
+    except MemoryError:
+        r6.append("raised")
+try:
+    gl._pb_pulse_radio(_ScanW("mem"), True)
+    r6.append("pulse ok")
+except MemoryError:
+    r6.append("pulse raised")
+gl.wifi_reset()
+check("REV-6/7: scan MemoryError and an empty scan read as a failed scan",
+      r6 == [None, None, "pulse ok"], repr(r6))
+
+# REV-8: the uploaded file that cannot be deleted keeps its .pos (it was
+# dropped, and the whole file went up again and again)
+_r8 = tempfile.mkdtemp()
+p8 = os.path.join(_r8, "20261101_110000.trk")
+make_trk(p8, 3)
+gl.write_offset(p8, 40)
+_rm8 = os.remove
+def _no_rm(path, *a):
+    if path == p8:
+        raise OSError(1)
+    return _rm8(path, *a)
+os.remove = _no_rm
+try:
+    try:
+        gl.commit_offset(p8, 3, 100, eof=True)
+        r8 = "no error"
+    except OSError:
+        r8 = "raised"
+finally:
+    os.remove = _rm8
+check("REV-8: a failed delete at EOF raises and keeps the .pos",
+      r8 == "raised" and os.path.exists(p8 + ".pos"), repr(r8))
+shutil.rmtree(_r8, ignore_errors=True)
+
+# REV-9: a client dribbling its request head gets WEB_HEAD_WAIT, not the
+# whole WEB_DEADLINE (no NMEA is read while recv waits); UART read between
+class _Drip(object):
+    def __init__(self):
+        self.n = 0
+    def settimeout(self, t):
+        pass
+    def recv(self, n):
+        _clock[0] += 300
+        self.n += 1
+        return b"x"
+_uart_rx.extend(b"$GPTXT,01,01,02,hello*00\r\n")
+c9 = _Drip()
+t9 = _clock[0]
+gl._web_end[0] = time.ticks_add(_clock[0], gl.WEB_DEADLINE * 1000)
+try:
+    gl._web_read(c9)
+    r9 = "returned"
+except OSError:
+    r9 = "timed out"
+finally:
+    end9 = gl._web_end[0]
+    gl._web_end[0] = None
+took9 = _clock[0] - t9
+check("REV-9: a dribbling head is cut after WEB_HEAD_WAIT, the deadline "
+      "restored, the UART read meanwhile",
+      r9 == "timed out" and took9 <= 1300 and not _uart_rx
+      and end9 == time.ticks_add(t9, gl.WEB_DEADLINE * 1000),
+      repr((r9, took9, len(_uart_rx))))
+del _uart_rx[:]
+
+# REV-11: counters stay small ints (heap longs every loop after 12 days);
+# "good" ages out with the other receiver stamps
+gl._up[:] = [0, _clock[0], 0]
+c11 = _clock[0]
+for d in range(20):
+    c11 += 86400000
+    up11 = gl.uptime_s(c11)
+small11 = gl._up[0] < (1 << 30) and len(gl._up) == 3 and 0 <= gl._up[2] < 1000
+gl.reset()
+gl.st["rx_b"] = 0x3FFFFFF0
+_uart_rx.extend(b"$" * 32)
+gl.read_uart()
+rx11 = gl.st["rx_b"]
+del _uart_rx[:]
+gl.reset()
+gl.st["good"] = _clock[0]
+_clock[0] += gl.TICKS_CAP + 1000
+gl._stamps_old(_clock[0])
+good11 = gl.st["good"]
+gl.reset()
+gl._up[:] = [0, _clock[0], 0]
+check("REV-11: uptime in seconds + ms (20 days), the byte count wraps at "
+      "2^30, good cleared after TICKS_CAP",
+      up11 == 20 * 86400 and small11 and rx11 == 16 and good11 is None,
+      repr((up11, list(gl._up), rx11, good11)))
+
+# REV-12: trk2gpx stops at the footer (bytes after it are left over from a
+# longer older write)
+g12 = trk2gpx.convert(["#TRK1\n", "47.1,18.4,1,1,20261026T100000Z\n",
+                       "#END\n", "47.9,18.9,1,1,20261026T095959Z\n"], "x")
+check("REV-12: trk2gpx ignores what follows #END",
+      g12.count("<trkpt") == 1 and "47.9" not in g12, g12[-200:])
+
+# REV-13: a receiver restart read during an acknowledged setup keeps the
+# wait txt() set (a storm's GPS_STORM_WAIT), not GPS_RETRY again
+gl.reset()
+_ack13 = gl._ubx_ack
+def _ack_restart(*a, **k):
+    if gl.st["gps_boots"] == 0:
+        gl.st["gps_boots"] += 1
+        gl.st["setup_wait"] = gl.GPS_STORM_WAIT
+    return True
+gl._ubx_ack = _ack_restart
+try:
+    gl.gps_setup()
+finally:
+    gl._ubx_ack = _ack13
+w13 = gl.st["setup_wait"]
+gl.reset()
+check("REV-13: a restart during the setup keeps the storm wait",
+      w13 == gl.GPS_STORM_WAIT, repr(w13))
+
+# REV-14: an interface that failed to come up at boot is made again after
+# the backoff (it stayed down for good)
+gl.wifi_reset()
+gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                    "hidden": False, "bssid": None, "ip": None}]
+gl.wifi.update(state="error", wlan=None, last_check=_clock[0])
+gl.wifi_tick()
+early14 = gl.wifi["wlan"]
+_clock[0] += gl.wifi["backoff"] + 1000
+gl.wifi_tick()
+made14 = gl.wifi["wlan"] is not None
+gl.wifi_reset()
+check("REV-14: WLAN made again after the backoff, not before",
+      early14 is None and made14, repr((early14, made14)))
+
+# REV-15: strapping pins refused as KEEPALIVE_PIN: C6 GPIO15, ESP32 GPIO12
+saved15 = gl.IS_C6
+try:
+    gl.IS_C6 = True
+    c15 = (gl._pin_taken(15), gl._pin_taken(2), gl._pin_taken(3))
+    gl.IS_C6 = False
+    e15 = (gl._pin_taken(12), gl._pin_taken(26), gl._pin_taken(13))
+finally:
+    gl.IS_C6 = saved15
+check("REV-15: C6 15 and ESP32 12 refused, the defaults kept",
+      c15 == (True, False, False) and e15 == (True, False, False),
+      repr((c15, e15)))
+
+# REV-16: an append after one cut short (half a line, no newline) starts
+# on a new line: no ghost point glued from the two
+_r16 = tempfile.mkdtemp()
+_hd16 = gl.HIST_DIR
+gl.HIST_DIR = _r16
+with open(os.path.join(_r16, "20261101.trk"), "w") as f:
+    f.write("47.100000,18.400000,1,2,1,20261101T100000Z\n47.4979")
+gl._hist_add(["47.200000,18.500000,1,2,1,20261101T100001Z\n"], 1)
+with open(os.path.join(_r16, "20261101.trk")) as f:
+    h16 = f.read()
+p16 = os.path.join(_r16, "20261101_100000.trk")
+make_trk(p16, 2)
+with open(p16 + ".bad", "w") as f:
+    f.write("47.4979")
+gl._append_bad(p16, 0, os.path.getsize(p16))
+with open(p16 + ".bad") as f:
+    b16 = f.read()
+gl.HIST_DIR = _hd16
+shutil.rmtree(_r16, ignore_errors=True)
+check("REV-16: hist and .bad appends after a cut line start a new line",
+      h16.endswith("\n47.4979\n47.200000,18.500000,1,2,1,20261101T100001Z\n")
+      and b16.startswith("47.4979\n52.500000,13.400000,"),
+      repr((h16[-80:], b16[:60])))
 
 print()
 print("%d passed, %d failed" % (passed, failed))

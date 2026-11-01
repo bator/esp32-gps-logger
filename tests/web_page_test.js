@@ -246,5 +246,47 @@ p.c.hlTrip(0);
 ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
 p.c.step(1);
 ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
+// REV-1: the static test keeps only a fix the receiver just sent
+ft.statFresh = (() => {
+  c0.stat = {on: true, s: []};
+  c0.statAdd({pos6: "47.1, 18.4", good_age_s: 1}, 1);
+  c0.statAdd({pos6: "47.2, 18.4", good_age_s: 8}, 2);
+  c0.statAdd({pos6: "47.3, 18.4", good_age_s: null}, 3);
+  return c0.stat.s.map((q) => q[1]);
+})();
+// REV-4: at 00:30 local on Nov 2 in Budapest (23:30 UTC on Nov 1) today
+// is Nov 2 and Nov 1 a past day (the UTC date made Nov 1 "today")
+ft.tz = (() => {
+  const saved = process.env.TZ;
+  process.env.TZ = "Europe/Budapest";
+  try {
+    const fake = new Date(2026, 10, 2, 0, 30, 0).getTime();
+    const RD = Date;
+    function D(...a) { return a.length ? new RD(...a) : new RD(fake); }
+    D.now = () => fake; D.UTC = RD.UTC;
+    const c = {Date: D, Math: Math, JSON: JSON};
+    vm.createContext(c);
+    vm.runInContext(src, c);
+    return [new RD(fake).getTimezoneOffset(), c.dayList(["20261031", "20261101"])];
+  } finally {
+    if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved;
+  }
+})();
+// REV-10: a shown day the board has deleted keeps both arrows working
+ft.pruned = (() => {
+  const q = page(1600);
+  q.c.boardDays = ["20261028", "20261030"];
+  q.c.sel = "20261029";
+  q.c.navPaint();
+  const nav = [q.doc.getElementById("dprev").disabled, q.doc.getElementById("dnext").disabled];
+  const back = [];
+  q.c.pick = (dd) => back.push(dd);
+  q.c.step(-1);
+  q.c.step(1);
+  q.c.sel = "20261020";                  // older than every day kept
+  q.c.navPaint();
+  nav.push(q.doc.getElementById("dprev").disabled);
+  return [nav, back];
+})();
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));

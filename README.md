@@ -145,7 +145,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `HOSTNAME` | DHCP hostname, `[A-Za-z0-9-]{1,32}` (defaults to `DEVICE_ID`) |
 | `KEEPALIVE` | Seconds between power bank keep-alive pulses, 5–600; `0` turns it off (e.g. on a car charger). Default 5. |
 | `KEEPALIVE_MODE` | What a pulse is: `scan` (default: a full WiFi scan, ~2 s), `radio` (the radio switched on and off, ~0.2 s; too little for a bank that averages the load), `gpio` (the keep-alive pin high for 0.1 s, for a load resistor). |
-| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin the board already uses (GPS TX/RX, I2C, the boot-bypass pin 25 / C6: 10, the C6's USB pins 12/13) or the chip needs (ESP32: strapping pin 0, UART0 1/3, SPI flash 6–11; C6: strapping pins 8/9, UART0 16/17, SPI flash 24–30) is refused with a console line and the default kept. A pin that cannot be driven falls back to `scan`. |
+| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin the board already uses (GPS TX/RX, I2C, the boot-bypass pin 25 / C6: 10, the C6's USB pins 12/13) or the chip needs (ESP32: strapping pins 0 and 12, UART0 1/3, SPI flash 6–11; C6: strapping pins 4/5, 8/9 and 15, UART0 16/17, SPI flash 24–30) is refused with a console line and the default kept. A pin that cannot be driven falls back to `scan`. |
 | `KEEPALIVE_CONNECTED` | `1`/`0`: pulses also while connected and idle (a power bank at home with the status page on); `scan` or `gpio`, a scan keeps the link. Default 0. |
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
@@ -394,9 +394,12 @@ GGA stops at 12) and the satellite list with its age (system and number,
 e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`, `SBAS 123`; signal in
 dBHz, elevation, azimuth, used), HDOP, the horizontal accuracy `hacc` (m,
 NAV-PVT only), the fix source `fix_src` (`pvt` / `nmea`), GPS time,
-position (`position` to 5 decimals, `pos6` to the track line's 6), NMEA
+position (`position` to 5 decimals, `pos6` to the track line's 6; both
+`null` once the last second is over 3 s old, `NO_DATA`, so a silent
+receiver's last fix is not shown as live), NMEA
 counts, UBX frames `ubx` (good / broken: a bad checksum, or
 a NAV-PVT of a wrong length), the GPS link (`rx_bytes` read since boot,
+wrapping at 2^30,
 `rx_age_s` / `good_age_s`: seconds since the last byte / the last whole
 NMEA sentence or UBX frame, `null` for none yet), the receiver model,
 receiver restarts; points logged, waiting and uploaded,
@@ -438,7 +441,8 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
   trip clicked is drawn white on the map, which zooms to it (clicked again:
   the whole day). `GPX` saves the shown day as GPX 1.1 (built in the
   browser, a segment per gap);
-- *Static test*: `START` keeps each poll's position (`pos6`) and hAcc, saved
+- *Static test*: `START` keeps each poll's position (`pos6`; only one the
+  receiver sent in the last 3 s, so a frozen fix cannot shrink the CEP) and hAcc, saved
   in the browser so a reload keeps them; it shows the samples, the span,
   CEP50 / CEP95 (the radius around their mean that holds 50 / 95 % of the
   fixes), the largest distance and the mean hAcc, with a scatter plot. Leave
@@ -491,7 +495,9 @@ whose `Host` is not the board's IP, `HOSTNAME` or `HOSTNAME.local` gets
 `403`: open the page by IP or as `http://<HOSTNAME>.local/` (a name the
 router's DNS gives it, e.g. `….lan`, is refused too). Only a `GET` is
 answered; an empty or cut-off request is just closed. The request head is
-read whole (up to 2 KB), the reply goes out in small pieces with the GPS
+read whole (up to 2 KB, within 1 s: `WEB_HEAD_WAIT`, the GPS read between
+the pieces; a client dribbling its head held the loop longer than the UART
+buffer lasts), the reply goes out in small pieces with the GPS
 read in between; each receive or send may wait 2 s (`WEB_TIMEOUT`) and the
 whole request 5 s (`WEB_DEADLINE`, which also cuts the waits short near
 its end), then the client is dropped, so a slow
@@ -608,7 +614,9 @@ console line.
 - **Averaging.** The valid `GGA` positions, altitude and HDOP of each UTC
   second are averaged and published when the next second starts (`RMC`
   positions if a second had no `GGA`). `GST` gives the receiver's own error
-  estimate of that second. Above `AVG_MAX_SPEED` (10 km/h, the second's top
+  estimate of that second; a second without one keeps the last estimate for
+  6 s (`GST_HOLD`): at 1 Hz `GST` comes only every 5th second, and a lost
+  one used to let its seconds through unfiltered. Above `AVG_MAX_SPEED` (10 km/h, the second's top
   `RMC` speed) the position is the second's first fix instead: the mean of
   five fixes lies ~0.4 s along the track but is stamped with the second,
   6 m behind at 50 km/h and 12 m at 100 km/h. Altitude and HDOP stay
@@ -1026,7 +1034,7 @@ with a NEO-6M; most never need changing.
 | `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP (NMEA) |
-| `GPS_MAX_STD` | 20 m | Skip samples with a worse GST error estimate (NMEA) |
+| `GPS_MAX_STD` / `GST_HOLD` | 20 m / 6 s | Skip samples with a worse GST error estimate (NMEA); how long the last estimate covers seconds without one |
 | `GPS_PVT` | `True` (auto) | UBX-NAV-PVT instead of NMEA on a u-blox M8/M10 (`.env` `GPS_PVT`: `auto` / `0`) |
 | `PVT_MAX_HACC` | 20 m | Skip NAV-PVT seconds with a worse horizontal accuracy estimate; fixes above it count in a second's mean only when it has no better one |
 | `PVT_MAX_TACC` | 1 s | NAV-PVT time at least this accurate (and valid, fully resolved) sets the board clock |
@@ -1042,6 +1050,7 @@ with a NEO-6M; most never need changing.
 | `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file; also the max age of an open file on WiFi |
 | `MIN_FREE` | 32 kB | Flash reserve |
 | `MAX_BATCH` | 240 | Points kept in RAM while flash writes fail |
+| `WFAIL_SWITCH` | 3 | Failed writes in a row to a track file (a bad block) before it is left as it is (it uploads what it holds) and the points go on in a new file |
 | `HOLD_MAX` | 150 | Lines a stay still being proven keeps in RAM |
 
 **Stays**
@@ -1119,7 +1128,7 @@ with a NEO-6M; most never need changing.
 | `STATUS` | 10 min | Console `status` line interval |
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
-| `WEB_TIMEOUT` / `WEB_DEADLINE` | 2 s / 5 s | How long one receive or send may wait; how long a whole request may take |
+| `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
