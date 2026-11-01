@@ -111,6 +111,7 @@ GPS_STORM_QUIET = 10000                  # ms without a restart (in a storm
 # Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
 # GPIO16/17 are its console UART, so it uses UART1 on GPIO18 (TX) / GPIO19
 # (RX): plain pins, unlike the strapping pins GPIO4/5 the GPS used before.
+# .env GPS_TX / GPS_RX move the GPS UART (_gps_pins_env, e.g. back to 4/5).
 # main.py keeps the matching boot-bypass pin.
 IS_C6 = "ESP32C6" in getattr(sys.implementation, "_machine", "")
 if IS_C6:
@@ -2837,6 +2838,55 @@ def _min_move_env(env):
         MIN_MOVE = m
     else:
         print("MIN_MOVE not 0-50 m, using", MIN_MOVE)
+
+def _gps_pin_ok(n, out):
+    """A pin the GPS UART may use: on the chip, not the console UART0, the
+    USB D-/D+, the SPI flash, the I2C (OLED) or the boot-bypass pin, and
+    not a strapping pin a GPS TX idling high would break the boot with
+    (C6: 8/9 download mode; ESP32: 0, and 12, MTDI: the flash at 1.8 V).
+    out: the ESP's TX, not on the ESP32's input-only 34-39."""
+    if n in (I2C_SCL, I2C_SDA):
+        return False
+    if IS_C6:
+        return 0 <= n <= 23 and n not in (8, 9, 10, 12, 13, 16, 17)
+    if out and n >= 34:
+        return False
+    return (0 <= n <= 39 and n not in (0, 1, 3, 12, 25)
+            and not 6 <= n <= 11 and n not in (20, 24, 28, 29, 30, 31))
+
+def _gps_pins_env(env):
+    """GPS_TX / GPS_RX in .env: the ESP's UART pins to the receiver (GPS_TX
+    the ESP's TX -> GPS RX, GPS_RX the ESP's RX <- GPS TX), e.g. the C6's
+    old wiring 4/5 for a second receiver. A pin the board or the chip
+    needs (_gps_pin_ok), or both the same, keeps the default; the UART is
+    moved to the new pins (before the first setup: run)."""
+    global GPS_TX, GPS_RX
+    pins = {"GPS_TX": GPS_TX, "GPS_RX": GPS_RX}
+    for key in ("GPS_TX", "GPS_RX"):
+        v = _plain(env.get(key))
+        if not v:
+            continue
+        try:
+            n = int(v)
+        except ValueError:
+            n = -1
+        if _gps_pin_ok(n, key == "GPS_TX"):
+            pins[key] = n
+        else:
+            print(key, v, "is not a GPS pin here, using", pins[key])
+    tx, rx = pins["GPS_TX"], pins["GPS_RX"]
+    if tx == rx:
+        print("GPS_TX and GPS_RX are the same pin, using", GPS_TX, GPS_RX)
+        return
+    if (tx, rx) == (GPS_TX, GPS_RX):
+        return
+    try:
+        uart.init(baudrate=BAUD, tx=tx, rx=rx)
+    except (ValueError, OSError) as e:
+        print("GPS pins", tx, rx, repr(e), "- using", GPS_TX, GPS_RX)
+        return
+    GPS_TX, GPS_RX = tx, rx
+    print("GPS pins tx", tx, "rx", rx)
 
 def _keepalive_env(env):
     """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
@@ -6231,7 +6281,8 @@ def run():
         wifi_reset()
         up_reset()
         env = load_env(ENV_FILE)
-        _gps_model_env(env)              # before the first setup
+        _gps_pins_env(env)               # before the first setup
+        _gps_model_env(env)
         _gps_pvt_env(env)
         _min_move_env(env)
         _diag_env(env)

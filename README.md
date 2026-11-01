@@ -68,8 +68,8 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
 - The firmware detects the C6 by itself (it has no UART2, and GPIO16/17 are
   its console). `deploy.sh` detects it too and compiles for `rv32imc`.
 - On the C6 the GPS used GPIO4/5 before; those are strapping (JTAG) pins, so
-  it moved to GPIO18/19. A board still wired to 4/5 needs the two data wires
-  moved (or an older firmware).
+  it moved to GPIO18/19. A board still wired to 4/5 sets `GPS_TX=4` and
+  `GPS_RX=5` in `.env` (or moves the two data wires).
 - The ESP TX → GPS RX wire is needed for the 5 Hz setup. Without it the
   receiver stays at 1 Hz and everything else still works.
 - Most GPS and OLED breakouts have their own regulator and I²C pull-ups;
@@ -149,6 +149,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `KEEPALIVE_CONNECTED` | `1`/`0`: pulses also while connected and idle (a power bank at home with the status page on); `scan` or `gpio`, a scan keeps the link. Default 0. |
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
+| `GPS_TX` / `GPS_RX` | The ESP's UART pins to the receiver: `GPS_TX` the ESP's TX (→ GPS RX), `GPS_RX` the ESP's RX (← GPS TX). Default 18 / 19 (ESP32: 17 / 16). A pin the board or chip needs (UART0, USB 12/13, SPI flash, I2C, the boot-bypass pin; C6: strapping 8/9; ESP32: strapping 0 and 12, input-only 34–39 as TX), or both the same, keeps the default with a console line. Read at boot, before the first setup. |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
 | `GPS_PVT` | `auto` (default): on a u-blox M8/M10 (from UBX-MON-VER) fixes come as UBX-NAV-PVT, NMEA off; `0`: NMEA on every receiver. See [GPS](#gps). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
