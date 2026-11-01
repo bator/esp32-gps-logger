@@ -299,7 +299,8 @@ OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 ```
 
 The board, with `OTA_URL` (the manifest's URL) and `OTA_KEY` (the same key)
-in `.env`, checks 2 minutes after boot and then daily, only on a home
+in `.env`, checks 2 minutes after boot and then every 10 minutes (a ~1 KB
+manifest on the LAN), only on a home
 network with no track file waiting for upload (`OTA_FIRST`, `OTA_CHECK`; the
 points in RAM are written before the reset). A build newer
 than its own, whose HMAC checks and that has not failed before, goes into
@@ -312,7 +313,9 @@ staged page files replace the old ones. A crash or reset before that and
 the bootloader boots the old slot; no WiFi within 10 minutes (`OTA_HEALTH`)
 and it resets itself, with the same result (it never sets the old slot to
 boot itself: that left the old image pending, and the next reset fell back
-to `ota_0`). A build that failed is noted in `/ota.bad` and not tried again;
+to `ota_0`). A download that fails its SHA-256 is tried again an hour later
+(`OTA_RETRY`), not every check; an error (server down) goes to the
+diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not tried again;
 one rolled back by a power-off (the cable pulled) is tried again. A boot
 without a pending note confirms the running image. Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
@@ -1204,7 +1207,7 @@ with a NEO-6M; most never need changing.
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
-| `OTA_FIRST` / `OTA_CHECK` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 24 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi; wall clock for one download |
+| `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi; wall clock for one download |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |

@@ -11680,7 +11680,7 @@ def _ota_reset():
         except OSError:
             pass
     gl.ota.update(state="idle", pend=None, pend_at=None, wifi_seen=False,
-                  at=None, paths=[])
+                  at=None, paths=[], failed=None, last_err=None)
     diag_clear()
 
 
@@ -12198,6 +12198,68 @@ gl = _reload_logger()
 check("R2-UPTIME: _up starts at the ticks of the import (boot), not at 0",
       gl._up[0] * 1000 + gl._up[2] == gl._up[1] and 0 <= gl._up[2] < 1000,
       repr(list(gl._up)))
+
+# OTA-RETRY: checks every OTA_CHECK (10 min); a download that failed its
+# sha256 is not downloaded again before OTA_RETRY; one diag line per kind
+# of error (a server down every 10 min filled the log)
+_ota_dir2 = tempfile.mkdtemp()
+_or_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
+             gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
+             gl.DIAG)
+_ota_dir = _ota_dir2
+gl.esp32, gl.HTTP_GET = _FakeEsp32, _ota_get
+gl.OTA_URL, gl.OTA_KEY = "http://ota.lan/gps/manifest.json", b"secret"
+gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+gl.OTA_PENDING = os.path.join(_ota_dir2, "ota.pending")
+gl.OTA_BAD = os.path.join(_ota_dir2, "ota.bad")
+gl.machine.reset = lambda: _ota_log.append(("reset",))
+gl.DIAG = 60000
+try:
+    _ota_reset()
+    gl.ota["failed"] = None
+    _serve(_manifest(200), img=_img[:-1] + b"x")
+    gl._ota_check()
+    w1 = _slots[1].writes
+    s1 = gl.ota["state"]
+    _clock[0] += gl.OTA_CHECK
+    gl._ota_check()
+    w2 = _slots[1].writes
+    _clock[0] += gl.OTA_RETRY
+    _serve(_manifest(200))
+    gl._ota_check()
+    retried = (_slots[1].writes > w2, list(_ota_log))
+    # errors: the same one twice is one diag line, a new one another
+    _ota_reset()
+    gl.ota.update(last_err=None, failed=None)
+    gl.wifi_reset()
+    gl.log_reset()
+    gl.up_reset()
+    gl.wifi.update(state="connected", home=True)
+    def _boom():
+        raise OSError(113)
+    _sc = gl._ota_check
+    gl._ota_check = _boom
+    try:
+        for k in range(3):
+            gl.ota["at"] = _clock[0] - gl.OTA_CHECK
+            gl.ota_tick(_clock[0])
+    finally:
+        gl._ota_check = _sc
+    errs = [l for l in diag_lines() if l.startswith("ota error")]
+finally:
+    (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
+     gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
+     gl.DIAG) = _or_saved
+    gl.wifi_reset()
+    gl.log_reset()
+    diag_clear()
+    shutil.rmtree(_ota_dir2, ignore_errors=True)
+check("OTA-RETRY: OTA_CHECK is 10 min; a bad download waits OTA_RETRY "
+      "before the next try; the same error is one diag line",
+      gl.OTA_CHECK == 600000 and s1 == "bad image" and w2 == w1
+      and retried == (True, [("boot", "ota_1"), ("reset",)])
+      and errs == ["ota error OSError(113)"],
+      repr((s1, w1, w2, retried, errs)))
 
 print()
 print("%d passed, %d failed" % (passed, failed))

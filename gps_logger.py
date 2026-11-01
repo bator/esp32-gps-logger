@@ -5946,7 +5946,10 @@ def _low_mem(now):
 OTA_URL = None                           # .env OTA_URL: the manifest
 OTA_KEY = None                           # .env OTA_KEY: its HMAC key (bytes)
 OTA_FIRST = 120000                       # ms after boot of the first check
-OTA_CHECK = 86400000                     # ms between checks
+OTA_CHECK = 600000                       # ms between checks (a ~1 KB manifest
+                                         # on the LAN)
+OTA_RETRY = 3600000                      # ms before a build whose download
+                                         # failed is downloaded again
 OTA_VALID_AFTER = 120000                 # ms a new firmware runs, WiFi
                                          # connected, before it is valid
 OTA_HEALTH = 600000                      # ms it may take to get WiFi
@@ -6178,6 +6181,11 @@ def _ota_check():
     if build <= FW_BUILD or build in _ota_bad():
         ota["state"] = "current"
         return
+    f = ota.get("failed")
+    if (f is not None and f[0] == build
+            and _age(time.ticks_ms(), f[1]) < OTA_RETRY):
+        ota["state"] = "bad image"       # (2 MB every OTA_CHECK: no)
+        return
     if _hmac_hex(OTA_KEY, _ota_signed(m)) != m.get("hmac"):
         ota["state"] = "bad hmac"
         _diag_write("ota %s: manifest hmac does not match" % m["commit"])
@@ -6196,6 +6204,7 @@ def _ota_check():
     got = w.close()
     if (code != 200 or got != m["sha256"]
             or _slot_sha(part, m["size"]) != m["sha256"]):
+        ota["failed"] = (build, time.ticks_ms())
         ota["state"] = "bad image"
         _diag_write("ota %s: download %s, sha256 mismatch" % (m["commit"],
                                                              code))
@@ -6322,7 +6331,12 @@ def ota_tick(now):
     except Exception as e:               # a network or flash error: the next
         ota["state"] = "err"             # check is OTA_CHECK later
         print("ota", repr(e))
-        _diag_write("ota error %r" % (e,))
+        err = repr(e)[:60]
+        if err != ota.get("last_err"):   # (one line per kind: a server down
+            ota["last_err"] = err        # every 10 min filled the diag log)
+            _diag_write("ota error %s" % err)
+        return
+    ota["last_err"] = None
 
 # --- Status page ------------------------------------------------------------
 # A small HTTP page on the LAN while the radio is connected (at home, or
