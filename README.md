@@ -152,7 +152,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `GPS_TX` / `GPS_RX` | The ESP's UART pins to the receiver: `GPS_TX` the ESP's TX (→ GPS RX), `GPS_RX` the ESP's RX (← GPS TX). Default 18 / 19 (ESP32: 17 / 16). A pin the board or chip needs (UART0, USB 12/13, SPI flash, I2C, the boot-bypass pin; C6: strapping 8/9; ESP32: strapping 0 and 12, input-only 34–39 as TX), or both the same, keeps the default with a console line. Read at boot, before the first setup. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
-| `GPS_PVT` | `auto` (default): on a u-blox M8/M10 (from UBX-MON-VER) fixes come as UBX-NAV-PVT, NMEA off; `0`: NMEA on every receiver. See [GPS](#gps). Read at boot. |
+| `GPS_PVT` | `auto` (default, also `1`/`true`): on a u-blox M8/M10 (from UBX-MON-VER) fixes come as UBX-NAV-PVT, NMEA off; `0` (or `false`/`off`/`no`): NMEA on every receiver. See [GPS](#gps). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
 | `WEB_AWAY` | `1`/`0`: with `WEB` on, the radio stays on for the page on the non-home networks too (e.g. a phone hotspot), instead of sleeping once all is uploaded. Default 0. |
@@ -281,11 +281,18 @@ PORT=/dev/ttyACM0 ./deploy.sh
 ```
 
 **Then:** `tools/build_firmware.sh --publish` writes `firmware/ota/`
-(`micropython.bin`, the page, `manifest.json`) and copies it with `scp` to
-`OTA_DEST`, a folder a web server on the LAN serves. The manifest carries the
-build (the commit time), the commit, size and SHA-256 of each file, and an
-HMAC-SHA256 over them with the key in `OTA_KEY_FILE` (default
-`~/.config/gps-logger/ota.key`). Only a clean, committed tree is published.
+(`micropython-<commit>.bin`, the page as `web-<commit>.html[.gz]`,
+`manifest.json`) and copies it with `scp` to `OTA_DEST`, a folder a web
+server on the LAN serves: the files first, the manifest naming them last,
+so a board reading the old manifest meanwhile still finds its files. The
+manifest carries the build (the commit time), the commit, size and SHA-256
+of each file, and an HMAC-SHA256 over them with the key in `OTA_KEY_FILE`
+(default `~/.config/gps-logger/ota.key`). The key is printable ASCII without
+quotes or spaces, 16 characters or more (the board reads it from `.env`):
+`openssl rand -hex 32 > ~/.config/gps-logger/ota.key`. Only a clean,
+committed tree is published. A `--flash` or dirty build carries the build
+time instead of the commit time, so the OTA does not replace what was just
+flashed by hand with an older published build.
 
 ```bash
 OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
@@ -293,22 +300,28 @@ OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 
 The board, with `OTA_URL` (the manifest's URL) and `OTA_KEY` (the same key)
 in `.env`, checks 2 minutes after boot and then daily, only on a home
-network with everything uploaded (`OTA_FIRST`, `OTA_CHECK`). A build newer
+network with no track file waiting for upload (`OTA_FIRST`, `OTA_CHECK`; the
+points in RAM are written before the reset). A build newer
 than its own, whose HMAC checks and that has not failed before, goes into
 the other app slot 4 KB at a time, with the GPS read and the watchdog fed
-between (~1 min). It is read back against its SHA-256, the page files are
-replaced (`.tmp`, then renamed), the slot is set to boot and the board
-resets. The new firmware runs pending: after 10 minutes with WiFi connected
-(`OTA_HEALTH`) it marks itself valid. A crash before that and the bootloader
-boots the old slot; no WiFi in that time and it boots the old slot itself.
-A build that failed is noted in `/ota.bad` and not tried again. Each step
-is in the diagnostic log (`ota … installed`, `booted, checking`, `ok`,
-`rolled back`). The status page shows the running commit and the OTA state
-under *Systems* (`FIRMWARE`).
+between (~1 min; the HTTP body ends at its Content-Length). It is read back
+against its SHA-256, the page files are staged as `<file>.new`, the slot is
+set to boot and the board resets. The new firmware runs pending: 2 minutes
+with WiFi connected (`OTA_VALID_AFTER`) mark it valid, and only then do the
+staged page files replace the old ones. A crash or reset before that and
+the bootloader boots the old slot; no WiFi within 10 minutes (`OTA_HEALTH`)
+and it resets itself, with the same result (it never sets the old slot to
+boot itself: that left the old image pending, and the next reset fell back
+to `ota_0`). A build that failed is noted in `/ota.bad` and not tried again;
+one rolled back by a power-off (the cable pulled) is tried again. A boot
+without a pending note confirms the running image. Each step is in the
+diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
+The status page shows the running commit and the OTA state under *Systems*
+(`FIRMWARE`: `pending`, `ok`, `rolled back`, `current`, …).
 
-After the migration, `--flash` over USB still works. It writes the first
-slot and erases otadata, so that slot boots even after an OTA had switched
-to the other.
+After the migration, `--flash` over USB still works. It backs up both slots
+(after an OTA the second one runs), writes the first slot and erases
+otadata, so that slot boots even after an OTA had switched to the other.
 
 ## Using it
 
@@ -531,8 +544,10 @@ in the header; it is drawn also without a fix), and zooms out (17 down to 13) un
 position. A gap of over 5 minutes breaks the line. Every track line the
 logger writes also goes to `/hist/YYYYMMDD.trk` (its UTC date; the same
 text as the track file, which is deleted once it is uploaded). The newest
-7 days are kept (`HIST_DAYS`), and nothing is added while the flash is
-nearly full (under 2 × `MIN_FREE`). The page asks
+7 days are kept (`HIST_DAYS`). The history yields to the tracks: under 1 MB
+free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
+batch would be dropped on a full flash, and nothing is added under
+2 × `MIN_FREE`. The page asks
 `/hist?d=YYYYMMDD&o=<byte>`: a reply is at most 16 KB (`HIST_REPLY`, so a
 long day cannot outrun `WEB_DEADLINE`), the page asks again from where it
 got to, and after that only for what is new, once a minute. A day is ~50
@@ -966,7 +981,11 @@ home.
   body is the same as before.
 - Progress is a `<file>.pos` byte offset, written atomically. It advances
   only after HTTP 2xx or a durable copy to `<file>.bad`, so an interrupted
-  POST is resent (Dawarich deduplicates).
+  POST is resent (Dawarich deduplicates). A 2xx with an HTML body
+  (`Content-Type: text/html`) is a captive portal or proxy answering, not
+  Dawarich: it counts as a failed POST (`upload err html … (captive
+  portal?)` in the diagnostic log). A file that cannot be deleted after its
+  last batch is parked as `.err` after 3 tries.
 - 400 / 413 / 422 quarantine the batch to `<file>.bad`. Three in a row
   without a success count as a server problem: backoff, no more quarantine
   (rejections of a `.bad` itself do not count here).
@@ -1104,6 +1123,7 @@ with a NEO-6M; most never need changing.
 | `FLUSH` | 60 s | Interval between flash writes |
 | `NEW_FILE_GAP` | 300 s | Fix loss that starts a new file; also the max age of an open file on WiFi |
 | `MIN_FREE` | 32 kB | Flash reserve |
+| `HIST_RESERVE` | 1 MB | Free flash the day history leaves to the tracks (older days go first) |
 | `MAX_BATCH` | 240 | Points kept in RAM while flash writes fail |
 | `WFAIL_SWITCH` | 3 | Failed writes in a row to a track file (a bad block) before it is left as it is (it uploads what it holds) and the points go on in a new file |
 | `HOLD_MAX` | 150 | Lines a stay still being proven keeps in RAM |
@@ -1184,7 +1204,7 @@ with a NEO-6M; most never need changing.
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
-| `OTA_FIRST` / `OTA_CHECK` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 24 h / 10 min / 5 min | First update check after boot, then between checks; how long a new firmware runs (WiFi connected) before it is valid; wall clock for one download |
+| `OTA_FIRST` / `OTA_CHECK` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 24 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi; wall clock for one download |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |

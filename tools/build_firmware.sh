@@ -15,7 +15,8 @@
 #   PORT=/dev/ttyACM0 tools/build_firmware.sh --migrate
 #   OTA_DEST=host:/srv/ota/gps tools/build_firmware.sh --publish
 # --flash checks that the board's partition table matches the build's,
-# backs up the board's first app slot to firmware/, writes only the app
+# backs up both app slots to firmware/ (after an OTA the second one runs),
+# writes only the app
 # (0x10000; bootloader, partition table and the file system are kept),
 # erases otadata so that slot boots (after an OTA the other one would) and
 # resets. Nothing on the file system is touched before or by the write: a
@@ -29,14 +30,19 @@
 # system too: copy /.env and /hist off first) and writes bootloader,
 # partition table, otadata and the app. Then put the files back and run
 # ./deploy.sh (see the README, "Firmware updates over WiFi").
-# --publish writes firmware/ota/ (manifest.json, micropython.bin, the page)
-# and copies it to OTA_DEST with scp. The manifest is signed with the key in
-# OTA_KEY_FILE (default ~/.config/gps-logger/ota.key, the board's .env
-# OTA_KEY); only a clean tree is published (BUILD is the commit time).
+# --publish writes firmware/ota/ (micropython-<commit>.bin, the page as
+# web-<commit>.html[.gz], manifest.json naming them) and copies it to
+# OTA_DEST with scp, the manifest last: a board reading the old manifest
+# meanwhile still finds the files it names. The manifest is signed with the
+# key in OTA_KEY_FILE (default ~/.config/gps-logger/ota.key, the board's
+# .env OTA_KEY: printable ASCII, e.g. openssl rand -hex 32); only a clean
+# tree is published (BUILD is the commit time).
 # firmware/gps_frozen.py records the SHA-256 of the frozen gps_logger.py
 # (deploy.sh stops when it differs from the one in the repo), the commit,
-# "-dirty" when the tree had uncommitted changes, and BUILD, the commit
-# time the board's OTA compares.
+# "-dirty" when the tree had uncommitted changes, and BUILD, which the
+# board's OTA compares: the commit time; for --flash and a dirty tree the
+# build time, so an OTA does not replace what was just flashed by hand
+# with an older published build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -63,6 +69,9 @@ DIRTY=
 if [ "$COMMIT" != unknown ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
     COMMIT=$COMMIT-dirty
     DIRTY=1
+fi
+if [ -n "$DIRTY" ] || [ "$MODE" = --flash ]; then
+    BUILD=$(date +%s)
 fi
 SHA=$(sha256sum "$OUT/gps_logger.py" | cut -d" " -f1)
 printf 'COMMIT = "%s"\nSHA = "%s"\nBUILD = %s\n' "$COMMIT" "$SHA" "$BUILD" > "$OUT/gps_frozen.py"
@@ -99,9 +108,12 @@ case "$MODE" in
         echo "(a board without the OTA slots: --migrate, once)" >&2
         exit 1
     fi
-    BACKUP=$OUT/app-backup-$(date +%Y%m%d-%H%M%S).bin
+    STAMP=$(date +%Y%m%d-%H%M%S)
+    BACKUP=$OUT/app-backup-$STAMP.bin
+    BACKUP1=$OUT/app1-backup-$STAMP.bin
     esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x10000 $APP_SIZE "$BACKUP" >/dev/null
-    echo "App slot backed up to $BACKUP"
+    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x280000 $APP_SIZE "$BACKUP1" >/dev/null
+    echo "App slots backed up to $BACKUP and $BACKUP1 (the second one runs after an OTA)"
     esptool.py --chip "$CHIP" --port "$PORT" -b 460800 --after no_reset write_flash \
         --flash_mode dio --flash_freq 80m 0x10000 "$OUT/micropython.bin"
     # otadata gone: the bootloader boots the first slot, the one just written
@@ -109,6 +121,7 @@ case "$MODE" in
     echo "Flashed $PORT. Now run ./deploy.sh (again if the board's REPL does not answer yet):"
     echo "it removes the old gps_logger.mpy that still shadows the frozen logger."
     echo "Roll back with: esptool.py --chip $CHIP --port $PORT write_flash 0x10000 $BACKUP, then ./deploy.sh"
+    echo "(if the board ran the second slot: write_flash 0x10000 $BACKUP1)"
     ;;
 --migrate)
     if ! esptool.py --chip "$CHIP" --port "$PORT" flash_id 2>/dev/null | grep -q "flash size: 16MB"; then
@@ -134,11 +147,19 @@ case "$MODE" in
         echo "No OTA key in $KEY_FILE (the board's .env OTA_KEY)" >&2
         exit 1
     fi
+    # the board reads it from .env: printable ASCII, no quotes or spaces
+    if ! tr -d '\n' < "$KEY_FILE" | LC_ALL=C grep -qE "^[!#-&(-~]{16,}$"; then
+        echo "The OTA key in $KEY_FILE must be 16+ printable ASCII characters" >&2
+        echo "without quotes or spaces (e.g. openssl rand -hex 32)" >&2
+        exit 1
+    fi
     : "${OTA_DEST:?OTA_DEST: where to copy firmware/ota (an scp target)}"
     rm -rf "$OUT/ota"
     mkdir -p "$OUT/ota"
-    cp "$OUT/micropython.bin" web.html "$OUT/ota/"
-    gzip -9 -n -c web.html > "$OUT/ota/web.html.gz"
+    BINF=micropython-$COMMIT.bin
+    cp "$OUT/micropython.bin" "$OUT/ota/$BINF"
+    cp web.html "$OUT/ota/web-$COMMIT.html"
+    gzip -9 -n -c web.html > "$OUT/ota/web-$COMMIT.html.gz"
     python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" <<'EOF'
 import hashlib, hmac, json, os, sys
 d, key_file, build, commit = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
@@ -146,12 +167,14 @@ key = open(key_file, "rb").read().strip()
 def meta(name):
     b = open(os.path.join(d, name), "rb").read()
     return len(b), hashlib.sha256(b).hexdigest()
-size, sha = meta("micropython.bin")
+binf = "micropython-%s.bin" % commit
+size, sha = meta(binf)
 m = {"build": build, "commit": commit, "size": size, "sha256": sha,
-     "url": "micropython.bin", "files": []}
-for name in ("web.html.gz", "web.html"):
+     "url": binf, "files": []}
+for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),
+                   ("/web.html", "web-%s.html" % commit)):
     n, h = meta(name)
-    m["files"].append({"path": "/" + name, "size": n, "sha256": h, "url": name})
+    m["files"].append({"path": path, "size": n, "sha256": h, "url": name})
 # the bytes gps_logger._ota_signed covers
 t = "%d|%s|%d|%s|%s" % (m["build"], m["commit"], m["size"], m["sha256"], m["url"])
 for f in m["files"]:
@@ -161,7 +184,9 @@ with open(os.path.join(d, "manifest.json"), "w") as f:
     json.dump(m, f)
 print("manifest: build", build, "commit", commit, "size", size)
 EOF
-    scp -q "$OUT/ota/micropython.bin" "$OUT/ota/web.html" "$OUT/ota/web.html.gz" "$OUT/ota/manifest.json" "$OTA_DEST/"
+    # the named files first, the manifest naming them last
+    scp -q "$OUT/ota/$BINF" "$OUT/ota/web-$COMMIT.html" "$OUT/ota/web-$COMMIT.html.gz" "$OTA_DEST/"
+    scp -q "$OUT/ota/manifest.json" "$OTA_DEST/"
     echo "Published $COMMIT (build $BUILD) to $OTA_DEST"
     ;;
 esac

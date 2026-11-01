@@ -557,18 +557,27 @@ function gpxSave() {
 // precision) and hAcc are kept (and saved in the browser, so a reload does
 // not lose an hour). The spread around their mean: CEP50 / CEP95 (the radius
 // that holds 50 / 95 % of the fixes) against the receiver's own hAcc.
-var STAT_KEY = "gps-static", stat = {on: false, s: []};
-try { var _st = JSON.parse(localStorage.getItem(STAT_KEY)); if (_st && _st.s) stat = _st; } catch (e) {}
+var STAT_KEY = "gps-static", STAT_MAX = 5000, stat = {on: false, s: []};
+// the saved state (another tab may have added to it); a broken one is none
+function statLoad() {
+  try {
+    var t = JSON.parse(localStorage.getItem(STAT_KEY));
+    if (t && Array.isArray(t.s)) stat = {on: !!t.on, s: t.s};
+  } catch (e) {}
+}
+statLoad();
 function statSave() { try { localStorage.setItem(STAT_KEY, JSON.stringify(stat)); } catch (e) {} }
 function statAdd(d, now) {
   // only a fix the receiver just sent (a frozen one would shrink the CEP)
+  statLoad();                           // (another tab's samples kept)
   if (!stat.on || (d.good_age_s !== undefined && (d.good_age_s === null || d.good_age_s > GPS_OK_S))) return;
   var p = String(d.pos6 || d.position || "").split(", ");
   if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) return;
   stat.s.push([now, +p[0], +p[1], typeof d.hacc === "number" ? d.hacc : null]);
+  if (stat.s.length > STAT_MAX) stat.s.splice(0, stat.s.length - STAT_MAX);   // ~21 h at 15 s
   statSave();
 }
-function statToggle() { stat.on = !stat.on; statSave(); statPaint(); }
+function statToggle() { statLoad(); stat.on = !stat.on; statSave(); statPaint(); }
 function statReset() { stat = {on: stat.on, s: []}; statSave(); statPaint(); }
 function quant(a, q) { return a.length ? a[Math.min(a.length - 1, Math.ceil(q * a.length) - 1)] : null; }
 function statView(s, on) {              // -> {btn, sstat, scat} (pure, for tests)
@@ -734,8 +743,10 @@ function tick() {
   x.open("GET", "/status.json", true);
   x.timeout = 10000;
   x.onload = function () {
-    try {
-      var d = JSON.parse(x.responseText);
+    var d = null;
+    try { d = JSON.parse(x.responseText); } catch (e) { stale(); }
+    // a bug drawing a box is not the board gone: LIVE stays, the error shows
+    if (d) try {
       every = d.refresh_s || 15;
       last = Date.now();
       document.body.className = "";
@@ -748,7 +759,9 @@ function tick() {
       statPaint();
       placeMap(d);
       if (histDue()) histLoad();
-    } catch (e) { stale(); }
+    } catch (e) {
+      document.getElementById("live").innerHTML = "LIVE &middot; PAGE ERROR " + esc(String(e && e.message || e)).slice(0, 60);
+    }
     setTimeout(tick, every * 1000);
   };
   x.onerror = x.ontimeout = function () { stale(); setTimeout(tick, every * 1000); };

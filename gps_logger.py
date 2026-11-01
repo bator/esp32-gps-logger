@@ -201,6 +201,8 @@ HIST_DAYS = 7                            # each written line, a file a UTC
                                          # day, the last HIST_DAYS kept
 HIST_REPLY = 16384                       # bytes at most per /hist reply
 MIN_FREE = 32768                         # bytes of flash kept free
+HIST_RESERVE = 1048576                   # bytes kept free from the day
+                                         # history: older days go first
 MAX_BATCH = 240                          # RAM cap while flash writes fail
 WFAIL_SWITCH = 3                         # failed writes in a row to a track
                                          # file before it is left (a bad
@@ -1463,7 +1465,7 @@ def _diag_tail(path, n):
 
 # whole seconds since boot, ticks then, ms over the seconds (one count of
 # ms passed the small-int range after 12.4 days: a heap long every loop)
-_up = [0, time.ticks_ms(), 0]
+_up = [time.ticks_ms() // 1000, time.ticks_ms(), time.ticks_ms() % 1000]
 
 def uptime_s(now=None):
     """Seconds since boot. ticks_ms wraps every 2^30 ms (12.4 days), so
@@ -2028,7 +2030,7 @@ def wifi_reset():
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
                 retried=False, idle_at=time.ticks_ms(), sleep_home=False,
-                lost_at=None, fails=0, diag_at={}, diag_more={},
+                lost_at=None, fails=0, diag_at={}, diag_more={}, empty=0,
                 pb_at=time.ticks_ms(), pb_scans=0,
                 wake=False, wake_at=None,
                 blank_rssi=None, blank_bssid=None, blank_bad=[],
@@ -2110,6 +2112,19 @@ def _blank_bad(bssid, now):
             return True
     return False
 
+def _scan_empty(aps):
+    """An empty scan that counts as failed. v1.29 returns [] both when
+    esp_wifi_scan_start fails and when no AP is around: the first empty one
+    after a non-empty scan is taken as failed (the round then tries every
+    network); the next ones in a row are a place without APs (every
+    network only each UNLISTED_EVERY rounds again, and an away stay counts
+    them as missed APs)."""
+    if aps:
+        wifi["empty"] = 0
+        return False
+    wifi["empty"] = wifi.get("empty", 0) + 1
+    return wifi["empty"] == 1
+
 def _scan_known(w):
     """Visible known nets, strongest BSSID per SSID, or None if scan fails.
     Hidden APs are listed with an empty SSID; the strongest blank RSSI is
@@ -2126,11 +2141,8 @@ def _scan_known(w):
     try:
         aps = w.scan()
     except SCAN_ERR:
-        aps = []
-    if not aps:
-        # failed: v1.29 returns [] when esp_wifi_scan_start fails (no
-        # exception), so an empty list counts as a failed scan (a place
-        # with no AP at all only costs a try or two more)
+        aps = None
+    if aps is None or _scan_empty(aps):
         wifi["blank_rssi"] = None
         wifi["blank_bssid"] = None
         wifi["blank_ours"] = False
@@ -2517,11 +2529,14 @@ def _wifi_connect(w, net):
     wifi["saw_connecting"] = False
     wifi["learn"] = False                # only a hidden-home GOT_IP sets it
     print("wifi try", net["ssid"])
+    _wifi_clear(w)
+    # the reason left after the clear (v1.29 keeps a disconnect reason until
+    # GOT_IP): taken before it, the previous SSID's 201/202 masked a real
+    # failure of this try with the same code for the whole CONNECT_TIMEOUT
     try:
         wifi["prev_status"] = w.status()
     except WLAN_ERR:
         wifi["prev_status"] = None
-    _wifi_clear(w)
     _wifi_ip(w, net)
     ssid = net.get("raw") or net["ssid"]
     try:
@@ -2686,6 +2701,8 @@ def _wifi_off(w, state):
     if state == "sleep":
         wifi["sleep_home"] = bool(at_home() and log["still"]["active"])
     _radio_off(w)
+    wifi["lost_at"] = None               # ("back after" measures a reconnect,
+                                         # not a sleep)
     wifi.update(state=state, home=False, ip=None, rssi=None, wake=False,
                 wake_at=None, backoff=WIFI_RETRY, last_check=time.ticks_ms())
     print("wifi", state, "home" if wifi["sleep_home"] else "")
@@ -2803,10 +2820,11 @@ def _wifi_poll(w):
         if elapsed >= CONNECT_TIMEOUT:
             return _wifi_failed(w, s, elapsed)
         return False
-    # v1.29 connect() may leave the previous SSID's fail reason. Do not
-    # attribute it to this attempt until CONNECTING was seen, or the
-    # whole CONNECT_TIMEOUT elapses with no GOT_IP.
-    leftover = (s == wifi.get("prev_status") or not wifi["saw_connecting"])
+    # v1.29 connect() may leave the reason the clear left (prev_status,
+    # taken after it): that one is not this attempt's until CONNECT_TIMEOUT
+    # elapses with no GOT_IP; any other failure status is (a fast fail: the
+    # radio no longer stays on 12 s for every network that is not there)
+    leftover = s == wifi.get("prev_status")
     if leftover and elapsed < CONNECT_TIMEOUT:
         return False
     return _wifi_failed(w, s, elapsed)
@@ -2873,9 +2891,10 @@ def _gps_pvt_env(env):
     if not v:
         return
     v = v.lower()
-    if v in ("auto", "1"):
+    t = _truthy(v)
+    if v == "auto" or t is True:
         GPS_PVT = True
-    elif v == "0":
+    elif t is False:                     # 0, false, off, no
         GPS_PVT = False
     else:
         print("GPS_PVT not auto or 0, using", "auto" if GPS_PVT else "0")
@@ -2992,6 +3011,11 @@ def _keepalive_env(env):
                   1 if PB_CONNECTED else 0)
         else:
             PB_CONNECTED = t
+    if PB_MODE == "gpio" and _pin_taken(PB_PIN):
+        # the default pin (or one set before the GPS moved): a pulse there
+        # would take a GPS UART pad from the receiver
+        print("KEEPALIVE_PIN", PB_PIN, "is in use (GPS?) - keep-alive scan")
+        PB_MODE = "scan"
 
 def _pin_taken(n):
     """A pin the board already uses or must not drive: GPS UART, I2C
@@ -3039,8 +3063,9 @@ def _pb_pulse_radio(w, scan):
         w.active(True)
         if scan:
             aps = w.scan()
-            _stay_scan(aps)
-            _home_seen(aps)
+            if not _scan_empty(aps):
+                _stay_scan(aps)
+                _home_seen(aps)
     except SCAN_ERR:
         pass
     finally:
@@ -3084,7 +3109,9 @@ def keepalive_tick(now):
             return
         if conn:
             try:
-                _stay_scan(w.scan())     # connected: scan, keep the link
+                aps = w.scan()           # connected: scan, keep the link
+                if not _scan_empty(aps):
+                    _stay_scan(aps)
             except SCAN_ERR:
                 pass
         else:
@@ -3508,6 +3535,8 @@ def flush(hold=None):
                                          # e.g. after the flash was full)
     room = free()
     if room is not None and room < MIN_FREE:
+        room = _hist_trim(MIN_FREE + HIST_RESERVE)   # the drawing goes
+    if room is not None and room < MIN_FREE:         # before the points
         log["full"] = True
         del batch[:]
         return
@@ -3602,8 +3631,10 @@ def flush(hold=None):
             if not creating and log["wfails"] >= WFAIL_SWITCH and batch:
                 print("track file failing, new file", path)
                 tc = batch[0][-17:-1]
+                seg = log["new_seg"], log["seg_tc"]
                 start_file(tc[:8] + "_" + tc[9:15])
-            return
+                log["new_seg"], log["seg_tc"] = seg   # (a fix loss in
+            return                                    # the batch stays one)
     log["created"] = True
     log["good_size"] = expected
     log["wfail"] = False
@@ -3631,6 +3662,8 @@ def _hist_add(lines, k):
     if not HIST_DAYS or not k:
         return
     room = free()
+    if room is not None and room < HIST_RESERVE:
+        room = _hist_trim(HIST_RESERVE)
     if room is not None and room < 2 * MIN_FREE:
         return
     i = 0
@@ -3689,6 +3722,21 @@ def _tail_nl(path, size):
                 f.close()
             except OSError:
                 pass
+
+def _hist_trim(want):
+    """Older day files go (the newest, today's, stays) until want bytes are
+    free: the day history yields to the tracks. -> free bytes, or None."""
+    room = free()
+    try:
+        days = sorted(n for n in os.listdir(HIST_DIR)
+                      if len(n) == 12 and n.endswith(".trk")
+                      and n[:8].isdigit())
+    except OSError:
+        return room
+    while room is not None and room < want and len(days) > 1:
+        _rm(HIST_DIR + "/" + days.pop(0))
+        room = free()
+    return room
 
 def _hist_prune():
     """Delete the day files beyond the newest HIST_DAYS."""
@@ -4498,13 +4546,26 @@ up = {}
 def _rm_done(path):
     """Delete an uploaded file. A failure raises (the caller's _fs_err):
     swallowed, the .pos went next and the whole file was sent again and
-    again. Already gone is fine."""
+    again. Already gone is fine. After READ_ERR_MAX failures in a row it is
+    parked as .err instead (its last batch went up each time)."""
     try:
         os.remove(path)
     except OSError as e:
         if e.args and e.args[0] == 2:    # ENOENT
             return
-        raise
+        errs = up.setdefault("rm_err", {})
+        errs[path] = errs.get(path, 0) + 1
+        if errs[path] < READ_ERR_MAX:
+            raise
+        errs.pop(path, None)
+        try:
+            os.rename(path, path + ".err")
+        except OSError:
+            raise e
+        print("upload: cannot delete, parked", path + ".err")
+        _diag_write("upload: %s cannot be deleted, parked as .err" % path)
+        return
+    up.get("rm_err", {}).pop(path, None)
 
 def _rm(path):
     try:
@@ -5177,6 +5238,14 @@ def _quarantine_batch(path, off, n, new_off, eof):
     up["state"] = "quarantine"
     return True
 
+def _portal(r):
+    """The answer is an HTML page (Content-Type text/html)."""
+    hdrs = getattr(r, "headers", None) or {}
+    for k in hdrs:
+        if str(k).lower() == "content-type":
+            return "html" in str(hdrs[k]).lower()
+    return False
+
 def _retry_after_ms(r):
     hdrs = getattr(r, "headers", None) or {}
     v = None
@@ -5225,9 +5294,11 @@ def _clear_bad_full(path):
         up["bad_full"] = bf
 
 class _Resp:
-    def __init__(self, code, retry):
+    def __init__(self, code, retry, ctype=None):
         self.status_code = code
         self.headers = {"Retry-After": retry} if retry is not None else {}
+        if ctype is not None:
+            self.headers["Content-Type"] = ctype
 
     def close(self):
         pass
@@ -5474,7 +5545,7 @@ def _raw_post(url, data, headers, timeout):
                 raise OSError(110)       # ETIMEDOUT
         line = s.readline(HTTP_LINE)
         code = int(line.split(None, 2)[1])
-        retry = None
+        retry = ctype = None
         try:
             # the status is in: a reset, a timeout or the guard closing
             # the socket in the headers must not turn a 2xx into a resend
@@ -5487,12 +5558,15 @@ def _raw_post(url, data, headers, timeout):
                     break
                 if bol:
                     k, _, v = h.partition(b":")
-                    if k.strip().lower() == b"retry-after":
+                    k = k.strip().lower()
+                    if k == b"retry-after":
                         retry = v.strip().decode()
+                    elif k == b"content-type":
+                        ctype = v.strip().decode()
                 bol = h[-1:] == b"\n"
         except Exception as e:
             print("upload head", code, repr(e))
-        return _Resp(code, retry)
+        return _Resp(code, retry, ctype)
     finally:
         _guard_stop()
         try:
@@ -5551,6 +5625,13 @@ def _http_post(size):
                       HTTP_TIMEOUT)
         code = r.status_code
         retry = _retry_after_ms(r)
+        if code is not None and 200 <= code < 300 and _portal(r):
+            # an HTML 2xx is a captive portal (or a proxy) answering, not
+            # Dawarich (JSON): without CA_FILE nothing else tells, and the
+            # batch counted as sent was deleted
+            print("upload: HTML answer, not Dawarich (captive portal?)")
+            _diag_write("upload err html %d (captive portal?)" % code)
+            code = None
         up["enomem"] = 0
         up["last_err"] = None
         # the guard may have closed the socket while the headers were read
@@ -5855,20 +5936,26 @@ def _low_mem(now):
 # time (the GPS read and the WDT fed between). It is read back against its
 # sha256, the files (the status page) are written to flash, the slot is set
 # to boot and the board resets. The new firmware then runs pending
-# (OTA_PENDING): OTA_HEALTH of running with WiFi connected marks it valid.
-# A crash before that and the bootloader boots the old one; no WiFi in
-# OTA_HEALTH and it boots the old one itself. A build that failed so is in
-# OTA_BAD and not tried again.
+# (OTA_PENDING): OTA_VALID_AFTER of running with WiFi connected marks it
+# valid, and only then do the new page files (staged as .new) replace the
+# old ones. A crash or reset before that and the bootloader boots the old
+# one; no WiFi in OTA_HEALTH and it resets itself, the same. A build that
+# failed so is in OTA_BAD and not tried again (not after a power cut: it
+# may have been the cable). No set_boot() back: that left the old image
+# pending, and the next reset fell back to ota_0, the failed build.
 OTA_URL = None                           # .env OTA_URL: the manifest
 OTA_KEY = None                           # .env OTA_KEY: its HMAC key (bytes)
 OTA_FIRST = 120000                       # ms after boot of the first check
 OTA_CHECK = 86400000                     # ms between checks
-OTA_HEALTH = 600000                      # ms a new firmware runs before valid
+OTA_VALID_AFTER = 120000                 # ms a new firmware runs, WiFi
+                                         # connected, before it is valid
+OTA_HEALTH = 600000                      # ms it may take to get WiFi
 OTA_MAX = 300000                         # ms one download may take (the
                                          # guard closes its socket)
 OTA_BLOCK = 4096                         # bytes a flash write (an erase page)
 OTA_MANIFEST_MAX = 4096                  # bytes a manifest may have
-OTA_PENDING = "/ota.pending"             # "<build> <commit>" just installed
+OTA_PENDING = "/ota.pending"             # "<build> <commit>" just installed,
+                                         # then the staged files, a line each
 OTA_BAD = "/ota.bad"                     # builds that failed their health
 try:
     from gps_frozen import BUILD as FW_BUILD, COMMIT as FW_COMMIT
@@ -5887,7 +5974,8 @@ def _ota_env(env):
         key = key.strip().encode()
     if url and key and url.startswith(("http://", "https://")):
         OTA_URL, OTA_KEY = url, key
-        ota["state"] = "idle"
+        if ota["state"] == "off":        # (not over "pending", "rolled back")
+            ota["state"] = "idle"
     elif url or key:
         print("OTA_URL / OTA_KEY: both needed, http(s) URL - no updates")
 
@@ -5938,19 +6026,34 @@ def _raw_get(url, sink, limit):
         _io_write(s, ("GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close"
                       "\r\n\r\n" % (path, host)).encode())
         code = int(s.readline(HTTP_LINE).split(None, 2)[1])
+        clen = None
         bol = True
         for _ in range(HTTP_LINES):
             h = s.readline(HTTP_LINE)
             if not h or (bol and h in (b"\r\n", b"\n")):
                 break
+            if bol:
+                k, _, v = h.partition(b":")
+                if k.strip().lower() == b"content-length":
+                    try:
+                        clen = int(v.strip())
+                    except ValueError:
+                        pass
             bol = h[-1:] == b"\n"
         if code != 200:
             return code
+        if clen is not None and clen > limit:
+            raise ValueError("ota body %d over %d" % (clen, limit))
         buf = bytearray(1024)
         mv = memoryview(buf)
         got = 0
-        while True:
-            n = s.readinto(buf)
+        # the body ends at Content-Length (a TLS server closing without
+        # close_notify raised at EOF), else at EOF
+        while clen is None or got < clen:
+            k = 1024 if clen is None else min(1024, clen - got)
+            n = s.readinto(mv[:k])
+            if n is None:
+                raise OSError(110)       # (a blocking socket timed out)
             if not n:
                 break
             got += n
@@ -5959,6 +6062,8 @@ def _raw_get(url, sink, limit):
             sink(mv[:n])
             read_uart()
             feed()
+        if clen is not None and got != clen:
+            raise ValueError("ota body %d of %d" % (got, clen))
         return code
     finally:
         _guard_stop()
@@ -6028,19 +6133,37 @@ def _ota_mark_bad(build):
         pass
 
 def _ota_file(f):
-    """One manifest file (the page) to flash: downloaded to .tmp, its
-    sha256 checked, then renamed over the old one."""
+    """One manifest file (the page) staged on flash as <path>.new: it
+    replaces the old one only once the new firmware is valid (_ota_promote:
+    a rollback keeps the old page with the old firmware)."""
     tmp = f["path"] + ".tmp"
     h = hashlib.sha256()
-    with open(tmp, "wb") as out:
-        def sink(mv):
-            h.update(mv)
-            out.write(mv)
-        code = HTTP_GET(_ota_url(f["url"]), sink, f["size"])
-    if code != 200 or binascii.hexlify(h.digest()).decode() != f["sha256"]:
-        _rm(tmp)
-        raise ValueError("ota file %s: %s" % (f["path"], code))
-    os.rename(tmp, f["path"])
+    ok = False
+    try:
+        with open(tmp, "wb") as out:
+            def sink(mv):
+                h.update(mv)
+                out.write(mv)
+            code = HTTP_GET(_ota_url(f["url"]), sink, f["size"])
+        if code != 200 or binascii.hexlify(h.digest()).decode() != f["sha256"]:
+            raise ValueError("ota file %s: %s" % (f["path"], code))
+        os.rename(tmp, f["path"] + ".new")
+        ok = True
+    finally:
+        if not ok:
+            _rm(tmp)
+
+def _ota_promote(paths):
+    """The staged page files over the old ones (the firmware is valid)."""
+    for p in paths:
+        try:
+            os.rename(p + ".new", p)
+        except OSError:
+            pass
+
+def _ota_drop(paths):
+    for p in paths:
+        _rm(p + ".new")
 
 def _ota_check():
     """Read the manifest; install a newer, signed build (resets the board)."""
@@ -6077,11 +6200,20 @@ def _ota_check():
         _diag_write("ota %s: download %s, sha256 mismatch" % (m["commit"],
                                                              code))
         return
-    for f in m.get("files") or ():
-        _ota_file(f)
-    with open(OTA_PENDING, "w") as f:
-        f.write("%d %s" % (build, m["commit"]))
-    part.set_boot()
+    paths = []
+    try:
+        for f in m.get("files") or ():
+            _ota_file(f)
+            paths.append(f["path"])
+        with open(OTA_PENDING, "w") as f:
+            f.write("%d %s\n%s" % (build, m["commit"], "\n".join(paths)))
+        part.set_boot()
+    except Exception:
+        # nothing boots: no pending note (it would blame a build that never
+        # ran), no staged page
+        _rm(OTA_PENDING)
+        _ota_drop(paths)
+        raise
     _diag_write("ota %s installed (was %s), rebooting" % (m["commit"],
                                                          FW_COMMIT))
     try:
@@ -6090,51 +6222,82 @@ def _ota_check():
         pass
     machine.reset()
 
-def ota_boot():
-    """At boot: a firmware just installed (OTA_PENDING) runs pending until
-    _ota_health; the old one running means the bootloader rolled back."""
+def _ota_valid():
+    """Confirm the running image (the bootloader's rollback then keeps it).
+    A non-OTA or never-pending image raises: nothing to confirm."""
+    try:
+        esp32.Partition.mark_app_valid_cancel_rollback()
+    except (OSError, AttributeError):
+        pass
+
+def _ota_pending():
+    """(build, commit, staged paths) of OTA_PENDING, or None."""
     try:
         with open(OTA_PENDING) as f:
-            b, _, c = f.read().strip().partition(" ")
-        build = int(b)
-    except (OSError, ValueError):
+            lines = f.read().split("\n")
+        b, _, c = lines[0].strip().partition(" ")
+        return int(b), c, [x for x in lines[1:] if x]
+    except (OSError, ValueError, IndexError):
+        return None
+
+def ota_boot():
+    """At boot: a firmware just installed (OTA_PENDING) runs pending until
+    _ota_health; the old one running means the bootloader rolled back
+    (blamed on the build unless the board was powered off meanwhile).
+    Without a pending note the running image is confirmed: an image left
+    pending would be aborted at the next reset."""
+    p = _ota_pending()
+    if p is None:
+        if esp32 is not None:
+            _ota_valid()
         return
+    build, c, paths = p
     if build == FW_BUILD:
         ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
-                   state="pending")
-        _diag_write("ota %s booted, checking for %d s" % (c,
-                                                         OTA_HEALTH // 1000))
+                   state="pending", paths=paths)
+        _diag_write("ota %s booted, checking" % c)
         return
-    _ota_mark_bad(build)
+    _ota_drop(paths)
     _rm(OTA_PENDING)
-    _diag_write("ota %s rolled back by the bootloader (running %s)"
-                % (c, FW_COMMIT))
+    ota["state"] = "rolled back"
+    try:
+        power = machine.reset_cause() == machine.PWRON_RESET
+    except Exception:
+        power = False
+    if power:
+        _diag_write("ota %s rolled back after a power-off, tried again "
+                    "later (running %s)" % (c, FW_COMMIT))
+    else:
+        _ota_mark_bad(build)
+        _diag_write("ota %s rolled back by the bootloader (running %s)"
+                    % (c, FW_COMMIT))
+    if esp32 is not None:
+        _ota_valid()
 
 def _ota_health(now):
-    """The pending firmware: valid after OTA_HEALTH with WiFi connected at
-    least once; without WiFi it boots the old slot again."""
+    """The pending firmware: valid after OTA_VALID_AFTER with WiFi connected
+    (then the staged page goes up); no WiFi in OTA_HEALTH and it resets,
+    the bootloader then boots the old image."""
     if wifi["state"] == "connected":
         ota["wifi_seen"] = True
-    if _age(now, ota["pend_at"]) < OTA_HEALTH:
-        return
-    build = ota["pend"]
-    ota["pend"] = None
-    _rm(OTA_PENDING)
-    if ota["wifi_seen"]:
-        try:
-            esp32.Partition.mark_app_valid_cancel_rollback()
-        except (OSError, AttributeError):
-            pass
+    age = _age(now, ota["pend_at"])
+    if ota["wifi_seen"] and age >= OTA_VALID_AFTER:
+        ota["pend"] = None
+        _ota_valid()
+        _ota_promote(ota.get("paths") or ())
+        _rm(OTA_PENDING)
         ota["state"] = "ok"
         _diag_write("ota %s ok" % FW_COMMIT)
         return
+    if age < OTA_HEALTH:
+        return
+    build = ota["pend"]
+    ota["pend"] = None
     _ota_mark_bad(build)
+    _ota_drop(ota.get("paths") or ())
+    _rm(OTA_PENDING)
     _diag_write("ota %s no wifi in %d s, rolling back" % (
         FW_COMMIT, OTA_HEALTH // 1000))
-    try:
-        esp32.Partition(esp32.Partition.RUNNING).get_next_update().set_boot()
-    except (OSError, AttributeError):
-        return
     machine.reset()
 
 def ota_tick(now):
@@ -6143,7 +6306,11 @@ def ota_tick(now):
         return
     if not OTA_URL or esp32 is None or wifi["state"] != "connected":
         return
-    if not at_home() or not _all_uploaded():
+    # points waiting in files or an upload backing off: not now (the RAM
+    # batch is flushed before the reset: a moving board kept one, and
+    # _all_uploaded() held the check back for good)
+    if (not at_home() or up.get("left") or up.get("files")
+            or str(up.get("state")).startswith("err")):
         return
     at = ota["at"]
     if _age(now, ota["boot_at"] if at is None else at) < (
@@ -6633,6 +6800,8 @@ def _web_hist(c, path):
     finally:
         f.close()
 
+_web_errs = [0]                          # page requests that raised a bug
+
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
     within WEB_DEADLINE."""
@@ -6654,6 +6823,11 @@ def web_tick():
         _web_reply(c, req)
     except (OSError, MemoryError) as e:
         print("web client", repr(e))
+    except Exception as e:               # a bug on a page request must not
+        print("web error", repr(e))      # reset the logger (run's handler)
+        _web_errs[0] += 1
+        if _web_errs[0] == 1:
+            _diag_write("web error %r" % (e,))
     finally:
         _web_end[0] = None
         try:

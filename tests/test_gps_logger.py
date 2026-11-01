@@ -6774,7 +6774,8 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
                                 text=True).stdout.strip())
         marks.append(rc == 0 and m.get("SHA") == sha and m.get("COMMIT")
                      == head + ("-dirty" if dirty else "")
-                     and m.get("BUILD") == ct and not calls)
+                     and (m.get("BUILD") == ct if not dirty else
+                          m.get("BUILD", 0) >= ct) and not calls)
     check("BUILD-MARKER: gps_frozen has the SHA-256 of the frozen "
           "gps_logger.py, COMMIT -dirty with changes", marks == [True, True],
           "%r rc=%d %r %r" % (marks, rc, out[-200:], err[-300:]))
@@ -6792,17 +6793,20 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and [c for c in calls if "write_flash" in c],
           "rc=%d %r" % (rc, calls))
     rc, out, err, work, calls = build_run(["--flash"], {})
+    flash_build = frozen_marker(work).get("BUILD", 0)
     steps = [c[c.index("read_flash") + 1] if "read_flash" in c else
              "write" if "write_flash" in c else c[0] for c in calls]
     erase = [c for c in calls if "erase_region" in c]
     check("BUILD-FLASH: check, backup, write, otadata erased (the written "
           "slot boots); no REPL step; deploy.sh named",
-          rc == 0 and steps == ["0x8000", "0x10000", "write", "esptool"]
+          rc == 0
+          and steps == ["0x8000", "0x10000", "0x280000", "write", "esptool"]
           and erase and erase[0][-2:] == ["0xd000", "0x2000"]
           and [c for c in calls if "read_flash" in c][1][-2] == "0x270000"
           and "./deploy.sh" in out
-          and "write_flash 0x10000" in out
-          and out.rstrip().endswith(", then ./deploy.sh"),
+          and "write_flash 0x10000" in out and ", then ./deploy.sh" in out
+          and "app1-backup-" in out.rstrip().splitlines()[-1]
+          and flash_build >= time.time() - 300,
           "rc=%d %r %r %r" % (rc, steps, out[-300:], err[-200:]))
     # --migrate: only a 16 MB board; backup, erase, write the whole build
     rc, out, err, work, calls = build_run(["--migrate"], {"FAKE_FLASH": "4MB"})
@@ -6822,13 +6826,18 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     # board accepts, copied after the files
     key_dir = tempfile.mkdtemp(dir=dp_td)
     key_file = os.path.join(key_dir, "ota.key")
+    bad_key = os.path.join(key_dir, "bad.key")
+    with open(bad_key, "w") as f:
+        f.write('"quoted key with spaces"\n')
     with open(key_file, "w") as f:
-        f.write("s3cret\n")
+        f.write("0123456789abcdef0123456789abcdef\n")
     dest = tempfile.mkdtemp(dir=dp_td)
     penv = {"OTA_KEY_FILE": key_file, "OTA_DEST": dest}
     rc_dirty = build_run(["--publish"], penv, dirty=True)[0]
     rc_nokey = build_run(["--publish"], {"OTA_KEY_FILE": key_file + "x",
                                          "OTA_DEST": dest})[0]
+    rc_badkey = build_run(["--publish"], {"OTA_KEY_FILE": bad_key,
+                                          "OTA_DEST": dest})[0]
     rc, out, err, work, calls = build_run(["--publish"], penv)
     try:
         with open(os.path.join(dest, "manifest.json")) as f:
@@ -6836,15 +6845,24 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     except (OSError, ValueError):
         man = {}
     scp = [c for c in calls if c[0] == "scp"]
-    good = (man.get("hmac") == gl._hmac_hex(b"s3cret", gl._ota_signed(man))
-            if man else False)
-    check("BUILD-PUBLISH: dirty or no key refused; else a manifest the "
-          "board's HMAC check accepts, the page in it, manifest copied last",
-          rc_dirty != 0 and rc_nokey != 0 and rc == 0 and good
-          and [f["path"] for f in man.get("files", [])]
+    good = (man.get("hmac") == gl._hmac_hex(
+        b"0123456789abcdef0123456789abcdef", gl._ota_signed(man))
+        if man else False)
+    named = [man.get("url")] + [f["url"] for f in man.get("files", [])]
+    check("BUILD-PUBLISH: dirty, no key or a quoted/short key refused; else "
+          "a manifest the board's HMAC check accepts, files named by commit "
+          "(a board reading the old manifest still finds its files), the "
+          "manifest copied last",
+          rc_dirty != 0 and rc_nokey != 0 and rc_badkey != 0 and rc == 0
+          and good and [f["path"] for f in man.get("files", [])]
           == ["/web.html.gz", "/web.html"]
-          and scp and scp[0][-2].endswith("manifest.json"),
-          repr((rc_dirty, rc_nokey, rc, man, scp, err[-200:])))
+          and named == ["micropython-%s.bin" % man.get("commit"),
+                        "web-%s.html.gz" % man.get("commit"),
+                        "web-%s.html" % man.get("commit")]
+          and all(os.path.exists(os.path.join(dest, n)) for n in named)
+          and len(scp) == 2 and scp[-1][-2].endswith("manifest.json")
+          and not any(c.endswith("manifest.json") for c in scp[0]),
+          repr((rc_dirty, rc_nokey, rc_badkey, rc, man, scp, err[-200:])))
 else:
     print("SKIP  BUILD: no bash/sha256sum/git/make")
 shutil.rmtree(dp_td, ignore_errors=True)
@@ -11010,6 +11028,16 @@ else:
           ft.get("pruned") == [[False, False, True],
                                ["20261028", "20261030"]],
           repr(ft.get("pruned")))
+    st_t = ft.get("statTabs") or [None, None, None]
+    check("R2-STATIC: the static test keeps another tab's samples, is "
+          "capped at STAT_MAX, and a broken saved state is ignored",
+          st_t[0] == [47.1, 47.2, 47.3] and st_t[1] == 5000
+          and st_t[2] is True, repr(st_t))
+    check("R2-PAGEERR: a bug drawing a box keeps LIVE and says so (not "
+          "OFFLINE)",
+          ft.get("pageErr", ["", ""])[0] == ""
+          and ft.get("pageErr", ["", ""])[1].startswith(
+              "LIVE &middot; PAGE ERROR boom"), repr(ft.get("pageErr")))
     gx = ft.get("gpx", "")
     check("PAGE-GPX: GPX 1.1, a segment per 5 min gap, ele when known, "
           "escaped name",
@@ -11645,13 +11673,14 @@ def _ota_reset():
         sl.mem[:] = b"\0" * len(sl.mem)
         sl.boot = False
     for f in (gl.OTA_PENDING, gl.OTA_BAD,
-              os.path.join(_ota_dir, "web.html.gz")):
+              os.path.join(_ota_dir, "web.html.gz"),
+              os.path.join(_ota_dir, "web.html.gz.new")):
         try:
             os.remove(f)
         except OSError:
             pass
     gl.ota.update(state="idle", pend=None, pend_at=None, wifi_seen=False,
-                  at=None)
+                  at=None, paths=[])
     diag_clear()
 
 
@@ -11665,17 +11694,18 @@ try:
     _serve(_manifest(200))
     gl._ota_check()
     slot = _slots[1].mem
-    with open(os.path.join(_ota_dir, "web.html.gz"), "rb") as f:
-        page_ok = f.read() == _page
+    page_p = os.path.join(_ota_dir, "web.html.gz")
+    with open(page_p + ".new", "rb") as f:
+        page_ok = f.read() == _page and not os.path.exists(page_p)
     with open(gl.OTA_PENDING) as f:
         pend = f.read()
     check("OTA-INSTALL: a newer signed build goes to the other slot (0xFF "
-          "padded), the page is replaced, the slot boots, pending is noted",
+          "padded), the page is staged (.new), the slot boots, pending noted",
           bytes(slot[:len(_img)]) == _img
           and bytes(slot[len(_img):12288]) == b"\xff" * (12288 - len(_img))
           and bytes(_slots[0].mem[:10]) == b"\0" * 10 and page_ok
           and _ota_log == [("boot", "ota_1"), ("reset",)]
-          and pend == "200 abc0200"
+          and pend == "200 abc0200\n" + page_p
           and any("ota abc0200 installed (was abc0100)" in l
                   for l in diag_lines()),
           repr((_ota_log, pend, diag_lines()[-2:])))
@@ -11716,41 +11746,163 @@ try:
           states == ["current", "bad hmac", "bad image", "too big", "current",
                      "no ota slot", "manifest 404"], repr(states))
 
-    # pending: valid after OTA_HEALTH with WiFi seen; without WiFi the old
-    # slot boots again and the build is marked bad; the old one running at
-    # boot means the bootloader rolled back
+    # pending: valid after OTA_VALID_AFTER with WiFi (the staged page goes
+    # up); no WiFi in OTA_HEALTH: a reset (no set_boot: the bootloader
+    # aborts the pending image) and the build is bad; the old build at boot
+    # is a rollback, blamed unless the board was powered off
+    page_p = os.path.join(_ota_dir, "web.html.gz")
     res = []
     for wifi_ok in (True, False):
         _ota_reset()
         gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        with open(page_p, "wb") as f:
+            f.write(b"old page")
+        with open(page_p + ".new", "wb") as f:
+            f.write(_page)
         with open(gl.OTA_PENDING, "w") as f:
-            f.write("200 abc0200")
+            f.write("200 abc0200\n" + page_p)
         gl.ota_boot()
         gl.wifi_reset()
         gl.wifi["state"] = "connected" if wifi_ok else "not found"
         gl.ota_tick(_clock[0])
         early = list(_ota_log)
-        _clock[0] += gl.OTA_HEALTH + 1000
+        _clock[0] += gl.OTA_VALID_AFTER + 1000
         gl.ota_tick(_clock[0])
-        res.append((early, list(_ota_log), gl.ota["state"],
-                    os.path.exists(gl.OTA_PENDING), gl._ota_bad()))
+        mid = (list(_ota_log), gl.ota["state"])
+        _clock[0] += gl.OTA_HEALTH
+        gl.ota_tick(_clock[0])
+        with open(page_p, "rb") as f:
+            page = f.read()
+        res.append((early, mid, list(_ota_log), gl.ota["state"],
+                    os.path.exists(gl.OTA_PENDING), gl._ota_bad(), page,
+                    os.path.exists(page_p + ".new")))
+    rb = []
+    for cause in (2, 1):                 # a hard reset, then a power-on
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        with open(page_p + ".new", "wb") as f:
+            f.write(_page)
+        with open(gl.OTA_PENDING, "w") as f:
+            f.write("200 abc0200\n" + page_p)
+        _reset_cause[0] = cause
+        gl.ota_boot()
+        rb.append((gl.ota["pend"], gl.ota["state"],
+                   os.path.exists(gl.OTA_PENDING), gl._ota_bad(),
+                   os.path.exists(page_p + ".new"), list(_ota_log),
+                   [l for l in diag_lines() if l.startswith("ota ")]))
+    _reset_cause[0] = 1
+    _ota_reset()
+    gl.ota_boot()                        # no pending note: confirm the image
+    plain = list(_ota_log)
+    check("OTA-HEALTH: valid after OTA_VALID_AFTER with WiFi, the staged "
+          "page goes up; no WiFi in OTA_HEALTH resets without set_boot "
+          "(bad, staged page dropped)",
+          res[0][:2] == ([], ([("valid",)], "ok"))
+          and res[0][3:] == ("ok", False, [], _page, False)
+          and res[1][1] == ([], "pending")
+          and res[1][2] == [("reset",)]
+          and res[1][4:] == (False, [200], b"old page", False),
+          repr(res))
+    check("OTA-ROLLBACK: the old build at boot after a hard reset is a "
+          "bootloader rollback (bad); after a power-off tried again; the "
+          "running image is confirmed; a plain boot confirms it too",
+          rb[0][:6] == (None, "rolled back", False, [200], False, [("valid",)])
+          and "rolled back by the bootloader" in rb[0][6][-1]
+          and rb[1][:6] == (None, "rolled back", False, [], False, [("valid",)])
+          and "after a power-off" in rb[1][6][-1]
+          and plain == [("valid",)],
+          repr((rb, plain)))
+    # set_boot failing: no pending note blames a build that never ran, the
+    # staged page is dropped
     _ota_reset()
     gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
-    with open(gl.OTA_PENDING, "w") as f:
-        f.write("200 abc0200")
-    gl.ota_boot()
-    rb = (gl.ota["pend"], os.path.exists(gl.OTA_PENDING), gl._ota_bad(),
-          [l for l in diag_lines() if l.startswith("ota ")])
-    check("OTA-HEALTH: valid after OTA_HEALTH with WiFi; no WiFi boots the "
-          "old slot (bad); the old build at boot is a bootloader rollback",
-          res[0] == ([], [("valid",)], "ok", False, [])
-          and res[1][0] == []
-          and res[1][1] == [("boot", "ota_1"), ("reset",)]
-          and res[1][3] is False and res[1][4] == [200]
-          and rb == (None, False, [200],
-                     ["ota abc0200 rolled back by the bootloader "
-                      "(running abc0100)"]),
-          repr((res, rb)))
+    _serve(_manifest(200))
+    def _sb_fail():
+        raise OSError(-1)
+    _slots[1].set_boot = _sb_fail
+    try:
+        try:
+            gl._ota_check()
+            sbf = "no error"
+        except OSError:
+            sbf = "raised"
+    finally:
+        del _slots[1].set_boot
+    check("OTA-SETBOOT: a failed set_boot leaves no pending note, no staged "
+          "page and no reset",
+          sbf == "raised" and not os.path.exists(gl.OTA_PENDING)
+          and not os.path.exists(page_p + ".new") and _ota_log == [],
+          repr((sbf, _ota_log)))
+    # a reset in between keeps the state: _ota_env leaves "pending" alone
+    gl.ota["state"] = "pending"
+    gl._ota_env({"OTA_URL": "http://ota.lan/m.json", "OTA_KEY": "k"})
+    st_keep = gl.ota["state"]
+    gl.ota["state"] = "off"
+    gl._ota_env({"OTA_URL": "http://ota.lan/m.json", "OTA_KEY": "k"})
+    check("OTA-STATE: .env keeps a pending / rolled back state for the page",
+          st_keep == "pending" and gl.ota["state"] == "idle", st_keep)
+
+    # _raw_get: the body ends at Content-Length (TLS without close_notify
+    # raised at EOF); a short body or one over the limit raises
+    class _GetSock(object):
+        def __init__(self, resp, eof_err=None):
+            self.resp, self.rd, self.eof_err = resp, 0, eof_err
+        def settimeout(self, t):
+            pass
+        def connect(self, a):
+            pass
+        def write(self, b):
+            return len(b)
+        def readline(self, n=-1):
+            i = self.resp.find(b"\n", self.rd)
+            i = len(self.resp) if i < 0 else i + 1
+            if n is not None and n >= 0:
+                i = min(i, self.rd + n)
+            line, self.rd = self.resp[self.rd:i], i
+            return line
+        def readinto(self, mv):
+            if self.rd >= len(self.resp):
+                if self.eof_err:
+                    raise self.eof_err
+                return 0
+            k = min(len(mv), len(self.resp) - self.rd)
+            mv[:k] = self.resp[self.rd:self.rd + k]
+            self.rd += k
+            return k
+        def close(self):
+            pass
+    _gs = [None]
+    _gsock = types.ModuleType("socket")
+    _gsock.SOCK_STREAM = 1
+    _gsock.getaddrinfo = lambda h, p, a=0, b=0: [(2, 1, 6, "", (h, p))]
+    _gsock.socket = lambda *a: _gs[0]
+    _gsaved = (gl.socket, gl.read_uart)
+    gl.socket, gl.read_uart = _gsock, lambda: None
+    got = []
+    try:
+        body = b"y" * 3000
+        _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\nContent-Length: 3000\r\n\r\n"
+                          + body, eof_err=OSError(-0x7280))
+        out = bytearray()
+        got.append((gl._raw_get("http://h/x", out.extend, 5000),
+                    bytes(out) == body))
+        for resp in (b"HTTP/1.0 200 OK\r\nContent-Length: 3000\r\n\r\n" + b"y" * 10,
+                     b"HTTP/1.0 200 OK\r\nContent-Length: 9000\r\n\r\n" + b"y"):
+            _gs[0] = _GetSock(resp)
+            try:
+                gl._raw_get("http://h/x", bytearray().extend, 5000)
+                got.append("ok")
+            except ValueError as e:
+                got.append(str(e)[:12])
+        _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\n\r\nabc")
+        out = bytearray()
+        got.append((gl._raw_get("http://h/x", out.extend, 5000), bytes(out)))
+    finally:
+        gl.socket, gl.read_uart = _gsaved
+    check("OTA-CLEN: reads exactly Content-Length (no EOF error), short or "
+          "too long raises, no length reads to EOF",
+          got == [(200, True), "ota body 10 ", "ota body 900", (200, b"abc")],
+          repr(got))
 
     # when it checks: connected at home with all uploaded, OTA_FIRST after
     # boot, then OTA_CHECK; never with points waiting or away
@@ -11762,6 +11914,7 @@ try:
     try:
         gl.wifi_reset()
         gl.log_reset()
+        gl.up_reset()
         gl.wifi.update(state="connected", home=True)
         gl.ota["boot_at"] = _clock[0]
         gl.ota_tick(_clock[0] + gl.OTA_FIRST - 1000)
@@ -11773,18 +11926,21 @@ try:
         gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
         n_away = len(calls)
         gl.wifi["home"] = True
-        gl.log["batch"].append("x")
+        gl.up_reset()
+        gl.up["left"] = 30               # points waiting in a file
         gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
         n_busy = len(calls)
-        gl.log["batch"][:] = []
+        gl.up["left"] = 0
+        gl.log["batch"].append("x")      # RAM only: flushed before a reset
         gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
         n_day = len(calls)
+        gl.log["batch"][:] = []
     finally:
         gl._ota_check = saved_check
         gl.wifi_reset()
         gl.log_reset()
     check("OTA-TICK: first check OTA_FIRST after boot, then OTA_CHECK; not "
-          "away from home, not with points waiting",
+          "away from home, not with points waiting in files (RAM is fine)",
           (n_early, n_first, n_away, n_busy, n_day) == (0, 1, 1, 1, 2),
           repr((n_early, n_first, n_away, n_busy, n_day)))
 
@@ -11805,6 +11961,243 @@ finally:
      gl.DIAG) = _ota_saved
     diag_clear()
     shutil.rmtree(_ota_dir, ignore_errors=True)
+
+# --- second review (R2-n) ---------------------------------------------------
+_r2_dir = tempfile.mkdtemp()
+gl.wifi_reset()
+gl.LOG_DIR = _r2_dir
+gl.log_reset()
+gl.up_reset()
+
+# R2-3: the WFAIL_SWITCH file change keeps the queued segment breaks
+gl.start_file("20261101_120000")
+gl.log["batch"].extend(trk_line(47.1, 18.4, "2026-11-01T12:00:%02dZ" % i)
+                       for i in range(2))
+gl.flush()
+f_old = gl.log["file"]
+_o3 = builtins.open
+def _bad3(name, mode="r", *a, **k):
+    if name == f_old and mode != "rb":
+        raise OSError(5)
+    return _o3(name, mode, *a, **k)
+builtins.open = _bad3
+try:
+    for r in range(gl.WFAIL_SWITCH):
+        if r == 1:
+            gl._seg_break()              # a fix loss while writes fail
+        gl._record((r, trk_line(47.2, 18.4, "2026-11-01T12:05:%02dZ" % r)),
+                   (47.2, 18.4))
+        gl.flush()
+finally:
+    builtins.open = _o3
+gl.flush()
+with open(gl.log["file"]) as f:
+    seg3 = f.read()
+check("R2-3: a file change after failed writes keeps a fix loss as a "
+      "segment break in the new file",
+      gl.log["file"] != f_old and "-\n" in seg3
+      and seg3.index("120500Z") < seg3.index("-\n") < seg3.index("120501Z"),
+      repr(seg3))
+gl.log_reset()
+
+# R2-7: v1.29's [] is a failed scan once; the next empty ones in a row are a
+# place without APs (no every-network round each time; a stay counts them)
+class _EmptyW(object):
+    def scan(self):
+        return []
+    def active(self, x=None):
+        return True
+gl.wifi_reset()
+gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                    "hidden": False, "bssid": None, "ip": None}]
+stays = []
+_ss = gl._stay_scan
+gl._stay_scan = lambda aps: stays.append(len(aps))
+try:
+    e7 = [gl._scan_known(_EmptyW()), gl._scan_known(_EmptyW())]
+    gl.wifi["empty"] = 0
+    gl._pb_pulse_radio(_EmptyW(), True)
+    first_pulse = list(stays)
+    gl._pb_pulse_radio(_EmptyW(), True)
+finally:
+    gl._stay_scan = _ss
+check("R2-7: one empty scan is a failed one, two in a row a place without "
+      "APs (same rule for the keep-alive scans)",
+      e7 == [None, []] and first_pulse == [0] and stays == [0, 0],
+      repr((e7, first_pulse, stays)))
+gl.wifi_reset()
+
+# R2-8: KEEPALIVE_MODE=gpio on the default pin the GPS moved onto falls back
+# to scan
+_k8 = (gl.PB_MODE, gl.PB_PIN, gl.GPS_TX, gl.GPS_RX)
+try:
+    gl.PB_PIN, gl.GPS_TX, gl.GPS_RX = 2, 3, 2
+    gl._keepalive_env({"KEEPALIVE_MODE": "gpio"})
+    m8a = gl.PB_MODE
+    gl.GPS_TX, gl.GPS_RX = 18, 19
+    gl._keepalive_env({"KEEPALIVE_MODE": "gpio"})
+    m8b = gl.PB_MODE
+finally:
+    gl.PB_MODE, gl.PB_PIN, gl.GPS_TX, gl.GPS_RX = _k8
+check("R2-8: gpio keep-alive on a GPS pin falls back to scan",
+      (m8a, m8b) == ("scan", "gpio"), repr((m8a, m8b)))
+
+# R2-PVT: GPS_PVT takes the usual false words
+_pv = gl.GPS_PVT
+got = []
+for v in ("false", "off", "no", "0", "auto", "1", "true", "maybe"):
+    gl.GPS_PVT = None
+    gl._gps_pvt_env({"GPS_PVT": v})
+    got.append(gl.GPS_PVT)
+gl.GPS_PVT = _pv
+check("R2-PVT: GPS_PVT false/off/no/0 turn it off, auto/1/true on",
+      got == [False, False, False, False, True, True, True, None], repr(got))
+
+# R2-PORTAL: an HTML 2xx (a captive portal) does not count as sent
+online(_r2_dir)
+pp = os.path.join(_r2_dir, "20261101_130000.trk")
+make_trk(pp, 3)
+_post_headers[0] = {"Content-Type": "text/html; charset=utf-8"}
+_post_code[0] = 200
+diag_clear()
+_dg = gl.DIAG
+gl.DIAG = 60000
+try:
+    pump()
+finally:
+    gl.DIAG = _dg
+portal = (os.path.exists(pp), gl.up["sent"],
+          any("captive portal" in l for l in diag_lines()))
+_post_headers[0] = {"Content-Type": "application/json"}
+_post_code[0] = 201
+gl.up["next_at"] = _clock[0]
+pump()
+check("R2-PORTAL: an HTML 200 keeps the track (not sent); a JSON 201 sends "
+      "it", portal == (True, 0, True) and not os.path.exists(pp)
+      and gl.up["sent"] == 3, repr((portal, gl.up["sent"])))
+_post_headers[0] = {}
+diag_clear()
+
+# R2-HIST: the day history yields to the tracks: older days go (today's
+# stays) when the flash runs low, also before a batch would be dropped
+_hd2 = gl.HIST_DIR
+gl.HIST_DIR = os.path.join(_r2_dir, "hist")
+os.makedirs(gl.HIST_DIR, exist_ok=True)
+for d in ("20261029", "20261030", "20261031", "20261101"):
+    with open(os.path.join(gl.HIST_DIR, d + ".trk"), "w") as f:
+        f.write("x" * 100)
+_fr = gl.free
+gl.free = lambda: 2000000 - 400000 * len(os.listdir(gl.HIST_DIR))
+try:
+    room = gl._hist_trim(1000000)
+    left = sorted(os.listdir(gl.HIST_DIR))
+    gl.free = lambda: 1000
+    room2 = gl._hist_trim(10 ** 9)
+    left2 = sorted(os.listdir(gl.HIST_DIR))
+finally:
+    gl.free = _fr
+    gl.HIST_DIR = _hd2
+check("R2-HIST: oldest days go until enough is free, today's file stays",
+      left == ["20261031.trk", "20261101.trk"] and room == 1200000
+      and left2 == ["20261101.trk"], repr((left, room, left2)))
+
+# R2-RM: a file that cannot be deleted after its upload is parked as .err
+# after READ_ERR_MAX tries (its last batch went up each time)
+pr = os.path.join(_r2_dir, "20261101_140000.trk")
+make_trk(pr, 2)
+_rmr = os.remove
+os.remove = lambda path, *a: (_ for _ in ()).throw(OSError(5)) \
+    if path == pr else _rmr(path, *a)
+res = []
+try:
+    for _ in range(gl.READ_ERR_MAX):
+        try:
+            gl._rm_done(pr)
+            res.append("ok")
+        except OSError:
+            res.append("raised")
+finally:
+    os.remove = _rmr
+check("R2-RM: raises READ_ERR_MAX-1 times, then parks the file as .err",
+      res == ["raised"] * (gl.READ_ERR_MAX - 1) + ["ok"]
+      and os.path.exists(pr + ".err") and not os.path.exists(pr),
+      repr(res))
+
+# R2-LOST: a radio turned off on purpose clears lost_at ("back after"
+# measures a reconnect, not an hour of sleep)
+class _OffW(object):
+    def disconnect(self):
+        pass
+    def active(self, x=None):
+        return False
+gl.wifi_reset()
+gl.log_reset()
+gl.wifi["lost_at"] = _clock[0]
+gl._wifi_off(_OffW(), "sleep")
+check("R2-LOST: _wifi_off clears lost_at", gl.wifi["lost_at"] is None)
+
+# R2-POLL: a failure status other than the one the clear left fails the try
+# at once (the radio stayed on CONNECT_TIMEOUT for every absent network)
+class _PollW(object):
+    def __init__(self, s):
+        self.s = s
+    def status(self, arg=None):
+        return self.s
+gl.wifi_reset()
+fails = []
+_wf = gl._wifi_failed
+gl._wifi_failed = lambda w, s, el: fails.append((s, el)) or False
+try:
+    gl.wifi.update(state="connecting", try_at=_clock[0], prev_status=0,
+                   saw_connecting=False)
+    _clock[0] += 500
+    gl._wifi_poll(_PollW(201))
+    fast = list(fails)
+    gl.wifi.update(try_at=_clock[0], prev_status=201)
+    _clock[0] += 500
+    gl._wifi_poll(_PollW(201))
+    held = list(fails)
+finally:
+    gl._wifi_failed = _wf
+    gl.wifi_reset()
+check("R2-POLL: a new failure status fails at once; the one the clear left "
+      "waits for CONNECT_TIMEOUT",
+      fast == [(201, 500)] and held == fast, repr((fast, held)))
+
+# R2-WEB: a bug on a page request is caught (no reset), counted, closed
+class _Cli(object):
+    closed = False
+    def settimeout(self, t):
+        pass
+    def close(self):
+        _Cli.closed = True
+class _Lsn(object):
+    def accept(self):
+        return _Cli(), ("1.2.3.4", 5)
+_wsaved = (gl._web_sock, gl._web_read, gl._web_reply, gl.WEB)
+gl._web_sock, gl.WEB = _Lsn(), True
+gl._web_read = lambda c: b"GET / HTTP/1.0\r\n\r\n"
+gl._web_reply = lambda c, r: (_ for _ in ()).throw(TypeError("bug"))
+gl.wifi_reset()
+gl.wifi["state"] = "connected"
+gl._web_errs[0] = 0
+try:
+    gl.web_tick()
+    r_web = "ok"
+except Exception as e:
+    r_web = repr(e)
+finally:
+    gl._web_sock, gl._web_read, gl._web_reply, gl.WEB = _wsaved
+    gl.wifi_reset()
+check("R2-WEB: a TypeError on a page request does not escape web_tick",
+      r_web == "ok" and gl._web_errs[0] == 1 and _Cli.closed, r_web)
+shutil.rmtree(_r2_dir, ignore_errors=True)
+
+# R2-UPTIME: uptime counts from boot (ticks at import), not from the import
+gl = _reload_logger()
+check("R2-UPTIME: _up starts at the ticks of the import (boot), not at 0",
+      gl._up[0] * 1000 + gl._up[2] == gl._up[1] and 0 <= gl._up[2] < 1000,
+      repr(list(gl._up)))
 
 print()
 print("%d passed, %d failed" % (passed, failed))
