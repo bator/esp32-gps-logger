@@ -10835,6 +10835,108 @@ else:
           and hd.get("day") == "<em>TODAY </em>%.2f KM" % hd.get("km", -1)
           and 0.28 < hd.get("km", 0) < 0.32, repr((hd.get("zoom"),
                                                     hd.get("day"))))
+    ft = v.get("feat", {})
+    check("PAGE-LINK: GPS link tone by seconds since the last frame, B/s "
+          "between polls, junk vs nothing, none on an old firmware",
+          ft.get("linkOk") == {"tone": "", "rate": 400, "silent": 0,
+                               "junk": False}
+          and ft.get("linkWarn") == "warn"
+          and ft.get("linkJunk", {}).get("silent") == 42
+          and ft.get("linkJunk", {}).get("junk") is True
+          and ft.get("linkDead") == {"tone": "bad", "rate": None,
+                                     "silent": 95, "junk": False}
+          and ft.get("linkOld") is None, repr(ft)[:600])
+    check("PAGE-LINK: red banner only while silent; Systems GPS LINK line",
+          ft.get("glOk") == "" and ft.get("glDead", "").startswith(
+              "GPS SILENT &middot; 42 S<em>nothing from the receiver")
+          and ft.get("alert", "").startswith("GPS SILENT &middot; 1 MIN 00 S")
+          and '>GPS LINK<span class="">400 B/s<em>last frame 0 s ago '
+              '&middot; 48.8 KB read</em>' in ft.get("sysOk", "")
+          and '>GPS LINK<span class="bad">-<em>last frame 42 s ago'
+              in ft.get("sysDead", "")
+          and "GPS LINK" not in ft.get("sysNone", "-"),
+          repr((ft.get("glDead"), ft.get("sysOk", "")[-400:])))
+    check("PAGE-UPLOAD: LAST UPLOAD line; amber (and the strip) when points "
+          "wait over 30 min",
+          '>LAST UPLOAD<span class="">30 s ago<em>0 pts waiting</em>'
+          in ft.get("sysOk", "")
+          and '>LAST UPLOAD<span class="warn">1 h 06 min ago<em>50 pts '
+              'waiting</em>' in ft.get("sysDead", "")
+          and '<div class="warn"><small>UPLINK</small><b>50<em>pts' in
+              ft.get("tmDead", "")
+          and "LAST UPLOAD" not in ft.get("sysNone", "-"),
+          repr(ft.get("sysDead", "")[-500:]))
+    pd = ft.get("pastDays") or ["?"]
+    check("PAGE-DAYS: the days oldest first (bad, duplicate and today's "
+          "skipped, today last); the arrow steps to a past local day, read "
+          "once from its UTC files, drawn without a fix; and back to today",
+          ft.get("days") == ["20261029", "20261030", ft.get("today")]
+          and pd[-1] == "20261030" and len(pd) in (1, 2)
+          and ft.get("pastEnd") == 86400000
+          and ft.get("nav0") == ["TODAY", False, True]
+          and ft.get("pickUrls") == ["/hist?d=%s&o=0" % pd[0]]
+          and ft.get("pickPts") == 5 and ft.get("pickDone") is True
+          and ft.get("pickMap") == "map nofix" and ft.get("pickTrk") is True
+          and ft.get("pickDay") == "<em>2026-10-30 </em>4.42 KM"
+          and ft.get("nav1") == ["2026-10-30", False, False]
+          and ft.get("backToday") is True and ft.get("pts") == [
+              [3600000, 120.5], [3601000, 121], [3602000, None]],
+          repr({k: ft.get(k) for k in ("days", "pastDays", "pickUrls",
+                                       "pickPts", "pickDay", "nav0",
+                                       "nav1")}))
+    check("PAGE-TIMELINE: trips split at stops over 5 min, a few standing "
+          "fixes folded into the stop; trip rows (km, time, km/h) and stop "
+          "rows; the picked trip marked",
+          ft.get("trips") == [[0, 20, 480, 500, 1.2], [24, 34, 660, 670, 0.5]]
+          and ft.get("timeline") == (
+              '<div class="tr go" onclick="hlTrip(0)"><time>08:00</time><i>'
+              '</i><span><b>1.20 km</b> &middot; 20 min &middot; 4 km/h'
+              '</span></div><div class="tr st"><time>08:20</time><i></i>'
+              '<span>stop 2 h 40 min</span></div><div class="tr go on" '
+              'onclick="hlTrip(1)"><time>11:00</time><i></i><span><b>0.50 '
+              'km</b> &middot; 10 min &middot; 3 km/h</span></div><div '
+              'class="tr end"><time>11:10</time><i></i><span></span></div>')
+          and ft.get("timelineNone") == [
+              '<span class="hint">NO TRIP THIS DAY</span>',
+              '<span class="hint">NO TRIP YET TODAY</span>'],
+          repr((ft.get("trips"), ft.get("timeline"))))
+    check("PAGE-TIMELINE: km, moving time (min, then h:mm) and trips on "
+          "top; a trip clicked is drawn on the map, clicked again the day",
+          ft.get("kpis") == "<div><b>1.70</b><em>km</em></div><div><b>30</b>"
+              "<em>min moving</em></div><div><b>2</b><em>trips</em></div>"
+          and "<b>1:15</b><em>h moving</em>" in ft.get("kpisLong", "")
+          and "<em>trip</em>" in ft.get("kpisLong", "")
+          and "<b>1</b><em>trip</em>" in ft.get("pickKpi", "")
+          and ft.get("hlMap") == 2 and ft.get("hlLine") is True
+          and ft.get("hlOff") == 1,
+          repr((ft.get("kpis"), ft.get("kpisLong"), ft.get("hlMap"))))
+    gx = ft.get("gpx", "")
+    check("PAGE-GPX: GPX 1.1, a segment per 5 min gap, ele when known, "
+          "escaped name",
+          gx.startswith('<?xml version="1.0" encoding="UTF-8"?>\n<gpx '
+                        'version="1.1"')
+          and "<name>GPS &lt;day&gt;</name>" in gx
+          and gx.count("<trkseg>") == 2
+          and '<trkpt lat="47.1" lon="18.4"><ele>120.5</ele><time>'
+              '2026-10-30T08:00:00Z</time></trkpt>' in gx
+          and '<trkpt lat="47.2" lon="18.5"><time>' in gx
+          and gx.endswith("</trkseg>\n</trk>\n</gpx>\n"), gx[:400])
+    sv = ft.get("stat", {})
+    check("PAGE-STATIC: CEP50 / CEP95 / max around the mean, mean hAcc, "
+          "scatter with both circles; pos6 kept only while recording",
+          sv.get("btn") == "STOP"
+          and "<small>CEP50</small><b>0.67<em>m</em>" in sv.get("sstat", "")
+          and "<small>CEP95</small><b>0.74<em>m</em>" in sv.get("sstat", "")
+          and "<small>MAX</small><b>9.51<em>m</em>" in sv.get("sstat", "")
+          and "<small>MEAN HACC</small><b>2.00<em>m</em>" in sv.get("sstat", "")
+          and sv.get("scat", "").count('class="d"') == 20
+          and 'class="c50"' in sv.get("scat", "")
+          and 'class="c95"' in sv.get("scat", "")
+          and ft.get("statEmpty", {}).get("btn") == "START"
+          and "<small>CEP50</small><b>-" in ft.get("statEmpty", {}).get(
+              "sstat", "")
+          and ft.get("statAdd") == [[1000, 47.185361, 18.427305, 1.5]],
+          repr(sv)[:500])
     check("PAGE: satellite table and map tile maths",
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"
@@ -10862,6 +10964,105 @@ for v in ("2.5", "0", "7 # meters", "60", "-1", "x", None):
 gl.MIN_MOVE = saved_mm
 check("MINMOVE-ENV: 0-50 m read (decimals, comment); invalid keeps 1",
       got == [2.5, 0.0, 7.0, 1, 1, 1, 1], repr(got))
+
+# WEB-LINK: the page's GPS link - bytes read, seconds since the last whole
+# NMEA sentence / UBX frame (a bad checksum is not one), None before any
+def _nm(body):
+    c = 0
+    for ch in body.encode():
+        c ^= ch
+    return ("$%s*%02X\r\n" % (body, c)).encode()
+gl.reset()
+j0 = json.loads(gl._web_json())
+_junk = b"\x00\xff garbage\r\n$GPRMC,1,2*00\r\n"
+_uart_rx.extend(_junk)
+gl.read_uart()
+j1 = json.loads(gl._web_json())
+junk_b, junk_good = gl.st["rx_b"], gl.st["good"]
+_clock[0] += 4000
+s1 = _nm("GPRMC,120500.00,V,,,,,,,171026,,,N")
+_uart_rx.extend(s1)
+gl.read_uart()
+good_at = gl.st["good"]
+_clock[0] += 7000
+_uart_rx.extend(gl._ubx(0x0A, 0x04, bytes(40)))
+gl.read_uart()
+ubx_at = gl.st["good"]
+_clock[0] += 12000
+j2 = json.loads(gl._web_json())
+check("WEB-LINK: rx_bytes counts every byte, good_age_s only whole frames",
+      j0["rx_bytes"] == 0 and j0["rx_age_s"] is None
+      and j0["good_age_s"] is None
+      and junk_b == len(_junk) and junk_good is None and j1["good_age_s"] is None
+      and j1["rx_age_s"] == 0 and good_at is not None
+      and ubx_at == good_at + 7000
+      and j2["rx_bytes"] == len(_junk) + len(s1) + 48
+      and j2["good_age_s"] == 12 and j2["rx_age_s"] == 12,
+      repr((j0.get("rx_bytes"), junk_b, junk_good, j1.get("good_age_s"),
+            good_at, ubx_at, j2.get("rx_bytes"), j2.get("good_age_s"))))
+
+# WEB-POS6: the position at the track line's precision for the static test:
+# NAV-PVT's integer 1e-7 degrees exactly, NMEA's float to 6 decimals
+gl.st.update(valid=True, lat=47.1853612, lon=18.4273049, lat_i=471853612,
+             lon_i=184273049)
+p_pvt = json.loads(gl._web_json())
+gl.st.update(lat_i=None, lon_i=None)
+p_nm = json.loads(gl._web_json())
+gl.st["valid"] = False
+p_none = json.loads(gl._web_json())
+check("WEB-POS6: pos6 from lat_i/lon_i (PVT), %.6f (NMEA), None w/o fix",
+      p_pvt["pos6"] == "47.185361, 18.427305"
+      and p_nm["pos6"] == "47.185361, 18.427305"
+      and p_pvt["position"] == "47.18536, 18.42730"
+      and p_none["pos6"] is None,
+      repr((p_pvt.get("pos6"), p_nm.get("pos6"), p_none.get("pos6"))))
+gl.reset()
+
+# WEB-DAYS: the day history's days for the page's picker, oldest first,
+# only YYYYMMDD.trk, listed at most every 30 s
+_hd_dir = tempfile.mkdtemp()
+_hd_saved = gl.HIST_DIR
+gl.HIST_DIR = _hd_dir
+gl._hd[1] = None
+for n in ("20261031.trk", "20261029.trk", "x.trk", "2026103.trk",
+          "20261030.trk.tmp", "20261030.trk"):
+    open(os.path.join(_hd_dir, n), "w").close()
+days1 = gl._hist_days()
+open(os.path.join(_hd_dir, "20261101.trk"), "w").close()
+_clock[0] += 10000
+days2 = gl._hist_days()
+_clock[0] += 25000
+days3 = json.loads(gl._web_json())["days"]
+gl.HIST_DIR = os.path.join(_hd_dir, "missing")
+gl._hd[1] = None
+days4 = gl._hist_days()
+gl.HIST_DIR = _hd_saved
+gl._hd[1] = None
+shutil.rmtree(_hd_dir, ignore_errors=True)
+check("WEB-DAYS: sorted YYYYMMDD days, cached 30 s, [] without the folder",
+      days1 == ["20261029", "20261030", "20261031"] and days2 == days1
+      and days3 == days1 + ["20261101"] and days4 == [],
+      repr((days1, days2, days3, days4)))
+
+# WEB-UPLOAD-AGE: seconds since the last accepted batch, None before one
+# (and after a rejected one only)
+_ua_dir = tempfile.mkdtemp()
+online(_ua_dir)
+make_trk(os.path.join(_ua_dir, "20261031_120000.trk"), 3)
+ua0 = json.loads(gl._web_json())["upload_age_s"]
+_post_code[0] = 422
+pump()
+ua1 = gl.up["ok_at"]
+online(_ua_dir)
+make_trk(os.path.join(_ua_dir, "20261031_130000.trk"), 3)
+pump()
+_clock[0] += 61000
+ua2 = json.loads(gl._web_json())["upload_age_s"]
+shutil.rmtree(_ua_dir, ignore_errors=True)
+check("WEB-UPLOAD-AGE: upload_age_s None until a 2xx, then its age",
+      ua0 is None and ua1 is None and ua2 == 61 and gl.up["sent"] == 3,
+      repr((ua0, ua1, ua2, gl.up.get("sent"))))
+
 
 # C6-UART: the C6 reads the GPS on UART1 GPIO18 (TX) / GPIO19 (RX), not the
 # strapping pins 4/5 (the GPS is soldered to 18/19 now); the ESP32 keeps 16/17

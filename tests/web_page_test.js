@@ -152,4 +152,99 @@ hx[0].onload();
 hx = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
 hd.again = hx.length > 1 && hx[1].url === hx[0].url.replace("&o=0", "&o=16384");
 v.hist = hd;
+// The new boxes: GPS link, last upload, day picker, track parse (speed),
+// profile, GPX, static test, and picking a past day on the page
+const ft = {};
+const c0 = page(1600).c;
+const base = {uptime: 600, rx_bytes: 50000, rx_age_s: 0, good_age_s: 0, left: 0, upload_age_s: 30};
+ft.linkOk = c0.gpsLink(base, {uptime: 585, rx_bytes: 44000});
+ft.linkWarn = c0.gpsLink(Object.assign({}, base, {good_age_s: 7}), null).tone;
+ft.linkJunk = c0.gpsLink(Object.assign({}, base, {good_age_s: 42, rx_age_s: 1}), null);
+ft.linkDead = c0.gpsLink(Object.assign({}, base, {good_age_s: null, rx_age_s: null, uptime: 95}), null);
+ft.linkOld = c0.gpsLink({uptime: 5}, null);
+const vOk = c0.view(base, {uptime: 585, rx_bytes: 44000});
+const vDead = c0.view(Object.assign({}, base, {good_age_s: 42, rx_age_s: null, left: 50, upload_age_s: 4000}), null);
+ft.glOk = vOk.gl;
+ft.glDead = vDead.gl;
+ft.sysOk = vOk.sys;
+ft.sysDead = vDead.sys;
+ft.tmDead = vDead.tm;
+ft.sysNone = c0.view({uptime: 10}).sys;
+ft.days = c0.dayList(["20261030", "bad", "20261029", c0.utcDay(Date.now()), "20261030"]);
+ft.today = c0.utcDay(Date.now());
+// a past local day: its UTC files, points outside it dropped
+const d0 = new Date(2026, 9, 30).getTime();
+c0.hist = c0.histNew("20261030");
+ft.pastDays = c0.hist.days;
+ft.pastEnd = c0.hist.end - c0.hist.start;
+const iso = (ms) => new Date(ms).toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+c0.histParse(c0.hist.days[0], "#TRK2\n47.0,18.0,120.5,2,5.0," + iso(d0 + 3600000) + "\n" +
+  "47.0001,18.0,121.0,2,,", "");
+c0.histParse(c0.hist.days[0], iso(d0 + 3601000) + "\n" + "47.0,18.0,,3," + iso(d0 + 3602000) + "\n" +
+  "47.0,18.0,1,2,1," + iso(d0 - 1000) + "\n47.0,18.0,1,2,1," + iso(d0 + 86400000) + "\n");
+ft.pts = c0.hist.pts.map((q) => [q[0] - d0, q[3]]);
+// trips and stops: a 1.2 km walk (20 min), a stop, a few fixes standing
+// (folded into the stop), a 0.5 km walk (10 min)
+const tp = [], dLat = 1 / 110.54;
+for (let k = 0; k <= 20; k++) tp.push([d0 + 8 * 3600000 + k * 60000, 47 + k * 0.06 * dLat, 18, 100]);
+for (let k = 0; k < 3; k++) tp.push([d0 + 10 * 3600000 + k * 60000, 47.02, 18, 100]);
+for (let k = 0; k <= 10; k++) tp.push([d0 + 11 * 3600000 + k * 60000, 47.02 + k * 0.05 * dLat, 18, 100]);
+const trips = c0.tripsOf(tp);
+ft.trips = trips.map((t) => [t.i0, t.i1, (t.t0 - d0) / 60000, (t.t1 - d0) / 60000, Math.round(t.km * 100) / 100]);
+ft.timeline = c0.timeline(trips, 1, true);
+ft.timelineNone = [c0.timeline([], null, true), c0.timeline([], null, false)];
+ft.kpis = c0.kpis(trips);
+ft.kpisLong = c0.kpis([{t0: 0, t1: 4500000, km: 12.345}]);
+ft.gpx = c0.gpxText([[Date.UTC(2026, 9, 30, 8, 0, 0), 47.1, 18.4, 120.5, 5], [Date.UTC(2026, 9, 30, 8, 0, 1), 47.2, 18.5, null, null],
+  [Date.UTC(2026, 9, 30, 9, 0, 0), 47.3, 18.6, 99, 0]], "GPS <day>");
+// static test: 20 fixes, 10 at the centre, 9 at 1 m, one at 10 m east
+const S = [];
+const ky = 110540, kx = 111320 * Math.cos(47 * Math.PI / 180);
+for (let k = 0; k < 10; k++) S.push([k * 15000, 47, 18, 2]);
+for (let k = 0; k < 9; k++) S.push([(10 + k) * 15000, 47 + 1 / ky, 18, 2]);
+S.push([19 * 15000, 47, 18 + 10 / kx, null]);
+ft.stat = c0.statView(S, true);
+ft.statEmpty = c0.statView([], false);
+ft.statAdd = (() => {
+  c0.stat = {on: true, s: []};
+  c0.statAdd({pos6: "47.185361, 18.427305", position: "47.18536, 18.42730", hacc: 1.5}, 1000);
+  c0.statAdd({position: null}, 2000);
+  c0.stat.on = false;
+  c0.statAdd({pos6: "1, 2"}, 3000);
+  return c0.stat.s;
+})();
+// the page: a poll fills the picker; picking a past day asks for its UTC
+// days once, draws the track without a fix, and does not poll it again
+p = page(1600);
+p.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null, days: ["20261029", "20261030"], uptime: 60,
+  rx_bytes: 0, good_age_s: null, rx_age_s: null});
+p.xhrs[0].onload();
+ft.nav0 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev").disabled,
+  p.doc.getElementById("dnext").disabled];
+ft.alert = p.doc.getElementById("gl").innerHTML;
+answer(p, null, "");
+p.c.step(-1);
+const ph = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done);
+ft.pickUrls = ph.map((x) => x.url);
+const pd = new Date(2026, 9, 30, 12, 0, 0).getTime();
+let pb = "#TRK2\n";
+for (let k = 0; k < 5; k++) pb += "47.1" + k + ",18.4,100,2,3," + iso(pd + k * 1000) + "\n";
+answer(p, new RegExp("d=" + c0.utcDay(pd) + "&o=0$"), pb);
+ft.pickPts = p.c.hist.pts.length;
+ft.pickDone = p.c.hist.done && !p.c.histDue();
+ft.pickMap = p.map.className;
+ft.pickTrk = p.doc.getElementById("trk").innerHTML.indexOf("<path") >= 0;
+ft.pickDay = p.doc.getElementById("day").innerHTML;
+ft.pickKpi = p.doc.getElementById("tkpi").innerHTML;
+ft.pickLine = p.doc.getElementById("tline").innerHTML;
+ft.nav1 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev").disabled,
+  p.doc.getElementById("dnext").disabled];
+p.c.hlTrip(0);
+ft.hlMap = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
+ft.hlLine = p.doc.getElementById("tline").innerHTML.indexOf('class="tr go on"') >= 0;
+p.c.hlTrip(0);
+ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
+p.c.step(1);
+ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
+v.feat = ft;
 process.stdout.write(JSON.stringify(v));
