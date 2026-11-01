@@ -1613,6 +1613,16 @@ def _diag(now):
             wifi["state"].replace(" ", "_"), wifi["pb_scans"],
             pf, fr, big, pk, pvt))
 
+def _diag_final():
+    """A status line right before a deliberate reset: the next boot reads
+    the run's length and end from it (_diag_prev). The last regular one
+    can be up to DIAG older, and an OTA install takes ~1.5 min after it:
+    the page showed the run before an update 1 min 05 s long, it was 2.5."""
+    try:
+        _diag(time.ticks_ms())
+    except Exception:
+        pass
+
 def checksum_ok(line):
     star = line.rfind(b"*")
     if not line.startswith(b"$") or star < 0:
@@ -5675,6 +5685,7 @@ def _tls_reboot():
         flush(_still_hold())
     except Exception:
         pass
+    _diag_final()
     _diag_write("reboot tls memory %d" % up["enomem"])
     machine.reset()
     return True
@@ -5694,6 +5705,7 @@ def _lowidf_reboot(big, low_ms):
         flush(_still_hold())
     except Exception:
         pass
+    _diag_final()
     _diag_write("reboot low idf %d KB %d s" % (big, low_ms // 1000))
     try:
         with open(LOWIDF_MARK, "w") as f:
@@ -6223,6 +6235,7 @@ def _ota_check():
         _rm(OTA_PENDING)
         _ota_drop(paths)
         raise
+    _diag_final()
     _diag_write("ota %s installed (was %s), rebooting" % (m["commit"],
                                                          FW_COMMIT))
     try:
@@ -6305,6 +6318,7 @@ def _ota_health(now):
     _ota_mark_bad(build)
     _ota_drop(ota.get("paths") or ())
     _rm(OTA_PENDING)
+    _diag_final()
     _diag_write("ota %s no wifi in %d s, rolling back" % (
         FW_COMMIT, OTA_HEALTH // 1000))
     machine.reset()
@@ -6474,6 +6488,8 @@ def _web_rows():
         ("uptime", uptime_s()),
         ("prev_uptime", prev_run["up"]),
         ("prev_run", _prev_text()),
+        ("prev_end", None if prev_run["end"] is None
+         else prev_run["end"].replace(" ", "T")),
         ("boot_cause", cause),
         ("temp", _temp()),
         ("mhz", machine.freq() // 1000000),
@@ -6485,6 +6501,7 @@ def _web_rows():
         ("rssi", wifi.get("rssi")),
         ("pulses", wifi["pb_scans"]),
         ("fw", FW_COMMIT),
+        ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
     ]
 

@@ -319,8 +319,10 @@ diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not
 one rolled back by a power-off (the cable pulled) is tried again. A boot
 without a pending note confirms the running image. Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
-The status page shows the running commit and the OTA state under *Systems*
-(`FIRMWARE`: `pending`, `ok`, `rolled back`, `current`, …).
+The status page shows the running build under *Systems*: `FIRMWARE` is the
+build's date (the commit time, `fw_build` in the JSON, local time), then
+the OTA state (`up to date`, `updated`, `checking`, `rolled back`, …) and
+the commit.
 
 After the migration, `--flash` over USB still works. It backs up both slots
 (after an OTA the second one runs), writes the first slot and erases
@@ -442,7 +444,7 @@ page shows the last 15 lines (`WEB_DIAG`), right after the switch to
 | Field | Meaning |
 |-------|---------|
 | `boot cause N` | Why the chip started (`machine.reset_cause()` of MicroPython 1.29): 1 power-on (also a brownout, or a power bank switching back on), 2 hard reset (the logger's own reset after a crash or for TLS memory, `mpremote reset`, a panic), 3 watchdog, 4 deep sleep, 5 soft reset (Ctrl-D), 0 other (e.g. a reset over USB-JTAG) |
-| `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; `0` = under a minute, `-` = no log) |
+| `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; exact before a deliberate reset, which writes a status line first; `0` = under a minute, `-` = no log) |
 | `up` | Seconds since boot (summed from tick differences, so it does not wrap after 12.4 days) |
 | `utc` | GPS time, `-` until the receiver has one |
 | `nmea ok/bad` | Valid and broken NMEA sentences so far (they stop growing on the NAV-PVT path, until a receiver restart) |
@@ -474,7 +476,8 @@ receiver restarts; points logged, waiting and uploaded,
 quarantined `.bad` files, upload state, `upload_age_s` (seconds since the
 last accepted batch, `null` for none since boot), the day history's
 `days`, stay; uptime and how long the previous run lasted (e.g. `58 min
-14 s`; seconds in the JSON), boot cause, chip temperature, free Python heap
+14 s`; seconds in the JSON, `prev_end` the time of its last line), boot
+cause, the build (`fw`, `fw_build`), chip temperature, free Python heap
 and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
 page is a dark telemetry view. On top, a darkened OpenStreetMap map is
@@ -495,7 +498,10 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
   needs, then the Python heap, free flash, upload state and counters,
   points logged and stay, receiver restarts and setup, the fix source
   (`NAV-PVT` / `NMEA`) with the UBX frame counts, WiFi (`ssid · 74%
-  (-63 dBm)`) and keep-alive pulses, boot cause with the previous run, chip
+  (-63 dBm)`) and keep-alive pulses, `BOOT`: the cause and when this run
+  started (local time; `up` how long ago), then how long the run before it
+  lasted and until when (`HARD RESET · 14:23`, `up 2 h 54 min · previous
+  run 2 min 30 s, until 14:23`), `FIRMWARE` (the build date), chip
   temperature and GPS time;
 - the *Event log*: the diagnostic log, newest on top, with the minute
   status lines as rows (local time, fix, satellites, points, IDF block, red
