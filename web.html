@@ -15,7 +15,7 @@
 <style>
 :root{--b:#060b16;--l:#16233d;--t:#d6e2ff;--m:#7487ae;--a:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
 body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-serif}
-.tm,.none,.term,.p h2,.hud,.coord,.legend,.svt{font-family:"JetBrains Mono",ui-monospace,monospace}
+.tm,.none,.p h2,.hud,.coord,.legend,.svt{font-family:"JetBrains Mono",ui-monospace,monospace}
 /* map */
 .map{position:relative;height:360px;overflow:hidden;background:#0a1222}
 .tiles{position:absolute;left:50%;top:42%;filter:invert(1) hue-rotate(195deg) saturate(.35) brightness(.62) contrast(1.15)}
@@ -61,6 +61,8 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .col{display:flex;flex-direction:column;gap:12px}.col .p:last-child{flex:1}
 /* sky radar */
 .radar svg{display:block;width:100%;max-width:380px;margin:auto}
+.col.l .p{flex:none}.col.l .radar{flex:1;display:flex;flex-direction:column}
+.col.l .radar svg{flex:1;height:0;min-height:240px;max-width:none}
 .rg{fill:none;stroke:rgba(34,211,238,.18)}.rx{stroke:rgba(34,211,238,.12)}
 .sweep{fill:url(#sw)}
 text{fill:var(--m);font:600 9px "JetBrains Mono",monospace;text-anchor:middle}
@@ -118,8 +120,41 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sx-k td.warn{color:var(--wo)}
 .sx-chip{display:inline-block;border:1px solid rgba(127,227,154,.45);background:rgba(127,227,154,.08);color:var(--g);font:600 10.5px Inter,sans-serif;letter-spacing:.06em;padding:4px 7px;border-radius:3px;margin-left:8px;vertical-align:1px;text-transform:uppercase}
 /* log + satellite table */
-.term{font-size:12.5px;line-height:1.75;color:#9fb3da;overflow-x:auto;white-space:nowrap}
-.term .t{color:var(--m)}.term .ok{color:var(--ok)}.term .boot{color:var(--a)}.term .err{color:var(--bad)}.term .warn{color:var(--warn)}.term .info{color:#c4b5fd}
+/* Event log, after the "server log monitoring" design */
+.ev{--g:#7fe39a;--lab:#8a96ad;--ln:rgba(255,255,255,.07);margin-top:12px;padding:18px;font-family:"JetBrains Mono",ui-monospace,monospace}
+.ev-t{font:500 26px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}
+.ev-s{font:400 12px "JetBrains Mono",monospace;color:var(--lab);margin:0 0 16px}
+.ev-row{display:grid;grid-template-columns:2fr 1fr;gap:12px}
+.ev-card{background:rgba(0,0,0,.25);border:1px solid var(--ln);border-radius:12px;padding:14px 16px;min-width:0}
+.ev-card h3{font:500 14px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}.ev-card>p{margin:0 0 8px;font-size:12px;color:var(--lab)}
+.ev-leg{display:flex;gap:14px;font-size:11px;color:var(--lab);margin-top:4px}
+.ev-leg i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:6px;vertical-align:2px;background:var(--g)}.ev-leg .u i{background:var(--a)}
+.ev-ch{width:100%;display:block}.ev-ch .gr line{stroke:rgba(255,255,255,.06)}
+.ev-ch text{fill:var(--lab);font:10px "JetBrains Mono",monospace;text-anchor:middle}.ev-ch .gr text{text-anchor:end}
+.ev-ch .l1{fill:none;stroke:var(--g);stroke-width:2.2;filter:drop-shadow(0 0 4px rgba(127,227,154,.8))}
+.ev-ch .l2{fill:none;stroke:var(--a);stroke-width:1.6;opacity:.9}
+.ev-dn{width:150px;display:block;margin:6px auto 10px}.ev-dn circle,.ev-dn path{fill:none;stroke-width:16}.ev-dn .bg{stroke:rgba(255,255,255,.06)}
+.ev-dn .ok{stroke:var(--g);filter:drop-shadow(0 0 4px rgba(127,227,154,.5))}.ev-dn .warn{stroke:var(--warn)}.ev-dn .bad{stroke:var(--bad)}
+.ev-dn .big{fill:#fff;font:500 26px "JetBrains Mono",monospace;text-anchor:middle;dominant-baseline:middle}
+.ev-dn .sm{fill:var(--lab);font:9px "JetBrains Mono",monospace;text-anchor:middle;letter-spacing:.1em}
+.ev-k4{display:grid;grid-template-columns:1fr 1fr;gap:6px}.ev-k4 div{background:rgba(255,255,255,.04);border-radius:8px;padding:9px 10px}
+.ev-k4 small{display:block;font-size:10px;color:var(--lab)}.ev-k4 b{font:500 15px "JetBrains Mono",monospace;color:#fff}
+.ev-logs{margin-top:12px}
+.ev-chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 8px}
+.ev-chips button{font:12px "JetBrains Mono",monospace;color:#c9d3e6;padding:6px 10px;border-radius:7px;background:rgba(255,255,255,.04);border:0;cursor:pointer}
+.ev-chips button.on{background:rgba(127,227,154,.14);color:var(--g)}.ev-chips em{font-style:normal;color:var(--lab);margin-left:6px}
+.lr{display:grid;grid-template-columns:28px 1.3fr 1fr 1fr 1fr 1fr 70px 52px;align-items:center;gap:12px;padding:8px 10px;border-radius:8px;font-size:12.5px;color:#e6ecf7}
+#log .lr:nth-child(odd){background:rgba(255,255,255,.025)}
+.lr.hd{font-size:10.5px;color:var(--lab);letter-spacing:.08em;padding-top:2px;padding-bottom:6px;border-bottom:1px solid var(--ln);border-radius:0;margin-bottom:4px}
+.lr .ic{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;background:rgba(127,227,154,.12)}
+.lr .ic svg{width:14px;height:14px;fill:none;stroke:var(--g);stroke-width:2}
+.lr .ic.boot,.lr .ic.ota{background:rgba(34,211,238,.12)}.lr .ic.boot svg,.lr .ic.ota svg{stroke:var(--a)}
+.lr .ic.err{background:rgba(248,113,113,.12)}.lr .ic.err svg{stroke:var(--bad)}.lr .ic.warn{background:rgba(251,191,36,.12)}.lr .ic.warn svg{stroke:var(--warn)}
+.lr b{font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lr b.ok{color:var(--g)}.lr b.warn,.lr .c.warn{color:var(--warn)}.lr b.err,.lr .c.err{color:var(--bad)}.lr b.boot,.lr b.ota{color:var(--a)}.lr b.info{color:#c4b5fd}
+.lr .c em{font-style:normal;color:var(--lab)}
+.lr .ms{grid-column:3/7;color:#c9d3e6;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.lr .src{color:var(--lab);font-size:11px}.lr .lt{color:var(--lab);text-align:right}
 details.p{margin-top:12px}
 details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter-spacing:.16em;color:var(--m);text-transform:uppercase}
 .svt{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
@@ -151,7 +186,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .trk path.hl{stroke:#fff;stroke-width:5;filter:drop-shadow(0 0 6px rgba(255,255,255,.8))}
 .scat circle.d{fill:var(--a);opacity:.55}.scat .c50{fill:none;stroke:var(--ok);stroke-dasharray:3 3}.scat .c95{fill:none;stroke:var(--warn);stroke-dasharray:3 3}
 .hint{font-size:11px;color:var(--m);margin-top:8px}
-@media(max-width:760px){.kv{grid-template-columns:repeat(2,1fr)}.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+@media(max-width:760px){.kv{grid-template-columns:repeat(2,1fr)}.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-row{grid-template-columns:1fr}.lr{grid-template-columns:24px 1.2fr 1fr 1fr 46px;gap:8px}.lr .pts,.lr .idf,.lr .src{display:none}.lr .ms{grid-column:3/5}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -165,29 +200,40 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
   <div class="alert" id="gl"></div>
   <div class="tm" id="tm"></div>
   <div class="g">
-    <div class="p radar"><h2 id="skyh">Sky</h2>
-      <svg viewBox="-104 -104 208 208">
-        <defs><radialGradient id="sw" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="scale(90)"><stop offset="0" stop-color="rgba(34,211,238,.18)"/><stop offset="1" stop-color="rgba(34,211,238,0)"/></radialGradient></defs>
-        <path class="sweep" d="M0 0L0-90A90 90 0 0 1 77.9-45Z"/>
-        <circle class="rg" r="90"/><circle class="rg" r="60"/><circle class="rg" r="30"/>
-        <path class="rx" d="M0-90V90M-90 0H90M-63.6-63.6L63.6 63.6M63.6-63.6L-63.6 63.6"/>
-        <text y="-94">N</text><text x="97" y="3">E</text><text y="101">S</text><text x="-97" y="3">W</text>
-        <g id="dots"></g>
-      </svg>
-      <div class="legend"><span class="g0"><i></i>GPS</span><span class="g2"><i></i>GAL</span><span class="g3"><i></i>BDS</span><span class="g6"><i></i>GLO</span><span class="g1"><i></i>OTHER</span><span class="u"><i></i>NOT USED</span></div>
+    <!-- the radar takes what the left column has left next to Systems -->
+    <div class="col l">
+      <div class="p radar"><h2 id="skyh">Sky</h2>
+        <svg viewBox="-104 -104 208 208">
+          <defs><radialGradient id="sw" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="scale(90)"><stop offset="0" stop-color="rgba(34,211,238,.18)"/><stop offset="1" stop-color="rgba(34,211,238,0)"/></radialGradient></defs>
+          <path class="sweep" d="M0 0L0-90A90 90 0 0 1 77.9-45Z"/>
+          <circle class="rg" r="90"/><circle class="rg" r="60"/><circle class="rg" r="30"/>
+          <path class="rx" d="M0-90V90M-90 0H90M-63.6-63.6L63.6 63.6M63.6-63.6L-63.6 63.6"/>
+          <text y="-94">N</text><text x="97" y="3">E</text><text y="101">S</text><text x="-97" y="3">W</text>
+          <g id="dots"></g>
+        </svg>
+        <div class="legend"><span class="g0"><i></i>GPS</span><span class="g2"><i></i>GAL</span><span class="g3"><i></i>BDS</span><span class="g6"><i></i>GLO</span><span class="g1"><i></i>OTHER</span><span class="u"><i></i>NOT USED</span></div>
+      </div>
+      <div class="p"><div class="ph"><h2>Track</h2><button class="btn" id="dprev" onclick="step(-1)">&lsaquo;</button><span class="dn" id="dname">TODAY</span><button class="btn" id="dnext" onclick="step(1)">&rsaquo;</button><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
+        <div class="kpi" id="tkpi"></div><div id="tline"></div></div>
+      <div class="p"><div class="ph"><h2>Static test</h2><button class="btn" id="sbtn" onclick="statToggle()">START</button><button class="btn" onclick="statReset()">RESET</button></div>
+        <div class="kv k3" id="sstat"></div><div class="scat" id="scat"></div></div>
     </div>
     <div class="col">
       <div class="p"><h2 id="bh">Signal &middot; dBHz</h2><div class="r" id="bars"></div></div>
       <div class="p sx" id="sys"></div>
     </div>
   </div>
-  <div class="g">
-    <div class="p"><div class="ph"><h2>Track</h2><button class="btn" id="dprev" onclick="step(-1)">&lsaquo;</button><span class="dn" id="dname">TODAY</span><button class="btn" id="dnext" onclick="step(1)">&rsaquo;</button><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
-      <div class="kpi" id="tkpi"></div><div id="tline"></div></div>
-    <div class="p"><div class="ph"><h2>Static test</h2><button class="btn" id="sbtn" onclick="statToggle()">START</button><button class="btn" onclick="statReset()">RESET</button></div>
-      <div class="kv k3" id="sstat"></div><div class="scat" id="scat"></div></div>
+  <!-- after the "server log monitoring" design: a chart, a donut, a table -->
+  <div class="p ev"><p class="ev-t">Event log</p><p class="ev-s">A status line every minute, events as they happen</p>
+    <div class="ev-row">
+      <div class="ev-card"><h3>Satellites</h3><p>seen and used, one point a minute</p><div id="evc"></div>
+        <div class="ev-leg"><span><i></i>seen</span><span class="u"><i></i>used</span></div></div>
+      <div class="ev-card"><h3>Fix quality</h3><p>share of minutes</p><div id="evd"></div></div>
+    </div>
+    <div class="ev-card ev-logs"><h3>Logs</h3><p>status lines, boots, updates, errors</p><div class="ev-chips" id="evf"></div>
+      <div class="lr hd"><span></span><span>EVENT</span><span class="c sats">SATS</span><span class="c hdop">HDOP / ACC</span><span class="c pts">POINTS</span><span class="c idf">IDF BLOCK</span><span class="src">SOURCE</span><span class="lt">TIME</span></div>
+      <div id="log"></div></div>
   </div>
-  <div class="p" style="margin-top:12px"><h2>Event log</h2><div class="term" id="log"></div></div>
   <details class="p"><summary id="svh">Satellite table</summary><table class="svt" id="svt"></table></details>
 </div>
 <script>
@@ -267,31 +313,119 @@ function clock(utc, up) {
   var t = new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
   return two(t.getHours()) + ":" + two(t.getMinutes());
 }
-function logLine(l) {
-  var m = STATUS.exec(l), t = "--:--", kind = "", text, ha;
+var EV_ICON = {
+  st: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>',
+  boot: '<svg viewBox="0 0 24 24"><path d="M12 3v9M6.3 7.3a8 8 0 1 0 11.4 0"/></svg>',
+  ota: '<svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
+  info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>',
+  err: '<svg viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3zM12 10v5M12 18h.01"/></svg>'
+};
+// one diag line -> {k: "st" status / "ev" event / "er" error or warning, h: its row}
+function logRow(l) {
+  var m = STATUS.exec(l), ha, f = l.split(" "), w = f[0], rest = esc(f.slice(1).join(" "));
   if (m) {
     var fix = m[8].replace(/_/g, " "), sv = m[7].split("/"), big = nn(m[16]);
-    t = clock(m[2], +m[1]);
-    kind = fixTone(fix) === "ok" ? "ok" : "warn";
-    text = esc(fix.toUpperCase()) + " &middot; " + esc(nn(sv[1])) + "/" + esc(nn(sv[0])) + " SATS" +
-      (+m[10] ? " &middot; " + num(m[10]) + " PTS" : "") +
-      ((ha = / hacc ([\d.]+)/.exec(l)) ? " &middot; &plusmn;" + esc(ha[1]) + " M" : "") + " &middot; " +
-      (big !== null && +big < TLS_KB ? '<span class="err">IDF ' + esc(big) + " KB</span>" : "IDF " + esc(big) + " KB");
-    return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";
+    ha = / hacc ([\d.]+)/.exec(l);
+    var low = big !== null && +big < TLS_KB;
+    return {k: "st", h: '<div class="lr"><span class="ic' + (fixTone(fix) === "ok" ? "" : " warn") + '">' + EV_ICON.st + "</span>" +
+      '<b class="' + (fixTone(fix) === "ok" ? "ok" : "warn") + '">' + esc(fix.toUpperCase()) + "</b>" +
+      '<span class="c sats">' + esc(nn(sv[1])) + "<em>/" + esc(nn(sv[0])) + "</em></span>" +
+      '<span class="c hdop">' + (ha ? "&plusmn;" + esc(ha[1]) + "<em> m</em>" : isNaN(+m[9]) ? "-" : (+m[9]).toFixed(2)) + "</span>" +
+      '<span class="c pts">' + num(m[10]) + "</span>" +
+      '<span class="c idf' + (low ? " err" : "") + '">' + esc(big) + "<em> KB</em></span>" +
+      '<span class="src">GPS</span><span class="lt">' + clock(m[2], +m[1]) + "</span></div>"};
   }
+  var k = "ev", ic = "info", title = esc(w.toUpperCase()), msg = rest, src = title;
   var b = /^boot cause (\S+) prev_up (\S+)/.exec(l);
   if (b) {
-    kind = "boot";
-    text = "BOOT &middot; " + esc((BOOT[b[1]] || "cause " + (nn(b[1]) || "-")).toUpperCase()) +
-      (b[2] === "-" ? "" : " &middot; PREVIOUS RUN " + esc(hms(+b[2]).toUpperCase()));
-  } else if (/^gps /.test(l) && !/^gps reset loop/.test(l)) {
-    kind = "info";
-    text = "RECEIVER &middot; " + esc(l.slice(4).toUpperCase());
-  } else {
-    kind = /^(crash|reboot|upload (err|aborted|low idf|ca err))/.test(l) ? "err" : /^gps reset loop/.test(l) ? "warn" : "";
-    text = esc(l.toUpperCase());
+    ic = "boot";
+    title = src = "BOOT";
+    msg = esc(BOOT[b[1]] || "cause " + (nn(b[1]) || "-")) + (b[2] === "-" ? "" : " &middot; previous run " + esc(hms(+b[2])));
+  } else if (w === "ota") {
+    ic = "ota";
+  } else if (w === "gps") {
+    title = "RECEIVER";
+    src = "GPS";
+    if (/^gps reset loop/.test(l)) { k = "er"; ic = "warn"; }
+  } else if (/^(crash|reboot|upload (err|aborted|low idf|ca err))/.test(l)) {
+    k = "er";
+    ic = "err";
   }
-  return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";
+  return {k: k, h: '<div class="lr"><span class="ic ' + ic + '">' + EV_ICON[ic === "warn" ? "err" : ic] + '</span><b class="' + ic + '">' +
+    title + '</b><span class="ms">' + msg + '</span><span class="src">' + src + '</span><span class="lt">--:--</span></div>'};
+}
+function logLine(l) { return logRow(l).h; }
+var EVF = "all";                         // the Logs filter: all, st, ev, er
+function evPick(f) {
+  EVF = f;
+  if (prevD) { var v = view(prevD); paint({log: v.log, evf: v.evf}); }
+}
+// the status lines of the diag tail -> the satellites chart and the fix donut
+function evStatus(lines) {
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var m = STATUS.exec(lines[i]);
+    if (!m) continue;
+    var u = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/.exec(m[2]), sv = m[7].split("/");
+    out.push({t: u ? Date.UTC(+u[1], u[2] - 1, +u[3], +u[4], +u[5], +u[6]) : +m[1] * 1000, utc: !!u,
+      seen: +sv[0], used: +sv[1], fix: m[8].replace(/_/g, " "), hd: +m[9],
+      ha: (/ hacc ([\d.]+)/.exec(lines[i]) || [])[1]});
+  }
+  return out;
+}
+function evChart(st) {
+  var p = st.filter(function (s) { return !isNaN(s.seen) && !isNaN(s.used); });
+  if (p.length < 2) return '<p class="none">TWO STATUS LINES ARE NEEDED (ONE A MINUTE)</p>';
+  var W = 640, H = 230, x0 = 34, x1 = W - 22, y0 = 10, y1 = H - 28, t0 = p[0].t, t1 = p[p.length - 1].t, top = 12;
+  for (var i = 0; i < p.length; i++) top = Math.max(top, Math.ceil(p[i].seen / 4) * 4);
+  function X(t) { return (x0 + (t1 > t0 ? (t - t0) / (t1 - t0) : 0) * (x1 - x0)).toFixed(1); }
+  function Y(v) { return (y1 - v / top * (y1 - y0)).toFixed(1); }
+  function line(key) {
+    var d = "M" + X(p[0].t) + " " + Y(p[0][key]);
+    for (var j = 1; j < p.length; j++) {
+      var mx = ((+X(p[j - 1].t) + +X(p[j].t)) / 2).toFixed(1);
+      d += " C" + mx + " " + Y(p[j - 1][key]) + " " + mx + " " + Y(p[j][key]) + " " + X(p[j].t) + " " + Y(p[j][key]);
+    }
+    return d;
+  }
+  var close = " L" + X(t1) + " " + y1 + " L" + X(t0) + " " + y1 + "Z", g = "", xt = "", ls = line("seen"), lu = line("used");
+  for (var v = 0; v <= top; v += 4) g += '<line x1="' + x0 + '" x2="' + x1 + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text x="' + (x0 - 8) +
+    '" y="' + (+Y(v) + 4) + '">' + v + "</text>";
+  var every = Math.max(1, Math.ceil(p.length / 8));
+  for (i = 0; i < p.length; i += every) xt += '<text x="' + X(p[i].t) + '" y="' + (H - 8) + '">' +
+    (p[i].utc ? hm(p[i].t) : "+" + Math.floor(p[i].t / 60000) + "m") + "</text>";
+  return '<svg class="ev-ch" viewBox="0 0 ' + W + " " + H + '"><defs>' +
+    '<linearGradient id="evfa" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7fe39a" stop-opacity=".35"/><stop offset="1" stop-color="#7fe39a" stop-opacity="0"/></linearGradient>' +
+    '<linearGradient id="evfb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22d3ee" stop-opacity=".25"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></linearGradient></defs>' +
+    '<g class="gr">' + g + '</g><path d="' + ls + close + '" fill="url(#evfa)"/><path class="l1" d="' + ls + '"/>' +
+    '<path d="' + lu + close + '" fill="url(#evfb)"/><path class="l2" d="' + lu + '"/><g>' + xt + "</g></svg>";
+}
+function evDonut(st, nev) {
+  var n = st.length, f3 = 0, f2 = 0, su = 0, nu = 0, sh = 0, nh = 0, pvt = false;
+  for (var i = 0; i < n; i++) {
+    var s = st[i];
+    if (s.fix.indexOf("3D") === 0) f3++;
+    else if (/^(2D|Fix)/.test(s.fix)) f2++;
+    if (!isNaN(s.used)) { su += s.used; nu++; }
+    var h = s.ha !== undefined ? +s.ha : s.hd;
+    if (s.ha !== undefined) pvt = true;
+    if (!isNaN(h)) { sh += h; nh++; }
+  }
+  var segs = "", at = 0, parts = [[f3, "ok"], [f2, "warn"], [n - f3 - f2, "bad"]];
+  for (i = 0; i < 3 && n; i++) {
+    var fr = parts[i][0] / n;
+    if (!fr) continue;
+    if (fr > 0.999) { segs += '<circle class="' + parts[i][1] + '" cx="80" cy="80" r="62"/>'; break; }
+    var a0 = 2 * Math.PI * (at + 0.004) - Math.PI / 2, a1 = 2 * Math.PI * (at + fr - 0.004) - Math.PI / 2;
+    segs += '<path class="' + parts[i][1] + '" d="M' + (80 + 62 * Math.cos(a0)).toFixed(1) + " " + (80 + 62 * Math.sin(a0)).toFixed(1) +
+      " A62 62 0 " + (fr > 0.5 ? 1 : 0) + " 1 " + (80 + 62 * Math.cos(a1)).toFixed(1) + " " + (80 + 62 * Math.sin(a1)).toFixed(1) + '"/>';
+    at += fr;
+  }
+  return '<svg class="ev-dn" viewBox="0 0 160 160"><circle class="bg" cx="80" cy="80" r="62"/>' + segs +
+    '<text class="big" x="80" y="80">' + (n ? Math.round(f3 * 100 / n) + "%" : "-") + '</text><text class="sm" x="80" y="100">3D FIX</text></svg>' +
+    '<div class="ev-k4"><div><small>3D fix</small><b>' + f3 + "/" + n + "</b></div><div><small>Avg used</small><b>" +
+    (nu ? (su / nu).toFixed(1) : "-") + "</b></div><div><small>" + (pvt ? "Avg acc" : "Avg HDOP") + "</small><b>" +
+    (nh ? (sh / nh).toFixed(pvt ? 1 : 2) + (pvt ? " m" : "") : "-") + "</b></div><div><small>Events</small><b>" + nev + "</b></div></div>";
 }
 
 function bytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }
@@ -445,9 +579,23 @@ function view(d, prev) {
       (pr ? "<tr><td>Previous run</td><td" + (/crash/.test(pr) ? ' class="warn"' : "") + ">" + esc(prevText(d)) + "</td></tr>" : "") +
       "<tr><td>Chip</td><td>" + (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz</td></tr>" +
       (d.utc ? "<tr><td>GPS time</td><td>" + esc(String(d.utc).slice(11, 19)) + " UTC</td></tr>" : "") + "</table>";
-  var lines = d.diag || [], log = "";
-  for (var j = lines.length - 1; j >= 0; j--) log += logLine(lines[j]);
-  v.log = log || '<span class="t">THE DIAGNOSTIC LOG IS EMPTY</span>';
+  // Event log: rows newest first, filtered by the chips; chart and donut
+  // from the status lines
+  var lines = d.diag || [], log = "", cnt = {all: 0, st: 0, ev: 0, er: 0};
+  for (var j = lines.length - 1; j >= 0; j--) {
+    var row = logRow(lines[j]);
+    cnt.all++;
+    cnt[row.k]++;
+    if (EVF === "all" || EVF === row.k) log += row.h;
+  }
+  v.log = log || '<p class="none">' + (lines.length ? "NOTHING OF THIS KIND" : "THE DIAGNOSTIC LOG IS EMPTY") + "</p>";
+  var chips = [["all", "All"], ["st", "Status"], ["ev", "Events"], ["er", "Errors"]];
+  v.evf = chips.map(function (c) {
+    return '<button class="' + (EVF === c[0] ? "on" : "") + '" onclick="evPick(\'' + c[0] + '\')">' + c[1] + "<em>" + cnt[c[0]] + "</em></button>";
+  }).join("");
+  var evs = evStatus(lines);
+  v.evc = evChart(evs);
+  v.evd = evDonut(evs, cnt.ev + cnt.er);
   var p = String(d.position || "").split(", ");
   v.coord = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ?
     Math.abs(+p[0]).toFixed(5) + "&deg; " + (+p[0] < 0 ? "S" : "N") + "  " +
