@@ -282,6 +282,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds. It counts as over after a quiet of twice its last gap between restarts (10-30 s) |
 | `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
+| `wifi lost <ssid> rssi N` / `wifi fail <ssid> status N after N ms` / `wifi back <ssid> after T, N failed tries, rssi N` | Also in the diagnostic log (and on the status page): the link dropping with its last RSSI, a failed try, and the reconnect with how long it was down. One line of a kind per 5 minutes (`WIFI_DIAG_GAP`), the ones in between counted as `(+N more)` |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
 | `upload <file> <n> <ok> <http> <mem>` | One POST; `mem` is the free Python heap in bytes (`gc.mem_free()` without the largest IDF block) |
 | `stay home\|away kept N` | A stay began; N points of the way in were kept |
@@ -799,7 +800,10 @@ tell a stay from a drive, so the stay filter works on positions.
    BSSIDs at ≥ −75 dBm, not a stranger's blank AP) gets one immediate retry:
    on the C6 the first association after a cold boot often fails after
    ~7.5 s with status 202 although the password is right, and the retry
-   connects within ~1 s.
+   connects within ~1 s. A 202 on an AP the scan saw is retried at any
+   RSSI: the board's home AP reads −65 to −75 dBm, and a reading just under
+   −75 skipped the retry, so the reconnect after a drop failed round after
+   round.
    Otherwise the SSID is marked failed for 2 minutes and the next one is
    tried. A leftover fail reason from the previous SSID (MicroPython 1.29) is
    not taken as this attempt failing.
