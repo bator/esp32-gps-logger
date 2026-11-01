@@ -1,5 +1,6 @@
 from machine import Pin, I2C, UART, WDT
 import machine, sys, time, os, network, gc, math, socket, json, select, struct
+import hashlib, binascii
 try:
     import esp32                         # mcu_temperature() on C3/C6/S2/S3
 except ImportError:
@@ -3160,6 +3161,7 @@ def wifi_start():
     up["key"] = env.get("API_KEY") or None
     _keepalive_env(env)
     _web_env(env)
+    _ota_env(env)
     DEVICE_ID = _safe_name(_plain(env.get("DEVICE_ID")), DEFAULT_DEVICE_ID)
     HOSTNAME = _safe_name(_plain(env.get("HOSTNAME"))
                           or _plain(env.get("DEVICE_ID")),
@@ -5842,6 +5844,319 @@ def _low_mem(now):
     _schedule(now)
     print("upload MemoryError, free", py_heap()[0])
 
+# --- OTA ---------------------------------------------------------------------
+# Firmware updates over WiFi. They need the OTA partition table (two app
+# slots: tools/build_firmware.sh --migrate, once over USB). At home and with
+# everything uploaded, OTA_FIRST after boot and then every OTA_CHECK, the
+# board reads OTA_URL: the manifest tools/build_firmware.sh --publish wrote,
+# {"build", "commit", "size", "sha256", "url", "files", "hmac"}. A build
+# newer than the running one (FW_BUILD: the commit time), whose HMAC-SHA256
+# with OTA_KEY checks, goes into the other app slot OTA_BLOCK bytes at a
+# time (the GPS read and the WDT fed between). It is read back against its
+# sha256, the files (the status page) are written to flash, the slot is set
+# to boot and the board resets. The new firmware then runs pending
+# (OTA_PENDING): OTA_HEALTH of running with WiFi connected marks it valid.
+# A crash before that and the bootloader boots the old one; no WiFi in
+# OTA_HEALTH and it boots the old one itself. A build that failed so is in
+# OTA_BAD and not tried again.
+OTA_URL = None                           # .env OTA_URL: the manifest
+OTA_KEY = None                           # .env OTA_KEY: its HMAC key (bytes)
+OTA_FIRST = 120000                       # ms after boot of the first check
+OTA_CHECK = 86400000                     # ms between checks
+OTA_HEALTH = 600000                      # ms a new firmware runs before valid
+OTA_MAX = 300000                         # ms one download may take (the
+                                         # guard closes its socket)
+OTA_BLOCK = 4096                         # bytes a flash write (an erase page)
+OTA_MANIFEST_MAX = 4096                  # bytes a manifest may have
+OTA_PENDING = "/ota.pending"             # "<build> <commit>" just installed
+OTA_BAD = "/ota.bad"                     # builds that failed their health
+try:
+    from gps_frozen import BUILD as FW_BUILD, COMMIT as FW_COMMIT
+except ImportError:                      # (not frozen, or a firmware older
+    FW_BUILD, FW_COMMIT = 0, "dev"       # than BUILD in gps_frozen)
+
+ota = {"at": None, "state": "off", "boot_at": time.ticks_ms(), "pend": None,
+       "pend_at": None, "wifi_seen": False}
+
+def _ota_env(env):
+    """OTA_URL and OTA_KEY in .env: both or no updates."""
+    global OTA_URL, OTA_KEY
+    url = _plain(env.get("OTA_URL"))
+    key = env.get("OTA_KEY")
+    if isinstance(key, str):
+        key = key.strip().encode()
+    if url and key and url.startswith(("http://", "https://")):
+        OTA_URL, OTA_KEY = url, key
+        ota["state"] = "idle"
+    elif url or key:
+        print("OTA_URL / OTA_KEY: both needed, http(s) URL - no updates")
+
+def _hmac_hex(key, msg):
+    """HMAC-SHA256 of msg as hex (no hmac module in MicroPython)."""
+    if len(key) > 64:
+        key = hashlib.sha256(key).digest()
+    key = key + b"\0" * (64 - len(key))
+    inner = hashlib.sha256(bytes(b ^ 0x36 for b in key) + msg).digest()
+    out = hashlib.sha256(bytes(b ^ 0x5C for b in key) + inner).digest()
+    return binascii.hexlify(out).decode()
+
+def _ota_signed(m):
+    """The bytes the manifest's HMAC covers (build_firmware.sh signs the
+    same): build|commit|size|sha256|url, then path|size|sha256|url a file."""
+    t = "%d|%s|%d|%s|%s" % (m["build"], m["commit"], m["size"], m["sha256"],
+                            m["url"])
+    for f in m.get("files") or ():
+        t += "|%s|%d|%s|%s" % (f["path"], f["size"], f["sha256"], f["url"])
+    return t.encode()
+
+def _ota_url(rel):
+    """A manifest URL relative to the manifest's own folder."""
+    if rel.startswith(("http://", "https://")):
+        return rel
+    return OTA_URL[:OTA_URL.rfind("/") + 1] + rel
+
+def _raw_get(url, sink, limit):
+    """A minimal HTTP/1.0 GET, no redirects: the body goes to sink(memoryview)
+    in pieces, the UART read and the WDT fed between, at most limit bytes
+    (more: ValueError). The guard closes the socket after OTA_MAX. -> the
+    status code (sink only gets a 200's body)."""
+    proto, _, rest = url.partition("://")
+    host, _, path = rest.partition("/")
+    path = "/" + path
+    port = 443 if proto == "https" else 80
+    if ":" in host:
+        host, _, p = host.rpartition(":")
+        port = int(p)
+    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
+    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
+    _guard_start(s, OTA_MAX)
+    try:
+        s.settimeout(HTTP_TIMEOUT)
+        s.connect(ai[-1])
+        if proto == "https":
+            s = _tls_wrap(s, host)
+        _io_write(s, ("GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close"
+                      "\r\n\r\n" % (path, host)).encode())
+        code = int(s.readline(HTTP_LINE).split(None, 2)[1])
+        bol = True
+        for _ in range(HTTP_LINES):
+            h = s.readline(HTTP_LINE)
+            if not h or (bol and h in (b"\r\n", b"\n")):
+                break
+            bol = h[-1:] == b"\n"
+        if code != 200:
+            return code
+        buf = bytearray(1024)
+        mv = memoryview(buf)
+        got = 0
+        while True:
+            n = s.readinto(buf)
+            if not n:
+                break
+            got += n
+            if got > limit:
+                raise ValueError("ota body over %d" % limit)
+            sink(mv[:n])
+            read_uart()
+            feed()
+        return code
+    finally:
+        _guard_stop()
+        try:
+            s.close()
+        except OSError:
+            pass
+
+HTTP_GET = _raw_get                      # (tests swap it)
+
+class _SlotWriter:
+    """Writes a download into an app slot OTA_BLOCK bytes at a time (the
+    last block padded with 0xFF) and hashes it on the way."""
+    def __init__(self, part):
+        self.part, self.blk, self.n = part, 0, 0
+        self.buf = bytearray(OTA_BLOCK)
+        self.h = hashlib.sha256()
+    def __call__(self, mv):
+        i = 0
+        while i < len(mv):
+            k = min(len(mv) - i, OTA_BLOCK - self.n)
+            self.buf[self.n:self.n + k] = mv[i:i + k]
+            self.n += k
+            i += k
+            if self.n == OTA_BLOCK:
+                self._put()
+    def _put(self):
+        self.h.update(memoryview(self.buf)[:self.n])
+        for j in range(self.n, OTA_BLOCK):
+            self.buf[j] = 0xFF
+        self.part.writeblocks(self.blk, self.buf)
+        self.blk += 1
+        self.n = 0
+        read_uart()
+        feed()
+    def close(self):
+        if self.n:
+            self._put()
+        return binascii.hexlify(self.h.digest()).decode()
+
+def _slot_sha(part, size):
+    """sha256 of the first size bytes of a slot, read back from flash."""
+    h = hashlib.sha256()
+    buf = bytearray(OTA_BLOCK)
+    blk = 0
+    while size > 0:
+        part.readblocks(blk, buf)
+        h.update(memoryview(buf)[:min(size, OTA_BLOCK)])
+        size -= OTA_BLOCK
+        blk += 1
+        read_uart()
+        feed()
+    return binascii.hexlify(h.digest()).decode()
+
+def _ota_bad():
+    try:
+        with open(OTA_BAD) as f:
+            return [int(x) for x in f.read().split()]
+    except (OSError, ValueError):
+        return []
+
+def _ota_mark_bad(build):
+    try:
+        with open(OTA_BAD, "a") as f:
+            f.write("%d\n" % build)
+    except OSError:
+        pass
+
+def _ota_file(f):
+    """One manifest file (the page) to flash: downloaded to .tmp, its
+    sha256 checked, then renamed over the old one."""
+    tmp = f["path"] + ".tmp"
+    h = hashlib.sha256()
+    with open(tmp, "wb") as out:
+        def sink(mv):
+            h.update(mv)
+            out.write(mv)
+        code = HTTP_GET(_ota_url(f["url"]), sink, f["size"])
+    if code != 200 or binascii.hexlify(h.digest()).decode() != f["sha256"]:
+        _rm(tmp)
+        raise ValueError("ota file %s: %s" % (f["path"], code))
+    os.rename(tmp, f["path"])
+
+def _ota_check():
+    """Read the manifest; install a newer, signed build (resets the board)."""
+    ota["state"] = "checking"
+    body = bytearray()
+    code = HTTP_GET(OTA_URL, body.extend, OTA_MANIFEST_MAX)
+    if code != 200:
+        ota["state"] = "manifest %s" % code
+        return
+    m = json.loads(body)
+    build = int(m["build"])
+    if build <= FW_BUILD or build in _ota_bad():
+        ota["state"] = "current"
+        return
+    if _hmac_hex(OTA_KEY, _ota_signed(m)) != m.get("hmac"):
+        ota["state"] = "bad hmac"
+        _diag_write("ota %s: manifest hmac does not match" % m["commit"])
+        return
+    try:
+        part = esp32.Partition(esp32.Partition.RUNNING).get_next_update()
+    except (OSError, AttributeError):
+        ota["state"] = "no ota slot"
+        return
+    if m["size"] > part.info()[3]:
+        ota["state"] = "too big"
+        return
+    ota["state"] = "downloading"
+    w = _SlotWriter(part)
+    code = HTTP_GET(_ota_url(m["url"]), w, m["size"])
+    got = w.close()
+    if (code != 200 or got != m["sha256"]
+            or _slot_sha(part, m["size"]) != m["sha256"]):
+        ota["state"] = "bad image"
+        _diag_write("ota %s: download %s, sha256 mismatch" % (m["commit"],
+                                                             code))
+        return
+    for f in m.get("files") or ():
+        _ota_file(f)
+    with open(OTA_PENDING, "w") as f:
+        f.write("%d %s" % (build, m["commit"]))
+    part.set_boot()
+    _diag_write("ota %s installed (was %s), rebooting" % (m["commit"],
+                                                         FW_COMMIT))
+    try:
+        flush(_still_hold())
+    except Exception:
+        pass
+    machine.reset()
+
+def ota_boot():
+    """At boot: a firmware just installed (OTA_PENDING) runs pending until
+    _ota_health; the old one running means the bootloader rolled back."""
+    try:
+        with open(OTA_PENDING) as f:
+            b, _, c = f.read().strip().partition(" ")
+        build = int(b)
+    except (OSError, ValueError):
+        return
+    if build == FW_BUILD:
+        ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
+                   state="pending")
+        _diag_write("ota %s booted, checking for %d s" % (c,
+                                                         OTA_HEALTH // 1000))
+        return
+    _ota_mark_bad(build)
+    _rm(OTA_PENDING)
+    _diag_write("ota %s rolled back by the bootloader (running %s)"
+                % (c, FW_COMMIT))
+
+def _ota_health(now):
+    """The pending firmware: valid after OTA_HEALTH with WiFi connected at
+    least once; without WiFi it boots the old slot again."""
+    if wifi["state"] == "connected":
+        ota["wifi_seen"] = True
+    if _age(now, ota["pend_at"]) < OTA_HEALTH:
+        return
+    build = ota["pend"]
+    ota["pend"] = None
+    _rm(OTA_PENDING)
+    if ota["wifi_seen"]:
+        try:
+            esp32.Partition.mark_app_valid_cancel_rollback()
+        except (OSError, AttributeError):
+            pass
+        ota["state"] = "ok"
+        _diag_write("ota %s ok" % FW_COMMIT)
+        return
+    _ota_mark_bad(build)
+    _diag_write("ota %s no wifi in %d s, rolling back" % (
+        FW_COMMIT, OTA_HEALTH // 1000))
+    try:
+        esp32.Partition(esp32.Partition.RUNNING).get_next_update().set_boot()
+    except (OSError, AttributeError):
+        return
+    machine.reset()
+
+def ota_tick(now):
+    if ota["pend"] is not None:
+        _ota_health(now)
+        return
+    if not OTA_URL or esp32 is None or wifi["state"] != "connected":
+        return
+    if not at_home() or not _all_uploaded():
+        return
+    at = ota["at"]
+    if _age(now, ota["boot_at"] if at is None else at) < (
+            OTA_FIRST if at is None else OTA_CHECK):
+        return
+    ota["at"] = now
+    try:
+        _ota_check()
+    except Exception as e:               # a network or flash error: the next
+        ota["state"] = "err"             # check is OTA_CHECK later
+        print("ota", repr(e))
+        _diag_write("ota error %r" % (e,))
+
 # --- Status page ------------------------------------------------------------
 # A small HTTP page on the LAN while the radio is connected (at home, or
 # everywhere with WEB_AWAY, it stays connected for it, see wifi_tick):
@@ -5988,6 +6303,8 @@ def _web_rows():
         ("wifi", "%s %s" % (wifi["state"], wifi.get("ssid") or "")),
         ("rssi", wifi.get("rssi")),
         ("pulses", wifi["pb_scans"]),
+        ("fw", FW_COMMIT),
+        ("ota", ota["state"]),
     ]
 
 _fl = [None, None]                       # (KB, ticks) of the last statvfs
@@ -6439,6 +6756,7 @@ def run():
         _diag_env(env)
         env = None
         _diag_boot()
+        ota_boot()
         gps_setup()
         wifi_start()
         _running = True
@@ -6494,6 +6812,7 @@ def _loop():
         feed()
         upload_tick()
         web_tick()
+        ota_tick(time.ticks_ms())
         now = time.ticks_ms()
         if (not _boot_ok_done
                 and time.ticks_diff(now, loop_start) >= BOOT_OK_MS):

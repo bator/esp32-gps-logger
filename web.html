@@ -168,7 +168,7 @@ var ZOOM = 17;
 // every status.json key the page shows (tests check none is missing)
 var SHOWN = ("fix sats hdop hacc fix_src ubx utc position pos6 nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
-  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses").split(" ");
+  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota").split(" ");
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
 var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime"];
@@ -352,6 +352,8 @@ function view(d, prev) {
       " keep-alive</em>", q4 ? q4[2] : "") +
     line("BOOT", esc(BOOT[d.boot_cause] || d.boot_cause).toUpperCase() + (pr ? "<em>prev " + esc(pr) + "</em>" : ""),
       d.boot_cause === 3 || /crash/.test(pr) ? "warn" : "") +
+    (d.fw === undefined ? "" : line("FIRMWARE", esc(d.fw) + "<em>ota " + esc(d.ota) + "</em>",
+      /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : "")) +
     line("CHIP", (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz" +
       (d.utc ? "<em>" + esc(String(d.utc).slice(11, 19)) + " UTC</em>" : ""));
   var lines = d.diag || [], log = "";

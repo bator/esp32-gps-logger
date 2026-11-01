@@ -6680,6 +6680,16 @@ if "read_flash" in a:
                 if a[i + 1] == "0x8000" else b"APP")
 if "write_flash" in a and os.environ.get("FAKE_WRITE_FAIL"):
     sys.exit(2)
+if "flash_id" in a:
+    print("Detected flash size: " + os.environ.get("FAKE_FLASH", "16MB"))
+"""
+FAKE_SCP = r"""#!/usr/bin/env python3
+import os, sys, json, shutil
+a = [x for x in sys.argv[1:] if x != "-q"]
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(json.dumps(["scp"] + a) + "\n")
+for src in a[:-1]:
+    shutil.copy(src, a[-1])
 """
 FAKE_BUILD_MPREMOTE = r"""#!/usr/bin/env python3
 import os, sys, json
@@ -6701,11 +6711,13 @@ def build_run(args, env_extra, dirty=False):
     shutil.copy(os.path.join(ROOT, "tools", "build_firmware.sh"),
                 os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
+    shutil.copy(os.path.join(ROOT, "web.html"), work)
     fake = os.path.join(work, "fake")
     for d in ("bin", "idf", "mpy/mpy-cross", "mpy/ports/esp32"):
         os.makedirs(os.path.join(fake, d))
     os.makedirs(os.path.join(work, ".venv", "bin"))
     for path, src in (("fake/bin/esptool.py", FAKE_ESPTOOL),
+                      ("fake/bin/scp", FAKE_SCP),
                       (".venv/bin/mpremote", FAKE_BUILD_MPREMOTE),
                       ("fake/idf/export.sh", ""),
                       ("fake/mpy/mpy-cross/Makefile", "all:\n\t@true\n"),
@@ -6715,7 +6727,7 @@ def build_run(args, env_extra, dirty=False):
         os.chmod(os.path.join(work, path), 0o755)
     git = ["git", "-C", work, "-c", "user.name=t", "-c", "user.email=t@t"]
     subprocess.run(git + ["init", "-q"], check=True)
-    subprocess.run(git + ["add", "gps_logger.py"], check=True)
+    subprocess.run(git + ["add", "gps_logger.py", "web.html"], check=True)
     subprocess.run(git + ["commit", "-q", "-m", "x"], check=True)
     if dirty:
         with open(os.path.join(work, "gps_logger.py"), "a") as f:
@@ -6757,9 +6769,12 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
                                "HEAD"], capture_output=True,
                               text=True).stdout.strip()
         m = frozen_marker(work)
+        ct = int(subprocess.run(["git", "-C", work, "log", "-1",
+                                 "--format=%ct"], capture_output=True,
+                                text=True).stdout.strip())
         marks.append(rc == 0 and m.get("SHA") == sha and m.get("COMMIT")
                      == head + ("-dirty" if dirty else "")
-                     and not calls)
+                     and m.get("BUILD") == ct and not calls)
     check("BUILD-MARKER: gps_frozen has the SHA-256 of the frozen "
           "gps_logger.py, COMMIT -dirty with changes", marks == [True, True],
           "%r rc=%d %r %r" % (marks, rc, out[-200:], err[-300:]))
@@ -6779,13 +6794,57 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     rc, out, err, work, calls = build_run(["--flash"], {})
     steps = [c[c.index("read_flash") + 1] if "read_flash" in c else
              "write" if "write_flash" in c else c[0] for c in calls]
-    check("BUILD-FLASH: check, backup, write; no REPL step; deploy.sh named "
-          "for the cleanup and after a rollback",
-          rc == 0 and steps == ["0x8000", "0x10000", "write"]
+    erase = [c for c in calls if "erase_region" in c]
+    check("BUILD-FLASH: check, backup, write, otadata erased (the written "
+          "slot boots); no REPL step; deploy.sh named",
+          rc == 0 and steps == ["0x8000", "0x10000", "write", "esptool"]
+          and erase and erase[0][-2:] == ["0xd000", "0x2000"]
+          and [c for c in calls if "read_flash" in c][1][-2] == "0x270000"
           and "./deploy.sh" in out
           and "write_flash 0x10000" in out
           and out.rstrip().endswith(", then ./deploy.sh"),
           "rc=%d %r %r %r" % (rc, steps, out[-300:], err[-200:]))
+    # --migrate: only a 16 MB board; backup, erase, write the whole build
+    rc, out, err, work, calls = build_run(["--migrate"], {"FAKE_FLASH": "4MB"})
+    m4 = (rc, [c for c in calls if "erase_flash" in c or "write_flash" in c])
+    rc, out, err, work, calls = build_run(["--migrate"], {})
+    mig = [("read 0" if "read_flash" in c and c[c.index("read_flash") + 1]
+            == "0" else "erase" if "erase_flash" in c else "write" if
+            "write_flash" in c else "id" if "flash_id" in c else c[1])
+           for c in calls]
+    check("BUILD-MIGRATE: refused under 16 MB; else flash id, backup of the "
+          "first 4 MB, erase, write of the whole build (@flash_args)",
+          m4[0] != 0 and m4[1] == [] and rc == 0
+          and mig == ["id", "read 0", "erase", "write"]
+          and calls[-1][-1] == "@flash_args" and "put /.env" in out,
+          repr((m4, mig, err[-200:])))
+    # --publish: refused dirty or without a key; else a signed manifest the
+    # board accepts, copied after the files
+    key_dir = tempfile.mkdtemp(dir=dp_td)
+    key_file = os.path.join(key_dir, "ota.key")
+    with open(key_file, "w") as f:
+        f.write("s3cret\n")
+    dest = tempfile.mkdtemp(dir=dp_td)
+    penv = {"OTA_KEY_FILE": key_file, "OTA_DEST": dest}
+    rc_dirty = build_run(["--publish"], penv, dirty=True)[0]
+    rc_nokey = build_run(["--publish"], {"OTA_KEY_FILE": key_file + "x",
+                                         "OTA_DEST": dest})[0]
+    rc, out, err, work, calls = build_run(["--publish"], penv)
+    try:
+        with open(os.path.join(dest, "manifest.json")) as f:
+            man = json.load(f)
+    except (OSError, ValueError):
+        man = {}
+    scp = [c for c in calls if c[0] == "scp"]
+    good = (man.get("hmac") == gl._hmac_hex(b"s3cret", gl._ota_signed(man))
+            if man else False)
+    check("BUILD-PUBLISH: dirty or no key refused; else a manifest the "
+          "board's HMAC check accepts, the page in it, manifest copied last",
+          rc_dirty != 0 and rc_nokey != 0 and rc == 0 and good
+          and [f["path"] for f in man.get("files", [])]
+          == ["/web.html.gz", "/web.html"]
+          and scp and scp[0][-2].endswith("manifest.json"),
+          repr((rc_dirty, rc_nokey, rc, man, scp, err[-200:])))
 else:
     print("SKIP  BUILD: no bash/sha256sum/git/make")
 shutil.rmtree(dp_td, ignore_errors=True)
@@ -11491,6 +11550,261 @@ check("WIFI-DIAG: lost (ssid, rssi), fails rate-limited with the count, "
              "wifi fail home status 201 after 300 ms (+1 more)",
              "wifi back home after 7 min 06 s, 3 failed tries, rssi -63"],
       repr(wd))
+
+# --- OTA: manifest, HMAC, slot write, rollback (OTA-*) ----------------------
+import hmac as _hmac_mod
+import hashlib as _hl
+for key, msg in ((b"k", b"m"), (b"x" * 64, b"abc"), (b"y" * 100, b"1|2|3")):
+    want = _hmac_mod.new(key, msg, _hl.sha256).hexdigest()
+    if gl._hmac_hex(key, msg) != want:
+        break
+check("OTA-HMAC: HMAC-SHA256 as Python's hmac (short, 64-byte, long key)",
+      gl._hmac_hex(key, msg) == want, key[:4])
+
+
+class _FakePart(object):
+    def __init__(self, name, size):
+        self.name, self.mem = name, bytearray(b"\0" * size)
+        self.boot = False
+        self.writes = 0
+    def info(self):
+        return (0, 16, 0x10000, len(self.mem), self.name, False)
+    def writeblocks(self, blk, buf):
+        o = blk * 4096
+        self.mem[o:o + len(buf)] = buf
+        self.writes += 1
+    def readblocks(self, blk, buf):
+        o = blk * 4096
+        buf[:] = self.mem[o:o + len(buf)]
+    def set_boot(self):
+        _ota_log.append(("boot", self.name))
+        self.boot = True
+    def get_next_update(self):
+        return _slots[1] if self is _slots[0] else _slots[0]
+
+
+class _FakeEsp32(object):
+    class Partition(object):
+        RUNNING = 1
+        def __new__(cls, which):
+            return _slots[0]
+        @staticmethod
+        def mark_app_valid_cancel_rollback():
+            _ota_log.append(("valid",))
+
+
+_ota_log = []
+_slots = [_FakePart("ota_0", 65536), _FakePart("ota_1", 65536)]
+_ota_dir = tempfile.mkdtemp()
+_ota_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
+              gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
+              gl.DIAG)
+gl.esp32 = _FakeEsp32
+gl.OTA_PENDING = os.path.join(_ota_dir, "ota.pending")
+gl.OTA_BAD = os.path.join(_ota_dir, "ota.bad")
+gl.machine.reset = lambda: _ota_log.append(("reset",))
+gl.DIAG = 60000
+_img = bytes((i * 7) & 255 for i in range(10000))      # 2 blocks + a tail
+_page = b"<html>new page</html>"
+_files = {}
+
+
+def _ota_get(url, sink, limit):
+    body = _files.get(url)
+    if body is None:
+        return 404
+    if len(body) > limit:
+        raise ValueError("too big")
+    for i in range(0, len(body), 1000):
+        sink(memoryview(body)[i:i + 1000])
+    return 200
+
+
+def _manifest(build, img=_img, key=b"secret", **kw):
+    page_path = os.path.join(_ota_dir, "web.html.gz")
+    m = {"build": build, "commit": "abc%04d" % build, "size": len(img),
+         "sha256": _hl.sha256(img).hexdigest(), "url": "micropython.bin",
+         "files": [{"path": page_path, "size": len(_page),
+                    "sha256": _hl.sha256(_page).hexdigest(),
+                    "url": "web.html.gz"}]}
+    m.update(kw)
+    m["hmac"] = gl._hmac_hex(key, gl._ota_signed(m))
+    return m
+
+
+def _serve(m, img=_img):
+    _files.clear()
+    _files["http://ota.lan/gps/manifest.json"] = json.dumps(m).encode()
+    _files["http://ota.lan/gps/micropython.bin"] = img
+    _files["http://ota.lan/gps/web.html.gz"] = _page
+
+
+def _ota_reset():
+    del _ota_log[:]
+    for sl in _slots:
+        sl.mem[:] = b"\0" * len(sl.mem)
+        sl.boot = False
+    for f in (gl.OTA_PENDING, gl.OTA_BAD,
+              os.path.join(_ota_dir, "web.html.gz")):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    gl.ota.update(state="idle", pend=None, pend_at=None, wifi_seen=False,
+                  at=None)
+    diag_clear()
+
+
+try:
+    gl.HTTP_GET = _ota_get
+    gl.OTA_URL, gl.OTA_KEY = "http://ota.lan/gps/manifest.json", b"secret"
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    # a newer signed build: written to the other slot, read back, the page
+    # replaced, set to boot, pending noted, the board reset
+    _ota_reset()
+    _serve(_manifest(200))
+    gl._ota_check()
+    slot = _slots[1].mem
+    with open(os.path.join(_ota_dir, "web.html.gz"), "rb") as f:
+        page_ok = f.read() == _page
+    with open(gl.OTA_PENDING) as f:
+        pend = f.read()
+    check("OTA-INSTALL: a newer signed build goes to the other slot (0xFF "
+          "padded), the page is replaced, the slot boots, pending is noted",
+          bytes(slot[:len(_img)]) == _img
+          and bytes(slot[len(_img):12288]) == b"\xff" * (12288 - len(_img))
+          and bytes(_slots[0].mem[:10]) == b"\0" * 10 and page_ok
+          and _ota_log == [("boot", "ota_1"), ("reset",)]
+          and pend == "200 abc0200"
+          and any("ota abc0200 installed (was abc0100)" in l
+                  for l in diag_lines()),
+          repr((_ota_log, pend, diag_lines()[-2:])))
+    # refused: an older/equal build, a bad HMAC, a sha256 that does not
+    # match, too big for the slot, a failed build, no OTA slot
+    states = []
+    for case in ("old", "hmac", "sha", "big", "bad", "noslot", "404"):
+        _ota_reset()
+        if case == "old":
+            _serve(_manifest(100))
+        elif case == "hmac":
+            _serve(_manifest(200, key=b"wrong"))
+        elif case == "sha":
+            _serve(_manifest(200), img=_img[:-1] + b"x")
+        elif case == "big":
+            big = b"z" * 70000
+            _serve(_manifest(200, img=big), img=big)
+        elif case == "bad":
+            with open(gl.OTA_BAD, "w") as f:
+                f.write("200\n")
+            _serve(_manifest(200))
+        elif case == "noslot":
+            gl.esp32 = None
+            _serve(_manifest(200))
+        else:
+            _files.clear()
+        try:
+            gl._ota_check()
+        except Exception as e:
+            states.append(("raised", repr(e)))
+        else:
+            states.append(gl.ota["state"])
+        gl.esp32 = _FakeEsp32
+        if _ota_log:
+            states.append(list(_ota_log))
+    check("OTA-REFUSE: older build, bad HMAC, sha256 mismatch, too big, a "
+          "failed build, no slot API, no manifest: nothing boots",
+          states == ["current", "bad hmac", "bad image", "too big", "current",
+                     "no ota slot", "manifest 404"], repr(states))
+
+    # pending: valid after OTA_HEALTH with WiFi seen; without WiFi the old
+    # slot boots again and the build is marked bad; the old one running at
+    # boot means the bootloader rolled back
+    res = []
+    for wifi_ok in (True, False):
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        with open(gl.OTA_PENDING, "w") as f:
+            f.write("200 abc0200")
+        gl.ota_boot()
+        gl.wifi_reset()
+        gl.wifi["state"] = "connected" if wifi_ok else "not found"
+        gl.ota_tick(_clock[0])
+        early = list(_ota_log)
+        _clock[0] += gl.OTA_HEALTH + 1000
+        gl.ota_tick(_clock[0])
+        res.append((early, list(_ota_log), gl.ota["state"],
+                    os.path.exists(gl.OTA_PENDING), gl._ota_bad()))
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    with open(gl.OTA_PENDING, "w") as f:
+        f.write("200 abc0200")
+    gl.ota_boot()
+    rb = (gl.ota["pend"], os.path.exists(gl.OTA_PENDING), gl._ota_bad(),
+          [l for l in diag_lines() if l.startswith("ota ")])
+    check("OTA-HEALTH: valid after OTA_HEALTH with WiFi; no WiFi boots the "
+          "old slot (bad); the old build at boot is a bootloader rollback",
+          res[0] == ([], [("valid",)], "ok", False, [])
+          and res[1][0] == []
+          and res[1][1] == [("boot", "ota_1"), ("reset",)]
+          and res[1][3] is False and res[1][4] == [200]
+          and rb == (None, False, [200],
+                     ["ota abc0200 rolled back by the bootloader "
+                      "(running abc0100)"]),
+          repr((res, rb)))
+
+    # when it checks: connected at home with all uploaded, OTA_FIRST after
+    # boot, then OTA_CHECK; never with points waiting or away
+    _ota_reset()
+    gl.FW_BUILD = 100
+    calls = []
+    saved_check = gl._ota_check
+    gl._ota_check = lambda: calls.append(_clock[0])
+    try:
+        gl.wifi_reset()
+        gl.log_reset()
+        gl.wifi.update(state="connected", home=True)
+        gl.ota["boot_at"] = _clock[0]
+        gl.ota_tick(_clock[0] + gl.OTA_FIRST - 1000)
+        n_early = len(calls)
+        gl.ota_tick(_clock[0] + gl.OTA_FIRST)
+        gl.ota_tick(_clock[0] + gl.OTA_FIRST + 60000)
+        n_first = len(calls)
+        gl.wifi["home"] = False
+        gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
+        n_away = len(calls)
+        gl.wifi["home"] = True
+        gl.log["batch"].append("x")
+        gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
+        n_busy = len(calls)
+        gl.log["batch"][:] = []
+        gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
+        n_day = len(calls)
+    finally:
+        gl._ota_check = saved_check
+        gl.wifi_reset()
+        gl.log_reset()
+    check("OTA-TICK: first check OTA_FIRST after boot, then OTA_CHECK; not "
+          "away from home, not with points waiting",
+          (n_early, n_first, n_away, n_busy, n_day) == (0, 1, 1, 1, 2),
+          repr((n_early, n_first, n_away, n_busy, n_day)))
+
+    # .env: both keys or none; JSON: fw and ota
+    gl.OTA_URL = gl.OTA_KEY = None
+    gl._ota_env({"OTA_URL": "http://ota.lan/m.json"})
+    one = (gl.OTA_URL, gl.OTA_KEY)
+    gl._ota_env({"OTA_URL": "http://ota.lan/m.json", "OTA_KEY": "k3y "})
+    both = (gl.OTA_URL, gl.OTA_KEY)
+    jd = json.loads(gl._web_json())
+    check("OTA-ENV: OTA_URL and OTA_KEY both or no updates; fw/ota in JSON",
+          one == (None, None) and both == ("http://ota.lan/m.json", b"k3y")
+          and jd.get("fw") == gl.FW_COMMIT and "ota" in jd,
+          repr((one, both, jd.get("fw"), jd.get("ota"))))
+finally:
+    (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
+     gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
+     gl.DIAG) = _ota_saved
+    diag_clear()
+    shutil.rmtree(_ota_dir, ignore_errors=True)
 
 print()
 print("%d passed, %d failed" % (passed, failed))
