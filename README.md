@@ -391,9 +391,15 @@ GGA stops at 12) and the satellite list with its age (system and number,
 e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`, `SBAS 123`; signal in
 dBHz, elevation, azimuth, used), HDOP, the horizontal accuracy `hacc` (m,
 NAV-PVT only), the fix source `fix_src` (`pvt` / `nmea`), GPS time,
-position, NMEA counts, UBX frames `ubx` (good / broken: a bad checksum, or
-a NAV-PVT of a wrong length), the receiver model, receiver restarts; points logged, waiting and uploaded,
-quarantined `.bad` files, upload state, stay; uptime and how long the previous run lasted (e.g. `58 min
+position (`position` to 5 decimals, `pos6` to the track line's 6), NMEA
+counts, UBX frames `ubx` (good / broken: a bad checksum, or
+a NAV-PVT of a wrong length), the GPS link (`rx_bytes` read since boot,
+`rx_age_s` / `good_age_s`: seconds since the last byte / the last whole
+NMEA sentence or UBX frame, `null` for none yet), the receiver model,
+receiver restarts; points logged, waiting and uploaded,
+quarantined `.bad` files, upload state, `upload_age_s` (seconds since the
+last accepted batch, `null` for none since boot), the day history's
+`days`, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON), boot cause, chip temperature, free Python heap
 and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
@@ -420,14 +426,33 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
 - the *Event log*: the diagnostic log, newest on top, with the minute
   status lines as rows (local time, fix, satellites, points, IDF block, red
   below 48 KB) and boots, upload errors and receiver lines as events;
+- *Track*: a day picker (today, or one of the days the board keeps), the
+  day's distance, moving time, points and top speed, a speed (km/h) and
+  altitude profile over the moving time (a stop over 5 min is a narrow
+  break), and a `GPX` button that saves the shown day as GPX 1.1 (built in
+  the browser, a segment per stop);
+- *Static test*: `START` keeps each poll's position (`pos6`) and hAcc, saved
+  in the browser so a reload keeps them; it shows the samples, the span,
+  CEP50 / CEP95 (the radius around their mean that holds 50 / 95 % of the
+  fixes), the largest distance and the mean hAcc, with a scatter plot. Leave
+  the board still under open sky; one sample a poll (15 s), so an hour gives
+  ~240;
 - a folded satellite table (signal, elevation, azimuth, used).
+
+*Systems* also shows `GPS LINK` (bytes a second between two polls, the age
+of the last whole frame; amber after 3 s, red after 10 s) and `LAST UPLOAD`
+(amber, also the strip's `UPLINK`, when points have waited over 30 min
+without an accepted batch). While the receiver sends nothing whole for over
+10 s, a red banner above the strip says `GPS SILENT · 42 S` and whether
+bytes still arrive (wiring or baud rate) or nothing does (power or the TX
+wire): useful while moving the wires with the page open.
 
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
 it the page shows the grid and the system font. The page is a file on the
 board (`/web.html`, copied by `deploy.sh`) and loads once; a browser
-(`Accept-Encoding: gzip`) gets `/web.html.gz` instead, ~9 KB instead of
-~24 KB, so it loads in a third of the sends; clients without gzip (curl
+(`Accept-Encoding: gzip`) gets `/web.html.gz` instead, ~16 KB instead of
+~45 KB, so it loads in a third of the sends; clients without gzip (curl
 without `--compressed`) and a board without the `.gz` get `web.html`. Copy
 both when you change the page by hand (or remove `/web.html.gz`); then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
@@ -438,7 +463,8 @@ rounded to two decimals on the page; the JSON keeps the receiver's value.
 
 **Day history on the map.** The page draws today's track (since local
 midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
-header, and zooms out (17 down to 13) until the track fits around the
+header (a day picked in *Track*: that local day, read once, with its date
+in the header; it is drawn also without a fix), and zooms out (17 down to 13) until the track fits around the
 position. A gap of over 5 minutes breaks the line. Every track line the
 logger writes also goes to `/hist/YYYYMMDD.trk` (its UTC date; the same
 text as the track file, which is deleted once it is uploaded). The newest

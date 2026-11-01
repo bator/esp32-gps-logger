@@ -90,7 +90,21 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .svt{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
 .svt td{padding:3px 6px;border-top:1px solid var(--l);text-align:right}
 .svt td:first-child{text-align:left}.svt .u td{color:var(--m)}
-@media(max-width:760px){.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+/* GPS link alert, track and static panels */
+.alert{margin-bottom:12px;padding:11px 14px;border:1px solid var(--bad);border-radius:14px;background:rgba(248,113,113,.12);color:var(--bad);font:600 12px "JetBrains Mono",monospace;letter-spacing:.08em}
+.alert em{font-style:normal;color:var(--t);font-weight:400;margin-left:8px}
+.alert:empty{display:none}
+.ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}.ph h2{margin:0;margin-right:auto}
+.btn,.sel{font:600 11px "JetBrains Mono",monospace;letter-spacing:.08em;color:var(--a);background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.35);border-radius:8px;padding:5px 9px;cursor:pointer}
+.btn:disabled{opacity:.4;cursor:default}
+.kv{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-family:"JetBrains Mono",monospace}
+.kv small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}.kv b{font-size:16px;color:#fff}
+.prof svg,.scat svg{display:block;width:100%;margin-top:10px}.prof svg{height:150px}
+.k3{grid-template-columns:repeat(3,1fr)}
+.prof .sp{fill:none;stroke:var(--a);stroke-width:1.6;vector-effect:non-scaling-stroke}.prof .al{fill:rgba(251,191,36,.12);stroke:var(--warn);stroke-width:1.2;vector-effect:non-scaling-stroke}
+.scat circle.d{fill:var(--a);opacity:.55}.scat .c50{fill:none;stroke:var(--ok);stroke-dasharray:3 3}.scat .c95{fill:none;stroke:var(--warn);stroke-dasharray:3 3}
+.hint{font-size:11px;color:var(--m);margin-top:8px}
+@media(max-width:760px){.kv{grid-template-columns:repeat(2,1fr)}.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -101,6 +115,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
   <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></div>
 </div>
 <div class="wrap">
+  <div class="alert" id="gl"></div>
   <div class="tm" id="tm"></div>
   <div class="g">
     <div class="p radar"><h2 id="skyh">Sky</h2>
@@ -119,6 +134,12 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
       <div class="p"><h2>Systems</h2><div id="sys"></div></div>
     </div>
   </div>
+  <div class="g">
+    <div class="p"><div class="ph"><h2>Track</h2><select class="sel" id="dsel" onchange="pick(this.value)"><option value="">TODAY</option></select><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
+      <div class="kv" id="tstat"></div><div class="prof" id="prof"></div></div>
+    <div class="p"><div class="ph"><h2>Static test</h2><button class="btn" id="sbtn" onclick="statToggle()">START</button><button class="btn" onclick="statReset()">RESET</button></div>
+      <div class="kv k3" id="sstat"></div><div class="scat" id="scat"></div></div>
+  </div>
   <div class="p" style="margin-top:12px"><h2>Event log</h2><div class="term" id="log"></div></div>
   <details class="p"><summary id="svh">Satellite table</summary><table class="svt" id="svt"></table></details>
 </div>
@@ -133,9 +154,11 @@ var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
 var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
 // every status.json key the page shows (tests check none is missing)
-var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea gps_boots gps_loops receiver setup_ok points left files " +
-  "bad_files sent upload upload_err stay uptime prev_run boot_cause temp mhz mem heap_kb idf flash_kb " +
-  "wifi rssi pulses").split(" ");
+var SHOWN = ("fix sats hdop hacc fix_src ubx utc position pos6 nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
+  "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
+  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses").split(" ");
+var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
+var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
 var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime"];
 
 function esc(v) {
@@ -225,8 +248,24 @@ function logLine(l) {
   return '<div><span class="t">' + t + '</span>  <span class="' + kind + '">' + text + "</span></div>";
 }
 
-// status.json -> the HTML of every box (pure: tests/web_page_test.js runs it)
-function view(d) {
+function bytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }
+// The GPS link: seconds since the last whole NMEA/UBX frame (good_age_s,
+// null: none since boot), the bytes a second between two polls (rx_bytes over
+// the uptime between them). -> {tone, rate, silent: s silent or 0, junk: bytes
+// arrive but no whole frame (wiring, baud)}, or null (a firmware without it)
+function gpsLink(d, prev) {
+  if (d.good_age_s === undefined || d.rx_bytes === undefined) return null;
+  var g = d.good_age_s, silent = g === null ? (d.uptime || 0) : g, rate = null;
+  if (prev && typeof prev.rx_bytes === "number" && d.uptime > prev.uptime && d.rx_bytes >= prev.rx_bytes)
+    rate = (d.rx_bytes - prev.rx_bytes) / (d.uptime - prev.uptime);
+  var tone = silent <= GPS_OK_S ? "" : silent <= GPS_SILENT_S ? "warn" : "bad";
+  return {tone: tone, rate: rate, silent: tone === "bad" ? silent : 0,
+    junk: tone === "bad" && d.rx_age_s !== null && d.rx_age_s !== undefined && d.rx_age_s <= GPS_SILENT_S};
+}
+
+// status.json -> the HTML of every box (pure: tests/web_page_test.js runs it;
+// prev: the poll before, for rates)
+function view(d, prev) {
   var v = {}, svs = d.satellites || [], used = 0, fix = d.fix || "-", dot = " &middot; ";
   var sats = String(d.sats || "- / -").replace(/None/g, "-").split(" / ");   // "seen / used"
   var nm = String(d.nmea || "0 / 0").split(" / "), ok = +nm[0], bad = +nm[1];
@@ -240,12 +279,17 @@ function view(d) {
   var src = d.fix_src === "pvt" ? "NAV-PVT" : d.fix_src === "nmea" ? "NMEA" : "-";
   var ub = String(d.ubx || "- / -").split(" / ");                 // UBX frames ok / bad
   var ubp = +ub[0] + +ub[1] ? +ub[1] * 100 / (+ub[0] + +ub[1]) : 0;   // NAV-PVT path
+  var gl = gpsLink(d, prev), ua = d.upload_age_s;
+  var late = d.left > 0 && (ua === null || ua === undefined ? d.uptime > UPLOAD_LATE_S : ua > UPLOAD_LATE_S);
   v.up = "UP " + esc(hms(d.uptime).toUpperCase());
+  v.gl = gl && gl.silent ? "GPS SILENT &middot; " + esc(hms(gl.silent).toUpperCase()) + "<em>" +
+    (gl.junk ? "bytes arrive but no valid sentence: check TX/RX and the baud rate" :
+      "nothing from the receiver: check its power and the TX wire") + "</em>" : "";
   v.tm = cell("FIX", esc(fix.replace(" fix", "")).toUpperCase(), "", fixTone(fix)) +
     cell("SATS", esc(sats[1]), "/" + esc(sats[0])) +
     (ha !== null ? cell("ACC", "&plusmn;" + ha.toFixed(1), "m", ha > MAX_HACC ? "warn" : "") :
       cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "")) +
-    cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 ? "warn" : "") +
+    cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 || late ? "warn" : "") +
     (q4 ? cell("WIFI", wifiIcon(q4[0]) + q4[1] + '<em>%</em><em class="db">' + d.rssi + " dBm</em>", "", q4[2]) :
       cell("WIFI", esc(ws[0]).toUpperCase())) +
     (d.fix_src === "pvt" ? cell("UBX BAD", ubp.toFixed(2), "%", ubp > 1 ? "warn" : "") :
@@ -283,6 +327,10 @@ function view(d) {
     line("UPLINK", esc(d.upload).toUpperCase() + "<em>" + num(d.sent) + " sent" + dot + num(d.files) + " files" + dot +
       num(d.upload_err) + " err" + dot + num(d.bad_files) + " bad</em>",
       d.bad_files > 0 ? "bad" : d.upload_err > 0 || /err|low/.test(d.upload || "") ? "warn" : "") +
+    (d.upload_age_s === undefined ? "" : line("LAST UPLOAD", (ua === null ? "none since boot" : hms(ua) + " ago") +
+      "<em>" + num(d.left) + " pts waiting</em>", late ? "warn" : "")) +
+    (gl ? line("GPS LINK", (gl.rate === null ? "-" : num(Math.round(gl.rate)) + " B/s") + "<em>last frame " +
+      (d.good_age_s === null ? "never" : hms(d.good_age_s) + " ago") + dot + bytes(d.rx_bytes) + " read</em>", gl.tone) : "") +
     line("TRACK", num(d.points) + " pts logged" + (d.stay === "yes" ? "<em>staying</em>" : "")) +
     line("RECEIVER", esc(comma > 0 ? rx.slice(0, comma) : rx).toUpperCase() + "<em>" + num(d.gps_boots) + " rst" + dot +
       num(d.gps_loops) + " loops" + dot + "setup " + (d.setup_ok === true ? "ok" : d.setup_ok === false ? "no" : "-") +
@@ -306,12 +354,25 @@ function view(d) {
   return v;
 }
 
-// The day's track since local midnight from the board's day history
-// (/hist?d=<UTC day>&o=<byte>): HIST_REPLY bytes a reply at most, then only
-// what is new, once a minute. Lines as in a .trk: lat,lon first, the time
-// (YYYYMMDDTHHMMSSZ) last; a gap over 5 min breaks the line.
-var HIST_REPLY = 16384, hist = {start: -1, days: [], off: {}, rest: {}, pts: [], km: 0, busy: false, at: 0};
+// The day's track from the board's day history (/hist?d=<UTC day>&o=<byte>):
+// HIST_REPLY bytes a reply at most. Today (since local midnight) asks again
+// once a minute for what is new; a past local day (the day picker, from the
+// JSON's days) is read once. Lines as in a .trk: lat,lon,ele first, the time
+// (YYYYMMDDTHHMMSSZ) last, TRK2 speed (m/s) before it; a gap over 5 min
+// breaks the line. A point: [ms, lat, lon, ele or null, km/h or null].
+var HIST_REPLY = 16384, GAP_MS = 300000, sel = null, hist = histNew(null);
 function utcDay(ms) { return new Date(ms).toISOString().slice(0, 10).replace(/-/g, ""); }
+function localDay(s) { return new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)).getTime(); }
+function histNew(day) {                 // day: a local day's YYYYMMDD, null today
+  var m = new Date(), start, end = Infinity;
+  m.setHours(0, 0, 0, 0);
+  start = day ? localDay(day) : m.getTime();
+  if (day) { var e = new Date(start); e.setDate(e.getDate() + 1); end = e.getTime(); }
+  var days = [utcDay(start)];
+  if (day && days.indexOf(utcDay(end - 1)) < 0) days.push(utcDay(end - 1));
+  return {start: start, end: end, past: !!day, days: days, off: {}, rest: {}, pts: [], km: 0, busy: false, at: 0,
+    done: false};
+}
 function histParse(day, text) {
   var ls = ((hist.rest[day] || "") + text).split("\n");
   hist.rest[day] = ls.pop();
@@ -319,22 +380,26 @@ function histParse(day, text) {
     var f = ls[i].split(","), s = f[f.length - 1];
     if (f.length < 5 || s.length !== 16 || f[0] === "") continue;
     var t = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(9, 11), +s.slice(11, 13), +s.slice(13, 15));
-    var la = +f[0], lo = +f[1], q = hist.pts[hist.pts.length - 1];
-    if (t < hist.start || isNaN(t) || isNaN(la) || isNaN(lo)) continue;
-    if (q && t - q[0] <= 300000) {
+    var la = +f[0], lo = +f[1], q = hist.pts[hist.pts.length - 1], d = 0;
+    if (t < hist.start || t >= hist.end || isNaN(t) || isNaN(la) || isNaN(lo)) continue;
+    if (q && t - q[0] <= GAP_MS) {
       var c = Math.cos(la * Math.PI / 180);
-      hist.km += Math.sqrt(Math.pow((la - q[1]) * 110.54, 2) + Math.pow((lo - q[2]) * 111.32 * c, 2));
+      d = Math.sqrt(Math.pow((la - q[1]) * 110.54, 2) + Math.pow((lo - q[2]) * 111.32 * c, 2));
+      hist.km += d;
     }
-    hist.pts.push([t, la, lo]);
+    var ele = f[2] === "" ? null : +f[2], v = f.length >= 6 && f[4] !== "" ? +f[4] * 3.6 : null;
+    if (v === null && q && t > q[0] && t - q[0] <= 10000) v = d * 3600000 / (t - q[0]);   // TRK1: from the distance
+    hist.pts.push([t, la, lo, isNaN(ele) ? null : ele, v === null || isNaN(v) ? null : v]);
   }
 }
 function histLoad() {
-  var now = Date.now(), m = new Date(now);
-  m.setHours(0, 0, 0, 0);
-  if (m.getTime() !== hist.start) {     // a new local day: start over
-    hist = {start: m.getTime(), days: [utcDay(m.getTime())], off: {}, rest: {}, pts: [], km: 0, busy: false, at: 0};
+  var now = Date.now();
+  if (!hist.past) {
+    var m = new Date(now);
+    m.setHours(0, 0, 0, 0);
+    if (m.getTime() !== hist.start) hist = histNew(null);   // a new local day: start over
+    if (hist.days.indexOf(utcDay(now)) < 0) hist.days.push(utcDay(now));
   }
-  if (hist.days.indexOf(utcDay(now)) < 0) hist.days.push(utcDay(now));
   hist.busy = true;
   histNext(0);
 }
@@ -342,19 +407,171 @@ function histNext(i) {
   if (i >= hist.days.length) {
     hist.busy = false;
     hist.at = Date.now();
-    if (mapD) placeMap(mapD);
+    hist.done = hist.past;
+    if (mapD) placeMap(mapD); else trackPaint();
     return;
   }
-  var day = hist.days[i], o = hist.off[day] || 0, x = new XMLHttpRequest();
+  var h = hist, day = h.days[i], o = h.off[day] || 0, x = new XMLHttpRequest();
   x.open("GET", "/hist?d=" + day + "&o=" + o, true);
   x.timeout = 10000;
   x.onload = function () {
+    if (h !== hist) return;             // another day was picked meanwhile
     var t = x.status === 200 ? x.responseText : "";
-    if (t) { hist.off[day] = o + t.length; histParse(day, t); }
+    if (t) { h.off[day] = o + t.length; histParse(day, t); }
     histNext(t.length >= HIST_REPLY ? i : i + 1);
   };
-  x.onerror = x.ontimeout = function () { hist.busy = false; hist.at = Date.now(); };
+  x.onerror = x.ontimeout = function () { if (h === hist) { h.busy = false; h.at = Date.now(); } };
   x.send();
+}
+function histDue() { return !hist.busy && !hist.done && Date.now() - hist.at >= 60000; }
+// the day picker: today, then the board's days newest first (local days)
+var selKey = "";
+function pickerHtml(days, cur) {
+  var h = '<option value="">TODAY</option>', today = utcDay(Date.now());
+  for (var i = (days || []).length - 1; i >= 0; i--) {
+    var s = String(days[i]);
+    if (!/^\d{8}$/.test(s) || s === today) continue;
+    h += '<option value="' + s + '"' + (s === cur ? " selected" : "") + ">" + s.slice(0, 4) + "-" + s.slice(4, 6) + "-" +
+      s.slice(6) + "</option>";
+  }
+  return h;
+}
+function pick(day) {
+  sel = day || null;
+  hist = histNew(sel);
+  trkKey = "";
+  histLoad();
+  if (mapD) placeMap(mapD); else trackPaint();
+}
+// the track's numbers: distance, moving time (gaps under 5 min), points,
+// top speed; the speed and altitude profile as one SVG (pure, for tests)
+function trackStats(pts, km) {
+  var mv = 0, top = 0;
+  for (var i = 0; i < pts.length; i++) {
+    if (i && pts[i][0] - pts[i - 1][0] <= GAP_MS) mv += pts[i][0] - pts[i - 1][0];
+    if (pts[i][4] !== null && pts[i][4] > top) top = pts[i][4];
+  }
+  return cell("DISTANCE", km.toFixed(2), "km") + cell("MOVING", esc(hms(mv / 1000).toUpperCase())) +
+    cell("POINTS", num(pts.length)) + cell("TOP SPEED", top ? top.toFixed(0) : "-", "km/h");
+}
+// x: the moving time, a stop (gap over 5 min) a narrow break, so a day of
+// short trips is not a few slivers across empty hours
+function profile(pts) {
+  if (pts.length < 2) return '<span class="hint">NO TRACK FOR THIS DAY YET</span>';
+  var W = 600, H = 120, t0 = pts[0][0], t1 = pts[pts.length - 1][0], step = Math.max(1, Math.ceil(pts.length / W));
+  var vmax = 0, e0 = 1e9, e1 = -1e9, i, p, xs = [0], mv = 0, gaps = 0;
+  for (i = 0; i < pts.length; i++) {
+    p = pts[i];
+    if (p[4] !== null) vmax = Math.max(vmax, p[4]);
+    if (p[3] !== null) { e0 = Math.min(e0, p[3]); e1 = Math.max(e1, p[3]); }
+    if (i) { var dt = p[0] - pts[i - 1][0]; if (dt > GAP_MS) gaps++; else mv += dt; }
+  }
+  var gw = Math.max(1000, mv * .03);     // a break: 3 % of the moving time
+  for (i = 1; i < pts.length; i++) {
+    var g = pts[i][0] - pts[i - 1][0];
+    xs.push(xs[i - 1] + (g > GAP_MS ? gw : g));
+  }
+  var sx = W / Math.max(1, xs[xs.length - 1]), sv = vmax ? (H - 14) / vmax : 0, se = e1 > e0 ? (H - 14) / (e1 - e0) : 0;
+  var sp = "", al = "", prev = null, open = false;
+  for (i = 0; i < pts.length; i += step) {
+    p = pts[i];
+    var x = (xs[i] * sx).toFixed(1), brk = prev !== null && p[0] - prev > GAP_MS;
+    if (p[4] !== null) sp += (sp === "" || brk ? "M" : "L") + x + " " + (H - p[4] * sv).toFixed(1);
+    if (p[3] !== null) {
+      if (open && brk) { al += "V" + H + "Z"; open = false; }
+      al += (open ? "L" : "M" + x + " " + H + "L") + x + " " + (H - 2 - (p[3] - e0) * se).toFixed(1);
+      open = true;
+    }
+    prev = p[0];
+  }
+  if (open) al += "V" + H + "Z";
+  var hh = function (ms) { var d = new Date(ms); return two(d.getHours()) + ":" + two(d.getMinutes()); };
+  return '<svg viewBox="0 0 ' + W + " " + (H + 12) + '" preserveAspectRatio="none">' +
+    (al ? '<path class="al" d="' + al + '"/>' : "") + (sp ? '<path class="sp" d="' + sp + '"/>' : "") +
+    '<text x="2" y="' + (H + 11) + '" style="text-anchor:start">' + hh(t0) + "</text>" +
+    '<text x="' + W + '" y="' + (H + 11) + '" style="text-anchor:end">' + hh(t1) + "</text>" +
+    '<text x="2" y="9" style="text-anchor:start;fill:var(--a)">' + (vmax ? vmax.toFixed(0) + " KM/H" : "") + "</text>" +
+    '<text x="' + W + '" y="9" style="text-anchor:end;fill:var(--warn)">' +
+    (se ? e0.toFixed(0) + "&ndash;" + e1.toFixed(0) + " M" : "") + "</text></svg>";
+}
+// GPX 1.1 of the shown day: a track segment per gap (pure, for tests)
+function gpxText(pts, name) {
+  var g = '<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="gps_logger" ' +
+    'xmlns="http://www.topografix.com/GPX/1/1">\n<trk><name>' + esc(name) + "</name>\n<trkseg>\n";
+  for (var i = 0; i < pts.length; i++) {
+    var p = pts[i];
+    if (i && p[0] - pts[i - 1][0] > GAP_MS) g += "</trkseg>\n<trkseg>\n";
+    g += '<trkpt lat="' + p[1] + '" lon="' + p[2] + '">' + (p[3] === null ? "" : "<ele>" + p[3] + "</ele>") +
+      "<time>" + new Date(p[0]).toISOString().replace(".000Z", "Z") + "</time></trkpt>\n";
+  }
+  return g + "</trkseg>\n</trk>\n</gpx>\n";
+}
+function dayName() {
+  var d = new Date(hist.start);
+  return d.getFullYear() + "-" + two(d.getMonth() + 1) + "-" + two(d.getDate());
+}
+function gpxSave() {
+  if (!hist.pts.length || typeof Blob === "undefined") return;
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([gpxText(hist.pts, "GPS logger " + dayName())], {type: "application/gpx+xml"}));
+  a.download = "gps-" + dayName() + ".gpx";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+// The static test: while it runs, each poll's position (pos6, the track's
+// precision) and hAcc are kept (and saved in the browser, so a reload does
+// not lose an hour). The spread around their mean: CEP50 / CEP95 (the radius
+// that holds 50 / 95 % of the fixes) against the receiver's own hAcc.
+var STAT_KEY = "gps-static", stat = {on: false, s: []};
+try { var _st = JSON.parse(localStorage.getItem(STAT_KEY)); if (_st && _st.s) stat = _st; } catch (e) {}
+function statSave() { try { localStorage.setItem(STAT_KEY, JSON.stringify(stat)); } catch (e) {} }
+function statAdd(d, now) {
+  if (!stat.on) return;
+  var p = String(d.pos6 || d.position || "").split(", ");
+  if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) return;
+  stat.s.push([now, +p[0], +p[1], typeof d.hacc === "number" ? d.hacc : null]);
+  statSave();
+}
+function statToggle() { stat.on = !stat.on; statSave(); statPaint(); }
+function statReset() { stat = {on: stat.on, s: []}; statSave(); statPaint(); }
+function quant(a, q) { return a.length ? a[Math.min(a.length - 1, Math.ceil(q * a.length) - 1)] : null; }
+function statView(s, on) {              // -> {btn, sstat, scat} (pure, for tests)
+  var n = s.length, la = 0, lo = 0, ha = 0, nh = 0, i, r = [], xy = [];
+  for (i = 0; i < n; i++) { la += s[i][1]; lo += s[i][2]; if (s[i][3] !== null) { ha += s[i][3]; nh++; } }
+  la /= n || 1; lo /= n || 1;
+  var ky = 110540, kx = 111320 * Math.cos(la * Math.PI / 180);
+  for (i = 0; i < n; i++) {
+    var x = (s[i][2] - lo) * kx, y = (s[i][1] - la) * ky;
+    xy.push([x, y]);
+    r.push(Math.sqrt(x * x + y * y));
+  }
+  r.sort(function (a, b) { return a - b; });
+  var c50 = quant(r, .5), c95 = quant(r, .95), dur = n > 1 ? (s[n - 1][0] - s[0][0]) / 1000 : 0, f = function (m) {
+    return m === null ? "-" : m.toFixed(2); };
+  var v = {btn: on ? "STOP" : "START"};
+  v.sstat = cell("SAMPLES", num(n), on ? "rec" : "") + cell("SPAN", esc(hms(dur).toUpperCase())) +
+    cell("CEP50", f(c50), "m") + cell("CEP95", f(c95), "m") + cell("MAX", f(r.length ? r[r.length - 1] : null), "m") +
+    cell("MEAN HACC", nh ? (ha / nh).toFixed(2) : "-", "m");
+  if (n < 2) {
+    v.scat = '<span class="hint">' + (on ? "RECORDING: ONE POSITION A POLL, LEAVE THE BOARD STILL UNDER OPEN SKY" :
+      "START IT WITH THE BOARD STILL UNDER OPEN SKY; AN HOUR GIVES A GOOD CEP95") + "</span>";
+    return v;
+  }
+  var R = Math.max(r[r.length - 1], 1) * 1.1, k = 90 / R, h = '<svg viewBox="-100 -100 200 200" style="max-width:300px;margin:10px auto 0">';
+  h += '<circle class="rg" r="90"/><path class="rx" d="M0-90V90M-90 0H90"/>';
+  for (i = 0; i < xy.length; i++)
+    h += '<circle class="d" r="1.8" cx="' + (xy[i][0] * k).toFixed(1) + '" cy="' + (-xy[i][1] * k).toFixed(1) + '"/>';
+  h += '<circle class="c50" r="' + (c50 * k).toFixed(1) + '"/><circle class="c95" r="' + (c95 * k).toFixed(1) + '"/>';
+  h += '<text y="98">' + R.toFixed(1) + " M RADIUS</text></svg>";
+  v.scat = h + '<div class="legend"><span style="color:var(--ok)">- - CEP50</span><span style="color:var(--warn)">- - CEP95</span></div>';
+  return v;
+}
+function statPaint() {
+  var v = statView(stat.s, stat.on);
+  document.getElementById("sbtn").innerHTML = v.btn;
+  paint({sstat: v.sstat, scat: v.scat});
 }
 // world pixels (256 a tile at zoom 0) of a position at zoom z
 function wpx(lat, lon, z) {
@@ -368,7 +585,8 @@ function wpx(lat, lon, z) {
 // anchor (50%, 42%)
 function fitView(lat, lon, el) {
   var w = el.offsetWidth, h = el.offsetHeight, top = 44, bot = h - 90, zf = ZOOM;
-  var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, ps = hist.pts.concat([[0, lat, lon]]);
+  // a past day: its track alone (the live position may be far away)
+  var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, ps = hist.past && hist.pts.length ? hist.pts : hist.pts.concat([[0, lat, lon]]);
   for (var i = 0; i < ps.length; i++) {
     var q = wpx(ps[i][1], ps[i][2], 0);
     x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]);
@@ -391,19 +609,35 @@ function histPath(t, z) {               // SVG path in the tile layer's pixels
   return d;
 }
 
+// the Track panel and the header's day, when the shown track changed
+var tpKey = "";
+function trackPaint() {
+  var k = hist.start + "/" + hist.pts.length;
+  if (k === tpKey) return;
+  tpKey = k;
+  document.getElementById("day").innerHTML = hist.pts.length ? "<em>" + (hist.past ? dayName() : "TODAY") + " </em>" +
+    hist.km.toFixed(2) + " KM" : "";
+  paint({tstat: trackStats(hist.pts, hist.km), prof: profile(hist.pts)});
+  document.getElementById("gpx").disabled = !hist.pts.length;
+}
+
 // The map: tiles around the position, rebuilt only when the centre tile
 // changes; the fraction moves the layer (no reload every poll)
 var mapKey = "", trkKey = "", mapD = null;
 function placeMap(d) {
   mapD = d;
   var el = document.getElementById("map"), p = String(d.position || "").split(", ");
-  if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) { el.className = "map nofix"; return; }
-  el.className = "map";
+  var fix = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]);
+  trackPaint();
+  // without a fix the day's track is still drawn (the pin hidden)
+  if (!fix && !hist.pts.length) { el.className = "map nofix"; return; }
+  el.className = fix ? "map" : "map nofix";
+  var lat = fix ? +p[0] : hist.pts[0][1], lon = fix ? +p[1] : hist.pts[0][2];
   // tiles to cover the element from its centre (a wide screen needs more)
-  var v = fitView(+p[0], +p[1], el), z = v.z, sc = v.sc, me = wpx(+p[0], +p[1], z);
+  var v = fitView(lat, lon, el), z = v.z, sc = v.sc, me = wpx(lat, lon, z);
   var nx = Math.ceil(el.offsetWidth / 512 / sc) + 1, ny = Math.ceil(el.offsetHeight / 512 / sc) + 1;
   var t = {x: Math.floor(v.X / 256), y: Math.floor(v.Y / 256), fx: v.X % 256, fy: v.Y % 256,
-    mpp: tile(+p[0], +p[1], z).mpp / sc};
+    mpp: tile(lat, lon, z).mpp / sc};
   var key = z + "/" + t.x + "/" + t.y + "/" + nx + "/" + ny, box = document.getElementById("tiles");
   // the pin, its ring and the coordinates at the position (off the anchor
   // when the view is centred on the day's track)
@@ -428,7 +662,6 @@ function placeMap(d) {
   if (key + "/" + hist.pts.length !== trkKey) {
     trkKey = key + "/" + hist.pts.length;
     trk.innerHTML = hist.pts.length ? '<svg width="1" height="1"><path d="' + histPath(t, z) + '"/></svg>' : "";
-    document.getElementById("day").innerHTML = hist.pts.length ? "<em>TODAY </em>" + hist.km.toFixed(2) + " KM" : "";
   }
   // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
   var acc = document.getElementById("acc"), px = typeof d.hacc === "number" ? d.hacc * 2 / t.mpp :
@@ -436,7 +669,7 @@ function placeMap(d) {
   acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
 }
 
-var last = 0, every = 15;
+var last = 0, every = 15, prevD = null;
 function paint(v) {
   for (var id in v) {
     var e = document.getElementById(id);
@@ -459,9 +692,14 @@ function tick() {
       last = Date.now();
       document.body.className = "";
       document.getElementById("live").innerHTML = "LIVE";
-      paint(view(d));
+      paint(view(d, prevD));
+      prevD = d;
+      var dk = String(d.days || "") + "/" + sel;
+      if (dk !== selKey) { selKey = dk; document.getElementById("dsel").innerHTML = pickerHtml(d.days, sel); }
+      statAdd(d, last);
+      statPaint();
       placeMap(d);
-      if (!hist.busy && Date.now() - hist.at >= 60000) histLoad();
+      if (histDue()) histLoad();
     } catch (e) { stale(); }
     setTimeout(tick, every * 1000);
   };

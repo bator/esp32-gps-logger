@@ -366,7 +366,8 @@ ep = {}                                  # the second being collected
 
 def reset():
     st.clear()
-    st.update(start=time.ticks_ms(), rx=None, spin=0, ok=0, err=0,
+    st.update(start=time.ticks_ms(), rx=None, rx_b=0, good=None, spin=0,
+              ok=0, err=0,
               status=None, quality=None, fixtype=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, course=None, used=None, view={},
@@ -852,6 +853,7 @@ def _ubx_frame(fr):
     unhealthy, gnssId) per satellite; MON-VER fills st["gps_ver"]; an
     ACK-ACK / ACK-NAK for the frame _ubx_ack waits for (st["ack_id"]) sets
     st["ack"] to 1 / 0. Others (late ACKs) are dropped."""
+    st["good"] = time.ticks_ms()
     cls, mid = fr[2], fr[3]
     if cls == 0x01 and mid == 0x07:
         if st["mode"] == "nmea":         # left on (PVT_STOP not taken yet):
@@ -1609,6 +1611,7 @@ def handle(line):
     if not checksum_ok(line):
         st["err"] += 1
         return
+    st["good"] = time.ticks_ms()         # the last whole frame (GPS link)
     try:
         f = line[1:line.rfind(b"*")].decode().split(",")
         fn = HANDLERS.get(f[0][2:])
@@ -1655,6 +1658,7 @@ def read_uart():
         if not k:
             return
         st["rx"] = time.ticks_ms()
+        st["rx_b"] += k                  # bytes read (the page's GPS link)
         st["spin"] += 1
         # a start-up banner (or its start), also when split across reads:
         # every one that ends in what was just read
@@ -4397,7 +4401,7 @@ def up_reset():
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
               bad_try={}, skip=None, hold={}, bad_full={}, read_err={},
               enomem=0, last_err=None, guard_hits=_guard["hits"],
-              lowidf_at=None, lowidf_seen=None,
+              lowidf_at=None, lowidf_seen=None, ok_at=None,
               lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
@@ -5594,6 +5598,7 @@ def upload_tick():
             _fs_err(now)
             return
         up["sent"] += n_ok
+        up["ok_at"] = now
         up["fail4"] = 0
         up["backoff"] = BACKOFF_START
         up["allow_bad"] = True
@@ -5724,13 +5729,23 @@ def _prev_text():
         return t + ", ended by a crash"
     return t + (" (last line %s)" % prev_run["end"] if prev_run["end"] else "")
 
+def _ago(t):
+    """Whole seconds since ticks t, None for never."""
+    return None if t is None else _age(time.ticks_ms(), t) // 1000
+
 def _web_rows():
     """(key, value) pairs of the JSON (web.html labels them)."""
     view = sv_seen()
     t = _fix_secs()
-    pos = None
+    pos = pos6 = None
     if st["valid"] and st["lat"] is not None and st["lon"] is not None:
         pos = "%.5f, %.5f" % (st["lat"], st["lon"])
+        # the track line's precision for the page's static measurement:
+        # NAV-PVT's integer degrees as they are, else the (float) NMEA one
+        if st.get("lat_i") is not None and st.get("lon_i") is not None:
+            pos6 = "%s, %s" % (_i7(st["lat_i"]), _i7(st["lon_i"]))
+        else:
+            pos6 = "%.6f, %.6f" % (st["lat"], st["lon"])
     try:
         cause = machine.reset_cause()
     except Exception:
@@ -5748,8 +5763,12 @@ def _web_rows():
         ("fix_src", st.get("fix_src")),
         ("utc", None if t is None else _stamp_at(t)[0]),
         ("position", pos),
+        ("pos6", pos6),
         ("nmea", "%d / %d" % (st["ok"], st["err"])),
         ("ubx", "%d / %d" % (st.get("ubx_ok", 0), st.get("ubx_bad", 0))),
+        ("rx_bytes", st["rx_b"]),
+        ("rx_age_s", _ago(st["rx"])),
+        ("good_age_s", _ago(st["good"])),
         ("gps_boots", st["gps_boots"]),
         ("gps_loops", st["loops"]),
         ("receiver", st["gps_ver"]),
@@ -5761,6 +5780,8 @@ def _web_rows():
         ("sent", up["sent"]),
         ("upload", up["state"]),
         ("upload_err", up["err"]),
+        ("upload_age_s", _ago(up.get("ok_at"))),
+        ("days", _hist_days()),
         ("stay", "yes" if still.get("active") else "no"),
         ("uptime", uptime_s()),
         ("prev_uptime", prev_run["up"]),
@@ -5792,6 +5813,23 @@ def _flash_kb():
         _fl[0] = None
     _fl[1] = now
     return _fl[0]
+
+_hd = [[], None]                         # (day history days, ticks)
+
+def _hist_days():
+    """The UTC days (YYYYMMDD) of the day history, oldest first, listed
+    at most every 30 s (the page picks a day from them)."""
+    now = time.ticks_ms()
+    if _hd[1] is not None and _age(now, _hd[1]) < 30000:
+        return _hd[0]
+    try:
+        _hd[0] = sorted(n[:8] for n in os.listdir(HIST_DIR)
+                        if len(n) == 12 and n.endswith(".trk")
+                        and n[:8].isdigit())
+    except OSError:
+        _hd[0] = []
+    _hd[1] = now
+    return _hd[0]
 
 _fc = [0, 0, None]                       # (files, bad files, ticks)
 
