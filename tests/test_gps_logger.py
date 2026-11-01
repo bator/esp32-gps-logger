@@ -6,7 +6,10 @@ import builtins
 import gc as real_gc
 import hashlib
 import importlib
+import importlib.util
+import io
 import json
+import math
 import os
 import shutil
 import sys
@@ -17,6 +20,34 @@ import types
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+# New tracks are binary .trb files. The checks here read a track's text:
+# a .trb opened for reading by this file (not by the logger) comes back as
+# the text lines it holds, decoded by tools/trk2gpx.py (written apart from
+# the logger's own decoder, so the two check each other), with the header
+# the text file would have had.
+_t2g_spec = importlib.util.spec_from_file_location(
+    "trk2gpx", os.path.join(ROOT, "tools", "trk2gpx.py"))
+trk2gpx = importlib.util.module_from_spec(_t2g_spec)
+_t2g_spec.loader.exec_module(trk2gpx)
+
+
+def trb_text(data):
+    """The text a .trb's bytes stand for, "#TRK1"/"#TRK2" header first."""
+    lines = list(trk2gpx.trb_lines(data))
+    if lines and lines[0] == "#TRKB\n":
+        pts = [x for x in lines if x[:1] not in ("#", "-")]
+        lines[0] = "#TRK2\n" if pts and pts[0].count(",") == 5 else "#TRK1\n"
+    return "".join(lines)
+
+
+def open(path, mode="r", *args, **kw):    # noqa: A001 (see above)
+    p = path if isinstance(path, str) else None
+    if p is not None and p.endswith(".trb") and mode in ("r", "rt", "rb"):
+        with builtins.open(p, "rb") as f:
+            text = trb_text(f.read())
+        return io.BytesIO(text.encode()) if "b" in mode else io.StringIO(text)
+    return builtins.open(path, mode, *args, **kw)
 
 _clock = [100000]
 _oled_fail = [False]
@@ -582,7 +613,7 @@ def online(tmpdir):
     gl.LOG_DIR = tmpdir
     try:
         for n in os.listdir(tmpdir):
-            if n.endswith((".gpx", ".trk", ".pos", ".tmp", ".bad")):
+            if n.endswith((".gpx", ".trk", ".trb", ".pos", ".tmp", ".bad")):
                 try:
                     os.remove(os.path.join(tmpdir, n))
                 except OSError:
@@ -1572,7 +1603,7 @@ try:
         p = os.path.join(tmpdir, n)
         if p == current:
             continue
-        if n.endswith((".gpx", ".trk", ".pos", ".tmp", ".bad")):
+        if n.endswith((".gpx", ".trk", ".trb", ".pos", ".tmp", ".bad")):
             try:
                 os.remove(p)
             except OSError:
@@ -1686,8 +1717,8 @@ try:
     rec = gl.log["batch"][0] if gl.log["batch"] else ""
     check("TRK-1: recorded point is lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ",
           rec == "52.500000,13.400000,10.0,1.2,20261005T120005Z\n", repr(rec))
-    check("TRK-1: new file is a .trk under LOG_DIR",
-          gl.log["file"] is not None and gl.log["file"].endswith(".trk")
+    check("TRK-1: new file is a .trb (binary) under LOG_DIR",
+          gl.log["file"] is not None and gl.log["file"].endswith(".trb")
           and os.path.dirname(gl.log["file"]) == trk_dir,
           "file=%s" % gl.log.get("file"))
 
@@ -2741,7 +2772,7 @@ try:
         if gl.log["file"]:
             seen.add(gl.log["file"])
     gl.flush()
-    disk = [n for n in os.listdir(drive_dir) if n.endswith(".trk")]
+    disk = [n for n in os.listdir(drive_dir) if n.endswith((".trk", ".trb"))]
     check("ROT-1: 1 h offline driving is one file",
           len(seen) == 1 and len(disk) == 1,
           "seen=%s disk=%s points=%s" % (seen, disk, gl.log.get("points")))
@@ -2766,7 +2797,7 @@ try:
                      fixtype=3)
         gl.log_tick()
     gl.flush()
-    park_disk = [n for n in os.listdir(park_dir) if n.endswith(".trk")]
+    park_disk = [n for n in os.listdir(park_dir) if n.endswith((".trk", ".trb"))]
     park_lines = []
     for n in park_disk:
         with open(os.path.join(park_dir, n)) as f:
@@ -2801,7 +2832,7 @@ try:
         if gl.log["file"]:
             opened.add(gl.log["file"])
     gl.flush()
-    hot_disk = [n for n in os.listdir(hot_dir) if n.endswith(".trk")]
+    hot_disk = [n for n in os.listdir(hot_dir) if n.endswith((".trk", ".trb"))]
     check("ROT-2: hotspot parking does not keep opening files",
           len(opened) <= 1 + 3600000 // gl.STILL_FILE + 1
           and len(hot_disk) <= 1 + 3600000 // gl.STILL_FILE + 1,
@@ -3894,7 +3925,6 @@ try:
     # REVIEW3-2: a strong, visible candidate gets one immediate retry; the
     # fail / retry lines carry the raw status
     import contextlib
-    import io
 
     def rv_start_wifi(env_text, aps, ok, fail_first=(), fail_always=()):
         reset_wlan()
@@ -4036,7 +4066,7 @@ try:
     def sv_lines():
         out = []
         for n in sorted(os.listdir(rv_dir)):
-            if n.endswith(".trk"):
+            if n.endswith((".trk", ".trb")):
                 with open(os.path.join(rv_dir, n)) as f:
                     out.extend(l for l in f if l.count(",") == 4)
         return out + list(gl.log["batch"])
@@ -4299,7 +4329,7 @@ try:
           "file=%s first=%r" % (gl.log["file"], new[0] if new else None))
     check("STAY: the new track is named after its first point",
           bool(new) and gl.log["file"].endswith(
-              new[0].strip().split(",")[4].replace("T", "_")[:15] + ".trk"),
+              new[0].strip().split(",")[4].replace("T", "_")[:15] + gl.TRB),
           "file=%s first=%r" % (gl.log["file"], new[0] if new else None))
 
     # driving past the home network without stopping is all recorded
@@ -4833,7 +4863,7 @@ try:
         hb_fix(0, 0, nofix=True)
     on_flash = 0
     for n in os.listdir(rv_dir):
-        if n.endswith(".trk"):
+        if n.endswith((".trk", ".trb")):
             on_flash += len(beats_of(l for l in open(os.path.join(rv_dir, n))
                                      if l.count(",") == 4))
     check("FLASH: 2 h without a fix -> the anchor points are on flash",
@@ -4850,7 +4880,7 @@ try:
         sv_drift(60, box=10.0, step=3.0)
     gl.flush()
     trk = sorted(os.path.join(rv_dir, n) for n in os.listdir(rv_dir)
-                 if n.endswith(".trk"))
+                 if n.endswith((".trk", ".trb")))
     check("ONEFILE: 3 h offline stay with fix gaps stays in one file",
           sv_active() and gl.log["file"] == stay_file
           and [p for p in trk if p >= stay_file] == [stay_file],
@@ -4896,7 +4926,6 @@ try:
 
     # HOLD: the drift that proves a stay is held in RAM, so a boot (or a new
     # fix) at home uploads nothing of it; a real arrival is still kept
-    import math
     for home in (True, False):
         sv_reset(home=home)
         for _ in range(30 * 60):
@@ -4977,7 +5006,7 @@ try:
         sparse(14, 3)
         on_flash = 0
         for n in os.listdir(rv_dir):
-            if n.endswith(".trk"):
+            if n.endswith((".trk", ".trb")):
                 on_flash += len([l for l in open(os.path.join(rv_dir, n))
                                  if l.count(",") == 4])
         leaks.append((sv_active(), on_flash))
@@ -5000,7 +5029,7 @@ try:
     check("CLOSE: the closed track has only lines before the hold",
           closed and len(old_pts) == 2 and old in gl.pending())
     check("CLOSE: the held lines move on to a file named after the first",
-          gl.log["file"].endswith("20261018_080010.trk")
+          gl.log["file"].endswith("20261018_080010.trb")
           and len(gl.log["batch"]) == 2 and not gl.log["created"])
     # GARAGE: a window at A, no fix for 2 min, then a stay 120 m away at B:
     # the stay is anchored at B, not between the two
@@ -5145,7 +5174,7 @@ try:
     with open(trip) as fh:
         trip_body = fh.read()
     later = [l for n in sorted(os.listdir(rv_dir))
-             if n.endswith(".trk") and os.path.join(rv_dir, n) != trip
+             if n.endswith((".trk", ".trb")) and os.path.join(rv_dir, n) != trip
              for l in open(os.path.join(rv_dir, n)) if sv_m_ok(l)
              and sv_m(l) < 30]
     check("FIXGAP: the old place's drift before the gap stays in its track",
@@ -8065,9 +8094,9 @@ check("TRK2-RING: the way out is the line _sample_line writes (TRK2 and "
       repr([(a, b) for a, b in zip(w2 + w1, g2 + g1) if a != b][:2]))
 gl.reset()
 
-# HIST: the day history the status page draws - each line flush wrote,
-# appended to HIST_DIR/<UTC day>.trk (the track file is deleted once
-# uploaded), the newest HIST_DAYS days kept, served by /hist?d=&o=
+# HIST: the day history the status page draws - each point once it is
+# uploaded, appended to HIST_DIR/<UTC day>.trk (the track file is deleted
+# then), the newest HIST_DAYS days kept, served by /hist?d=&o=
 import tempfile as _tf
 _hist_saved = (gl.HIST_DIR, gl.LOG_DIR, gl.HIST_REPLY)
 _hd = _tf.mkdtemp(prefix="hist-")
@@ -8114,17 +8143,44 @@ try:
         gl.free = free_saved
     check("HIST: nothing written while the flash is nearly full",
           _hread("20261101") == _hl("20261101", "080000"))
-    # flush: the lines that landed in the track file go to the history too
-    gl.log_reset()
-    gl.log["file"] = os.path.join(_hd, "t.trk")
-    gl.log["fmt"] = 2
-    fl = [_hl("20261101", "090000"), _hl("20261101", "090001", 47.186)]
-    gl.log["batch"] = list(fl)
-    gl.flush()
-    check("HIST: flush appends the lines it wrote to the day history",
-          _hread("20261101") == _hl("20261101", "080000") + "".join(fl)
-          and gl.log["batch"] == [] and gl.log["points"] == 2,
-          repr(_hread("20261101")))
+    # flush: a .trb's points are on the flash once, in the track file; the
+    # history gets them when they are up (they were written twice, and a
+    # day offline filled the flash twice as fast). A .trk (TRK_BIN off, or
+    # from older firmware, already in the history) goes at flush as before
+    for ext in (".trk", gl.TRB):
+        tb_ = ext == gl.TRB
+        online(_hd)
+        gl.LOG_DIR = _hd
+        h0 = _hread("20261101")
+        gl.log["file"] = os.path.join(_hd, "20261101_090000" + ext)
+        gl.log["fmt"] = 2
+        fl = [_hl("20261101", "090000"), _hl("20261101", "090001", 47.186)]
+        gl.log["batch"] = list(fl)
+        gl.flush()
+        check("HIST: flush writes a .trb, not the day history; a .trk and "
+              "the history (%s)" % ext,
+              _hread("20261101") == (h0 if tb_ else h0 + "".join(fl))
+              and gl.log["batch"] == [] and gl.log["points"] == 2,
+              repr(_hread("20261101")))
+        h0 = h0 if tb_ else h0 + "".join(fl)
+        gl.log["file"] = None            # (closed: pending)
+        _post_code[0] = 500
+        pump()
+        check("HIST: a failed upload adds nothing (%s)" % ext,
+              _hread("20261101") == h0, repr(_hread("20261101")))
+        _post_code[0] = 201
+        pump()
+        check("HIST: a .trb's uploaded points go to the day history, once, "
+              "as text; a .trk's not again (%s)" % ext,
+              _hread("20261101") == h0 + ("".join(fl) if tb_ else "")
+              and not os.path.exists(os.path.join(_hd, "20261101_090000"
+                                                  + ext)),
+              repr(_hread("20261101")))
+        pump()
+        check("HIST: ... and not again (%s)" % ext,
+              _hread("20261101") == h0 + ("".join(fl) if tb_ else ""))
+        with open(os.path.join(gl.HIST_DIR, "20261101.trk"), "w") as f:
+            f.write(_hl("20261101", "080000"))
     gl.log_reset()
 
     class _HConn:
@@ -9214,10 +9270,10 @@ make_trk(ok_p, 3)
 real_rb = gl.read_batch
 
 
-def rb_fail(path, off=0):
+def rb_fail(path, off=0, key=None):
     if path == bad_p:
         raise OSError(5)
-    return real_rb(path, off)
+    return real_rb(path, off, key)
 gl.read_batch = rb_fail
 _posts[:] = []
 _post_code[0] = 201
@@ -10476,9 +10532,9 @@ gl._idf_info = lambda: (157 * 1024, 102900)
 real_rb_ = gl.read_batch
 
 
-def _rb_grows(path, off=0):
+def _rb_grows(path, off=0, key=None):
     heap_kb[0] = 248                     # the read grew the heap
-    return real_rb_(path, off)
+    return real_rb_(path, off, key)
 
 
 gl.read_batch = _rb_grows
@@ -10992,6 +11048,10 @@ else:
           repr({k: ft.get(k) for k in ("days", "pastDays", "pickUrls",
                                        "pickPts", "pickDay", "nav0",
                                        "nav1")}))
+    check("PAGE-HIST: a track uploaded after a newer one is drawn in time "
+          "order; no km from the jump back",
+          ft.get("late") == [[3600000, 3601000, 7200000, 7201000], 221],
+          repr(ft.get("late")))
     check("PAGE-TIMELINE: trips split at stops over 5 min, a few standing "
           "fixes folded into the stop; trip rows (km, time, km/h) and stop "
           "rows; the picked trip marked",
@@ -12260,6 +12320,510 @@ check("OTA-RETRY: OTA_CHECK is 10 min; a bad download waits OTA_RETRY "
       and retried == (True, [("boot", "ota_1"), ("reset",)])
       and errs == ["ota error OSError(113)"],
       repr((s1, w1, w2, retried, errs)))
+
+# --- TRKB: binary delta tracks (.trb) ----------------------------------------
+# The same text lines, each stored as its difference from the line before:
+# the upload JSON, the .bad copy and the day history are the text lines
+# byte for byte; a point takes ~2-8 bytes instead of ~46-51.
+import random as _rnd
+gl.reset()
+_tb_saved = (gl.LOG_DIR, gl.HIST_DIR, gl.UPLOAD_BATCH)
+_tb = tempfile.mkdtemp(prefix="trb-")
+gl.HIST_DIR = os.path.join(_tb, "hist")
+
+
+def _tb_drive(n, fmt, seed=1, lat=47.185356, lon=18.426934, step=1,
+              gaps=True):
+    """n text lines as _line writes them: a 1 Hz drive (fmt 2: NAV-PVT
+    ints, acc and speed; fmt 1: NMEA floats and hdop)."""
+    r = _rnd.Random(seed)
+    out = []
+    t = 1793520000 - gl.EPOCH_DAYS * 86400     # 2026-11-01
+    li, lo = int(lat * 1e7), int(lon * 1e7)
+    ele, hd, spd, head = 120.0, 1.2, 13.0, 0.4
+    for i in range(n):
+        t += step if r.random() > 0.05 else r.randint(2, 40)
+        head += r.uniform(-0.08, 0.08)
+        spd = max(0.0, min(36.0, spd + r.uniform(-0.6, 0.6)))
+        li += int(spd * 90 * math.cos(head))   # ~1e-7 deg per 1.1 cm
+        lo += int(spd * 133 * math.sin(head))
+        ele += r.uniform(-0.3, 0.3)
+        if r.random() < 0.1:
+            hd = round(max(0.6, min(4.0, hd + r.uniform(-0.3, 0.3))), 1)
+        tc = gl._stamp_s(t)[1]
+        e = "%.1f" % ele if not gaps or r.random() > 0.01 else ""
+        if fmt == 2:
+            c = gl._i7(li) + "," + gl._i7(lo)
+            out.append("%s,%s,%d,%s,%s\n" % (c, e, max(1, int(hd * 2)),
+                                             "%.1f" % spd, tc))
+        else:
+            c = "%.6f,%.6f" % (li / 1e7, lo / 1e7)
+            out.append("%s,%s,%s,%s\n" % (c, e, "%.1f" % hd, tc))
+    return out
+
+
+def _tb_write(path, lines, per=60, fmt=None):
+    """lines through flush() into path, per lines a flush (as the logger
+    writes a drive: FLUSH every 60 s)."""
+    gl.log_reset()
+    gl.log["file"] = path
+    gl.log["fmt"] = fmt or (2 if lines[0].count(",") == 5 else 1)
+    for i in range(0, len(lines), per):
+        gl.log["batch"] = list(lines[i:i + per])
+        gl.flush()
+    gl.log["file"] = None
+
+
+def _tb_bodies(path):
+    """Every read_batch body of path, offset by offset as the upload goes."""
+    out, off, key = [], 0, None
+    for _ in range(10000):
+        n, ok, size, new_off, eof = gl.read_batch(path, off, key)
+        out.append((n, ok, bytes(gl._body[:size])))
+        key = gl._rk[0]
+        if eof:
+            break
+        off = new_off
+    return out
+
+
+def _tb_keys(path):
+    """The records of a .trb in order: "=" keyframe, "d" delta, "-", "#"."""
+    out = []
+    with builtins.open(path, "rb") as f:
+        gl._rd_open(0)
+        while gl._rd_rec(f):
+            c = gl._rbuf[gl._rd[1]]
+            out.append("d" if c >= 128 else chr(c))
+    return "".join(out)
+
+
+def _tb_raw(path):
+    with builtins.open(path, "rb") as f:
+        return f.read()
+
+
+try:
+    gl.LOG_DIR = _tb
+    sizes = {}
+    same = {}
+    for fmt in (1, 2):
+        lines = _tb_drive(1500, fmt, seed=fmt)
+        pt = os.path.join(_tb, "20261101_08000%d.trk" % fmt)
+        pb = os.path.join(_tb, "20261101_08000%d.trb" % fmt)
+        _tb_write(pt, lines)
+        _tb_write(pb, lines)
+        raw = _tb_raw(pb)
+        sizes[fmt] = (len(raw) - len(gl.HEADERB) - len(gl.FOOTER)) / len(lines)
+        dec = list(trk2gpx.trb_lines(raw))
+        same[fmt] = (dec[1:-1] == lines, _tb_bodies(pt) == _tb_bodies(pb),
+                     gl.count_points() if False else None)
+        rs = _tb_keys(pb)
+        same[fmt] += (rs.startswith("#=") and rs.endswith("d#"),
+                      rs.count("="), os.path.getsize(pt) / len(lines))
+        pk = os.path.join(_tb, "20261101_08100%d.trb" % fmt)
+        _tb_write(pk, _tb_drive(400, fmt, seed=fmt, gaps=False), per=400)
+        same[fmt] += (sum(1 for a_, b_ in zip(lines, lines[1:])
+                          if (",," in a_) != (",," in b_)),)
+        rk = _tb_keys(pk)[1:-1]
+        same[fmt] += (rk == ("=" + "d" * gl.KEY_EVERY) * 6 + "=" + "d" * 9,)
+    print("TRKB bytes/point", sizes, "text", same[1][5], same[2][5])
+    g_t = trk2gpx.convert(open(pt), "x")
+    g_b = trk2gpx.convert(trk2gpx.trb_lines(_tb_raw(pb)), "x")
+    _so = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        rc_ = trk2gpx.main(["trk2gpx.py", pb])
+        g_m = sys.stdout.getvalue()
+    finally:
+        sys.stdout = _so
+    check("TRKB: trk2gpx converts a .trb to the GPX of its .trk",
+          g_b == g_t and rc_ == 0 and g_m == g_b.replace(
+              "<name>x</name>", "<name>20261101_080002</name>")
+          and g_t.count("<trkpt") == 1500, repr((rc_, len(g_b), len(g_t))))
+    check("TRKB: a flushed drive decodes to the very text lines (trk2gpx), "
+          "TRK1 and TRK2",
+          same[1][0] and same[2][0])
+    check("TRKB: read_batch sends byte-identical Overland JSON, batch for "
+          "batch, as from the .trk",
+          same[1][1] and same[2][1])
+    check("TRKB: under 10 bytes a point on a 1 Hz drive (TRK1 ~46, TRK2 ~51)",
+          sizes[1] < 10 and sizes[2] < 10, repr(sizes))
+    check("TRKB: each flush starts with a keyframe, then one every "
+          "KEY_EVERY deltas",
+          same[1][3] and same[2][3] and same[1][7] and same[2][7]
+          and 25 <= same[1][4] <= 25 + same[1][6]
+          and 25 <= same[2][4] <= 25 + same[2][6],
+          repr((same[1][3:], same[2][3:])))
+
+    # lines no delta can stand for are keyframes, kept as written
+    odd = ["47.500000,19.000000,100.0,1.2,20261101T090000Z\n",
+           "47.500010,19.000000,-0.0,1.2,20261101T090001Z\n",   # -0.0
+           "47.500020,19.000000,05,1.2,20261101T090002Z\n",     # 05
+           "47.500030,19.000000,1e3,1.2,20261101T090003Z\n",    # 1e3
+           "47.500040,19.000000,100.0,1.2,20261101T090003Z\n",  # same s
+           "47.500050,19.000000,100.0,1.2,20261101T090002Z\n",  # back
+           "47.50006,19.000000,100.0,1.2,20261101T090005Z\n",   # decimals
+           "47.500070,19.000000,,1.2,20261101T090006Z\n",       # no ele
+           "47.500080,19.000000,,,20261101T090007Z\n",          # no hdop
+           "47.500090,19.000000,,,20261101T090008Z\n",
+           "47.500100,19.000000,100.0,1.2,4,20261101T090009Z\n",  # TRK2
+           "47.500110,19.000000,100.0,1.2,4,20261101T090010Z\n",
+           "-47.500110,-19.000001,-12.5,3,0.0,20261101T090011Z\n",
+           "-47.500100,-19.000002,-12.4,3,0.0,20261101T090012Z\n",
+           "-0.000001,0.000000,0.0,3,0.0,20261101T090013Z\n",
+           "0.000001,-0.000001,0.0,3,0.0,20261101T090014Z\n",
+           "47.5,19.0,1.0,2,1.0,20261131T000000Z\n",           # 31 Nov
+           "47.5,19.0,1.0,2,1.0,20261130T000000Z\n",
+           "47.5,19.0,1.0,2,1.0,20281231T235959Z\n",           # far
+           "47.5,19.0,1.0,2,1.0,20290101T000000Z\n",
+           "179.999999,179.999999,9999.9,999,99.9,20290101T000001Z\n"]
+    po = os.path.join(_tb, "20261101_090000.trb")
+    pot = os.path.join(_tb, "20261101_090000.trk")
+    _tb_write(po, odd, per=7, fmt=2)
+    _tb_write(pot, odd, per=7, fmt=2)
+    raw = _tb_raw(po)
+    dec = list(trk2gpx.trb_lines(raw))
+    nkey = _tb_keys(po).count("=")
+    check("TRKB: odd lines (-0.0, 05, 1e3, a second twice or back, other "
+          "decimals, empty fields, TRK1/TRK2 mixed, negative, a day that "
+          "does not exist) round-trip as keyframes",
+          dec[1:-1] == odd and _tb_bodies(po) == _tb_bodies(pot)
+          and nkey >= 12, repr((nkey, [(a, b) for a, b in zip(dec[1:-1], odd)
+                                      if a != b][:2])))
+    rec = [0, 0]
+    g = gl._ks
+    gl._kb_parse(odd[0].encode(), 0, len(odd[0]) - 1, g)
+    chk = (g[0] is not None and g[1] == 47500000 and g[6] == 6
+           and g[3] == 1000 and g[8] == 1 and g[11] == 4)
+    for bad_ in ("05", "-0", "-0.0", "1.", ".5", "1e3", "+1", "1234567890",
+                 "nan", " 1", "1-"):
+        ln = ("47.5,19.0,%s,1.2,20261101T090000Z" % bad_).encode()
+        gl._kb_parse(ln, 0, len(ln), g)
+        rec[0] += g[0] is None
+    for ok_ in ("0", "-1", "0.5", "-0.5", "123456789", "-12.34"):
+        ln = ("47.5,19.0,%s,1.2,20261101T090000Z" % ok_).encode()
+        gl._kb_parse(ln, 0, len(ln), g)
+        rec[1] += g[0] is not None
+    check("TRKB: only numbers written as they print are deltas (no -0, "
+          "leading zero, exponent, over 9 digits)",
+          chk and rec == [11, 6], repr((chk, rec)))
+
+    # segment breaks stay "-" lines, before the line recorded after them
+    sl = _tb_drive(30, 2, seed=5)
+    ps = os.path.join(_tb, "20261101_100000.trb")
+    gl.log_reset()
+    gl.log["file"] = ps
+    gl.log["fmt"] = 2
+    gl.log["batch"] = list(sl[:20])
+    gl.log["new_seg"] = True
+    gl.log["seg_tc"] = [sl[12][-17:-1]]
+    gl.flush()
+    gl.log["batch"] = list(sl[20:])
+    gl.log["new_seg"] = True
+    gl.log["seg_tc"] = [sl[20][-17:-1]]
+    gl.flush()
+    dec = list(trk2gpx.trb_lines(_tb_raw(ps)))
+    check("TRKB: segment breaks are '-' lines where the text has them",
+          dec[1:-1] == sl[:12] + ["-\n"] + sl[12:20] + ["-\n"] + sl[20:],
+          repr(dec[10:16]))
+
+    # the upload: resumed from the .pos (offset and keyframe) after every
+    # batch, across a reboot each time; each point up once, in order
+    online(_tb)
+    gl.LOG_DIR = _tb
+    rl = _tb_drive(400, 2, seed=7)
+    pr = os.path.join(_tb, "20261101_110000.trb")
+    _tb_write(pr, rl)
+    left0 = gl.count_points()
+    poss = []
+    for _ in range(20):
+        if not os.path.exists(pr):
+            break
+        pump()
+        if os.path.exists(pr + ".pos"):
+            with builtins.open(pr + ".pos") as f:
+                poss.append(f.read())
+        gl.up_reset()                    # a reboot: the .pos only
+        gl.up["url"] = "https://dawarich.example.com"
+        gl.up["key"] = "secret-key"
+    sent = locations()
+    want = []
+    for ln in rl:
+        f_ = ln[:-1].split(",")
+        want.append((round(float(f_[1]), 6), round(float(f_[0]), 6),
+                     "%s-%s-%sT%s:%s:%sZ" % (f_[5][0:4], f_[5][4:6],
+                                             f_[5][6:8], f_[5][9:11],
+                                             f_[5][11:13], f_[5][13:15])))
+    got = [(x["geometry"]["coordinates"][0], x["geometry"]["coordinates"][1],
+            x["properties"]["timestamp"]) for x in sent]
+    check("TRKB: uploaded in batches across reboots from the .pos "
+          "'offset keyframe': every point once, in order",
+          got == want and left0 == 400 and len(_posts) == 8
+          and not os.path.exists(pr) and not os.path.exists(pr + ".pos")
+          and all(len(x.split()) == 2 for x in poss),
+          repr((len(got), len(want), left0, len(_posts), poss[:2])))
+
+    # a .pos without (or with a wrong) keyframe resends from 0: nothing lost
+    for posv in ("%d\n", "%d 3\n", "%d 99999999\n", "%d -2\n"):
+        online(_tb)
+        gl.LOG_DIR = _tb
+        _tb_write(pr, rl[:120])
+        n, ok, size, off1, eof = gl.read_batch(pr, 0)
+        k1 = gl._rk[0]
+        with builtins.open(pr + ".pos", "w") as f:
+            f.write(posv % off1 if "%" in posv else posv)
+        o2, k2 = gl.read_pos(pr)
+        for _ in range(10):
+            if os.path.exists(pr):
+                pump()
+        ts = [x["properties"]["timestamp"] for x in locations()]
+        check("TRKB: a .pos %r resends from the start, nothing lost"
+              % posv.strip(),
+              (o2, k2) == (0, None) and len(set(ts)) == 120
+              and k1 is not None, repr((o2, k2, len(ts), len(set(ts)))))
+
+    # a misaligned offset (not on a record) with a good keyframe: from 0
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:120])
+    n, ok, size, off1, eof = gl.read_batch(pr, 0)
+    k1 = gl._rk[0]
+    gl.write_offset(pr, off1 + 1, k1)
+    for _ in range(10):
+        if os.path.exists(pr):
+            pump()
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    check("TRKB: an offset inside a record resends from 0",
+          len(set(ts)) == 120, repr(len(ts)))
+
+    # count_points counts the records left from the .pos
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:130])
+    gl.UPLOAD_BATCH = 50
+    n, ok, size, off1, eof = gl.read_batch(pr, 0)
+    gl.commit_offset(pr, n, off1, eof, gl._rk[0])
+    check("TRKB: count_points counts the points after the .pos",
+          gl.count_points() == 80, repr(gl.count_points()))
+
+    # 422: the batch goes to <file>.trb.bad as text lines, read as a .trk
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:70])
+    _post_code[0] = 422
+    pump()
+    _post_code[0] = 201
+    bad = pr + ".bad"
+    with builtins.open(bad) as f:
+        btxt = f.read()
+    hist_q = []
+    for d in os.listdir(gl.HIST_DIR):
+        with builtins.open(os.path.join(gl.HIST_DIR, d)) as f:
+            hist_q.append(f.read())
+    check("TRKB: a rejected batch is parked as text lines in .trb.bad "
+          "(listed as a .bad, read as text)",
+          btxt == "".join(rl[:50]) and gl.pending_bad() == [bad]
+          and gl._is_trk(bad) and not bad.endswith(gl.TRB)
+          and "".join(rl[:50]) in "".join(hist_q),
+          repr(btxt[:80]))
+    for _ in range(10):
+        pump()
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    check("TRKB: ... the rest of the track and then the .bad go up",
+          not os.path.exists(pr) and not os.path.exists(bad)
+          and len(set(ts)) == 70, repr((len(ts), os.listdir(_tb))))
+
+    # a file cut off mid-record (a damaged end): the points before it go up
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:90], per=90)
+    raw = _tb_raw(pr)
+    with builtins.open(pr, "wb") as f:
+        f.write(raw[:len(raw) - len(gl.FOOTER) - 1])
+    for _ in range(10):
+        if os.path.exists(pr):
+            pump()
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    check("TRKB: a file cut off inside its last record uploads the points "
+          "before it",
+          len(ts) == 89 and not os.path.exists(pr), repr(len(ts)))
+
+    # a damaged delta drops points only up to the next keyframe
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:120], per=60)
+    raw = bytearray(_tb_raw(pr))
+    i = raw.index(b"\n", 7) + 1          # the first delta record
+    raw[i] = 0xC1                        # bit 6: no such field
+    with builtins.open(pr, "wb") as f:
+        f.write(raw)
+    for _ in range(10):
+        if os.path.exists(pr):
+            pump()
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    want = [x[2] for x in [(0, 0, "%s-%s-%sT%s:%s:%sZ" % (
+        l[-17:-13], l[-13:-11], l[-11:-9], l[-8:-6], l[-6:-4], l[-4:-2]))
+        for l in rl[:120]]]
+    check("TRKB: a damaged record loses the points up to the next "
+          "keyframe, none after it, no wrong ones",
+          ts == [want[0]] + want[60:], repr((len(ts), ts[:2])))
+
+    # the end of a .trb not where the last write left it: no guessing at a
+    # record boundary, the batch goes on in a new file
+    online(_tb)
+    gl.LOG_DIR = _tb
+    pw = os.path.join(_tb, "20261101_120000.trb")
+    gl.log_reset()
+    gl.log["file"] = pw
+    gl.log["fmt"] = 2
+    gl.log["batch"] = list(rl[:30])
+    gl.flush()
+    raw = _tb_raw(pw)
+    with builtins.open(pw, "wb") as f:
+        f.write(raw[:-len(gl.FOOTER)] + b"\x83\x05\n\x01")   # no footer
+    gl.log["good_size"] = None
+    gl.log["batch"] = list(rl[30:40])
+    gl.flush()
+    gl.log["batch"] = list(rl[40:50]) if gl.log["batch"] == [] else \
+        gl.log["batch"]
+    nf = gl.log["file"]
+    if gl.log["batch"]:
+        gl.flush()
+    check("TRKB: a .trb whose footer is gone is not appended to: the "
+          "batch goes to a new file",
+          nf != pw and _tb_raw(pw) == raw[:-len(gl.FOOTER)] + b"\x83\x05\n\x01"
+          and nf.endswith(gl.TRB) and gl.log["batch"] == []
+          and list(trk2gpx.trb_lines(_tb_raw(nf)))[1:-1]
+          == rl[30:30 + gl.log["points"]],
+          repr((nf, gl.log["points"], len(gl.log["batch"]))))
+    gl.log_reset()
+
+    # no keyframe in the first batch (its "=" damaged): the upload goes on
+    # from the .pos "offset -1", it does not send the same batch forever
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:120], per=120)
+    raw = bytearray(_tb_raw(pr))
+    raw[len(gl.HEADERB)] = 0x3E          # "=" -> ">"
+    with builtins.open(pr, "wb") as f:
+        f.write(raw)
+    poss = []
+    for _ in range(6):
+        if os.path.exists(pr):
+            pump()
+            if os.path.exists(pr + ".pos"):
+                with builtins.open(pr + ".pos") as f:
+                    poss.append(f.read().split())
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    check("TRKB: a first batch without a keyframe is passed ('offset -1'), "
+          "the rest goes up once",
+          not os.path.exists(pr) and poss and poss[0][1] == "-1"
+          and len(_posts) == 2
+          and len(ts) == len(set(ts)) == 120 - 1 - gl.KEY_EVERY,
+          repr((poss, len(_posts), len(ts))))
+
+    # framing lost inside a record (its flag byte damaged below 0x80): the
+    # records read from inside it are dropped, never decoded as points
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:120], per=60)
+    raw = bytearray(_tb_raw(pr))
+    gl._rd_open(0)
+    offs = []
+    with builtins.open(pr, "rb") as f:
+        while gl._rd_rec(f):
+            offs.append(gl._rd[0] + gl._rd[1])
+    raw[offs[12]] = 0x30                 # a "0": a text line up to a 0x0A
+    with builtins.open(pr, "wb") as f:
+        f.write(raw)
+    for _ in range(10):
+        if os.path.exists(pr):
+            pump()
+    got = [(x["geometry"]["coordinates"][1], x["properties"]["timestamp"])
+           for x in locations()]
+    want = {}
+    for ln in rl[:120]:
+        f_ = ln.split(",")
+        want["%s-%s-%sT%s:%s:%sZ" % (f_[5][0:4], f_[5][4:6], f_[5][6:8],
+                                     f_[5][9:11], f_[5][11:13],
+                                     f_[5][13:15])] = round(float(f_[0]), 6)
+    wrong = [g for g in got if want.get(g[1]) != g[0]]
+    check("TRKB: a record damaged below 0x80 drops the points up to the "
+          "next keyframe, no wrong ones",
+          not wrong and 60 <= len(got) < 120, repr((len(got), wrong[:2])))
+
+    # a delta stream that keeps growing (damaged data): the state goes
+    # invalid before a line outgrows the 96 bytes past the read buffer
+    s_ = gl._ks
+    ln = b"=1.000000,1.000000,1.0,1.0,1.0,20261101T000000Z\n"
+    gl._rbuf[0:len(ln)] = ln
+    gl._kb_rec(0, len(ln), s_)
+    big = bytes([0x80, 0x80, 0x80, 0x80, 0x02])     # zigzag 2^29: +2^28
+    rec = bytes([0xBE]) + big * 5
+    gl._rbuf[0:len(rec)] = rec
+    res = []
+    try:
+        for _ in range(8):
+            res.append(gl._kb_rec(0, len(rec), s_))
+    except Exception as e:
+        res.append(repr(e))
+    over = bytes([0x82, 0x80, 0x80, 0x80, 0x80, 0x04])  # 2^30: too big
+    gl._rbuf[0:len(ln)] = ln
+    gl._kb_rec(0, len(ln), s_)
+    gl._rbuf[0:len(over)] = over
+    r_over = gl._kb_rec(0, len(over), s_)
+    check("TRKB: deltas that keep growing (damaged data) make the state "
+          "invalid before a line outgrows the decode buffer",
+          all(isinstance(r, tuple) for r in res)
+          and all(r[1] - gl._SCR <= 96 for r in res if r[1])
+          and res[3] == (0, 0) and res[2][1] and res[4:] == [(0, 0)] * 4
+          and r_over == (0, 0) and s_[0] is None,
+          repr((res[:5], r_over)))
+
+    # out of memory while encoding is no write failure: the batch waits
+    online(_tb)
+    gl.LOG_DIR = _tb
+    gl.log["file"] = os.path.join(_tb, "20261101_130000.trb")
+    gl.log["fmt"] = 2
+    gl.log["batch"] = list(rl[:10])
+    enc_ = gl._kb_encode
+
+    def _enc_oom(*a):
+        raise MemoryError
+
+    gl._kb_encode = _enc_oom
+    try:
+        for _ in range(4):
+            gl.flush()
+    finally:
+        gl._kb_encode = enc_
+    st_ = (gl.log["wfails"], gl.log["file"], len(gl.log["batch"]))
+    gl.flush()
+    check("TRKB: MemoryError while encoding keeps the batch and the file "
+          "(no WFAIL_SWITCH); the next flush writes it",
+          st_ == (0, os.path.join(_tb, "20261101_130000.trb"), 10)
+          and gl.log["batch"] == [] and gl.log["points"] == 10, repr(st_))
+    gl.log_reset()
+
+    # the open file's name, and firmware from before TRK_BIN
+    gl.st["date"], gl.st["time"] = "2026-11-01", "13:00:00"
+    gl.start_file()
+    nm1 = gl.log["file"]
+    gl.TRK_BIN = False
+    gl.start_file()
+    nm2 = gl.log["file"]
+    gl.TRK_BIN = True
+    gl.log_reset()
+    check("TRKB: new files are .trb (TRK_BIN; False: .trk as before), "
+          "a suffix older firmware does not list",
+          nm1.endswith("20261101_130000.trb") and nm2.endswith(".trk")
+          and not nm1.endswith((".gpx", ".trk")), repr((nm1, nm2)))
+finally:
+    gl.LOG_DIR, gl.HIST_DIR, gl.UPLOAD_BATCH = _tb_saved
+    shutil.rmtree(_tb, ignore_errors=True)
+    gl.log_reset()
+    gl.up_reset()
 
 print()
 print("%d passed, %d failed" % (passed, failed))

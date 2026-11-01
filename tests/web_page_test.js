@@ -183,6 +183,12 @@ c0.histParse(c0.hist.days[0], "#TRK2\n47.0,18.0,120.5,2,5.0," + iso(d0 + 3600000
 c0.histParse(c0.hist.days[0], iso(d0 + 3601000) + "\n" + "47.0,18.0,,3," + iso(d0 + 3602000) + "\n" +
   "47.0,18.0,1,2,1," + iso(d0 - 1000) + "\n47.0,18.0,1,2,1," + iso(d0 + 86400000) + "\n");
 ft.pts = c0.hist.pts.map((q) => [q[0] - d0, q[3]]);
+// a track uploaded after a newer one: its lines come later in the day file
+c0.hist = c0.histNew("20261030");
+const dl = (ms, la) => la + ",18.0,100.0,2,1.0," + iso(d0 + ms) + "\n";
+c0.histParse(c0.hist.days[0], dl(7200000, "47.0") + dl(7201000, "47.001"));
+c0.histParse(c0.hist.days[0], dl(3600000, "47.01") + dl(3601000, "47.011"));
+ft.late = [c0.hist.pts.map((q) => q[0] - d0), Math.round(c0.hist.km * 1000)];
 // trips and stops: a 1.2 km walk (20 min), a stop, a few fixes standing
 // (folded into the stop), a 0.5 km walk (10 min)
 const tp = [], dLat = 1 / 110.54;

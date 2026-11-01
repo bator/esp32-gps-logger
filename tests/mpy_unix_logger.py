@@ -331,6 +331,49 @@ check("read_batch .trk in place", (n, n_ok, eof) == (4, 2, True)
       and locs[1]["properties"]["timestamp"] == "2026-10-29T10:15:01Z"
       and "altitude" not in locs[1]["properties"])
 
+# a .trb: flush's encoder, then read_batch decoding it to the same JSON as
+# the .trk of the same lines, also resumed mid-file from a keyframe (ints,
+# bytearray +=, bytes %, the varints: the MicroPython side)
+tl = []
+la, lo = 471853560, 184269340
+for i in range(130):
+    la += 1350 - i * 7
+    lo -= 800 + i
+    tl.append("%s,%s,%.1f,%d,%.1f,%s\n" % (
+        gl._i7(la), gl._i7(lo), 120.0 + i * 0.3 - (i % 7), 2 + i % 3,
+        12.0 + (i % 11) * 0.4, gl._stamp_s(215611200 + i + i // 40 * 30)[1]))
+tl.append("-12.5,-0.000001,,1.2,20261101T090000Z\n")
+base = "/tmp/gps-logger-smoke-%d" % time.ticks_ms()
+body = gl._kb_encode(tl, len(tl), [70])
+outs = []
+try:
+    with open(base + ".trb", "wb") as f:
+        f.write(b"#TRKB\n" + body + b"#END\n")
+    with open(base + ".trk", "wb") as f:
+        f.write(("#TRK2\n" + "".join(tl[:70]) + "-\n" + "".join(tl[70:])
+                 + "#END\n").encode())
+    for ext in (".trb", ".trk"):
+        got, off, key = [], 0, None
+        while True:
+            n, n_ok, size, new_off, eof = gl.read_batch(base + ext, off, key)
+            got.append(bytes(gl._body[:size]))
+            key = gl._rk[0]
+            if eof:
+                break
+            off = new_off
+        outs.append(got)
+    n, n_ok, size, new_off, eof = gl.read_batch(base + ".trb", 0)
+    mid = gl.read_batch(base + ".trb", new_off, gl._rk[0])
+    tail = bytes(gl._body[:mid[2]])
+finally:
+    import os
+    for ext in (".trb", ".trk"):
+        os.remove(base + ext)
+check("trb: same JSON as the .trk, %d B for %d points"
+      % (len(body), len(tl)), outs[0] == outs[1] and len(outs[0]) == 3
+      and len(body) < 12 * len(tl))
+check("trb: resumed from a keyframe mid-file", tail == outs[1][1])
+
 # the hidden home's learned BSSIDs survive a reboot (/home_aps: hex lines,
 # bytes.find and a bytearray parse, no binascii); garbage lines are skipped
 gl.HOME_APS_FILE = "/tmp/gps-logger-smoke-aps-%d" % time.ticks_ms()

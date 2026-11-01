@@ -161,7 +161,7 @@ var GNSS = {GPS: 0, SBAS: 1, Galileo: 2, BeiDou: 3, QZSS: 5, GLONASS: 6};
 // 2 also machine.reset() and a panic, 0 a USB/JTAG or unknown reset
 var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", 3: "watchdog", 4: "deep sleep", 5: "soft reset"};
 var TLS_KB = 48;                        // TLS_MIN_KB in gps_logger.py
-var POINT_B = 51;                       // bytes per .trk point (TRK2; TRK1 ~46)
+var POINT_B = 8;                        // bytes per .trb point (~7 on a 1 Hz drive; .trk ~46-51)
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
 var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
@@ -390,19 +390,30 @@ function histNew(day) {                 // day: a local day's YYYYMMDD, null tod
 function histParse(day, text) {
   var ls = ((hist.rest[day] || "") + text).split("\n");
   hist.rest[day] = ls.pop();
+  var late = false;
   for (var i = 0; i < ls.length; i++) {
     var f = ls[i].split(","), s = f[f.length - 1];
     if (f.length < 5 || s.length !== 16 || f[0] === "") continue;
     var t = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(9, 11), +s.slice(11, 13), +s.slice(13, 15));
     var la = +f[0], lo = +f[1], q = hist.pts[hist.pts.length - 1];
     if (t < hist.start || t >= hist.end || isNaN(t) || isNaN(la) || isNaN(lo)) continue;
-    if (q && t - q[0] <= GAP_MS) {
-      var c = Math.cos(la * Math.PI / 180);
-      hist.km += Math.sqrt(Math.pow((la - q[1]) * 110.54, 2) + Math.pow((lo - q[2]) * 111.32 * c, 2));
-    }
+    if (q && t < q[0]) late = true;
+    else if (q && t - q[0] <= GAP_MS) hist.km += legKm(q, la, lo);
     var ele = f[2] === "" ? null : +f[2];
     hist.pts.push([t, la, lo, isNaN(ele) ? null : ele]);
   }
+  // a track uploaded after a newer one (held back, retried) adds its points
+  // to the day file after the newer ones: put them in time order again
+  if (late) {
+    hist.pts.sort(function (a, b) { return a[0] - b[0]; });
+    hist.km = 0;
+    for (var k = 1; k < hist.pts.length; k++)
+      if (hist.pts[k][0] - hist.pts[k - 1][0] <= GAP_MS) hist.km += legKm(hist.pts[k - 1], hist.pts[k][1], hist.pts[k][2]);
+  }
+}
+function legKm(q, la, lo) {
+  var c = Math.cos(la * Math.PI / 180);
+  return Math.sqrt(Math.pow((la - q[1]) * 110.54, 2) + Math.pow((lo - q[2]) * 111.32 * c, 2));
 }
 function histLoad() {
   var now = Date.now();
