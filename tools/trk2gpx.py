@@ -51,6 +51,8 @@ def read_points(lines):
     line)."""
     new_seg = False
     for raw in lines:
+        if raw == "#END\n":                # the footer: bytes after it are
+            break                          # left from a longer older write
         if raw == "-\n":
             new_seg = True
             continue
