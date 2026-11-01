@@ -393,16 +393,18 @@ main loop, by `deploy.sh` or by a power cycle. By hand:
 **Getting tracks:** they live in `/gpx/`. With the boot bypass held:
 
 ```bash
-.venv/bin/mpremote cp :/gpx/20261005_101500.trk .
-python3 tools/trk2gpx.py 20261005_101500.trk > 20261005_101500.gpx
+.venv/bin/mpremote cp :/gpx/20261005_101500.trb .
+python3 tools/trk2gpx.py 20261005_101500.trb > 20261005_101500.gpx
 ```
 
-Next to a track you may find `<file>.pos` (upload progress) and
-`<file>.bad` (batches the server rejected; retried until 8 more rejections
-per boot), and `<file>.err` (a track that could not be read three times,
-parked so the newer ones upload). `trk2gpx.py` converts `.trk.bad` and
-`.trk.err` files the same way.
-To queue a `.bad` again:
+New tracks are binary `.trb` files (see Format), older ones `.trk` text;
+`trk2gpx.py` converts both. Next to a track you may find `<file>.pos`
+(upload progress) and `<file>.bad` (batches the server rejected; retried
+until 8 more rejections per boot), and `<file>.err` (a track that could not
+be read three times, parked so the newer ones upload). `trk2gpx.py`
+converts `.bad` and `.err` files the same way. A `.trb.bad` holds the
+rejected points as text lines, like a `.trk`.
+To queue a `.bad` again (a `.trb.bad` becomes a `.trk`):
 
 ```bash
 .venv/bin/mpremote exec "import os; os.rename('/gpx/20261005_101500.trk.bad', '/gpx/20261005_101500.trk')"
@@ -550,10 +552,17 @@ rounded to two decimals on the page; the JSON keeps the receiver's value.
 midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
 header (a day stepped to in *Track*: that local day, read once, with its date
 in the header; it is drawn also without a fix), and zooms out (17 down to 13) until the track fits around the
-position. A gap of over 5 minutes breaks the line. Every track line the
-logger writes also goes to `/hist/YYYYMMDD.trk` (its UTC date; the same
-text as the track file, which is deleted once it is uploaded). The newest
-7 days are kept (`HIST_DAYS`). The history yields to the tracks: under 1 MB
+position. A gap of over 5 minutes breaks the line. Every point goes to
+`/hist/YYYYMMDD.trk` (its UTC date; the text line of the track file). A
+`.trb` point goes there once it is uploaded, when its batch is accepted (or
+parked as `.bad`), not when it is written: while it waits for WiFi it is on
+the flash once, in the track file. So the map shows a trip from when it is
+up: at home about a minute after the track closes, on a hotspot as it
+uploads; points still waiting are not drawn. A `.trk` (`TRK_BIN` off, or
+written by older firmware) goes there when written, as before. A track
+uploaded after a newer one (held back, retried) lands later in the day
+file; the page puts the points in time order again. The newest 7 days are
+kept (`HIST_DAYS`). The history yields to the tracks: under 1 MB
 free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
 batch would be dropped on a full flash, and nothing is added under
 2 × `MIN_FREE`. The page asks
@@ -738,6 +747,42 @@ console line.
   stops at the footer: bytes after it are left over from a longer write
   that failed (points the logger had dropped), and the file counts as
   complete. Older `.gpx` files are still uploaded.
+- **Binary tracks (TRKB).** New files are `/gpx/YYYYMMDD_HHMMSS.trb`
+  (`TRK_BIN`): the same TRK1/TRK2 lines, each stored as its difference from
+  the line before, ~7 bytes a point on a 1 Hz drive (measured in the
+  tests: 7.3 TRK1, 7.0 TRK2, against 47 and 49 as text), so the flash holds
+  about 6-7 times as many. Lossless: every line decodes byte for byte to
+  its text, so the upload JSON, the `.bad` copy and the day history are
+  what a `.trk` gives.
+  - Records: a `#TRKB` header; a keyframe, `=` + the whole text line; delta
+    records, a flag byte (0x80 | bit 0: a time step other than 1 s
+    follows, bits 1-5: lat, lon, ele, hdop/acc, speed changed) and one
+    LEB128 varint per set bit (the step in seconds; the zigzag change in
+    the field's last decimal: 1e-6° for lat/lon, 0.1 m for ele); `-` and
+    `#END` stay text lines (below 0x80).
+  - A delta keeps the keyframe's shape: the same fields, empty ones
+    included, with the same decimals. Any other line (an empty elevation
+    on a 2D fix, a second written twice, a number not written as it
+    prints, a change of 2^28 or more) is a keyframe. Each 60 s write starts
+    with one, and one follows every 64 deltas (`KEY_EVERY`), so a damaged
+    record loses at most the points up to the next keyframe.
+  - The `.pos` is `offset keyframe-offset`: a reader resumes by decoding
+    from that keyframe (at most 64 records). A `.pos` without a valid
+    keyframe, or an offset inside a record, resends the file from the
+    start (Dawarich deduplicates).
+  - A write never guesses where a `.trb` ends: if the footer is not where
+    the last write left it, the batch goes on in a new file (a guessed
+    boundary could split a record and decode garbage as points).
+  - A record that is not a delta, a keyframe, `-` or `#...` (a damaged
+    flag byte) makes the reader drop the deltas up to the next keyframe:
+    reading on from inside a record never decodes as points. Decoded
+    values are bounded (9 digits, a delta under 2^28), so a damaged stream
+    cannot outgrow the decode buffer. A `.pos` keyframe of `-1` means none
+    was read yet (a damaged first keyframe): the reader goes on from the
+    offset and drops deltas up to the next keyframe.
+  - Firmware from before TRK_BIN does not list `.trb` files: after an OTA
+    rollback they wait (and do not block the OTA check from coming back) for
+    the next forward update. `TRK_BIN = False` writes `.trk` again.
 - **TRK2.** A file opened while the fixes come from NAV-PVT has a `#TRK2`
   header and `lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ` lines (~51 bytes): acc
   the horizontal accuracy in whole metres, rounded up and at least 1 (see
@@ -1010,7 +1055,9 @@ home.
 - **Reading:** track lines are read with `readinto` into one 512-byte
   buffer (`LINE_MAX`) and a `.trk` point is parsed there and written
   straight into the JSON buffer, so a 50-point batch makes only small,
-  short-lived objects (the `float()` checks), no line copies.
+  short-lived objects (the `float()` checks), no line copies. A `.trb`
+  delta is decoded to its text line in 96 bytes past the read buffer, then
+  parsed the same way.
 - **Own HTTP client:** a minimal HTTP/1.0 POST over the `tls` module. The
   body goes out in 1 KB pieces and the wait for the answer (up to 30 s,
   `HTTP_WAIT`) polls, both reading the UART meanwhile, so a slow server
@@ -1215,6 +1262,7 @@ with a NEO-6M; most never need changing.
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi; wall clock for one download |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
+| `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
