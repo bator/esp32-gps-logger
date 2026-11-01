@@ -3421,8 +3421,6 @@ KEY_EVERY = 64                           # deltas between two keyframes
 _KB_MAX = 1 << 28                        # a delta at least this big: keyframe
 _P10 = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000,
         1000000000)
-_NF = (b"%d", b"%d.%01d", b"%d.%02d", b"%d.%03d", b"%d.%04d", b"%d.%05d",
-       b"%d.%06d", b"%d.%07d", b"%d.%08d", b"%d.%09d")
 # A line's state: [0] seconds since 2020 (None: not valid, no delta from
 # it), [1..5] lat, lon, ele, hdop/acc, speed in their last decimal (None:
 # empty), [6..10] their decimals, [11] the number of fields before the time
@@ -3472,7 +3470,8 @@ def _kb_num(buf, a, b, s, i):
 
 def _kb_time(buf, t):
     """The compact time YYYYMMDDTHHMMSSZ at buf[t:t + 16] -> seconds since
-    2020, or None (not a valid UTC time from 2020 to 2099)."""
+    2020, or None (not a valid UTC time from 2020 up to FIX_S_END: the line
+    is then a keyframe)."""
     if buf[t + 8] != 84 or buf[t + 15] != 90:
         return None
     for k in _TDIG:
@@ -3491,7 +3490,8 @@ def _kb_time(buf, t):
     z = _days(y, m, 1)
     if d > _days(y, m + 1, 1) - z:       # (past the month's last day)
         return None
-    return (z + d - 1 - EPOCH_DAYS) * 86400 + hh * 3600 + mi * 60 + ss
+    t = (z + d - 1 - EPOCH_DAYS) * 86400 + hh * 3600 + mi * 60 + ss
+    return t if t < FIX_S_END else None  # (_kb_dec reads no delta past it)
 
 def _kb_parse(buf, a, e, s):
     """The text line buf[a:e] (no newline) into the state s; s[0] None
@@ -5045,14 +5045,42 @@ def _rd_rec(f):
     _rd[2] = j if j < n else n
     return True
 
+# The decoded line is written digit by digit (small ints only): a bytes %
+# per field, a tuple per record and the date tuple per point made ~2.7
+# times the garbage of a .trk read, right before the TLS POST.
+_kday = [-1, bytearray(8)]               # the day (since 2020) and its YYYYMMDD
+_kr = [0, 0]                             # the decoded point line (_kb_rec)
+
 def _kb_put(p, v, d):
+    """The number v (in its last decimal, d decimals) as text at _rbuf[p:]
+    -> the end."""
     if v < 0:
         _rbuf[p] = 45                    # -
         p += 1
         v = -v
-    t = _NF[d] % (v // _P10[d], v % _P10[d]) if d else b"%d" % v
-    _rbuf[p:p + len(t)] = t
-    return p + len(t)
+    n = 1
+    t = v
+    while t >= 10:
+        t //= 10
+        n += 1
+    if n <= d:
+        n = d + 1                        # (0.05)
+    e = p + n + (1 if d else 0)
+    q = e - 1
+    k = 0
+    while k < n:
+        if d and k == d:
+            _rbuf[q] = 46                # .
+            q -= 1
+        _rbuf[q] = 48 + v % 10
+        v //= 10
+        q -= 1
+        k += 1
+    return e
+
+def _kb_2(p, v):
+    _rbuf[p] = 48 + v // 10
+    _rbuf[p + 1] = 48 + v % 10
 
 def _kb_dec(a, b, s):
     """Apply the delta record _rbuf[a:b] to the state s and write its text
@@ -5107,28 +5135,50 @@ def _kb_dec(a, b, s):
         _rbuf[p] = 44                    # ,
         p += 1
         i += 1
-    y, mo, d = _civil(s[0] // 86400 + EPOCH_DAYS)
+    day = s[0] // 86400
+    if day != _kday[0]:                  # (the date only when it changes)
+        y, mo, d = _civil(day + EPOCH_DAYS)
+        b8 = _kday[1]
+        b8[0] = 48 + y // 1000
+        b8[1] = 48 + y // 100 % 10
+        b8[2] = 48 + y // 10 % 10
+        b8[3] = 48 + y % 10
+        b8[4] = 48 + mo // 10
+        b8[5] = 48 + mo % 10
+        b8[6] = 48 + d // 10
+        b8[7] = 48 + d % 10
+        _kday[0] = day
+    _rbuf[p:p + 8] = _kday[1]
     r = s[0] % 86400
-    t = b"%04d%02d%02dT%02d%02d%02dZ\n" % (y, mo, d, r // 3600, r // 60 % 60,
-                                          r % 60)
-    _rbuf[p:p + len(t)] = t
-    return p + len(t)
+    _rbuf[p + 8] = 84                    # T
+    _kb_2(p + 9, r // 3600)
+    _kb_2(p + 11, r // 60 % 60)
+    _kb_2(p + 13, r % 60)
+    _rbuf[p + 15] = 90                   # Z
+    _rbuf[p + 16] = 10
+    return p + 17
 
 def _kb_rec(a, b, s):
-    """A .trb record _rbuf[a:b] -> (start, end) of its point's text line
-    in _rbuf, (0, 0) for a point that does not decode, or None (not a
-    point: a header, "-", a cut-off keyframe). A keyframe sets s, any other
-    line but "-" and "#..." makes it not valid."""
+    """A .trb record _rbuf[a:b] -> 1: a point, its text line at
+    _rbuf[_kr[0]:_kr[1]]; 0: a point that does not decode; -1: not a point
+    (a header, "-", a cut-off keyframe). A keyframe sets s, any other line
+    but "-" and "#..." makes it not valid."""
     c = _rbuf[a]
     if c >= 128:
         e = _kb_dec(a, b, s)
-        return (_SCR, e) if e else (0, 0)
+        if not e:
+            return 0
+        _kr[0] = _SCR
+        _kr[1] = e
+        return 1
     if c == 61 and _rbuf[b - 1] == 10:   # =
         _kb_parse(_rbuf, a + 1, b - 1, s)
-        return a + 1, b
+        _kr[0] = a + 1
+        _kr[1] = b
+        return 1
     if not (c == 35 or (c == 45 and b - a == 2 and _rbuf[a + 1] == 10)):
         s[0] = None                      # (not "-" or "#": a damaged record,
-    return None                          # the next ones may be read from
+    return -1                            # the next ones may be read from
                                          # inside one: none until a keyframe)
 
 def _kb_seek(f, off, key, s):
@@ -5180,9 +5230,16 @@ def count_points():
         gpx = not _is_trk(path)
         tb = path.endswith(TRB)
         try:
-            off = read_offset(path)
+            off, key = read_pos(path)
             with open(path, "rb") as f:
-                _rd_open(off)
+                # a .trb offset that is no record start (its keyframe good)
+                # counts from 0, as read_batch then reads the file;
+                # _kb_seek leaves the reader at a good one
+                if tb and off and (key is None
+                                   or not _kb_seek(f, off, key, _ks)):
+                    off = 0
+                if not (tb and off):
+                    _rd_open(off)
                 while _rd_rec(f) if tb else _rd_line(f):
                     a, b = _rd[1], _rd[2]
                     if a == b:
@@ -5557,9 +5614,9 @@ def read_batch(path, off=0, key=None):
                 if _rbuf[a] == 61:       # = a keyframe
                     _rk[0] = _rd[0] + a
                 r = _kb_rec(a, b, s)
-                if r is None:
+                if r < 0:
                     continue
-                need = _trk_point(r[0], r[1]) if r[1] else 0
+                need = _trk_point(_kr[0], _kr[1]) if r else 0
                 if need < 0:
                     need = 0
             else:
@@ -5624,9 +5681,8 @@ def _track_lines(src, path, off, end, key, fn):
             if a == b:
                 s[0] = None
             elif not _rd_footer(a, b):
-                r = _kb_rec(a, b, s)
-                if r is not None and r[1]:
-                    fn(r[0], r[1])
+                if _kb_rec(a, b, s) > 0:
+                    fn(_kr[0], _kr[1])
         return
     _rd_open(off)
     while _rd[0] + _rd[2] < end and _rd_line(src):
@@ -5634,23 +5690,77 @@ def _track_lines(src, path, off, end, key, fn):
         if a < b and _rd_point(a, b, gpx):
             fn(a, b)
 
-def _hist_lines(path, off, end, key):
-    """The point lines of a .trb batch about to be committed (from off to
-    end), as text, for the day history: a .trb's points go there once they
-    are up, not while they wait (on the flash twice, the history and the
-    track). [] for other files (a .trk's went when written, a .bad's when
-    they left their track) and on any error."""
-    lines = []
+_hd8 = bytearray(8)                      # the day of the open history file
+
+def _hist_batch(path, off, end, key):
+    """A .trb batch about to be committed (from off to end) into the day
+    history: a .trb's points go there once they are up, not while they
+    wait (they were on the flash twice, the history and the track). Each
+    decoded line is written straight to its day's file (a list of the lines
+    was ~100 objects right after the POST). Before the commit: at the end
+    of the file the commit deletes it; one that then fails sends the batch
+    again, its points in the history twice (a line drawn over itself). Not
+    for other files: a .trk's went when written, a .bad's when they left
+    their track. Best effort, as _hist_add."""
     if not HIST_DAYS or not path.endswith(TRB):
-        return lines
+        return
+    room = free()
+    if room is not None and room < HIST_RESERVE:
+        room = _hist_trim(HIST_RESERVE)
+    if room is not None and room < 2 * MIN_FREE:
+        return
+    st = [None, False]                   # the open day file, made just now
     try:
-        with open(path, "rb") as f:
-            _track_lines(f, path, off, end, key,
-                         lambda a, b: lines.append(bytes(_rmv[a:b]).decode()))
-    except (OSError, MemoryError, UnicodeError) as e:
-        print("hist read", repr(e))
-        del lines[:]
-    return lines
+        with open(path, "rb") as src:
+            _track_lines(src, path, off, end, key,
+                         lambda a, b: _hist_put(st, a, b))
+    except (OSError, MemoryError) as e:
+        print("hist", repr(e))
+        log["herr"] = log.get("herr", 0) + 1
+    finally:
+        _hist_close(st)
+
+def _hist_put(st, a, b):
+    """The line _rbuf[a:b] into the day file of its time (opened when the
+    day changes)."""
+    d = b - 17                           # YYYYMMDD of its time
+    if st[0] is not None:
+        k = 0
+        while k < 8 and _rbuf[d + k] == _hd8[k]:
+            k += 1
+        if k == 8:
+            st[0].write(_rmv[a:b])
+            return
+        _hist_close(st)
+    for k in range(8):
+        c = _rbuf[d + k]
+        if not 48 <= c <= 57:
+            return                       # (no date: not in a day's file)
+        _hd8[k] = c
+    path = HIST_DIR + "/" + bytes(_hd8).decode() + ".trk"
+    size = _file_size(path)
+    if size is None:
+        try:
+            os.mkdir(HIST_DIR)
+        except OSError:
+            pass                         # (there already)
+    cut = not _tail_nl(path, size)
+    f = open(path, "ab")
+    st[0], st[1] = f, size is None
+    if cut:
+        f.write(b"\n")
+    f.write(_rmv[a:b])
+
+def _hist_close(st):
+    f, new = st
+    st[0], st[1] = None, False
+    if f is not None:
+        try:
+            f.close()
+        except OSError:
+            pass
+    if new:
+        _hist_prune()
 
 def _append_bad(path, off, new_off, key=None):
     """Copy consumed point lines to <path>.bad. False if not durable.
@@ -5694,7 +5804,7 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
         bf[path] = True
         up["bad_full"] = bf
         return False
-    hl = _hist_lines(path, off, new_off, key)
+    _hist_batch(path, off, new_off, key)
     try:
         commit_offset(path, n, new_off, eof, key1)
     except OSError as e:
@@ -5704,7 +5814,6 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
         up["err"] += 1
         up["state"] = "fs err"
         return False
-    _hist_add(hl, len(hl))
     up["allow_bad"] = False
     up["state"] = "quarantine"
     return True
@@ -6341,14 +6450,12 @@ def upload_tick():
     if code is not None and 200 <= code < 300:
         # the day history gets the points once they are up (at flush they
         # were on the flash twice while they waited)
-        hl = _hist_lines(path, off, new_off, key)
+        _hist_batch(path, off, new_off, key)
         try:
             commit_offset(path, n, new_off, eof, key1)
         except OSError:
             _fs_err(now)
             return
-        _hist_add(hl, len(hl))
-        hl = None
         up["sent"] += n_ok
         up["ok_at"] = now
         up["fail4"] = 0
@@ -6638,12 +6745,27 @@ def _ota_file(f):
             _rm(tmp)
 
 def _ota_promote(paths):
-    """The staged page files over the old ones (the firmware is valid)."""
+    """The staged page files over the old ones (the firmware is valid). A
+    file system that does not rename over an existing file: the old one is
+    moved aside first (and back if the new one still does not go up). One
+    that cannot go up is a diag line: it was silent, and the new firmware
+    served the old page until the next update."""
     for p in paths:
         try:
             os.rename(p + ".new", p)
+            continue
         except OSError:
             pass
+        try:
+            os.rename(p, p + ".old")
+            try:
+                os.rename(p + ".new", p)
+            except OSError:
+                os.rename(p + ".old", p)
+                raise
+            _rm(p + ".old")
+        except OSError as e:
+            _diag_write("ota %s page %s not put up: %r" % (FW_COMMIT, p, e))
 
 def _ota_drop(paths):
     for p in paths:

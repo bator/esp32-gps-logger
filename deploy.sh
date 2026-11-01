@@ -10,10 +10,14 @@
 # installs gps_logger.mpy even there (an emergency: it shadows the frozen
 # logger and brings its ~60 KB back into the Python heap).
 #
-# The files are copied next to the old ones (<name>.new), checked (size and
+# The files are copied next to the old ones (<name>.dpl), checked (size and
 # SHA-256 on the board) and only then renamed over them: a copy cut short
 # on a nearly full flash used to leave an unimportable gps_logger.mpy and
 # the board in the REPL. Any failure stops here, old files untouched.
+# (Not <name>.new: an OTA stages the page it installs as /web.html.new.)
+# While an OTA install is being validated (/ota.pending) it stops: its
+# reset would abort the pending firmware (the bootloader rolls back and the
+# build is blamed). Wait the ~2 minutes, or FORCE=1.
 #
 # Usage: ./deploy.sh            (PORT=/dev/ttyUSB1 ./deploy.sh to override)
 set -euo pipefail
@@ -78,17 +82,24 @@ esac
 # a third of the bytes; web.html stays for other clients (curl)
 gzip -9 -n -c web.html > web.html.gz
 
-# Free flash, after dropping the .new files of an earlier failed deploy:
+# Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
-# of metadata, while the old one still exists
+# of metadata, while the old one still exists. Also: an OTA being validated?
 FREE=$($MPREMOTE connect "$PORT" exec "
 import os
-for n in os.listdir():
-    if n.endswith('.new'):
+names = os.listdir()
+for n in names:
+    if n.endswith('.dpl'):
         os.remove(n)
 s = os.statvfs('/')
-print('free', s[0], s[3])" | tr -d '\r' | grep '^free ' | tail -n 1 || true)
-read -r _ BSIZE BFREE <<< "$FREE" || true
+print('free', s[0], s[3], 'ota.pending' in names)" | tr -d '\r' | grep '^free ' | tail -n 1 || true)
+read -r _ BSIZE BFREE OTAPEND <<< "$FREE" || true
+if [ "${OTAPEND:-}" = True ]; then
+    echo "An OTA install is being validated on the board (/ota.pending): its reset" >&2
+    echo "now would roll it back. Wait ~2 minutes (status page: ota ok), then deploy." >&2
+    [ "${FORCE:-0}" = 1 ] || exit 1
+    echo "FORCE=1: deploying during the OTA validation" >&2
+fi
 case "${BSIZE:-x}${BFREE:-x}" in
     *[!0-9]*) echo "Could not read the free flash of the board: $FREE" >&2; exit 1 ;;
 esac
@@ -102,11 +113,11 @@ if [ "$BFREE" -lt "$NEED" ]; then
     exit 1
 fi
 
-# Copy to <name>.new, then size + SHA-256 of each on the board
+# Copy to <name>.dpl, then size + SHA-256 of each on the board
 CP=()
 EXPECT=""
 for f in $FILES; do
-    CP+=(cp "$f" ":$f.new" +)
+    CP+=(cp "$f" ":$f.dpl" +)
     EXPECT+="$f $(( $(wc -c < "$f") )) $(sha256sum "$f" | cut -d' ' -f1)"$'\n'
 done
 GOT=$($MPREMOTE connect "$PORT" "${CP[@]}" exec "
@@ -114,14 +125,14 @@ import os, hashlib, binascii
 b = bytearray(512)
 for n in '$FILES'.split():
     h = hashlib.sha256()
-    f = open(n + '.new', 'rb')
+    f = open(n + '.dpl', 'rb')
     while True:
         k = f.readinto(b)
         if not k:
             break
         h.update(memoryview(b)[:k])
     f.close()
-    print('sum', n, os.stat(n + '.new')[6], binascii.hexlify(h.digest()).decode())" \
+    print('sum', n, os.stat(n + '.dpl')[6], binascii.hexlify(h.digest()).decode())" \
     | tr -d '\r' | grep '^sum ' | cut -d' ' -f2- || true)
 if [ "$GOT"$'\n' != "$EXPECT" ]; then
     echo "Copy check FAILED, the old files are kept. Expected:" >&2
@@ -132,7 +143,7 @@ if [ "$GOT"$'\n' != "$EXPECT" ]; then
 import os
 for n in '$FILES'.split():
     try:
-        os.remove(n + '.new')
+        os.remove(n + '.dpl')
     except OSError:
         pass" >/dev/null || true
     exit 1
@@ -150,10 +161,10 @@ $MPREMOTE connect "$PORT" \
 import os
 for n in '$FILES'.split():
     try:
-        os.rename(n + '.new', n)
+        os.rename(n + '.dpl', n)
     except OSError:
         os.remove(n)
-        os.rename(n + '.new', n)
+        os.rename(n + '.dpl', n)
 'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
 '$FROZEN'.startswith('frozen') and not $KEEP_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
