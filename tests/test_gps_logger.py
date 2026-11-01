@@ -10867,37 +10867,49 @@ else:
           and "LAST UPLOAD" not in ft.get("sysNone", "-"),
           repr(ft.get("sysDead", "")[-500:]))
     pd = ft.get("pastDays") or ["?"]
-    check("PAGE-DAYS: picker today + days newest first (bad and today "
-          "skipped); a past local day reads its UTC files once, draws "
-          "without a fix",
-          ft.get("picker") == '<option value="">TODAY</option><option value='
-              '"20261030">2026-10-30</option><option value="20261029" '
-              'selected>2026-10-29</option>'
+    check("PAGE-DAYS: the days oldest first (bad, duplicate and today's "
+          "skipped, today last); the arrow steps to a past local day, read "
+          "once from its UTC files, drawn without a fix; and back to today",
+          ft.get("days") == ["20261029", "20261030", ft.get("today")]
           and pd[-1] == "20261030" and len(pd) in (1, 2)
           and ft.get("pastEnd") == 86400000
-          and ft.get("dsel", "").count("<option") == 3
+          and ft.get("nav0") == ["TODAY", False, True]
           and ft.get("pickUrls") == ["/hist?d=%s&o=0" % pd[0]]
           and ft.get("pickPts") == 5 and ft.get("pickDone") is True
           and ft.get("pickMap") == "map nofix" and ft.get("pickTrk") is True
           and ft.get("pickDay") == "<em>2026-10-30 </em>4.42 KM"
-          and "<small>POINTS</small><b>5</b>" in ft.get("pickStat", "")
-          and ft.get("backToday") is True,
-          repr({k: ft.get(k) for k in ("picker", "pastDays", "pickUrls",
-                                       "pickPts", "pickDay")}))
-    check("PAGE-PROFILE: TRK2 speed in km/h, TRK1 speed from the distance, "
-          "points outside the day dropped; stats and SVG profile",
-          ft.get("pts") == [[3600000, 120.5, 18], [3601000, 121, 39.8],
-                            [3602000, None, 39.8]]
-          and "<small>TOP SPEED</small><b>40<em>km/h</em>" in ft.get("stats", "")
-          and "<small>POINTS</small><b>3</b>" in ft.get("stats", "")
-          and '<path class="al" d="M0.0 120L' in ft.get("profile", "")
-          and '<path class="sp" d="M0.0 72.1L300.0 14.0L600.0 14.0"/>'
-              in ft.get("profile", "")
-          and "40 KM/H" in ft.get("profile", "")
-          and "121 M" in ft.get("profile", "")
-          and "NO TRACK" in ft.get("profileNone", "")
-          and "L284.2 67.0M315.8 14.0L" in ft.get("profileGap", ""),
-          repr((ft.get("pts"), ft.get("profile", "")[:300])))
+          and ft.get("nav1") == ["2026-10-30", False, False]
+          and ft.get("backToday") is True and ft.get("pts") == [
+              [3600000, 120.5], [3601000, 121], [3602000, None]],
+          repr({k: ft.get(k) for k in ("days", "pastDays", "pickUrls",
+                                       "pickPts", "pickDay", "nav0",
+                                       "nav1")}))
+    check("PAGE-TIMELINE: trips split at stops over 5 min, a few standing "
+          "fixes folded into the stop; trip rows (km, time, km/h) and stop "
+          "rows; the picked trip marked",
+          ft.get("trips") == [[0, 20, 480, 500, 1.2], [24, 34, 660, 670, 0.5]]
+          and ft.get("timeline") == (
+              '<div class="tr go" onclick="hlTrip(0)"><time>08:00</time><i>'
+              '</i><span><b>1.20 km</b> &middot; 20 min &middot; 4 km/h'
+              '</span></div><div class="tr st"><time>08:20</time><i></i>'
+              '<span>stop 2 h 40 min</span></div><div class="tr go on" '
+              'onclick="hlTrip(1)"><time>11:00</time><i></i><span><b>0.50 '
+              'km</b> &middot; 10 min &middot; 3 km/h</span></div><div '
+              'class="tr end"><time>11:10</time><i></i><span></span></div>')
+          and ft.get("timelineNone") == [
+              '<span class="hint">NO TRIP THIS DAY</span>',
+              '<span class="hint">NO TRIP YET TODAY</span>'],
+          repr((ft.get("trips"), ft.get("timeline"))))
+    check("PAGE-TIMELINE: km, moving time (min, then h:mm) and trips on "
+          "top; a trip clicked is drawn on the map, clicked again the day",
+          ft.get("kpis") == "<div><b>1.70</b><em>km</em></div><div><b>30</b>"
+              "<em>min moving</em></div><div><b>2</b><em>trips</em></div>"
+          and "<b>1:15</b><em>h moving</em>" in ft.get("kpisLong", "")
+          and "<em>trip</em>" in ft.get("kpisLong", "")
+          and "<b>1</b><em>trip</em>" in ft.get("pickKpi", "")
+          and ft.get("hlMap") == 2 and ft.get("hlLine") is True
+          and ft.get("hlOff") == 1,
+          repr((ft.get("kpis"), ft.get("kpisLong"), ft.get("hlMap"))))
     gx = ft.get("gpx", "")
     check("PAGE-GPX: GPX 1.1, a segment per 5 min gap, ele when known, "
           "escaped name",

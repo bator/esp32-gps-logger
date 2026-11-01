@@ -426,11 +426,15 @@ screen; amber below -67 dBm, red below -80 dBm. Below:
 - the *Event log*: the diagnostic log, newest on top, with the minute
   status lines as rows (local time, fix, satellites, points, IDF block, red
   below 48 KB) and boots, upload errors and receiver lines as events;
-- *Track*: a day picker (today, or one of the days the board keeps), the
-  day's distance, moving time, points and top speed, a speed (km/h) and
-  altitude profile over the moving time (a stop over 5 min is a narrow
-  break), and a `GPX` button that saves the shown day as GPX 1.1 (built in
-  the browser, a segment per stop);
+- *Track*: the day as a timeline (as in Maps Timeline), `‹ day ›` arrows
+  step through today and the days the board keeps. On top the km, the
+  moving time and the trips; below, a dot and a solid line per trip (start
+  time, km, duration, mean km/h) and a hollow dot and a dashed line per stop
+  (its length). A trip is a run of points without a gap over 5 min that
+  covers 100 m at least; a few fixes while standing belong to the stop. A
+  trip clicked is drawn white on the map, which zooms to it (clicked again:
+  the whole day). `GPX` saves the shown day as GPX 1.1 (built in the
+  browser, a segment per gap);
 - *Static test*: `START` keeps each poll's position (`pos6`) and hAcc, saved
   in the browser so a reload keeps them; it shows the samples, the span,
   CEP50 / CEP95 (the radius around their mean that holds 50 / 95 % of the
@@ -463,7 +467,7 @@ rounded to two decimals on the page; the JSON keeps the receiver's value.
 
 **Day history on the map.** The page draws today's track (since local
 midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
-header (a day picked in *Track*: that local day, read once, with its date
+header (a day stepped to in *Track*: that local day, read once, with its date
 in the header; it is drawn also without a fix), and zooms out (17 down to 13) until the track fits around the
 position. A gap of over 5 minutes breaks the line. Every track line the
 logger writes also goes to `/hist/YYYYMMDD.trk` (its UTC date; the same

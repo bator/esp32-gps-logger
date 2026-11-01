@@ -170,9 +170,9 @@ ft.sysOk = vOk.sys;
 ft.sysDead = vDead.sys;
 ft.tmDead = vDead.tm;
 ft.sysNone = c0.view({uptime: 10}).sys;
-ft.picker = c0.pickerHtml(["20261029", "bad", "20261030", c0.utcDay(Date.now())], "20261029");
-// a past local day: its UTC files, points outside it dropped, TRK2 speed,
-// TRK1 speed from the distance
+ft.days = c0.dayList(["20261030", "bad", "20261029", c0.utcDay(Date.now()), "20261030"]);
+ft.today = c0.utcDay(Date.now());
+// a past local day: its UTC files, points outside it dropped
 const d0 = new Date(2026, 9, 30).getTime();
 c0.hist = c0.histNew("20261030");
 ft.pastDays = c0.hist.days;
@@ -182,15 +182,19 @@ c0.histParse(c0.hist.days[0], "#TRK2\n47.0,18.0,120.5,2,5.0," + iso(d0 + 3600000
   "47.0001,18.0,121.0,2,,", "");
 c0.histParse(c0.hist.days[0], iso(d0 + 3601000) + "\n" + "47.0,18.0,,3," + iso(d0 + 3602000) + "\n" +
   "47.0,18.0,1,2,1," + iso(d0 - 1000) + "\n47.0,18.0,1,2,1," + iso(d0 + 86400000) + "\n");
-ft.pts = c0.hist.pts.map((q) => [q[0] - d0, q[3], q[4] === null ? null : Math.round(q[4] * 10) / 10]);
-ft.stats = c0.trackStats(c0.hist.pts, c0.hist.km);
-ft.profile = c0.profile(c0.hist.pts);
-ft.profileNone = c0.profile([]);
-// two trips 3 h apart: the stop is a narrow break, not 3 h of empty axis
-const trips = [];
-for (let k = 0; k < 10; k++) trips.push([d0 + k * 1000, 47, 18, 100, 10]);
-for (let k = 0; k < 10; k++) trips.push([d0 + 3 * 3600000 + k * 1000, 47, 18, 100, 20]);
-ft.profileGap = c0.profile(trips);
+ft.pts = c0.hist.pts.map((q) => [q[0] - d0, q[3]]);
+// trips and stops: a 1.2 km walk (20 min), a stop, a few fixes standing
+// (folded into the stop), a 0.5 km walk (10 min)
+const tp = [], dLat = 1 / 110.54;
+for (let k = 0; k <= 20; k++) tp.push([d0 + 8 * 3600000 + k * 60000, 47 + k * 0.06 * dLat, 18, 100]);
+for (let k = 0; k < 3; k++) tp.push([d0 + 10 * 3600000 + k * 60000, 47.02, 18, 100]);
+for (let k = 0; k <= 10; k++) tp.push([d0 + 11 * 3600000 + k * 60000, 47.02 + k * 0.05 * dLat, 18, 100]);
+const trips = c0.tripsOf(tp);
+ft.trips = trips.map((t) => [t.i0, t.i1, (t.t0 - d0) / 60000, (t.t1 - d0) / 60000, Math.round(t.km * 100) / 100]);
+ft.timeline = c0.timeline(trips, 1, true);
+ft.timelineNone = [c0.timeline([], null, true), c0.timeline([], null, false)];
+ft.kpis = c0.kpis(trips);
+ft.kpisLong = c0.kpis([{t0: 0, t1: 4500000, km: 12.345}]);
 ft.gpx = c0.gpxText([[Date.UTC(2026, 9, 30, 8, 0, 0), 47.1, 18.4, 120.5, 5], [Date.UTC(2026, 9, 30, 8, 0, 1), 47.2, 18.5, null, null],
   [Date.UTC(2026, 9, 30, 9, 0, 0), 47.3, 18.6, 99, 0]], "GPS <day>");
 // static test: 20 fixes, 10 at the centre, 9 at 1 m, one at 10 m east
@@ -215,10 +219,11 @@ p = page(1600);
 p.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null, days: ["20261029", "20261030"], uptime: 60,
   rx_bytes: 0, good_age_s: null, rx_age_s: null});
 p.xhrs[0].onload();
-ft.dsel = p.doc.getElementById("dsel").innerHTML;
+ft.nav0 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev").disabled,
+  p.doc.getElementById("dnext").disabled];
 ft.alert = p.doc.getElementById("gl").innerHTML;
 answer(p, null, "");
-p.c.pick("20261030");
+p.c.step(-1);
 const ph = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done);
 ft.pickUrls = ph.map((x) => x.url);
 const pd = new Date(2026, 9, 30, 12, 0, 0).getTime();
@@ -230,8 +235,16 @@ ft.pickDone = p.c.hist.done && !p.c.histDue();
 ft.pickMap = p.map.className;
 ft.pickTrk = p.doc.getElementById("trk").innerHTML.indexOf("<path") >= 0;
 ft.pickDay = p.doc.getElementById("day").innerHTML;
-ft.pickStat = p.doc.getElementById("tstat").innerHTML;
-p.c.pick("");
+ft.pickKpi = p.doc.getElementById("tkpi").innerHTML;
+ft.pickLine = p.doc.getElementById("tline").innerHTML;
+ft.nav1 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev").disabled,
+  p.doc.getElementById("dnext").disabled];
+p.c.hlTrip(0);
+ft.hlMap = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
+ft.hlLine = p.doc.getElementById("tline").innerHTML.indexOf('class="tr go on"') >= 0;
+p.c.hlTrip(0);
+ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
+p.c.step(1);
 ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));

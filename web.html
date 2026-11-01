@@ -95,13 +95,25 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .alert em{font-style:normal;color:var(--t);font-weight:400;margin-left:8px}
 .alert:empty{display:none}
 .ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}.ph h2{margin:0;margin-right:auto}
-.btn,.sel{font:600 11px "JetBrains Mono",monospace;letter-spacing:.08em;color:var(--a);background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.35);border-radius:8px;padding:5px 9px;cursor:pointer}
+.btn{font:600 11px "JetBrains Mono",monospace;letter-spacing:.08em;color:var(--a);background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.35);border-radius:8px;padding:5px 9px;cursor:pointer}
 .btn:disabled{opacity:.4;cursor:default}
 .kv{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-family:"JetBrains Mono",monospace}
 .kv small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}.kv b{font-size:16px;color:#fff}
-.prof svg,.scat svg{display:block;width:100%;margin-top:10px}.prof svg{height:150px}
+.scat svg{display:block;width:100%;margin-top:10px}
 .k3{grid-template-columns:repeat(3,1fr)}
-.prof .sp{fill:none;stroke:var(--a);stroke-width:1.6;vector-effect:non-scaling-stroke}.prof .al{fill:rgba(251,191,36,.12);stroke:var(--warn);stroke-width:1.2;vector-effect:non-scaling-stroke}
+.dn{font:600 12px "JetBrains Mono",monospace;letter-spacing:.08em;color:#fff;min-width:96px;text-align:center}
+.kpi{display:flex;gap:22px;font-family:"JetBrains Mono",monospace;margin-bottom:12px}.kpi b{font-size:22px;color:#fff}.kpi em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
+.tr{display:grid;grid-template-columns:50px 18px 1fr;min-height:30px;font:12.5px "JetBrains Mono",monospace;line-height:16px}
+.tr time{color:#fff;font-weight:600}.tr span{color:var(--m);padding-left:8px}
+.tr i{position:relative}
+.tr i:before{content:"";position:absolute;left:4px;top:3px;width:10px;height:10px;border-radius:50%;box-sizing:border-box;background:var(--b);border:2px solid var(--m)}
+.tr i:after{content:"";position:absolute;left:8px;top:13px;bottom:-3px;border-left:2px dashed rgba(116,135,174,.45)}
+.tr.go i:before{background:var(--a);border-color:var(--a);box-shadow:0 0 8px var(--a)}
+.tr.go i:after{border-left:3px solid var(--a);left:7.5px;box-shadow:0 0 6px rgba(34,211,238,.5)}
+.tr.go{cursor:pointer}.tr.go span{color:var(--t)}.tr.go span b{color:#fff}
+.tr.go:hover span,.tr.go.on span,.tr.go.on span b{color:var(--a)}.tr.go.on i:after{border-left-color:#fff}
+.tr.end i:after{display:none}
+.trk path.hl{stroke:#fff;stroke-width:5;filter:drop-shadow(0 0 6px rgba(255,255,255,.8))}
 .scat circle.d{fill:var(--a);opacity:.55}.scat .c50{fill:none;stroke:var(--ok);stroke-dasharray:3 3}.scat .c95{fill:none;stroke:var(--warn);stroke-dasharray:3 3}
 .hint{font-size:11px;color:var(--m);margin-top:8px}
 @media(max-width:760px){.kv{grid-template-columns:repeat(2,1fr)}.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
@@ -135,8 +147,8 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
     </div>
   </div>
   <div class="g">
-    <div class="p"><div class="ph"><h2>Track</h2><select class="sel" id="dsel" onchange="pick(this.value)"><option value="">TODAY</option></select><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
-      <div class="kv" id="tstat"></div><div class="prof" id="prof"></div></div>
+    <div class="p"><div class="ph"><h2>Track</h2><button class="btn" id="dprev" onclick="step(-1)">&lsaquo;</button><span class="dn" id="dname">TODAY</span><button class="btn" id="dnext" onclick="step(1)">&rsaquo;</button><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
+      <div class="kpi" id="tkpi"></div><div id="tline"></div></div>
     <div class="p"><div class="ph"><h2>Static test</h2><button class="btn" id="sbtn" onclick="statToggle()">START</button><button class="btn" onclick="statReset()">RESET</button></div>
       <div class="kv k3" id="sstat"></div><div class="scat" id="scat"></div></div>
   </div>
@@ -358,8 +370,8 @@ function view(d, prev) {
 // HIST_REPLY bytes a reply at most. Today (since local midnight) asks again
 // once a minute for what is new; a past local day (the day picker, from the
 // JSON's days) is read once. Lines as in a .trk: lat,lon,ele first, the time
-// (YYYYMMDDTHHMMSSZ) last, TRK2 speed (m/s) before it; a gap over 5 min
-// breaks the line. A point: [ms, lat, lon, ele or null, km/h or null].
+// (YYYYMMDDTHHMMSSZ) last; a gap over 5 min breaks the line. A point:
+// [ms, lat, lon, ele or null].
 var HIST_REPLY = 16384, GAP_MS = 300000, sel = null, hist = histNew(null);
 function utcDay(ms) { return new Date(ms).toISOString().slice(0, 10).replace(/-/g, ""); }
 function localDay(s) { return new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)).getTime(); }
@@ -371,7 +383,7 @@ function histNew(day) {                 // day: a local day's YYYYMMDD, null tod
   var days = [utcDay(start)];
   if (day && days.indexOf(utcDay(end - 1)) < 0) days.push(utcDay(end - 1));
   return {start: start, end: end, past: !!day, days: days, off: {}, rest: {}, pts: [], km: 0, busy: false, at: 0,
-    done: false};
+    done: false, hl: null};
 }
 function histParse(day, text) {
   var ls = ((hist.rest[day] || "") + text).split("\n");
@@ -380,16 +392,14 @@ function histParse(day, text) {
     var f = ls[i].split(","), s = f[f.length - 1];
     if (f.length < 5 || s.length !== 16 || f[0] === "") continue;
     var t = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(9, 11), +s.slice(11, 13), +s.slice(13, 15));
-    var la = +f[0], lo = +f[1], q = hist.pts[hist.pts.length - 1], d = 0;
+    var la = +f[0], lo = +f[1], q = hist.pts[hist.pts.length - 1];
     if (t < hist.start || t >= hist.end || isNaN(t) || isNaN(la) || isNaN(lo)) continue;
     if (q && t - q[0] <= GAP_MS) {
       var c = Math.cos(la * Math.PI / 180);
-      d = Math.sqrt(Math.pow((la - q[1]) * 110.54, 2) + Math.pow((lo - q[2]) * 111.32 * c, 2));
-      hist.km += d;
+      hist.km += Math.sqrt(Math.pow((la - q[1]) * 110.54, 2) + Math.pow((lo - q[2]) * 111.32 * c, 2));
     }
-    var ele = f[2] === "" ? null : +f[2], v = f.length >= 6 && f[4] !== "" ? +f[4] * 3.6 : null;
-    if (v === null && q && t > q[0] && t - q[0] <= 10000) v = d * 3600000 / (t - q[0]);   // TRK1: from the distance
-    hist.pts.push([t, la, lo, isNaN(ele) ? null : ele, v === null || isNaN(v) ? null : v]);
+    var ele = f[2] === "" ? null : +f[2];
+    hist.pts.push([t, la, lo, isNaN(ele) ? null : ele]);
   }
 }
 function histLoad() {
@@ -424,75 +434,87 @@ function histNext(i) {
   x.send();
 }
 function histDue() { return !hist.busy && !hist.done && Date.now() - hist.at >= 60000; }
-// the day picker: today, then the board's days newest first (local days)
-var selKey = "";
-function pickerHtml(days, cur) {
-  var h = '<option value="">TODAY</option>', today = utcDay(Date.now());
-  for (var i = (days || []).length - 1; i >= 0; i--) {
+// The day: today or one of the board's days (the JSON's days, UTC names
+// read as local days), stepped with the arrows
+var boardDays = [];
+function dayList(days) {               // -> YYYYMMDD days oldest first, today last
+  var today = utcDay(Date.now()), out = [];
+  for (var i = 0; i < (days || []).length; i++) {
     var s = String(days[i]);
-    if (!/^\d{8}$/.test(s) || s === today) continue;
-    h += '<option value="' + s + '"' + (s === cur ? " selected" : "") + ">" + s.slice(0, 4) + "-" + s.slice(4, 6) + "-" +
-      s.slice(6) + "</option>";
+    if (/^\d{8}$/.test(s) && s < today && out.indexOf(s) < 0) out.push(s);
   }
-  return h;
+  out.sort();
+  out.push(today);
+  return out;
+}
+function step(dir) {
+  var ds = dayList(boardDays), i = ds.indexOf(sel || ds[ds.length - 1]), j = Math.max(0, Math.min(ds.length - 1, i + dir));
+  if (j !== i) pick(j === ds.length - 1 ? "" : ds[j]);
+}
+function navPaint() {
+  var ds = dayList(boardDays), i = ds.indexOf(sel || ds[ds.length - 1]);
+  document.getElementById("dname").innerHTML = hist.past ? dayName() : "TODAY";
+  document.getElementById("dprev").disabled = i <= 0;
+  document.getElementById("dnext").disabled = i < 0 || i >= ds.length - 1;
 }
 function pick(day) {
   sel = day || null;
   hist = histNew(sel);
   trkKey = "";
+  navPaint();
   histLoad();
   if (mapD) placeMap(mapD); else trackPaint();
 }
-// the track's numbers: distance, moving time (gaps under 5 min), points,
-// top speed; the speed and altitude profile as one SVG (pure, for tests)
-function trackStats(pts, km) {
-  var mv = 0, top = 0;
-  for (var i = 0; i < pts.length; i++) {
-    if (i && pts[i][0] - pts[i - 1][0] <= GAP_MS) mv += pts[i][0] - pts[i - 1][0];
-    if (pts[i][4] !== null && pts[i][4] > top) top = pts[i][4];
-  }
-  return cell("DISTANCE", km.toFixed(2), "km") + cell("MOVING", esc(hms(mv / 1000).toUpperCase())) +
-    cell("POINTS", num(pts.length)) + cell("TOP SPEED", top ? top.toFixed(0) : "-", "km/h");
-}
-// x: the moving time, a stop (gap over 5 min) a narrow break, so a day of
-// short trips is not a few slivers across empty hours
-function profile(pts) {
-  if (pts.length < 2) return '<span class="hint">NO TRACK FOR THIS DAY YET</span>';
-  var W = 600, H = 120, t0 = pts[0][0], t1 = pts[pts.length - 1][0], step = Math.max(1, Math.ceil(pts.length / W));
-  var vmax = 0, e0 = 1e9, e1 = -1e9, i, p, xs = [0], mv = 0, gaps = 0;
-  for (i = 0; i < pts.length; i++) {
-    p = pts[i];
-    if (p[4] !== null) vmax = Math.max(vmax, p[4]);
-    if (p[3] !== null) { e0 = Math.min(e0, p[3]); e1 = Math.max(e1, p[3]); }
-    if (i) { var dt = p[0] - pts[i - 1][0]; if (dt > GAP_MS) gaps++; else mv += dt; }
-  }
-  var gw = Math.max(1000, mv * .03);     // a break: 3 % of the moving time
-  for (i = 1; i < pts.length; i++) {
-    var g = pts[i][0] - pts[i - 1][0];
-    xs.push(xs[i - 1] + (g > GAP_MS ? gw : g));
-  }
-  var sx = W / Math.max(1, xs[xs.length - 1]), sv = vmax ? (H - 14) / vmax : 0, se = e1 > e0 ? (H - 14) / (e1 - e0) : 0;
-  var sp = "", al = "", prev = null, open = false;
-  for (i = 0; i < pts.length; i += step) {
-    p = pts[i];
-    var x = (xs[i] * sx).toFixed(1), brk = prev !== null && p[0] - prev > GAP_MS;
-    if (p[4] !== null) sp += (sp === "" || brk ? "M" : "L") + x + " " + (H - p[4] * sv).toFixed(1);
-    if (p[3] !== null) {
-      if (open && brk) { al += "V" + H + "Z"; open = false; }
-      al += (open ? "L" : "M" + x + " " + H + "L") + x + " " + (H - 2 - (p[3] - e0) * se).toFixed(1);
-      open = true;
+// The day as trips and stops (Maps Timeline style): a trip is a run of
+// points without a gap over 5 min that covers TRIP_KM at least; shorter
+// runs (a few fixes while standing) belong to the stop around them.
+// -> [{i0, i1, t0, t1, km}] (pure, for tests)
+var TRIP_KM = .1;
+function tripsOf(pts) {
+  var out = [], i0 = 0, km = 0;
+  for (var i = 1; i <= pts.length; i++) {
+    var end = i === pts.length || pts[i][0] - pts[i - 1][0] > GAP_MS;
+    if (!end) {
+      var c = Math.cos(pts[i][1] * Math.PI / 180);
+      km += Math.sqrt(Math.pow((pts[i][1] - pts[i - 1][1]) * 110.54, 2) + Math.pow((pts[i][2] - pts[i - 1][2]) * 111.32 * c, 2));
+      continue;
     }
-    prev = p[0];
+    if (km >= TRIP_KM) out.push({i0: i0, i1: i - 1, t0: pts[i0][0], t1: pts[i - 1][0], km: km});
+    i0 = i;
+    km = 0;
   }
-  if (open) al += "V" + H + "Z";
-  var hh = function (ms) { var d = new Date(ms); return two(d.getHours()) + ":" + two(d.getMinutes()); };
-  return '<svg viewBox="0 0 ' + W + " " + (H + 12) + '" preserveAspectRatio="none">' +
-    (al ? '<path class="al" d="' + al + '"/>' : "") + (sp ? '<path class="sp" d="' + sp + '"/>' : "") +
-    '<text x="2" y="' + (H + 11) + '" style="text-anchor:start">' + hh(t0) + "</text>" +
-    '<text x="' + W + '" y="' + (H + 11) + '" style="text-anchor:end">' + hh(t1) + "</text>" +
-    '<text x="2" y="9" style="text-anchor:start;fill:var(--a)">' + (vmax ? vmax.toFixed(0) + " KM/H" : "") + "</text>" +
-    '<text x="' + W + '" y="9" style="text-anchor:end;fill:var(--warn)">' +
-    (se ? e0.toFixed(0) + "&ndash;" + e1.toFixed(0) + " M" : "") + "</text></svg>";
+  return out;
+}
+function hm(ms) { var d = new Date(ms); return two(d.getHours()) + ":" + two(d.getMinutes()); }
+function dur(ms) { var m = Math.round(ms / 60000); return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + two(m % 60) + " min"; }
+// the timeline: a dot and a solid line per trip (distance, time, mean
+// speed), a hollow dot and a dashed line per stop; on: the trip shown on
+// the map (pure, for tests)
+function timeline(trips, on, past) {
+  if (!trips.length) return '<span class="hint">' + (past ? "NO TRIP THIS DAY" : "NO TRIP YET TODAY") + "</span>";
+  var h = "";
+  for (var k = 0; k < trips.length; k++) {
+    var t = trips[k], ms = t.t1 - t.t0, v = ms > 0 ? t.km * 3600000 / ms : 0;
+    h += '<div class="tr go' + (k === on ? " on" : "") + '" onclick="hlTrip(' + k + ')"><time>' + hm(t.t0) + "</time><i></i><span><b>" +
+      t.km.toFixed(2) + " km</b> &middot; " + dur(ms) + " &middot; " + v.toFixed(0) + " km/h</span></div>";
+    var nx = trips[k + 1];
+    h += '<div class="tr ' + (nx ? "st" : "end") + '"><time>' + hm(t.t1) + "</time><i></i><span>" +
+      (nx ? "stop " + dur(nx.t0 - t.t1) : "") + "</span></div>";
+  }
+  return h;
+}
+function kpis(trips) {
+  var km = 0, ms = 0;
+  for (var k = 0; k < trips.length; k++) { km += trips[k].km; ms += trips[k].t1 - trips[k].t0; }
+  var m = Math.round(ms / 60000);
+  return "<div><b>" + km.toFixed(2) + "</b><em>km</em></div><div><b>" + (m < 60 ? m : Math.floor(m / 60) + ":" + two(m % 60)) +
+    "</b><em>" + (m < 60 ? "min" : "h") + " moving</em></div><div><b>" + trips.length + "</b><em>" +
+    (trips.length === 1 ? "trip" : "trips") + "</em></div>";
+}
+function hlTrip(k) {                    // a trip on the map (again: the whole day)
+  hist.hl = hist.hl === k ? null : k;
+  tpKey = trkKey = "";
+  if (mapD) placeMap(mapD); else trackPaint();
 }
 // GPX 1.1 of the shown day: a track segment per gap (pure, for tests)
 function gpxText(pts, name) {
@@ -586,7 +608,9 @@ function wpx(lat, lon, z) {
 function fitView(lat, lon, el) {
   var w = el.offsetWidth, h = el.offsetHeight, top = 44, bot = h - 90, zf = ZOOM;
   // a past day: its track alone (the live position may be far away)
-  var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, ps = hist.past && hist.pts.length ? hist.pts : hist.pts.concat([[0, lat, lon]]);
+  // a trip picked in the timeline: that trip alone
+  var hl = hlRange(), x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  var ps = hl ? hist.pts.slice(hl[0], hl[1] + 1) : hist.past && hist.pts.length ? hist.pts : hist.pts.concat([[0, lat, lon]]);
   for (var i = 0; i < ps.length; i++) {
     var q = wpx(ps[i][1], ps[i][2], 0);
     x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]);
@@ -598,12 +622,18 @@ function fitView(lat, lon, el) {
   if (hist.pts.length < 2) { var c = wpx(lat, lon, z); return {z: z, sc: sc, X: c[0], Y: c[1]}; }
   return {z: z, sc: sc, X: (x0 + x1) / 2 * k, Y: (y0 + y1) / 2 * k + (h * .42 - (top + bot) / 2) / sc};
 }
-function histPath(t, z) {               // SVG path in the tile layer's pixels
+function hlRange() {
+  var t = hist.hl === null || hist.hl === undefined || !hist.trips ? null : hist.trips[hist.hl];
+  return t ? [t.i0, t.i1] : null;
+}
+function histPath(t, z, i0, i1) {       // SVG path in the tile layer's pixels
   var k = Math.pow(2, z), d = "", prev = 0;
-  for (var i = 0; i < hist.pts.length; i++) {
+  i0 = i0 || 0;
+  i1 = i1 === undefined ? hist.pts.length - 1 : i1;
+  for (var i = i0; i <= i1; i++) {
     var p = hist.pts[i], r = p[1] * Math.PI / 180;
     var x = ((p[2] + 180) / 360 * k - t.x) * 256, y = ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * k - t.y) * 256;
-    d += (i && p[0] - prev <= 300000 ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+    d += (i > i0 && p[0] - prev <= 300000 ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
     prev = p[0];
   }
   return d;
@@ -612,12 +642,16 @@ function histPath(t, z) {               // SVG path in the tile layer's pixels
 // the Track panel and the header's day, when the shown track changed
 var tpKey = "";
 function trackPaint() {
-  var k = hist.start + "/" + hist.pts.length;
+  var k = hist.start + "/" + hist.pts.length + "/" + hist.hl;
   if (k === tpKey) return;
   tpKey = k;
-  document.getElementById("day").innerHTML = hist.pts.length ? "<em>" + (hist.past ? dayName() : "TODAY") + " </em>" +
-    hist.km.toFixed(2) + " KM" : "";
-  paint({tstat: trackStats(hist.pts, hist.km), prof: profile(hist.pts)});
+  if (hist.trips === undefined || hist.tn !== hist.pts.length) { hist.trips = tripsOf(hist.pts); hist.tn = hist.pts.length; }
+  var km = 0;                            // the trips' km, as the timeline sums them
+  for (var j = 0; j < hist.trips.length; j++) km += hist.trips[j].km;
+  document.getElementById("day").innerHTML = hist.trips.length ? "<em>" + (hist.past ? dayName() : "TODAY") + " </em>" +
+    km.toFixed(2) + " KM" : "";
+  paint({tkpi: kpis(hist.trips), tline: timeline(hist.trips, hist.hl, hist.past)});
+  navPaint();
   document.getElementById("gpx").disabled = !hist.pts.length;
 }
 
@@ -659,9 +693,11 @@ function placeMap(d) {
     "translate(" + (-t.fx).toFixed(1) + "px," + (-t.fy).toFixed(1) + "px)";
   var trk = document.getElementById("trk");
   trk.style.transform = box.style.transform;
-  if (key + "/" + hist.pts.length !== trkKey) {
-    trkKey = key + "/" + hist.pts.length;
-    trk.innerHTML = hist.pts.length ? '<svg width="1" height="1"><path d="' + histPath(t, z) + '"/></svg>' : "";
+  if (key + "/" + hist.pts.length + "/" + hist.hl !== trkKey) {
+    trkKey = key + "/" + hist.pts.length + "/" + hist.hl;
+    var hr = hlRange();
+    trk.innerHTML = hist.pts.length ? '<svg width="1" height="1"><path d="' + histPath(t, z) + '"/>' +
+      (hr ? '<path class="hl" d="' + histPath(t, z, hr[0], hr[1]) + '"/>' : "") + "</svg>" : "";
   }
   // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
   var acc = document.getElementById("acc"), px = typeof d.hacc === "number" ? d.hacc * 2 / t.mpp :
@@ -694,8 +730,8 @@ function tick() {
       document.getElementById("live").innerHTML = "LIVE";
       paint(view(d, prevD));
       prevD = d;
-      var dk = String(d.days || "") + "/" + sel;
-      if (dk !== selKey) { selKey = dk; document.getElementById("dsel").innerHTML = pickerHtml(d.days, sel); }
+      boardDays = d.days || [];
+      navPaint();
       statAdd(d, last);
       statPaint();
       placeMap(d);
