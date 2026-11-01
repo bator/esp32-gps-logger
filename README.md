@@ -491,7 +491,9 @@ HDOP, points waiting
 for upload, WiFi signal and the share of bad NMEA sentences. The WiFi cell
 is an arc icon (0–3 arcs lit) and the link quality in per cent, 2 x (RSSI +
 100) capped at 0–100 (-63 dBm = 74 %), with the dBm beside it on a wide
-screen; amber below -67 dBm, red below -80 dBm. Below:
+screen; amber below -67 dBm, red below -80 dBm. Below (on a wide screen in two
+columns: the sky plot, *Track* and *Static test* on the left, the plot growing
+to fill the column next to *Systems*; signal bars and *Systems* on the right):
 - a radar-style sky plot (centre = overhead, edge = horizon, north up;
   colour = system: GPS blue, Galileo green, BeiDou amber, GLONASS pink;
   filled = in the fix, hollow = not used);

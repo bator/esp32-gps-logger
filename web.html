@@ -61,6 +61,8 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .col{display:flex;flex-direction:column;gap:12px}.col .p:last-child{flex:1}
 /* sky radar */
 .radar svg{display:block;width:100%;max-width:380px;margin:auto}
+.col.l .p{flex:none}.col.l .radar{flex:1;display:flex;flex-direction:column}
+.col.l .radar svg{flex:1;height:0;min-height:240px;max-width:none}
 .rg{fill:none;stroke:rgba(34,211,238,.18)}.rx{stroke:rgba(34,211,238,.12)}
 .sweep{fill:url(#sw)}
 text{fill:var(--m);font:600 9px "JetBrains Mono",monospace;text-anchor:middle}
@@ -151,7 +153,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .trk path.hl{stroke:#fff;stroke-width:5;filter:drop-shadow(0 0 6px rgba(255,255,255,.8))}
 .scat circle.d{fill:var(--a);opacity:.55}.scat .c50{fill:none;stroke:var(--ok);stroke-dasharray:3 3}.scat .c95{fill:none;stroke:var(--warn);stroke-dasharray:3 3}
 .hint{font-size:11px;color:var(--m);margin-top:8px}
-@media(max-width:760px){.kv{grid-template-columns:repeat(2,1fr)}.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+@media(max-width:760px){.kv{grid-template-columns:repeat(2,1fr)}.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -165,27 +167,28 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
   <div class="alert" id="gl"></div>
   <div class="tm" id="tm"></div>
   <div class="g">
-    <div class="p radar"><h2 id="skyh">Sky</h2>
-      <svg viewBox="-104 -104 208 208">
-        <defs><radialGradient id="sw" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="scale(90)"><stop offset="0" stop-color="rgba(34,211,238,.18)"/><stop offset="1" stop-color="rgba(34,211,238,0)"/></radialGradient></defs>
-        <path class="sweep" d="M0 0L0-90A90 90 0 0 1 77.9-45Z"/>
-        <circle class="rg" r="90"/><circle class="rg" r="60"/><circle class="rg" r="30"/>
-        <path class="rx" d="M0-90V90M-90 0H90M-63.6-63.6L63.6 63.6M63.6-63.6L-63.6 63.6"/>
-        <text y="-94">N</text><text x="97" y="3">E</text><text y="101">S</text><text x="-97" y="3">W</text>
-        <g id="dots"></g>
-      </svg>
-      <div class="legend"><span class="g0"><i></i>GPS</span><span class="g2"><i></i>GAL</span><span class="g3"><i></i>BDS</span><span class="g6"><i></i>GLO</span><span class="g1"><i></i>OTHER</span><span class="u"><i></i>NOT USED</span></div>
+    <!-- the radar takes what the left column has left next to Systems -->
+    <div class="col l">
+      <div class="p radar"><h2 id="skyh">Sky</h2>
+        <svg viewBox="-104 -104 208 208">
+          <defs><radialGradient id="sw" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="scale(90)"><stop offset="0" stop-color="rgba(34,211,238,.18)"/><stop offset="1" stop-color="rgba(34,211,238,0)"/></radialGradient></defs>
+          <path class="sweep" d="M0 0L0-90A90 90 0 0 1 77.9-45Z"/>
+          <circle class="rg" r="90"/><circle class="rg" r="60"/><circle class="rg" r="30"/>
+          <path class="rx" d="M0-90V90M-90 0H90M-63.6-63.6L63.6 63.6M63.6-63.6L-63.6 63.6"/>
+          <text y="-94">N</text><text x="97" y="3">E</text><text y="101">S</text><text x="-97" y="3">W</text>
+          <g id="dots"></g>
+        </svg>
+        <div class="legend"><span class="g0"><i></i>GPS</span><span class="g2"><i></i>GAL</span><span class="g3"><i></i>BDS</span><span class="g6"><i></i>GLO</span><span class="g1"><i></i>OTHER</span><span class="u"><i></i>NOT USED</span></div>
+      </div>
+      <div class="p"><div class="ph"><h2>Track</h2><button class="btn" id="dprev" onclick="step(-1)">&lsaquo;</button><span class="dn" id="dname">TODAY</span><button class="btn" id="dnext" onclick="step(1)">&rsaquo;</button><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
+        <div class="kpi" id="tkpi"></div><div id="tline"></div></div>
+      <div class="p"><div class="ph"><h2>Static test</h2><button class="btn" id="sbtn" onclick="statToggle()">START</button><button class="btn" onclick="statReset()">RESET</button></div>
+        <div class="kv k3" id="sstat"></div><div class="scat" id="scat"></div></div>
     </div>
     <div class="col">
       <div class="p"><h2 id="bh">Signal &middot; dBHz</h2><div class="r" id="bars"></div></div>
       <div class="p sx" id="sys"></div>
     </div>
-  </div>
-  <div class="g">
-    <div class="p"><div class="ph"><h2>Track</h2><button class="btn" id="dprev" onclick="step(-1)">&lsaquo;</button><span class="dn" id="dname">TODAY</span><button class="btn" id="dnext" onclick="step(1)">&rsaquo;</button><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
-      <div class="kpi" id="tkpi"></div><div id="tline"></div></div>
-    <div class="p"><div class="ph"><h2>Static test</h2><button class="btn" id="sbtn" onclick="statToggle()">START</button><button class="btn" onclick="statReset()">RESET</button></div>
-      <div class="kv k3" id="sstat"></div><div class="scat" id="scat"></div></div>
   </div>
   <div class="p" style="margin-top:12px"><h2>Event log</h2><div class="term" id="log"></div></div>
   <details class="p"><summary id="svh">Satellite table</summary><table class="svt" id="svt"></table></details>
