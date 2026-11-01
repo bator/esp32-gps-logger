@@ -288,5 +288,38 @@ ft.pruned = (() => {
   nav.push(q.doc.getElementById("dprev").disabled);
   return [nav, back];
 })();
+// R2: the static test is capped at STAT_MAX and keeps another tab's
+// samples (it reloads the saved state before adding); a bug drawing a box
+// keeps LIVE (only a failed or unparsable answer is offline)
+ft.statTabs = (() => {
+  const store = {};
+  const ls = {getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }};
+  const c = {Date: Date, Math: Math, JSON: JSON, localStorage: ls};
+  vm.createContext(c);
+  vm.runInContext(src, c);
+  c.stat = {on: true, s: []};
+  c.statSave();
+  c.statAdd({pos6: "47.1, 18.4", good_age_s: 0}, 1);
+  // another tab adds one meanwhile
+  const other = JSON.parse(store["gps-static"]);
+  other.s.push([2, 47.2, 18.4, null]);
+  store["gps-static"] = JSON.stringify(other);
+  c.statAdd({pos6: "47.3, 18.4", good_age_s: 0}, 3);
+  const merged = c.stat.s.map((q) => q[1]);
+  c.stat = {on: true, s: []};
+  for (let k = 0; k < c.STAT_MAX + 7; k++) c.stat.s.push([k, 47, 18, null]);
+  c.statSave();
+  c.statAdd({pos6: "47.4, 18.4", good_age_s: 0}, 99999);
+  store["gps-static"] = "{\"on\":true,\"s\":5}";
+  c.statLoad();
+  return [merged, c.stat.s.length, Array.isArray(c.stat.s)];
+})();
+ft.pageErr = (() => {
+  const q = page(1600);
+  q.c.statPaint = () => { throw new Error("boom"); };
+  q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null});
+  q.xhrs[0].onload();
+  return [q.doc.body.className, q.doc.getElementById("live").innerHTML];
+})();
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));
