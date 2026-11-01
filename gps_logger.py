@@ -3381,11 +3381,201 @@ def at_home():
 # commits on close, so a power cut leaves either the previous or the new
 # version. A line cut short has no newline and is skipped on read.
 # Older .gpx files (XML) are still read and uploaded.
+#
+# New files are binary (.trb, "#TRKB" header, TRK_BIN), ~6-8 bytes a point
+# instead of ~46-51. The lines are the same TRK1/TRK2 text, stored as the
+# difference from the line before: a keyframe "=" + the whole text line,
+# then delta records, each a flag byte (0x80 | bit 0: the time step is not
+# 1 s, bit i: field i (lat, lon, ele, hdop/acc, speed) changed) and one
+# LEB128 varint per flag bit (the step in s, the zigzag change in the
+# field's last decimal). "-\n" and the "#END\n" footer stay text lines
+# (they start below 0x80). A delta keeps the keyframe's shape (which
+# fields are empty, their decimals): any other line, or one not written
+# exactly as its numbers print, is a keyframe. Each flush starts with one,
+# and one follows every KEY_EVERY deltas, so a damaged record costs at
+# most those. A reader resumes from the .pos "offset keyframe-offset". The
+# decoded line is byte for byte the text line: the upload is the same.
+# Firmware from before TRK_BIN does not list .trb files (an OTA rollback
+# keeps them for the next forward update).
 
 HEADER = "#TRK1\n"
 HEADER2 = "#TRK2\n"
+HEADERB = "#TRKB\n"
 FOOTER = "#END\n"
 NEW_SEG = "-\n"
+TRB = ".trb"
+_TRACKS = (".gpx", ".trk", TRB)          # the track files (pending)
+_BADS = (".gpx.bad", ".trk.bad", ".trb.bad")
+TRK_BIN = True                           # new track files binary (.trb)
+KEY_EVERY = 64                           # deltas between two keyframes
+_KB_MAX = 1 << 28                        # a delta at least this big: keyframe
+_P10 = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000,
+        1000000000)
+_NF = (b"%d", b"%d.%01d", b"%d.%02d", b"%d.%03d", b"%d.%04d", b"%d.%05d",
+       b"%d.%06d", b"%d.%07d", b"%d.%08d", b"%d.%09d")
+# A line's state: [0] seconds since 2020 (None: not valid, no delta from
+# it), [1..5] lat, lon, ele, hdop/acc, speed in their last decimal (None:
+# empty), [6..10] their decimals, [11] the number of fields before the time
+_ke = [None] * 12                        # the encoder's (flush)
+_kt = [None] * 12                        # the line being encoded
+_ks = [None] * 12                        # the reader's
+
+def _kb_num(buf, a, b, s, i):
+    """buf[a:b] into s[i] (value) and s[i + 5] (decimals): empty, or a
+    number written as it prints ("-?(0|[1-9][0-9]*)(.[0-9]+)?", no "-0",
+    at most 9 digits). False for anything else."""
+    if a == b:
+        s[i] = None
+        s[i + 5] = 0
+        return True
+    neg = buf[a] == 45
+    if neg:
+        a += 1
+    v = 0
+    d = -1
+    ip = 0
+    j = a
+    while j < b:
+        c = buf[j]
+        if c == 46:
+            if d >= 0 or j == a or j == b - 1:
+                return False
+            d = 0
+        elif 48 <= c <= 57:
+            if d < 0:
+                if ip and not v:
+                    return False         # a leading zero
+                ip += 1
+            else:
+                d += 1
+            if ip + (d if d > 0 else 0) > 9:
+                return False
+            v = v * 10 + c - 48
+        else:
+            return False
+        j += 1
+    if not ip or (neg and not v):
+        return False
+    s[i] = -v if neg else v
+    s[i + 5] = d if d > 0 else 0
+    return True
+
+def _kb_time(buf, t):
+    """The compact time YYYYMMDDTHHMMSSZ at buf[t:t + 16] -> seconds since
+    2020, or None (not a valid UTC time from 2020 to 2099)."""
+    if buf[t + 8] != 84 or buf[t + 15] != 90:
+        return None
+    for k in _TDIG:
+        if not 48 <= buf[t + k] <= 57:
+            return None
+    y = ((buf[t] - 48) * 1000 + (buf[t + 1] - 48) * 100
+         + (buf[t + 2] - 48) * 10 + buf[t + 3] - 48)
+    m = (buf[t + 4] - 48) * 10 + buf[t + 5] - 48
+    d = (buf[t + 6] - 48) * 10 + buf[t + 7] - 48
+    hh = (buf[t + 9] - 48) * 10 + buf[t + 10] - 48
+    mi = (buf[t + 11] - 48) * 10 + buf[t + 12] - 48
+    ss = (buf[t + 13] - 48) * 10 + buf[t + 14] - 48
+    if not (2020 <= y <= 2099 and 1 <= m <= 12 and d >= 1
+            and hh < 24 and mi < 60 and ss < 60):
+        return None
+    z = _days(y, m, 1)
+    if d > _days(y, m + 1, 1) - z:       # (past the month's last day)
+        return None
+    return (z + d - 1 - EPOCH_DAYS) * 86400 + hh * 3600 + mi * 60 + ss
+
+def _kb_parse(buf, a, e, s):
+    """The text line buf[a:e] (no newline) into the state s; s[0] None
+    when it is no TRK1/TRK2 point written as it prints."""
+    s[0] = None
+    if e - a < 21 or buf[e - 17] != 44:
+        return
+    t = _kb_time(buf, e - 16)
+    if t is None:
+        return
+    i = 1
+    p = a
+    while True:
+        c = buf.find(b",", p, e - 17)
+        q = c if c >= 0 else e - 17
+        if i > 5 or not _kb_num(buf, p, q, s, i):
+            return
+        i += 1
+        if c < 0:
+            break
+        p = c + 1
+    if i - 1 < 4 or s[1] is None or s[2] is None:
+        return
+    s[11] = i - 1
+    while i <= 5:
+        s[i] = None
+        s[i + 5] = 0
+        i += 1
+    s[0] = t
+
+def _kb_uv(out, v):
+    while v >= 128:
+        out.append((v & 127) | 128)
+        v >>= 7
+    out.append(v)
+
+def _kb_delta(bl, s, out):
+    """Append the text line bl as a delta record from the state s to out
+    and move s on -> True; False (nothing written) when it must be a
+    keyframe."""
+    t = _kt
+    _kb_parse(bl, 0, len(bl) - 1, t)
+    if t[0] is None or s[0] is None or t[11] != s[11]:
+        return False
+    dt = t[0] - s[0]
+    if dt < 1 or dt >= _KB_MAX:
+        return False
+    m = 128 if dt == 1 else 129
+    i = 1
+    while i <= 5:
+        v, w = t[i], s[i]
+        if (v is None) != (w is None) or t[i + 5] != s[i + 5]:
+            return False
+        if v is not None and v != w:
+            if not -_KB_MAX < v - w < _KB_MAX:
+                return False
+            m |= 1 << i
+        i += 1
+    out.append(m)
+    if dt != 1:
+        _kb_uv(out, dt)
+    i = 1
+    while i <= 5:
+        if m & (1 << i):
+            d = t[i] - s[i]
+            _kb_uv(out, d << 1 if d >= 0 else ((-d) << 1) - 1)
+        i += 1
+    i = 0
+    while i < 12:
+        s[i] = t[i]
+        i += 1
+    return True
+
+def _kb_encode(lines, k, seg):
+    """lines[:k] (text lines) as the bytes of a .trb flush: a keyframe
+    first, the segment breaks before the indexes in seg."""
+    out = bytearray()
+    s = _ke
+    s[0] = None
+    n = j = i = 0
+    while i < k:
+        if seg is not None and j < len(seg) and seg[j] == i:
+            out += NEW_SEG.encode()
+            j += 1
+        bl = lines[i].encode()
+        if n < KEY_EVERY and _kb_delta(bl, s, out):
+            n += 1
+        else:
+            out.append(61)               # =
+            out += bl
+            _kb_parse(bl, 0, len(bl) - 1, s)
+            n = 0
+        i += 1
+    return out
 
 log = {}
 
@@ -3506,7 +3696,8 @@ def start_file(stamp=None):
         log["fmt"] = _src_fmt()
     # (wfail: a write that failed on the previous file must not keep the
     # next one from closing: log_tick)
-    log.update(file=LOG_DIR + "/" + name + ".trk", created=False, points=0,
+    log.update(file=LOG_DIR + "/" + name + (TRB if TRK_BIN else ".trk"),
+               created=False, points=0,
                new_seg=False, seg_tc=[], file_at=time.ticks_ms(),
                good_size=None, wfail=False, wfails=0)
     # First write happens when there are points (parking must not create
@@ -3569,21 +3760,38 @@ def flush(hold=None):
                 while j < len(q) and q[j] is not None and q[j] <= t:
                     j += 1
             i += 1
+    tb = path.endswith(TRB)
+    if tb:
+        try:
+            body = _kb_encode(batch, k, seg)   # (the segment breaks in it)
+        except MemoryError:              # not the flash: the batch waits
+            gc.collect()                 # for the next flush
+            log["err"] += 1
+            return
     try:
-        extra = len(NEW_SEG) * len(seg) if seg is not None else 0
-        pts = 0
-        i = 0
-        while i < k:
-            pts += len(batch[i])
-            i += 1
+        if tb:
+            extra, pts = 0, len(body)
+        else:
+            extra = len(NEW_SEG) * len(seg) if seg is not None else 0
+            pts = 0
+            i = 0
+            while i < k:
+                pts += len(batch[i])
+                i += 1
         if creating:
-            head = HEADER2 if log["fmt"] == 2 else HEADER
+            head = (HEADERB if tb else HEADER2 if log["fmt"] == 2
+                    else HEADER)
             expected = len(head) + extra + pts + len(FOOTER)
             f = open(path, "wb")
             f.write(head.encode())
         else:
             f = open(path, "r+b")
-            _seek_footer(f, old)
+            if not _seek_footer(f, old) and tb:
+                # the end is not where the last write left it: after a
+                # guessed newline a record could be split, and its half
+                # read as points. The batch goes on in a new file.
+                log["wfails"] = max(log.get("wfails", 0), WFAIL_SWITCH - 1)
+                raise OSError(5)
             try:
                 start = f.tell()
             except (OSError, AttributeError):
@@ -3591,8 +3799,10 @@ def flush(hold=None):
                 if start < 0:
                     start = 0
             expected = start + extra + pts + len(FOOTER)
+        if tb:
+            f.write(body)
         i = j = 0
-        while i < k:
+        while i < k and not tb:
             if seg is not None and j < len(seg) and seg[j] == i:
                 f.write(NEW_SEG.encode())
                 j += 1
@@ -3641,7 +3851,8 @@ def flush(hold=None):
     log["wfails"] = 0
     log["points"] += k
     up["left"] += k
-    _hist_add(batch, k)
+    if not tb:
+        _hist_add(batch, k)              # (a .trb's go when uploaded)
     q = log["seg_tc"]
     if log["new_seg"] and q:
         last = batch[k - 1][-17:-1]
@@ -4596,7 +4807,8 @@ def _file_size(path):
         return None
 
 def _seek_footer(f, old):
-    """Seek to the last known FOOTER, or after the last newline if truncated.
+    """Seek to the last known FOOTER, or after the last newline if truncated
+    (-> False: a guess).
 
     A partial append leaves extra bytes after good_size; overwrite those
     from the last good footer. An externally truncated file is shorter
@@ -4608,31 +4820,32 @@ def _seek_footer(f, old):
         f.seek(pos, 0)
         if f.read(n) == foot:
             f.seek(pos, 0)
-            return
+            return True
         f.seek(0, 2)
         if f.tell() > old:
             f.seek(pos, 0)
-            return
+            return True
     else:
         f.seek(-n, 2)
         pos = f.tell()
         if f.read(n) == foot:
             f.seek(pos, 0)
-            return
+            return True
     f.seek(0, 2)
     end = f.tell()
     win = end if end < LINE_MAX else LINE_MAX
     if win <= 0:
         f.seek(0, 0)
-        return
+        return False
     start = end - win
     f.seek(start, 0)
     chunk = f.read(win)
     i = chunk.rfind(b"\n")
     if i < 0:
         f.seek(0, 0)
-        return
+        return False
     f.seek(start + i + 1, 0)
+    return False
 
 def _lowidf_mark_take():
     """True once if the last boot was a low-idf reboot (LOWIDF_MARK)."""
@@ -4676,61 +4889,89 @@ def up_reset():
         up["left"] = 0
         print("count MemoryError")
 
-def read_offset(path):
-    """Byte offset to resume from. Corrupt / past-EOF sidecars reset to 0
-    (Dawarich dedup handles the resend). Never treat a bad .pos as EOF."""
+def read_pos(path):
+    """(byte offset to resume from, the offset of the keyframe its .trb
+    delta records count from, else None). Corrupt / past-EOF sidecars reset
+    to 0 (Dawarich dedup handles the resend). Never treat a bad .pos as
+    EOF. A .trb offset without a keyframe "=" to start from is one too;
+    key -1: none was read before off (its deltas up to the next keyframe
+    are dropped, as they were then)."""
     size = _file_size(path)
     if size is None:
-        return 0
+        return 0, None
     try:
         with open(path + ".pos") as f:
-            off = int(f.read().strip() or 0)
+            v = f.read().split()
+        off = int(v[0]) if v else 0
+        key = int(v[1]) if len(v) > 1 else None
     except (OSError, ValueError):
-        return 0
+        return 0, None
     if off < 0 or off > size:
         print("pos corrupt", path, off, size)
-        return 0
+        return 0, None
     if off == 0:
-        return 0
+        return 0, None
+    tb = path.endswith(TRB)
     try:
         with open(path, "rb") as f:
-            f.seek(off - 1)
-            b = f.read(1)
-        if b != b"\n":
+            if tb:                       # (-1: no keyframe read yet)
+                ok = key is not None and -1 <= key <= off
+                if ok and key >= 0:
+                    f.seek(key)
+                    ok = f.read(1) == b"="
+            else:
+                f.seek(off - 1)
+                ok = f.read(1) == b"\n"
+        if not ok:
             print("pos misaligned", path, off)
-            return 0
+            return 0, None
     except OSError:
-        return 0
-    return off
+        return 0, None
+    return off, key if tb else None
 
-def write_offset(path, off):
+def read_offset(path):
+    return read_pos(path)[0]
+
+def write_offset(path, off, key=None):
     """Sidecar update: write <file>.pos.tmp, then rename over .pos.
-    Atomic on LittleFS; on FAT a crash may drop the .pos (resend from 0)."""
+    Atomic on LittleFS; on FAT a crash may drop the .pos (resend from 0).
+    key: a .trb's keyframe offset (read_pos)."""
     tmp = path + ".pos.tmp"
     with open(tmp, "w") as f:
-        f.write("%d\n" % off)
+        if key is None:
+            f.write("%d\n" % off)
+        else:
+            f.write("%d %d\n" % (off, key))
     os.rename(tmp, path + ".pos")
 
 # Track files are read line by line into one buffer (readinto), never a
 # new bytes object per line: f.readline(LINE_MAX) allocated LINE_MAX bytes
 # for each line, and the upload reads at the worst moment for the heap.
-_rbuf = bytearray(LINE_MAX)
+# A .trb delta record is decoded to its text line in _rbuf[_SCR:], past
+# the bytes read from the file.
+_SCR = LINE_MAX
+_rbuf = bytearray(LINE_MAX + 96)
 _rmv = memoryview(_rbuf)
-_rd = [0, 0, 0, 0]                       # file offset of _rbuf[0], line start,
-                                         # line end, bytes in _rbuf
+_rlm = _rmv[:LINE_MAX]
+_rd = [0, 0, 0, 0, False]                # file offset of _rbuf[0], line start,
+                                         # line end, bytes in _rbuf, EOF read
+_rk = [None, 0]                          # read_batch: the keyframe at its
+                                         # end, the offset it read from
 
 def _rd_open(off):
     _rd[0] = off
     _rd[1] = _rd[2] = _rd[3] = 0
+    _rd[4] = False
 
 def _rd_fill(f):
     """Fill _rbuf from f's position: the bytes read (fewer only at EOF)."""
     n = 0
     while n < LINE_MAX:
-        k = f.readinto(_rmv[n:] if n else _rbuf)
+        k = f.readinto(_rlm[n:] if n else _rlm)
         if not k:
             break
         n += k
+    _rd[4] = n < LINE_MAX
     return n
 
 def _rd_line(f):
@@ -4765,6 +5006,143 @@ def _rd_line(f):
     _rd[2] = i + 1
     return True
 
+def _rd_rec(f):
+    """Next record of a .trb (opened with _rd_open) in _rbuf[_rd[1]:_rd[2]]:
+    a delta record (its first byte 0x80 or more; one cut off at the end of
+    the file comes back short, _kb_dec drops it) or a line as _rd_line
+    returns it. False at EOF."""
+    a, n = _rd[2], _rd[3]
+    if n - a < 32 and not _rd[4]:        # (a record is at most 31 bytes)
+        _rd[0] += a
+        f.seek(_rd[0])
+        n = _rd_fill(f)
+        _rd[1] = _rd[2] = a = 0
+        _rd[3] = n
+    if a >= n:
+        return False
+    m = _rbuf[a]
+    if m < 128:
+        return _rd_line(f)
+    j = a + 1
+    i = 0
+    while i < 6 and j < n:
+        if m & (1 << i):
+            while j < n and _rbuf[j] >= 128:
+                j += 1
+            j += 1
+        i += 1
+    _rd[1] = a
+    _rd[2] = j if j < n else n
+    return True
+
+def _kb_put(p, v, d):
+    if v < 0:
+        _rbuf[p] = 45                    # -
+        p += 1
+        v = -v
+    t = _NF[d] % (v // _P10[d], v % _P10[d]) if d else b"%d" % v
+    _rbuf[p:p + len(t)] = t
+    return p + len(t)
+
+def _kb_dec(a, b, s):
+    """Apply the delta record _rbuf[a:b] to the state s and write its text
+    line to _rbuf[_SCR:] -> its end, or 0: s not valid, or the record
+    damaged (s is then not valid either, up to the next keyframe)."""
+    if s[0] is None:
+        return 0
+    m = _rbuf[a]
+    nf = s[11]
+    if m & 127 & ~((2 << nf) - 1):       # a field this line does not have
+        s[0] = None
+        return 0
+    j = a + 1
+    dt = 1
+    i = 0
+    while i <= nf:
+        if m & (1 << i):
+            v = sh = 0
+            while True:
+                if j >= b or sh > 28:
+                    s[0] = None
+                    return 0
+                c = _rbuf[j]
+                j += 1
+                v |= (c & 127) << sh
+                sh += 7
+                if c < 128:
+                    break
+            if v > 2 * _KB_MAX:          # (more than the encoder writes)
+                s[0] = None
+                return 0
+            if not i:
+                dt = v
+            elif s[i] is None:
+                s[0] = None
+                return 0
+            else:
+                s[i] += (v >> 1) ^ -(v & 1)
+                if not -_P10[9] < s[i] < _P10[9]:   # (9 digits: the line
+                    s[0] = None                     # fits _rbuf[_SCR:])
+                    return 0
+        i += 1
+    if j != b or dt < 1 or s[0] + dt >= FIX_S_END:
+        s[0] = None
+        return 0
+    s[0] += dt
+    p = _SCR
+    i = 1
+    while i <= nf:
+        if s[i] is not None:
+            p = _kb_put(p, s[i], s[i + 5])
+        _rbuf[p] = 44                    # ,
+        p += 1
+        i += 1
+    y, mo, d = _civil(s[0] // 86400 + EPOCH_DAYS)
+    r = s[0] % 86400
+    t = b"%04d%02d%02dT%02d%02d%02dZ\n" % (y, mo, d, r // 3600, r // 60 % 60,
+                                          r % 60)
+    _rbuf[p:p + len(t)] = t
+    return p + len(t)
+
+def _kb_rec(a, b, s):
+    """A .trb record _rbuf[a:b] -> (start, end) of its point's text line
+    in _rbuf, (0, 0) for a point that does not decode, or None (not a
+    point: a header, "-", a cut-off keyframe). A keyframe sets s, any other
+    line but "-" and "#..." makes it not valid."""
+    c = _rbuf[a]
+    if c >= 128:
+        e = _kb_dec(a, b, s)
+        return (_SCR, e) if e else (0, 0)
+    if c == 61 and _rbuf[b - 1] == 10:   # =
+        _kb_parse(_rbuf, a + 1, b - 1, s)
+        return a + 1, b
+    if not (c == 35 or (c == 45 and b - a == 2 and _rbuf[a + 1] == 10)):
+        s[0] = None                      # (not "-" or "#": a damaged record,
+    return None                          # the next ones may be read from
+                                         # inside one: none until a keyframe)
+
+def _kb_seek(f, off, key, s):
+    """Read a .trb from its keyframe at key up to off, the state s at off
+    (key -1: no keyframe before off, s not valid). False when off is not
+    where a record starts (s then not valid)."""
+    s[0] = None
+    if key < 0:
+        _rd_open(off)
+        return True
+    _rd_open(key)
+    while _rd[0] + _rd[2] < off:
+        if not _rd_rec(f):
+            break
+        a, b = _rd[1], _rd[2]
+        if a < b:
+            _kb_rec(a, b, s)
+        else:
+            s[0] = None
+    if _rd[0] + _rd[2] != off:
+        s[0] = None
+        return False
+    return True
+
 def _rd_point(a, b, gpx):
     """_rbuf[a:b] is a point line (see _is_point)."""
     if gpx:
@@ -4782,7 +5160,7 @@ def count_points():
     Feeds the WDT every 64 lines so a full flash cannot starve it."""
     try:
         names = [n for n in os.listdir(LOG_DIR)
-                 if n.endswith((".gpx", ".trk"))]
+                 if n.endswith(_TRACKS)]
     except OSError:
         return 0
     total = 0
@@ -4790,11 +5168,12 @@ def count_points():
     for n in names:
         path = LOG_DIR + "/" + n
         gpx = not _is_trk(path)
+        tb = path.endswith(TRB)
         try:
             off = read_offset(path)
             with open(path, "rb") as f:
                 _rd_open(off)
-                while _rd_line(f):
+                while _rd_rec(f) if tb else _rd_line(f):
                     a, b = _rd[1], _rd[2]
                     if a == b:
                         continue
@@ -4803,7 +5182,11 @@ def count_points():
                     nlines += 1
                     if nlines & 63 == 0:
                         feed()
-                    if _rd_point(a, b, gpx):
+                    if tb:
+                        c = _rbuf[a]
+                        if c >= 128 or (c == 61 and _rbuf[b - 1] == 10):
+                            total += 1
+                    elif _rd_point(a, b, gpx):
                         total += 1
         except (OSError, MemoryError) as e:
             print("count", path, repr(e))
@@ -4815,7 +5198,7 @@ def pending():
     Sidecars (.pos) and quarantined (.bad) files are not listed."""
     try:
         names = sorted(n for n in os.listdir(LOG_DIR)
-                       if n.endswith((".gpx", ".trk")))
+                       if n.endswith(_TRACKS))
     except OSError:
         return []
     return [p for p in (LOG_DIR + "/" + n for n in names) if p != log["file"]]
@@ -4824,7 +5207,7 @@ def pending_bad():
     """Rejected-batch files left for later recovery."""
     try:
         names = sorted(n for n in os.listdir(LOG_DIR)
-                       if n.endswith((".gpx.bad", ".trk.bad")))
+                       if n.endswith(_BADS))
     except OSError:
         return []
     return [LOG_DIR + "/" + n for n in names]
@@ -4879,7 +5262,8 @@ def _put(pos, b):
     return pos + len(b)
 
 def _is_trk(path):
-    return path.endswith(".trk") or path.endswith(".trk.bad")
+    """A .trk or .trb track or a .bad copy of one (text lines)."""
+    return path.endswith((".trk", TRB, ".trk.bad", ".trb.bad"))
 
 def _is_point(line, gpx):
     """One point line: <trkpt> in old .gpx, "lat,lon,ele,hdop,time" (TRK1)
@@ -5107,20 +5491,35 @@ def _gpx_loc(line):
             '"timestamp":"%s",%s"device_id":"%s"}}'
             % (lon_f, lat_f, p[2], extra, DEVICE_ID)).encode()
 
-def read_batch(path, off=0):
+def read_batch(path, off=0, key=None):
     """Fill _body with up to UPLOAD_BATCH valid points from byte offset off
     as Overland JSON -> (n, n_ok, body_len, new_off, eof).
     Truncated / non-numeric / inf / over-long points are skipped.
     A valid point that does not fit is left unread (eof=False). A .trk is
     parsed in _rbuf and written straight into _body: a few small objects
-    per point (the float checks), not ~25 and a line buffer."""
+    per point (the float checks), not ~25 and a line buffer. A .trb is
+    read from its keyframe at key (read_pos) and each delta decoded to its
+    text line first; the keyframe at new_off goes to _rk[0]."""
     gpx = not _is_trk(path)
+    tb = path.endswith(TRB)
+    s = _ks
     n, n_ok, pos, sep = 0, 0, _put(0, _J_START), 0
     nlines, eof = 0, False
+    _rk[0] = None
+    _rk[1] = off
     with open(path, "rb") as f:
-        _rd_open(off)
+        if tb:
+            if off and (key is None or not _kb_seek(f, off, key, s)):
+                print("pos misaligned", path, off)
+                off = _rk[1] = 0         # (resent: Dawarich deduplicates)
+            if not off:
+                _rd_open(0)
+                s[0] = None
+            _rk[0] = key if off else -1
+        else:
+            _rd_open(off)
         while True:
-            if not _rd_line(f):
+            if not (_rd_rec(f) if tb else _rd_line(f)):
                 eof = True
                 break
             a, b = _rd[1], _rd[2]
@@ -5128,6 +5527,7 @@ def read_batch(path, off=0):
             if nlines & 63 == 0:
                 feed()
             if a == b:
+                s[0] = None              # (an over-long line in a .trb)
                 continue
             loc = None
             if gpx:
@@ -5142,6 +5542,16 @@ def read_batch(path, off=0):
                 # footer before them), lines the logger dropped
                 eof = True
                 break
+            elif tb:
+                k0 = _rk[0]
+                if _rbuf[a] == 61:       # = a keyframe
+                    _rk[0] = _rd[0] + a
+                r = _kb_rec(a, b, s)
+                if r is None:
+                    continue
+                need = _trk_point(r[0], r[1]) if r[1] else 0
+                if need < 0:
+                    need = 0
             else:
                 need = _trk_point(a, b)
                 if need < 0:
@@ -5153,6 +5563,8 @@ def read_batch(path, off=0):
                     need = 0
                 else:
                     _rd[2] = a           # leave it unread
+                    if tb:
+                        _rk[0] = k0
                     n -= 1
                     eof = False
                     break
@@ -5170,26 +5582,76 @@ def read_batch(path, off=0):
         return n, 0, 0, new_off, eof
     return n, n_ok, _put(pos, b"]}"), new_off, eof
 
-def commit_offset(path, n, new_off, eof=False):
+def commit_offset(path, n, new_off, eof=False, key=None):
     """Record that n points are done. Delete only at true EOF.
     Crash between POST and this call resends (at-least-once). At EOF the
     file goes without a .pos write first: on a full flash that write
-    failed, so the file was never deleted and no room came back."""
+    failed, so the file was never deleted and no room came back. key: a
+    .trb's keyframe at new_off (_rk after read_batch)."""
     if eof:
         _rm_done(path)
         _rm(path + ".pos")
         _clear_bad_full(path)
-    else:
+    elif key is None:
         write_offset(path, new_off)
+    else:
+        write_offset(path, new_off, key)
     up["left"] = max(up["left"] - n, 0)
 
-def _append_bad(path, off, new_off):
-    """Copy consumed point lines to <path>.bad. False if not durable."""
+def _track_lines(src, path, off, end, key, fn):
+    """fn(a, b) for each point line of the track file src (path) from off
+    to end, in _rbuf[a:b]: a .trb's decoded from its keyframe at key."""
+    gpx = not _is_trk(path)
+    if path.endswith(TRB):
+        s = _ks
+        if off and (key is None or not _kb_seek(src, off, key, s)):
+            return                       # (read_batch read it from 0)
+        if not off:
+            _rd_open(0)
+            s[0] = None
+        while _rd[0] + _rd[2] < end and _rd_rec(src):
+            a, b = _rd[1], _rd[2]
+            if a == b:
+                s[0] = None
+            elif not _rd_footer(a, b):
+                r = _kb_rec(a, b, s)
+                if r is not None and r[1]:
+                    fn(r[0], r[1])
+        return
+    _rd_open(off)
+    while _rd[0] + _rd[2] < end and _rd_line(src):
+        a, b = _rd[1], _rd[2]
+        if a < b and _rd_point(a, b, gpx):
+            fn(a, b)
+
+def _hist_lines(path, off, end, key):
+    """The point lines of a .trb batch about to be committed (from off to
+    end), as text, for the day history: a .trb's points go there once they
+    are up, not while they wait (on the flash twice, the history and the
+    track). [] for other files (a .trk's went when written, a .bad's when
+    they left their track) and on any error."""
+    lines = []
+    if not HIST_DAYS or not path.endswith(TRB):
+        return lines
+    try:
+        with open(path, "rb") as f:
+            _track_lines(f, path, off, end, key,
+                         lambda a, b: lines.append(bytes(_rmv[a:b]).decode()))
+    except (OSError, MemoryError, UnicodeError) as e:
+        print("hist read", repr(e))
+        del lines[:]
+    return lines
+
+def _append_bad(path, off, new_off, key=None):
+    """Copy consumed point lines to <path>.bad. False if not durable.
+    A .trb's are decoded: the .bad has the text lines."""
     if path.endswith(".bad"):
         return False
     bad = path + ".bad"
     sz = _file_size(bad) or 0
     need = max(new_off - off, 0)
+    if path.endswith(TRB):
+        need *= 8                        # (its text is ~6-8 times as long)
     if sz >= MAX_BAD_BYTES or sz + need > MAX_BAD_BYTES:
         print("bad file full", bad)
         return False
@@ -5197,36 +5659,34 @@ def _append_bad(path, off, new_off):
     if room is not None and room - need < MIN_FREE:
         print("bad file: flash reserve", bad)
         return False
-    gpx = not _is_trk(path)
     cut = not _tail_nl(bad, sz)
     try:
         with open(path, "rb") as src, open(bad, "ab") as dst:
             if cut:
                 dst.write(b"\n")
-            _rd_open(off)
-            while _rd[0] + _rd[2] < new_off and _rd_line(src):
-                a, b = _rd[1], _rd[2]
-                if a < b and _rd_point(a, b, gpx):
-                    dst.write(_rmv[a:b])
+            _track_lines(src, path, off, new_off, key,
+                         lambda a, b: dst.write(_rmv[a:b]))
     except (OSError, MemoryError) as e:
         print("quarantine", repr(e))
         gc.collect()
         return False
     return True
 
-def _quarantine_batch(path, off, n, new_off, eof):
-    """Park one rejected batch only if the copy landed on flash."""
+def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
+    """Park one rejected batch only if the copy landed on flash. key, key1:
+    a .trb's keyframes at off and new_off."""
     if path.endswith(".bad"):
         up["state"] = "err 422"
         return False
-    if not _append_bad(path, off, new_off):
+    if not _append_bad(path, off, new_off, key):
         up["state"] = "bad full"
         bf = up.get("bad_full") or {}
         bf[path] = True
         up["bad_full"] = bf
         return False
+    hl = _hist_lines(path, off, new_off, key)
     try:
-        commit_offset(path, n, new_off, eof)
+        commit_offset(path, n, new_off, eof, key1)
     except OSError as e:
         # the copy landed but the offset did not: the next try copies the
         # batch again (duplicates in .bad, deduplicated by Dawarich)
@@ -5234,6 +5694,7 @@ def _quarantine_batch(path, off, n, new_off, eof):
         up["err"] += 1
         up["state"] = "fs err"
         return False
+    _hist_add(hl, len(hl))
     up["allow_bad"] = False
     up["state"] = "quarantine"
     return True
@@ -5746,10 +6207,13 @@ def upload_tick():
         up["next_at"] = time.ticks_add(now, BACKOFF_START)
         return
     path = files[0]
-    off = read_offset(path)
+    off, key = read_pos(path)
     try:
         _heap_mark()
-        n, n_ok, size, new_off, eof = read_batch(path, off)
+        n, n_ok, size, new_off, eof = read_batch(path, off, key)
+        key1 = _rk[0]
+        if _rk[1] != off:
+            off, key = _rk[1], None      # (read from 0: a bad .pos)
         _heap_note("read_batch")
         feed()
         fsize = _file_size(path) or 0
@@ -5782,7 +6246,7 @@ def upload_tick():
         # unreadable track (READ_ERR_MAX of them parked a good one as .err)
         try:
             if n:
-                commit_offset(path, n, new_off, eof)
+                commit_offset(path, n, new_off, eof, key1)
             elif eof or fsize == 0:
                 _rm_done(path)           # empty / EOF track and .bad
                 _rm(path + ".pos")
@@ -5863,11 +6327,16 @@ def upload_tick():
         return
     gap = UPLOAD_GAP_AWAY if not at_home() else UPLOAD_GAP
     if code is not None and 200 <= code < 300:
+        # the day history gets the points once they are up (at flush they
+        # were on the flash twice while they waited)
+        hl = _hist_lines(path, off, new_off, key)
         try:
-            commit_offset(path, n, new_off, eof)
+            commit_offset(path, n, new_off, eof, key1)
         except OSError:
             _fs_err(now)
             return
+        _hist_add(hl, len(hl))
+        hl = None
         up["sent"] += n_ok
         up["ok_at"] = now
         up["fail4"] = 0
@@ -5898,7 +6367,7 @@ def upload_tick():
             _hold_file(path, now, retry if retry else BACKOFF_MAX)
             _schedule(now, gap)
             return
-        if not _quarantine_batch(path, off, n, new_off, eof):
+        if not _quarantine_batch(path, off, n, new_off, eof, key, key1):
             _hold_file(path, now, BACKOFF_MAX)
             _schedule(now, gap)
             return
@@ -6538,10 +7007,10 @@ def _file_counts():
         else:                            # CPython (tests)
             names = iter(os.listdir(LOG_DIR))
         for name in names:
-            if name.endswith((".gpx", ".trk")):
+            if name.endswith(_TRACKS):
                 if cur is None or cur != LOG_DIR + "/" + name:
                     n += 1
-            elif name.endswith((".gpx.bad", ".trk.bad")):
+            elif name.endswith(_BADS):
                 bad += 1
     except OSError:
         pass
