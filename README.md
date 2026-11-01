@@ -150,6 +150,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `GPS_TX` / `GPS_RX` | The ESP's UART pins to the receiver: `GPS_TX` the ESP's TX (→ GPS RX), `GPS_RX` the ESP's RX (← GPS TX). Default 18 / 19 (ESP32: 17 / 16). A pin the board or chip needs (UART0, USB 12/13, SPI flash, I2C, the boot-bypass pin; C6: strapping 8/9; ESP32: strapping 0 and 12, input-only 34–39 as TX), or both the same, keeps the default with a console line. Read at boot, before the first setup. |
+| `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
 | `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
 | `GPS_PVT` | `auto` (default): on a u-blox M8/M10 (from UBX-MON-VER) fixes come as UBX-NAV-PVT, NMEA off; `0`: NMEA on every receiver. See [GPS](#gps). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
@@ -259,6 +260,55 @@ firmware again. In an emergency `FORCE_MPY=1 ./deploy.sh` installs
 frozen module and takes its ~60 KB of Python heap again. To roll back,
 write the backup with the `esptool.py` command `--flash` prints, then run
 `./deploy.sh`.
+
+### 5. Firmware updates over WiFi (OTA)
+
+The firmware is built for `boards/GPS_LOGGER_C6`: MicroPython's
+`ESP32_GENERIC_C6` with two 2.4 MB OTA app slots
+(`partitions-8MiBplus-ota.csv`, 16 MB flash; the file system takes the
+~11 MB after them) and the bootloader's rollback on. The old single-slot
+app (1984 KB) was 98% full.
+
+**Once, over USB:** `--migrate` moves a board to this table. It erases the
+whole flash, file system included, so first let every point upload and copy
+the files off:
+
+```bash
+.venv/bin/mpremote connect /dev/ttyACM0 cp :/.env env.backup + cp -r :/hist . + reset
+PORT=/dev/ttyACM0 tools/build_firmware.sh --migrate   # 16 MB only; backs up the first 4 MB
+# put .env back (with OTA_URL / OTA_KEY added), /hist too, then:
+PORT=/dev/ttyACM0 ./deploy.sh
+```
+
+**Then:** `tools/build_firmware.sh --publish` writes `firmware/ota/`
+(`micropython.bin`, the page, `manifest.json`) and copies it with `scp` to
+`OTA_DEST`, a folder a web server on the LAN serves. The manifest carries the
+build (the commit time), the commit, size and SHA-256 of each file, and an
+HMAC-SHA256 over them with the key in `OTA_KEY_FILE` (default
+`~/.config/gps-logger/ota.key`). Only a clean, committed tree is published.
+
+```bash
+OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
+```
+
+The board, with `OTA_URL` (the manifest's URL) and `OTA_KEY` (the same key)
+in `.env`, checks 2 minutes after boot and then daily, only on a home
+network with everything uploaded (`OTA_FIRST`, `OTA_CHECK`). A build newer
+than its own, whose HMAC checks and that has not failed before, goes into
+the other app slot 4 KB at a time, with the GPS read and the watchdog fed
+between (~1 min). It is read back against its SHA-256, the page files are
+replaced (`.tmp`, then renamed), the slot is set to boot and the board
+resets. The new firmware runs pending: after 10 minutes with WiFi connected
+(`OTA_HEALTH`) it marks itself valid. A crash before that and the bootloader
+boots the old slot; no WiFi in that time and it boots the old slot itself.
+A build that failed is noted in `/ota.bad` and not tried again. Each step
+is in the diagnostic log (`ota … installed`, `booted, checking`, `ok`,
+`rolled back`). The status page shows the running commit and the OTA state
+under *Systems* (`FIRMWARE`).
+
+After the migration, `--flash` over USB still works. It writes the first
+slot and erases otadata, so that slot boots even after an OTA had switched
+to the other.
 
 ## Using it
 
@@ -1134,6 +1184,7 @@ with a NEO-6M; most never need changing.
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
+| `OTA_FIRST` / `OTA_CHECK` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 24 h / 10 min / 5 min | First update check after boot, then between checks; how long a new firmware runs (WiFi connected) before it is valid; wall clock for one download |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
