@@ -518,9 +518,20 @@ to fill the column next to *Systems*; signal bars and *Systems* on the right):
     cause, the run before it and until when, chip temperature and clock,
     GPS time.
   Counters that are 0 are left out of the rows;
-- the *Event log*: the diagnostic log, newest on top, with the minute
-  status lines as rows (local time, fix, satellites, points, IDF block, red
-  below 48 KB) and boots, upload errors and receiver lines as events;
+- the *Event log* (laid out after a server log monitoring design), from the
+  last 15 diagnostic lines (`WEB_DIAG`):
+  - *Satellites*: satellites seen (green) and used (cyan) over the status
+    lines' times, one point a minute;
+  - *Fix quality*: a donut of the minutes with a 3D fix (amber: 2D, red:
+    none), the 3D share, the average satellites used, the average HDOP (or
+    accuracy on NAV-PVT) and the number of events;
+  - *Logs*: newest on top, filtered by `All / Status / Events / Errors`
+    (with counts). A status line is a row of columns: fix, satellites
+    used/seen, HDOP (`±m` on NAV-PVT), points, the largest IDF block (red
+    below 48 KB), source and local time. Boots, OTA steps, receiver lines
+    and the rest are events, with their message across those columns.
+    Upload errors, crashes, reboots and a receiver reset loop count as
+    errors;
 - *Track*: the day as a timeline (as in Maps Timeline), `‹ day ›` arrows
   step through today and the days the board keeps. On top the km, the
   moving time and the trips; below, a dot and a solid line per trip (start

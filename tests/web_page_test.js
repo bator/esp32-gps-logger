@@ -25,6 +25,17 @@ v.logNone = ctx.logLine("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix
   "points 0 sent 0 wifi off pulses 0 mem 27000 idf None/None heap 124");
 v.bootNone = ctx.logLine("boot cause None prev_up - mhz 80");
 v.nullSys = ctx.view({}).sys;
+// Event log: the chart from two status lines, the filter chips
+const evL = ["up 60 utc 20261031T053014Z nmea 9/1 gpsboots 0 loops 0 sats 10/7 fix 3D_fix hdop 1.2 points 0 sent 0 " +
+  "wifi connected pulses 0 mem 27000 idf 157/120 heap 124",
+  "up 120 utc 20261031T053114Z nmea 9/1 gpsboots 0 loops 0 sats 12/9 fix 2D_fix hdop 1.8 points 0 sent 0 " +
+  "wifi connected pulses 0 mem 27000 idf 157/120 heap 124", "ota abc ok"];
+v.evChart = ctx.evChart(ctx.evStatus(evL));
+v.evDonut = ctx.evDonut(ctx.evStatus(evL), 1);
+ctx.EVF = "er";
+v.evErr = ctx.view(d).log;
+v.evErrChips = ctx.view(d).evf;
+ctx.EVF = "all";
 
 // The page against a stub document (no browser in CI)
 function El(id) {

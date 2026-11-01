@@ -10899,8 +10899,10 @@ else:
           "NMEA count; the log row shows +-hAcc",
           "<small>UBX BAD</small><b>0.40<em>%</em>" in tm3
           and "NMEA BAD" not in tm3 and "<small>NMEA BAD</small>" in tm
-          and "15/22 SATS &middot; &plusmn;2.3 M &middot; IDF 208 KB"
-          in v3.get("log", ""), tm3[-300:] + v3.get("log", "")[:300])
+          and '<span class="c sats">15<em>/22</em></span><span class="c hdop">'
+              '&plusmn;2.3<em> m</em></span>' in v3.get("log", "")
+          and "Avg acc</small><b>2.3 m" in v3.get("evd", ""),
+          tm3[-300:] + v3.get("log", "")[:400])
     # BOOT: when this run started (local time) and how long the one before
     # it lasted, until when; FIRMWARE: the build date, the commit after it
     jb = json.loads(page_json)
@@ -10979,14 +10981,45 @@ else:
           repr(v.get("unlabeled")) + sy[sy.find("Upload <em>") - 300:
                                          sy.find("Storage module")])
     lg = v.get("log", "")
-    check("PAGE: Event log - newest first, status rows, events, red low IDF",
-          lg.startswith('<div><span class="t">--:--</span>  <span class="">'
-                        'UP 60 &lt;B&gt;')
-          and lg.index("BOOT &middot; WATCHDOG &middot; PREVIOUS RUN 10 MIN 00 S")
-              < lg.index("3D FIX &middot; 13/21 SATS &middot; 4 PTS")
-          and '<span class="err">IDF 20 KB</span>' in lg, lg[:500])
-    check("PAGE: Event log - an unreadable CA_FILE ('upload ca err') is red",
-          '<span class="err">UPLOAD CA ERR OSERROR(5)</span>' in lg, lg[:600])
+    check("PAGE: Event log - newest first, a status row in columns (sats "
+          "used/seen, HDOP, points, IDF red under 48 KB), events with their "
+          "message, escaped",
+          lg.startswith('<div class="lr"><span class="ic info">')
+          and '<b class="info">UP</b><span class="ms">60 &lt;b&gt;</span>' in lg
+          and lg.index('<b class="boot">BOOT</b><span class="ms">watchdog '
+                       '&middot; previous run 10 min 00 s</span>')
+              < lg.index('<b class="ok">3D FIX</b>')
+          and '<span class="c sats">13<em>/21</em></span><span class="c hdop">'
+              '0.90</span><span class="c pts">4</span><span class="c idf err">'
+              '20<em> KB</em></span>' in lg and "<b>" not in lg, lg[:700])
+    check("PAGE: Event log - an unreadable CA_FILE ('upload ca err') is an "
+          "error row; the chips count all / status / events / errors",
+          '<span class="ic err">' in lg
+          and '<b class="err">UPLOAD</b><span class="ms">ca err OSError(5)'
+              in lg
+          and ">All<em>4</em>" in v.get("evf", "")
+          and ">Status<em>1</em>" in v.get("evf", "")
+          and ">Events<em>2</em>" in v.get("evf", "")
+          and ">Errors<em>1</em>" in v.get("evf", ""), v.get("evf", ""))
+    check("PAGE-EV: the Errors chip shows only the error rows",
+          v.get("evErr", "").count('<div class="lr">') == 1
+          and "UPLOAD" in v.get("evErr", "")
+          and '<button class="on" onclick="evPick(\'er\')">Errors'
+              in v.get("evErrChips", ""), v.get("evErr", "")[:300])
+    check("PAGE-EV: satellites chart (seen and used lines over the status "
+          "times, a grid every 4) and the fix donut (3D share, avg used, "
+          "avg HDOP, events); one status line is not a chart",
+          v.get("evChart", "").startswith('<svg class="ev-ch"')
+          and v.get("evChart", "").count('class="l1"') == 1
+          and v.get("evChart", "").count('class="l2"') == 1
+          and ">12</text>" in v.get("evChart", "")
+          and "50%</text>" in v.get("evDonut", "")
+          and "3D fix</small><b>1/2" in v.get("evDonut", "")
+          and "Avg used</small><b>8.0" in v.get("evDonut", "")
+          and "Avg HDOP</small><b>1.50" in v.get("evDonut", "")
+          and "Events</small><b>1" in v.get("evDonut", "")
+          and "TWO STATUS LINES" in v.get("evc", ""),
+          repr((v.get("evChart", "")[:200], v.get("evDonut", "")[-300:])))
     # PAGE-WIFI: an arc icon (0-3 arcs lit) and the quality in per cent,
     # 2 x (RSSI + 100) clamped; amber below -67 dBm, red below -80; no words
     check("PAGE-WIFI: arcs, quality % and tone from RSSI",
@@ -11006,9 +11039,10 @@ else:
           repr((v.get("coordSW"), v.get("coordNE"))))
     check("PAGE-NULL: diag 'sats 0/None' reads -/0, 'idf None' and 'cause "
           "None' read -",
-          "-/0 SATS" in v.get("logNone", "") and "IDF - KB" in v.get("logNone", "")
+          '<span class="c sats">-<em>/0</em></span>' in v.get("logNone", "")
+          and '<span class="c idf">-<em> KB</em>' in v.get("logNone", "")
           and "None" not in v.get("logNone", "") + v.get("bootNone", "")
-          and "CAUSE -" in v.get("bootNone", ""),
+          and '<span class="ms">cause -</span>' in v.get("bootNone", ""),
           repr((v.get("logNone"), v.get("bootNone"))))
     check("PAGE-NULL: an empty status.json shows - (no None/null/NaN)",
           "heap -/- KB" in v.get("nullSys", "")
