@@ -3950,7 +3950,20 @@ try:
 
     w, calls, out = rv_start_wifi(rv_env, [("home", -80), ("phone", -85)],
                                   ["home", "phone"], fail_always=("home",))
-    check("REVIEW3-2: a weak candidate (< ROAM_MIN_RSSI) is not retried",
+    check("WIFI-202: a weak candidate (< ROAM_MIN_RSSI) failing with 202 "
+          "(STAT_WRONG_PASSWORD, the C6 quirk) is retried once",
+          calls == ["home", "home", "phone"] and w["ssid"] == "phone",
+          "calls=%s" % calls)
+    # the mock fails with 4 (its STAT_WRONG_PASSWORD): as another status
+    # (beacon timeout, no AP) the weak candidate gets no retry
+    saved_wp = sys.modules["network"].STAT_WRONG_PASSWORD
+    sys.modules["network"].STAT_WRONG_PASSWORD = 99
+    try:
+        w, calls, out = rv_start_wifi(rv_env, [("home", -80), ("phone", -85)],
+                                      ["home", "phone"], fail_always=("home",))
+    finally:
+        sys.modules["network"].STAT_WRONG_PASSWORD = saved_wp
+    check("REVIEW3-2: a weak candidate failing otherwise is not retried",
           calls == ["home", "phone"] and w["ssid"] == "phone",
           "calls=%s" % calls)
 
@@ -11436,6 +11449,48 @@ check("REV-16: hist and .bad appends after a cut line start a new line",
       h16.endswith("\n47.4979\n47.200000,18.500000,1,2,1,20261101T100001Z\n")
       and b16.startswith("47.4979\n52.500000,13.400000,"),
       repr((h16[-80:], b16[:60])))
+
+# WIFI-DIAG: a drop, the failed tries and the way back go to the diag log
+# (only the console had them: a drop at home could not be explained from
+# the page), one line of a kind per WIFI_DIAG_GAP, the rest counted
+class _GoneW(object):
+    def status(self, arg=None):
+        if arg:
+            raise OSError(1)
+        return 0
+class _BackW(object):
+    def ifconfig(self):
+        return ("192.168.1.60", "255.255.255.0", "192.168.1.1", "1.1.1.1")
+    def status(self, arg=None):
+        return -63 if arg == "rssi" else 3
+_wd_saved = gl.DIAG
+gl.DIAG = 60000
+diag_clear()
+gl.wifi_reset()
+gl.log_reset()
+gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
+                    "hidden": False, "bssid": None, "ip": None}]
+gl.wifi.update(wlan=_GoneW(), state="connected", ssid="home", home=True,
+               rssi=-61, last_check=_clock[0])
+gl.wifi_tick()
+gl._mark_failed("home", "status 202 after 7000 ms")
+_clock[0] += 1000
+gl._mark_failed("home", "status 202 after 7000 ms")
+_clock[0] += gl.WIFI_DIAG_GAP
+gl._mark_failed("home", "status 201 after 300 ms")
+_clock[0] += 125000
+gl._wifi_got_ip(_BackW())
+wd = [l for l in diag_lines() if l.startswith("wifi ")]
+gl.DIAG = _wd_saved
+diag_clear()
+gl.wifi_reset()
+check("WIFI-DIAG: lost (ssid, rssi), fails rate-limited with the count, "
+      "back (after, tries, rssi) in the diag log",
+      wd == ["wifi lost home rssi -61",
+             "wifi fail home status 202 after 7000 ms",
+             "wifi fail home status 201 after 300 ms (+1 more)",
+             "wifi back home after 7 min 06 s, 3 failed tries, rssi -63"],
+      repr(wd))
 
 print()
 print("%d passed, %d failed" % (passed, failed))

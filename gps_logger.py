@@ -256,6 +256,9 @@ LOST_GRACE = 5000                        # ms to let IDF auto-reconnect after dr
 ROAM_CHECK = 300000                      # ms between home-roam scans on hotspot
 ROAM_BACKOFF_MAX = 3600000               # ms cap on roam retry (60 min)
 ROAM_MIN_RSSI = -75                      # do not jump to a weak home AP
+WIFI_DIAG_GAP = 300000                   # ms between diag lines of one kind
+                                         # (lost / fail / back): the rest
+                                         # counted into the next one
 BLANK_BAD_HOLD = 3600000                 # ms a blank AP whose hidden-home
                                          # try failed is not tried again
 HOME_AP_MAX = 4                          # BSSIDs of the hidden home learned
@@ -2024,6 +2027,7 @@ def wifi_reset():
                 roam_at=time.ticks_ms(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
                 retried=False, idle_at=time.ticks_ms(), sleep_home=False,
+                lost_at=None, fails=0, diag_at={}, diag_more={},
                 pb_at=time.ticks_ms(), pb_scans=0,
                 wake=False, wake_at=None,
                 blank_rssi=None, blank_bssid=None, blank_bad=[],
@@ -2054,9 +2058,25 @@ def _recently_failed(ssid, now):
     t = wifi["failed"].get(ssid)
     return t is not None and _age(now, t) < FAIL_HOLD
 
+def _wifi_diag(kind, line):
+    """A WiFi event in the diag log (a drop and why the reconnects failed
+    were only on the console): one line of a kind per WIFI_DIAG_GAP, the
+    ones in between counted into the next."""
+    now = time.ticks_ms()
+    at, more = wifi["diag_at"], wifi["diag_more"]
+    t = at.get(kind)
+    if t is not None and _age(now, t) < WIFI_DIAG_GAP:
+        more[kind] = more.get(kind, 0) + 1
+        return
+    n = more.pop(kind, 0)
+    at[kind] = now
+    _diag_write(line + (" (+%d more)" % n if n else ""))
+
 def _mark_failed(ssid, why=""):
     wifi["failed"][ssid] = time.ticks_ms()
+    wifi["fails"] = wifi.get("fails", 0) + 1
     print("wifi fail", ssid, why)
+    _wifi_diag("fail", "wifi fail %s %s" % (ssid, why))
     if wifi.get("roaming") and _net_home(ssid):
         if not _net_hidden(ssid):
             b = wifi.get("roam_backoff") or ROAM_CHECK
@@ -2542,6 +2562,13 @@ def _wifi_got_ip(w):
         wifi["rssi"] = None
     wifi["home"] = _net_home(wifi.get("ssid"))
     wifi["down_at"] = None
+    lost = wifi.get("lost_at")
+    if lost is not None:
+        _wifi_diag("back", "wifi back %s after %s, %d failed tries, rssi %s"
+                   % (wifi.get("ssid") or "", _hms(_age(time.ticks_ms(), lost)
+                                                   // 1000),
+                      wifi.get("fails", 0), wifi["rssi"]))
+        wifi["lost_at"] = None
     wifi["learn"] = False
     if wifi["home"] and _net_hidden(wifi.get("ssid")):
         # our hidden home answered: no blank AP stays blamed for an
@@ -2576,8 +2603,13 @@ def _wifi_failed(w, s, elapsed):
     i = wifi.get("cand_i", 0)
     net = cands[i] if i < len(cands) else None
     rssi = net.get("rssi") if net else None
+    # 202 (STAT_WRONG_PASSWORD, also v1.29's CONNECTION_FAIL) on a network
+    # the scan saw is retried at any RSSI: the board's home AP reads -65 to
+    # -75 dBm, a dip under ROAM_MIN_RSSI skipped the retry the 202 quirk
+    # needs, and the reconnect after a drop failed round after round
+    quirk = s == getattr(network, "STAT_WRONG_PASSWORD", 202)
     if (net is not None and net["ssid"] == ssid and not wifi.get("retried")
-            and rssi is not None and rssi >= ROAM_MIN_RSSI):
+            and rssi is not None and (quirk or rssi >= ROAM_MIN_RSSI)):
         wifi["retried"] = True
         print("wifi retry", ssid, why)
         return _wifi_connect(w, net)
@@ -3226,6 +3258,10 @@ def wifi_tick():
         # auto-reconnects. Do not map that to "connecting" with a stale
         # try_at (that would immediately fail the current SSID).
         wifi["state"] = "lost"
+        wifi["lost_at"] = now
+        wifi["fails"] = 0
+        _wifi_diag("lost", "wifi lost %s rssi %s" % (wifi.get("ssid") or "",
+                                                    wifi.get("rssi")))
         # a stay that began at home stays a home stay while the link is
         # down (a router restart): at_home() reads sleep_home off-line
         wifi["sleep_home"] = bool(wifi.get("home") and (log.get("still")
