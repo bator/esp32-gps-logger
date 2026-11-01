@@ -10993,6 +10993,53 @@ gl.MIN_MOVE = saved_mm
 check("MINMOVE-ENV: 0-50 m read (decimals, comment); invalid keeps 1",
       got == [2.5, 0.0, 7.0, 1, 1, 1, 1], repr(got))
 
+import inspect
+# GPS-PINS-ENV: .env GPS_TX / GPS_RX move the GPS UART (a second receiver
+# on the C6's old 4/5 wiring); pins the board or chip needs, both the same,
+# or a UART that refuses keep the default
+class _UartSpy(object):
+    def __init__(self, fail=False):
+        self.calls, self.fail = [], fail
+    def init(self, **k):
+        if self.fail:
+            raise ValueError("bad pin")
+        self.calls.append(k)
+_gp_saved = (gl.uart, gl.GPS_TX, gl.GPS_RX, gl.IS_C6)
+gp = []
+try:
+    gl.IS_C6 = True
+    for env, fail in (({"GPS_TX": "4", "GPS_RX": "5 # old wiring"}, False),
+                      ({"GPS_TX": "12", "GPS_RX": "16"}, False),
+                      ({"GPS_TX": "4", "GPS_RX": "18"}, False),
+                      ({"GPS_TX": "x", "GPS_RX": "9"}, False),
+                      ({"GPS_TX": "2", "GPS_RX": "3"}, True),
+                      ({}, False)):
+        gl.GPS_TX, gl.GPS_RX = 18, 19
+        gl.uart = _UartSpy(fail)
+        gl._gps_pins_env(env)
+        gp.append((gl.GPS_TX, gl.GPS_RX, list(gl.uart.calls)))
+    gl.IS_C6 = False
+    gl.GPS_TX, gl.GPS_RX = 17, 16
+    gl.uart = _UartSpy()
+    gl._gps_pins_env({"GPS_TX": "34", "GPS_RX": "12"})
+    gp.append((gl.GPS_TX, gl.GPS_RX, list(gl.uart.calls)))
+    gl._gps_pins_env({"GPS_TX": "27", "GPS_RX": "35"})
+    gp.append((gl.GPS_TX, gl.GPS_RX, list(gl.uart.calls)))
+finally:
+    gl.uart, gl.GPS_TX, gl.GPS_RX, gl.IS_C6 = _gp_saved
+check("GPS-PINS-ENV: GPS_TX/GPS_RX move the UART; console, USB, strapping "
+      "8/9/12, same pin, input-only TX or a refused init keep the default",
+      gp == [(4, 5, [{"baudrate": gl.BAUD, "tx": 4, "rx": 5}]),
+             (18, 19, []),
+             (4, 18, [{"baudrate": gl.BAUD, "tx": 4, "rx": 18}]),
+             (18, 19, []),
+             (18, 19, []),
+             (18, 19, []),
+             (17, 16, []),
+             (27, 35, [{"baudrate": gl.BAUD, "tx": 27, "rx": 35}])]
+      and "_gps_pins_env(env)" in inspect.getsource(gl.run),
+      repr(gp))
+
 # WEB-LINK: the page's GPS link - bytes read, seconds since the last whole
 # NMEA sentence / UBX frame (a bad checksum is not one), None before any
 def _nm(body):
