@@ -6188,7 +6188,7 @@ try:
               kept == [26] * 5 + [2] * 3 and free == 3, "%r %r" % (kept, free))
         # R2-12: pins the chip itself needs: ESP32 strapping GPIO0 (download
         # mode), UART0 1/3, SPI flash 6-11 (driving one crashes the board);
-        # C6 strapping 8/9, UART0 16/17, SPI flash 24-30
+        # C6 strapping 4/5 and 8/9, UART0 16/17, SPI flash 24-30
         saved_c6, saved_pin = gl.IS_C6, gl.PB_PIN
         bad_ok, good = [], []
         try:
@@ -6203,7 +6203,7 @@ try:
                 gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
                 good.append(gl.PB_PIN)
             gl.IS_C6 = True
-            for v in (8, 9, 16, 17, 24, 27, 30):
+            for v in (4, 5, 8, 9, 16, 17, 24, 27, 30):
                 gl.PB_PIN = 2
                 gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
                 if gl.PB_PIN != 2:
@@ -10862,6 +10862,32 @@ for v in ("2.5", "0", "7 # meters", "60", "-1", "x", None):
 gl.MIN_MOVE = saved_mm
 check("MINMOVE-ENV: 0-50 m read (decimals, comment); invalid keeps 1",
       got == [2.5, 0.0, 7.0, 1, 1, 1, 1], repr(got))
+
+# C6-UART: the C6 reads the GPS on UART1 GPIO18 (TX) / GPIO19 (RX), not the
+# strapping pins 4/5 (the GPS is soldered to 18/19 now); the ESP32 keeps 16/17
+_uart_kw = []
+_UART0 = sys.modules["machine"].UART
+class _UARTSpy(_UART0):
+    def __init__(self, *a, **k):
+        _uart_kw.append((a, k))
+_saved_machine = getattr(sys.implementation, "_machine", "")
+sys.modules["machine"].UART = _UARTSpy
+try:
+    sys.implementation._machine = "Generic ESP32C6 module with ESP32C6"
+    c6 = _reload_logger()
+    c6_pins = (c6.IS_C6, c6.GPS_UART, c6.GPS_TX, c6.GPS_RX, _uart_kw[-1])
+    sys.implementation._machine = "Generic ESP32 module with ESP32"
+    wr = _reload_logger()
+    wr_pins = (wr.IS_C6, wr.GPS_UART, wr.GPS_TX, wr.GPS_RX)
+finally:
+    sys.modules["machine"].UART = _UART0
+    sys.implementation._machine = _saved_machine
+    gl = _reload_logger()
+check("C6-UART: C6 GPS on UART1 tx=18 rx=19, ESP32 on UART2 tx=17 rx=16",
+      c6_pins[:4] == (True, 1, 18, 19)
+      and c6_pins[4][0][:1] == (1,) and c6_pins[4][1].get("tx") == 18
+      and c6_pins[4][1].get("rx") == 19
+      and wr_pins == (False, 2, 17, 16), "%r %r" % (c6_pins, wr_pins))
 
 print()
 print("%d passed, %d failed" % (passed, failed))
