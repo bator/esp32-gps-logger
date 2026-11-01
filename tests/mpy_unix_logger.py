@@ -374,6 +374,69 @@ check("trb: same JSON as the .trk, %d B for %d points"
       and len(body) < 12 * len(tl))
 check("trb: resumed from a keyframe mid-file", tail == outs[1][1])
 
+# the .trb read allocates about what the .trk read does: it runs right
+# before a TLS POST, when the heap is tightest (it made ~2.7 times the
+# garbage: a bytes % per field, a tuple per record, the date tuple)
+if hasattr(gc, "mem_alloc"):
+    base = "/tmp/gps-logger-alloc-%d" % time.ticks_ms()
+    tl2 = tl[:50]
+    try:
+        with open(base + ".trb", "wb") as f:
+            f.write(b"#TRKB\n" + gl._kb_encode(tl2, len(tl2), None) + b"#END\n")
+        with open(base + ".trk", "wb") as f:
+            f.write(("#TRK2\n" + "".join(tl2) + "#END\n").encode())
+        used = {}
+        for ext in (".trk", ".trb"):
+            gc.collect()
+            gc.disable()
+            a0 = gc.mem_alloc()
+            gl.read_batch(base + ext, 0)
+            used[ext] = gc.mem_alloc() - a0
+            gc.enable()
+    finally:
+        import os
+        for ext in (".trb", ".trk"):
+            os.remove(base + ext)
+    print("read_batch alloc", used)
+    check("trb: read_batch allocates at most 1.25 x the .trk read",
+          used[".trb"] <= used[".trk"] * 1.25)
+
+# an uploaded .trb batch goes to the day history without a list of its
+# lines (it built ~100 objects right after the POST): what a batch of 50
+# allocates beyond one of 10 is under 40 bytes a point
+if hasattr(gc, "mem_alloc"):
+    import os
+    base = "/tmp/gps-logger-hist-%d" % time.ticks_ms()
+    gl.HIST_DIR = base + "-hist"
+    gl.free = lambda: None
+    hist_alloc = {}
+    hist_txt = ""
+    try:
+        for k in (10, 50):
+            tl3 = tl[:k]
+            with open(base + ".trb", "wb") as f:
+                f.write(b"#TRKB\n" + gl._kb_encode(tl3, k, None) + b"#END\n")
+            gl._hist_batch(base + ".trb", 0, 1 << 20, None)   # (day file made)
+            gc.collect()
+            gc.disable()
+            a0 = gc.mem_alloc()
+            gl._hist_batch(base + ".trb", 0, 1 << 20, None)
+            hist_alloc[k] = gc.mem_alloc() - a0
+            gc.enable()
+        for n in sorted(os.listdir(gl.HIST_DIR)):
+            with open(gl.HIST_DIR + "/" + n) as f:
+                hist_txt += f.read()
+    finally:
+        os.remove(base + ".trb")
+        for n in os.listdir(gl.HIST_DIR):
+            os.remove(gl.HIST_DIR + "/" + n)
+        os.rmdir(gl.HIST_DIR)
+    print("hist alloc", hist_alloc)
+    check("trb: an uploaded batch goes to the day history as its text, "
+          "under 40 bytes allocated a point",
+          hist_txt == "".join(tl[:10]) * 2 + "".join(tl[:50]) * 2
+          and (hist_alloc[50] - hist_alloc[10]) < 40 * 40)
+
 # the hidden home's learned BSSIDs survive a reboot (/home_aps: hex lines,
 # bytes.find and a bytearray parse, no binascii); garbage lines are skipped
 gl.HOME_APS_FILE = "/tmp/gps-logger-smoke-aps-%d" % time.ticks_ms()

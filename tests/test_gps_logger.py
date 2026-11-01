@@ -6568,9 +6568,14 @@ def deploy_run(env_extra):
     os.makedirs(dev)
     for n, b in (("gps_logger.mpy", b"OLD MODULE"), ("main.py", b"old main"),
                  ("web.html", b"old page"), ("gps_logger.py", b"stray"),
-                 ("web.html.new", b"left from a failed deploy")):
+                 ("web.html.dpl", b"left from a failed deploy")):
         with open(os.path.join(dev, n), "wb") as f:
             f.write(b)
+    if env_extra.get("FAKE_OTA_PENDING"):      # an OTA install being validated:
+        for n, b in (("ota.pending", b"1793557995 6b62646\n/web.html"),
+                     ("web.html.new", b"page staged by the OTA")):
+            with open(os.path.join(dev, n), "wb") as f:
+                f.write(b)
     fz = env_extra.get("FAKE_FROZEN")           # firmware with the logger in:
     if fz:                                      # built from this gps_logger.py
         with open(os.path.join(work, "gps_logger.py"), "rb") as f:
@@ -6616,20 +6621,20 @@ if shutil.which("bash") and shutil.which("sha256sum"):
         new_page = f.read()
     rc, out, err, dev, calls = deploy_run({})
     cps = [c for call in calls for c in call if c[0] == "cp"]
-    check("DEPLOY: copies to .new, checks, renames; old .new and stray .py go",
+    check("DEPLOY: copies to .dpl, checks, renames; old .dpl and stray .py go",
           rc == 0 and dev_file(dev, "gps_logger.mpy") == new_mpy
           and dev_file(dev, "web.html") == new_page
           and dev_file(dev, "gps_logger.py") is None
-          and not [n for n in os.listdir(dev) if n.endswith(".new")]
+          and not [n for n in os.listdir(dev) if n.endswith(".dpl")]
           and dev_file(dev, ".rtc") == b"0"
-          and len(cps) == 4 and all(c[2].endswith(".new") for c in cps)
+          and len(cps) == 4 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Generic ESP32C6" in out and "(rv32imc)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
     check("DEPLOY-GZIP: web.html.gz (gzip -9 -n of web.html) goes up too",
           gunzip(dev_file(dev, "web.html.gz") or b"") == new_page
           and (dev_file(dev, "web.html.gz") or b"")[4:8] == b"\0\0\0\0"
-          and ["cp", "web.html.gz", ":web.html.gz.new"] in cps, repr(cps))
+          and ["cp", "web.html.gz", ":web.html.gz.dpl"] in cps, repr(cps))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
     check("DEPLOY: too little free flash -> stops before copying, old kept",
           rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
@@ -6639,7 +6644,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY: a cut copy fails the check -> old files kept, .new removed",
           rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
           and dev_file(dev, "main.py") == b"old main"
-          and not [n for n in os.listdir(dev) if n.endswith(".new")]
+          and not [n for n in os.listdir(dev) if n.endswith(".dpl")]
           and "Copy check FAILED" in err
           and "Deployed" not in out, "rc=%d %r" % (rc, err[-300:]))
     rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": "match"})
@@ -6654,6 +6659,23 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and "frozen in (abc1234)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
+    # DEPLOY-OTA: an OTA install still being validated (/ota.pending): the
+    # deploy's reset would abort the pending image (the bootloader rolls back
+    # and ota_boot blames the build), and its files would clash with the
+    # staged page (<path>.new). It stops; FORCE=1 deploys, the staged page
+    # left alone
+    rc, out, err, dev, calls = deploy_run({"FAKE_OTA_PENDING": "1"})
+    ota_stop = (rc != 0 and "OTA" in err
+                and not [c for call in calls for c in call if c[0] == "cp"]
+                and dev_file(dev, "web.html.new") == b"page staged by the OTA"
+                and dev_file(dev, "main.py") == b"old main")
+    rc, out, err, dev, calls = deploy_run({"FAKE_OTA_PENDING": "1",
+                                           "FORCE": "1"})
+    check("DEPLOY-OTA: an OTA being validated stops the deploy before "
+          "copying; FORCE=1 deploys and leaves the staged page",
+          ota_stop and rc == 0 and dev_file(dev, "web.html") == new_page
+          and dev_file(dev, "web.html.new") == b"page staged by the OTA",
+          "%r rc=%d %r %r" % (ota_stop, rc, out[-200:], err[-300:]))
     # DEPLOY-STALE: the frozen logger is not this gps_logger.py (or a first
     # build without SHA): stop before copying, unless FORCE=1
     stale = []
@@ -11964,6 +11986,52 @@ try:
           and "after a power-off" in rb[1][6][-1]
           and plain == [("valid",)],
           repr((rb, plain)))
+    # OTA-PROMOTE: a staged page that cannot be renamed over the old one
+    # (a file system that does not rename over an existing file) goes up
+    # after the old one is removed; one that cannot go up at all is in the
+    # diag log (it was silent, the new firmware served the old page)
+    prom = []
+    real_rename = os.rename
+    for mode in ("exists", "broken"):
+        _ota_reset()
+        diag_clear()
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        with open(page_p, "wb") as f:
+            f.write(b"old page")
+        with open(page_p + ".new", "wb") as f:
+            f.write(_page)
+        with open(gl.OTA_PENDING, "w") as f:
+            f.write("200 abc0200\n" + page_p)
+
+        def _rename(a, b, mode=mode):
+            if a == page_p + ".new" and (mode == "broken"
+                                         or os.path.exists(b)):
+                raise OSError(17)
+            return real_rename(a, b)
+
+        gl.os.rename = _rename
+        try:
+            gl.ota_boot()
+            gl.wifi_reset()
+            gl.wifi["state"] = "connected"
+            gl.ota_tick(_clock[0])
+            _clock[0] += gl.OTA_VALID_AFTER + 1000
+            gl.ota_tick(_clock[0])
+        finally:
+            gl.os.rename = real_rename
+        page = None
+        if os.path.exists(page_p):
+            with open(page_p, "rb") as f:
+                page = f.read()
+        prom.append((gl.ota["state"], page,
+                     [l for l in diag_lines() if "page" in l]))
+    check("OTA-PROMOTE: a page not renamed over the old one goes up after "
+          "moving it aside; one that cannot go up is a diag line and the "
+          "old page stays",
+          prom[0][:2] == ("ok", _page) and prom[0][2] == []
+          and prom[1][:2] == ("ok", b"old page") and prom[1][2]
+          and "not put up" in prom[1][2][0] and page_p in prom[1][2][0],
+          repr(prom))
     # set_boot failing: no pending note blames a build that never ran, the
     # staged page is dropped
     _ota_reset()
@@ -12699,6 +12767,31 @@ try:
     check("TRKB: count_points counts the points after the .pos",
           gl.count_points() == 80, repr(gl.count_points()))
 
+    # count_points from a .pos whose offset is inside a record (its
+    # keyframe good): counts the file from the start, as read_batch then
+    # reads it (it counted misframed bytes: a wrong 'left' held the OTA)
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:130])
+    n, ok, size, off1, eof = gl.read_batch(pr, 0)
+    gl.write_offset(pr, off1 + 1, gl._rk[0])
+    check("TRKB: count_points from an offset inside a record counts the "
+          "whole file", gl.count_points() == 130, repr(gl.count_points()))
+
+    # the encoder and the decoder share the time range: lines dated 2088
+    # or later (past FIX_S_END) are keyframes, all read back (the encoder
+    # wrote deltas the decoder dropped)
+    far = ["47.5000%02d,19.000000,1.0,2,1.0,20900101T0000%02dZ\n" % (i, i)
+           for i in range(6)]
+    pf = os.path.join(_tb, "20900101_000000.trb")
+    with builtins.open(pf, "wb") as f:
+        f.write(gl.HEADERB.encode() + gl._kb_encode(far, len(far), None)
+                + gl.FOOTER.encode())
+    n_f, ok_f = gl.read_batch(pf, 0)[:2]
+    check("TRKB: lines past FIX_S_END are keyframes, every one read back",
+          (n_f, ok_f) == (6, 6) and _tb_keys(pf).count("=") == 6,
+          repr((n_f, ok_f, _tb_keys(pf))))
+
     # 422: the batch goes to <file>.trb.bad as text lines, read as a .trk
     online(_tb)
     gl.LOG_DIR = _tb
@@ -12857,14 +12950,15 @@ try:
     res = []
     try:
         for _ in range(8):
-            res.append(gl._kb_rec(0, len(rec), s_))
+            r_ = gl._kb_rec(0, len(rec), s_)
+            res.append((gl._kr[0], gl._kr[1]) if r_ > 0 else (0, 0))
     except Exception as e:
         res.append(repr(e))
     over = bytes([0x82, 0x80, 0x80, 0x80, 0x80, 0x04])  # 2^30: too big
     gl._rbuf[0:len(ln)] = ln
     gl._kb_rec(0, len(ln), s_)
     gl._rbuf[0:len(over)] = over
-    r_over = gl._kb_rec(0, len(over), s_)
+    r_over = (0, 0) if gl._kb_rec(0, len(over), s_) == 0 else "point"
     check("TRKB: deltas that keep growing (damaged data) make the state "
           "invalid before a line outgrows the decode buffer",
           all(isinstance(r, tuple) for r in res)

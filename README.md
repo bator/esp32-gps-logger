@@ -194,10 +194,15 @@ enough free flash` when the new files would not fit next to the old ones).
 It makes `web.html.gz` (`gzip -9 -n web.html`: ~9 KB instead of ~24 KB,
 what browsers get) and copies `gps_logger.mpy`, `main.py`, the status page
 `web.html` and `web.html.gz` as
-`<name>.new`, checks their size and SHA-256 on the board, and only then
+`<name>.dpl`, checks their size and SHA-256 on the board, and only then
 renames them over the old files; a failed check (`Copy check FAILED`)
-removes the `.new` files and keeps the old install, so a copy cut short on
-a nearly full flash can no longer leave an unimportable module. Then it
+removes the `.dpl` files and keeps the old install, so a copy cut short on
+a nearly full flash can no longer leave an unimportable module (not
+`<name>.new`: that is how an OTA stages the page it installs). While an
+OTA install is being validated (`/ota.pending`, about 2 minutes) it stops
+before copying: its reset would abort the pending firmware, the bootloader
+would roll back and the build would be blamed (`FORCE=1` deploys anyway,
+the staged page left alone). Then it
 removes a stray `gps_logger.py`, clears the boot-fail counter and resets
 the board. When it cannot tell whether the firmware has the logger frozen
 in (no clear answer from the board), it stops instead of guessing.
@@ -309,7 +314,10 @@ between (~1 min; the HTTP body ends at its Content-Length). It is read back
 against its SHA-256, the page files are staged as `<file>.new`, the slot is
 set to boot and the board resets. The new firmware runs pending: 2 minutes
 with WiFi connected (`OTA_VALID_AFTER`) mark it valid, and only then do the
-staged page files replace the old ones. A crash or reset before that and
+staged page files replace the old ones (on a file system that does not
+rename over a file, the old one is moved aside first and back if the new
+one still does not go up; a page that does not go up is a diag line,
+`ota <commit> page <path> not put up`). A crash or reset before that and
 the bootloader boots the old slot; no WiFi within 10 minutes (`OTA_HEALTH`)
 and it resets itself, with the same result (it never sets the old slot to
 boot itself: that left the old image pending, and the next reset fell back
@@ -580,7 +588,10 @@ position. A gap of over 5 minutes breaks the line. Every point goes to
 `/hist/YYYYMMDD.trk` (its UTC date; the text line of the track file). A
 `.trb` point goes there once it is uploaded, when its batch is accepted (or
 parked as `.bad`), not when it is written: while it waits for WiFi it is on
-the flash once, in the track file. So the map shows a trip from when it is
+the flash once, in the track file. Each decoded line is written straight
+to its day's file, just before the batch is committed (a commit that then
+fails sends the batch again, and its points are drawn twice over the same
+line). So the map shows a trip from when it is
 up: at home about a minute after the track closes, on a hotspot as it
 uploads; points still waiting are not drawn. A `.trk` (`TRK_BIN` off, or
 written by older firmware) goes there when written, as before. A track
@@ -787,13 +798,19 @@ console line.
   - A delta keeps the keyframe's shape: the same fields, empty ones
     included, with the same decimals. Any other line (an empty elevation
     on a 2D fix, a second written twice, a number not written as it
-    prints, a change of 2^28 or more) is a keyframe. Each 60 s write starts
+    prints, a change of 2^28 or more, a time from 2088 on) is a keyframe.
+    Each 60 s write starts
     with one, and one follows every 64 deltas (`KEY_EVERY`), so a damaged
     record loses at most the points up to the next keyframe.
   - The `.pos` is `offset keyframe-offset`: a reader resumes by decoding
     from that keyframe (at most 64 records). A `.pos` without a valid
     keyframe, or an offset inside a record, resends the file from the
-    start (Dawarich deduplicates).
+    start (Dawarich deduplicates); the boot-time point count (`left`) then
+    counts it from the start too.
+  - The decoder writes each line digit by digit into the read buffer (the
+    date only when the day changes): a batch of 50 allocates what the
+    `.trk` read does (measured on the MicroPython unix port: 19.6 KB each;
+    it was 52.6 KB, right before the TLS POST).
   - A write never guesses where a `.trb` ends: if the footer is not where
     the last write left it, the batch goes on in a new file (a guessed
     boundary could split a record and decode garbage as points).
