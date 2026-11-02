@@ -14231,10 +14231,16 @@ check("PAGE-STATIC-GONE: no Static test panel, code, CSS or browser "
       not any(w_ in page_src for w_ in (
           "Static test", "statView", "statAdd", "sstat", "scat", "STAT_",
           "gps-static", "localStorage", "CEP50")), "")
-check("PAGE: polls status.json at the board's refresh_s, no reload",
+# (the map: OSM-carto tiles through the homelab Atlas proxy, as Dawarich
+# uses: one cache, Geoapify's key stays on CT 146; OSM's own tile servers
+# ask apps not to use them for this)
+check("PAGE: polls status.json at the board's refresh_s, no reload; Atlas "
+      "map tiles, credited",
       "/status.json" in page_src and "refresh_s" in page_src
       and 'http-equiv="refresh"' not in page_src
-      and "tile.openstreetmap.org" in page_src and "OpenStreetMap</a>" in page_src
+      and "tile.openstreetmap.org" not in page_src
+      and "https://atlas.crusand.org/tiles/geoapify/" in page_src
+      and "OpenStreetMap</a>" in page_src and "Geoapify</a>" in page_src
       and '<link rel="icon" href="data:image/svg+xml,' in page_src
       and "el.offsetWidth / 512" in page_src and "window.onresize" in page_src
       and 'name="viewport"' in page_src)

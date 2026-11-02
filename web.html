@@ -8,7 +8,8 @@
 <meta name="theme-color" content="#09090b">
 <!-- Status page of gps_logger.py, served from the board's flash as is.
      It loads once, then polls /status.json (every refresh_s from the JSON)
-     and redraws the boxes. The map tiles come from OpenStreetMap and the
+     and redraws the boxes. The map tiles (OSM-carto) come through the
+     homelab Atlas proxy and the
      fonts from Google Fonts when the phone is online. -->
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
@@ -250,7 +251,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
   <div class="tiles" id="tiles"></div><div class="grid"></div><div class="trk" id="trk"></div>
   <div class="acc" id="acc"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
   <div class="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
-  <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></div>
+  <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &middot; <a href="https://www.geoapify.com/">Geoapify</a></div>
 </div>
 <div class="wrap">
   <div class="alert" id="gl"></div>
@@ -295,6 +296,10 @@ var POINT_B = 7;                        // bytes per .trb point (7.0-7.3 on a 1 
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
 var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
+// the map tiles: OSM-carto through the homelab Atlas proxy (CT 146 adds the
+// Geoapify key; Cloudflare caches the tiles); it answers pages on a
+// private-network address, as the board's is
+var TILES = "https://atlas.crusand.org/tiles/geoapify/";
 // every status.json key the page shows (tests check none is missing)
 var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
@@ -1237,7 +1242,7 @@ function placeMap(d) {
   if (key !== mapKey) {
     var h = "";
     for (var dx = -nx; dx <= nx; dx++) for (var dy = -ny; dy <= ny; dy++)
-      h += '<img alt="" src="https://tile.openstreetmap.org/' + z + "/" + (t.x + dx) + "/" + (t.y + dy) +
+      h += '<img alt="" src="' + TILES + z + "/" + (t.x + dx) + "/" + (t.y + dy) +
         '.png" style="left:' + dx * 256 + "px;top:" + dy * 256 + 'px">';
     box.innerHTML = h;
     mapKey = key;

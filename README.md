@@ -603,7 +603,11 @@ cause, the build (`fw`, `fw_build`), chip temperature, free Python heap
 and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log (the page
 itself no longer uses them: it reads the whole log, below). The
-page is a dark telemetry view. On top, a darkened OpenStreetMap map is
+page is a dark telemetry view in one colour world (near-black, white as
+the accent; green, amber and red only for meaning). On top, a darkened
+grey OSM-carto map (through the homelab Atlas tile proxy,
+`atlas.crusand.org/tiles/geoapify/`, which answers pages on a
+private-network address such as the board's) is
 centred on the position, with a glowing dot, an accuracy ring (NAV-PVT's
 accuracy as it is, else HDOP x 2.5 m) and the coordinates (N/S, E/W) with
 ± that accuracy; without a fix it says `NO FIX`. Over its lower edge a strip
