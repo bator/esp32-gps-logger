@@ -185,6 +185,11 @@ echo "Copied and checked: $FILES"
 # frozen module: '' comes first in sys.path).
 # Clear the RTC boot-fail counter so a previous crash lock (REPL after 5
 # failures) does not survive this deploy reset. Power-on also clears it.
+# With an OTA pending (FORCE=1) no reset: it would abort the pending image;
+# the EXIT trap runs the logger again and the new files count from the
+# next boot.
+RESET=(+ reset)
+[ "$OTAPEND" = False ] || RESET=()
 $MPREMOTE connect "$PORT" \
     exec "
 import os
@@ -198,7 +203,11 @@ for n in '$FILES'.split():
 '$FROZEN'.startswith('frozen') and not $KEEP_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
-    + reset
-trap - EXIT
+    ${RESET[@]+"${RESET[@]}"}
+if [ "$OTAPEND" = False ]; then
+    trap - EXIT
+else
+    echo "No reset (OTA pending or unknown): the new files count from the next boot" >&2
+fi
 
 echo "Deployed to $PORT"

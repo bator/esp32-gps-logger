@@ -5432,7 +5432,11 @@ def count_points():
         gpx = not _is_trk(path)
         tb = path.endswith(TRB)
         try:
-            off, key = read_pos(path)
+            try:
+                off, key = read_pos(path)
+            except OSError:
+                # unreadable .pos: the track waits, and may go up from 0
+                off, key = 0, None
             with open(path, "rb") as f:
                 # a .trb offset that is no record start (its keyframe good)
                 # counts from 0, as read_batch then reads the file;
