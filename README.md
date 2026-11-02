@@ -191,11 +191,12 @@ PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 The script asks the board which chip it is, compiles `gps_logger.py` to
 `gps_logger.mpy` for it and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
-It makes `web.html.gz` (`gzip -9 -n web.html`: ~9 KB instead of ~24 KB,
-what browsers get) and copies `gps_logger.mpy`, `main.py`, the status page
-`web.html` and `web.html.gz` as
+It makes `web.html.gz` (~26 KB instead of the ~70 KB `web.html`, with
+the firmware's 4 KB window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
+`gps_logger.mpy`, `main.py` and the status page, only as `web.html.gz`, as
 `<name>.dpl`, checks their size and SHA-256 on the board, and only then
-renames them over the old files; a failed check (`Copy check FAILED`)
+renames them over the old files, removing an old plain `/web.html` in the
+same step (~70 KB of flash back); a failed check (`Copy check FAILED`)
 removes the `.dpl` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module (not
 `<name>.new`: that is how an OTA stages the page it installs). Its first
@@ -286,10 +287,20 @@ write the backup with the `esptool.py` command `--flash` prints, then run
 ### 5. Firmware updates over WiFi (OTA)
 
 The firmware is built for `boards/GPS_LOGGER_C6`: MicroPython's
-`ESP32_GENERIC_C6` with two 2.4 MB OTA app slots
-(`partitions-8MiBplus-ota.csv`, 16 MB flash; the file system takes the
-~11 MB after them) and the bootloader's rollback on. The old single-slot
-app (1984 KB) was 98% full.
+`ESP32_GENERIC_C6` with two 1792 KB OTA app slots
+(`boards/GPS_LOGGER_C6/partitions-ota.csv`, 16 MB flash; the file system
+takes the ~12.4 MB after them) and the bootloader's rollback on. It leaves
+out what the logger never uses: BLE, ESP-NOW, Ethernet, mDNS, the SD card
+and I2S, and of the frozen packages all but the port's own modules
+(asyncio, umqtt, webrepl, mip, requests...). That made the app 1.51 MB
+instead of 2.02 MB, and the BLE controller's ~34 KB of static RAM is free
+for the ESP-IDF heap. The old single-slot app (1984 KB) was 98% full.
+
+Until 2026-11 the slots were 2496 KB (`partitions-8MiBplus-ota.csv`, ~11 MB
+of file system). An OTA never changes the partition table: the slim app
+runs in the old slots too (MicroPython finds the file system after the
+last partition on the board's own table), and the board gets the ~1.4 MB
+more file system only with the move below.
 
 **Once, over USB:** `--migrate` moves a board to this table. It erases the
 whole flash, file system included, so first let every point upload and copy
@@ -313,8 +324,9 @@ ignores `env.backup`, `hist/` and `*.env*`, for a copy made in the repo
 anyway.
 
 **Then:** `tools/build_firmware.sh --publish` writes `firmware/ota/`
-(`micropython-<commit>.bin`, the page as `web-<commit>.html[.gz]`,
-`manifest.json`) and copies it with `scp` to `OTA_DEST` (`host:/path`), a
+(`micropython-<commit>.bin`, the page as `web-<commit>.html.gz` with the
+firmware's small window, `manifest.json` naming only `/web.html.gz`; an
+older firmware takes such a manifest too) and copies it with `scp` to `OTA_DEST` (`host:/path`), a
 folder a web server on the LAN serves: each file as `<name>.tmp`, moved
 over the live one with `ssh` (one rename: a board downloading a
 republished `.bin` keeps reading the old one, and none reads a half-copied
@@ -347,7 +359,8 @@ against its SHA-256, the page files are staged as `<file>.new`, the slot is
 set to boot and the board resets. Before any of that the manifest's fields
 are checked (whole numbers, a 64-hex SHA-256, no `|` in a string, the
 commit 1–20 lowercase hex with an optional `-dirty`, only `/web.html` and
-`/web.html.gz`, each once): the HMAC covers them joined by `|`, so a
+`/web.html.gz`, each once; the published manifest names only the gzip,
+older ones both): the HMAC covers them joined by `|`, so a
 manifest with a `|` moved between fields would keep it (`bad manifest`;
 the format itself is unchanged). The HMAC is compared in constant time.
 A refused manifest is one diagnostic line until a good one comes, and no
@@ -370,7 +383,10 @@ longer makes it valid), mark it valid, and only then do the
 staged page files replace the old ones (on a file system that does not
 rename over a file, the old one is moved aside first and back if the new
 one still does not go up; a page that does not go up is a diag line,
-`ota <commit> page <path> not put up`). A crash or reset before that and
+`ota <commit> page <path> not put up`). A `/web.html.gz` that went up
+removes the old plain `/web.html` (unless the manifest named it too): the
+board keeps the page only gzipped. Not earlier: a rollback keeps the old
+firmware's files. A crash or reset before that and
 the bootloader boots the old slot; no WiFi or no manifest within 10 minutes
 (`OTA_HEALTH`) and it resets itself, with the same result (it never sets
 the old slot to boot itself: that left the old image pending, and the next
@@ -660,11 +676,22 @@ wire): useful while moving the wires with the page open.
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
 it the page shows the grid and the system font. The page is a file on the
-board (`/web.html`, copied by `deploy.sh`) and loads once; a browser
-(`Accept-Encoding: gzip`) gets `/web.html.gz` instead, ~16 KB instead of
-~45 KB, so it loads in a third of the sends; clients without gzip (curl
-without `--compressed`) and a board without the `.gz` get `web.html`. Copy
-both when you change the page by hand (or remove `/web.html.gz`); then it asks
+board, kept only gzipped (`/web.html.gz`, ~26 KB instead of the ~70 KB
+`web.html`; copied by `deploy.sh` or an OTA) and loads once: a browser
+(`Accept-Encoding: gzip`) gets the file as is; a client without gzip (curl
+without `--compressed`) gets it inflated on the board as it goes out
+(`deflate.DeflateIO`, no `Content-Length`; a firmware without the
+`deflate` module answers 406, one short of RAM for it 503). The file is
+made with a 4 KB window (`WEB_GZ_WBITS = 12`), not `gzip -9`'s 32 KB:
+inflating takes a buffer of the window's size, and the Python heap has
+~15 KB free (the 4 KB window and its state take ~7 KB while a page goes
+out, measured on the unix port). It costs ~11% (zlib level 9 on
+`web.html`: 23.5 KB with `gzip -9`, 34.0 / 30.3 / 27.9 / 26.2 KB with a
+0.5 / 1 / 2 / 4 KB window). A board deployed before this still has the
+plain `/web.html` (its `.gz` may have the 32 KB window, too wide to
+inflate here): it goes to clients without gzip until the next deploy or
+OTA removes it. When you change the page by hand, gzip it the way
+`deploy.sh` does and copy only `/web.html.gz`; then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
 only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
@@ -676,13 +703,15 @@ midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
 header (a day stepped to in *Track*: that local day, read once, with its date
 in the header; it is drawn also without a fix), and zooms out (17 down to 13) until the track fits around the
 position. A gap of over 5 minutes breaks the line. Every point goes to
-`/hist/YYYYMMDD.trk` (its UTC date; the text line of the track file). A
-`.trb` point goes there once it is uploaded, when its batch is accepted (or
+`/hist/YYYYMMDD.trb` (its UTC date), a binary track like the track files
+(see *Binary tracks*): the header, then each append the records a flush
+writes, a keyframe first, and one `#END` footer at the end that the next
+append overwrites. A `.trb` point goes there once it is uploaded, when its batch is accepted (or
 parked as `.bad`), not when it is written: while it waits for WiFi it is on
 the flash once, in the track file. Each decoded line is written straight
-to its day's file, just before the batch is committed (a commit that then
-fails sends the batch again, and its points are drawn twice over the same
-line). So the map shows a trip from when it is
+to its day's file as its record again, just before the batch is
+committed (a commit that then fails sends the batch again, and its points
+are drawn twice over the same line). So the map shows a trip from when it is
 up: at home about a minute after the track closes, on a hotspot as it
 uploads; points still waiting are not drawn. A `.trk` (`TRK_BIN` off, or
 written by older firmware) goes there when written, as before. A track
@@ -691,12 +720,26 @@ file; the page puts the points in time order again. The newest 7 days are
 kept (`HIST_DAYS`). The history yields to the tracks: under 1 MB
 free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
 batch would be dropped on a full flash, and nothing is added under
-2 × `MIN_FREE`. The page asks
-`/hist?d=YYYYMMDD&o=<byte>`: a reply is at most 16 KB (`HIST_REPLY`, so a
-long day cannot outrun `WEB_DEADLINE`), the page asks again from where it
-got to, and after that only for what is new, once a minute. A day is ~50
-bytes a point: ~65 KB for 1300 points.
-The board sends the file in 1 KB reads and the JSON piece by piece (a
+2 × `MIN_FREE`. An append cut short (the flash full mid-write) leaves no
+footer: the next one starts with 32 `0xC0` bytes and a newline
+(`HIST_SEP`), which end a record cut there (no keyframe is lost to it, no
+point made up). The page asks `/hist?d=YYYYMMDD&o=<offset>` and gets the
+day's text lines (the line format of a `.trk`), decoded from the `.trb`
+record by record: a reply stops before the next keyframe once ~16 KB of
+text is out (`HIST_REPLY`, so a long day cannot outrun `WEB_DEADLINE`; it
+decodes the records twice, for the `Content-Length` first), with
+`X-Hist-Next: <offset>` (where to ask from next, a keyframe) and
+`X-Hist-End: <offset>` (where the day's records end now, the footer's
+start). The page asks again from `X-Hist-Next` while it is short of
+`X-Hist-End`, and after that only for what is new, once a minute, from
+there: the next append's keyframe starts there. A day is ~6-7 bytes a point
+(~50 as text): a 2 h drive at 1 Hz ~50 KB instead of ~370 KB, the 7 days
+of 2 h a day ~0.35 MB instead of ~2.6 MB. Days written as text by older
+firmware (`/hist/YYYYMMDD.trk`) are listed and drawn as before (sent as
+they are from byte `o`, no `X-Hist-Next`: the page counts the bytes), and
+a day that began as text stays text to its end (no conversion); they go
+after `HIST_DAYS`.
+The board sends a day's lines gathered into 1 KB sends and the JSON piece by piece (a
 diagnostic line a piece, gathered into 1 KB sends), so a page view needs
 ~2 KB of Python heap (building the whole page used to need ~20 KB, enough
 to double the Python heap into the IDF heap TLS needs). It is plain HTTP
@@ -1435,9 +1478,9 @@ with a NEO-6M; most never need changing.
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
 | `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
-| `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
+| `WEB_PAGE_GZ` / `WEB_GZ_WBITS` / `WEB_PAGE` / `WEB_REFRESH` | `/web.html.gz` / 12 / `/web.html` / 15 s | The page on the board, kept only gzipped (as is to clients accepting gzip, inflated for the others); its window (2^12 = 4 KB of heap to inflate; `deploy.sh` and `--publish` use it); an older board's plain page, served while it is there; how often the page polls `/status.json` |
 | `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
-| `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
+| `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |
@@ -1463,7 +1506,9 @@ every pull request:
     over real loopback sockets (a normal request, a foreign `Host`, an
     empty, an oversized, a stalled and a trickling request, a client
     resetting mid-reply, a reply past the request deadline, the gzipped
-    page for a client that accepts it);
+    page for a client that accepts it, and for one that does not the page
+    inflated from the `.gz` alone, byte for byte, its live heap under
+    10 KB on the unix build);
   - `node tests/web_page_test.js`: `web.html`'s view on generated
     `status.json`, and the whole page script (`tick`, `paint`, `placeMap`,
     `stale`) against a stub document. With `CI=true` (GitHub Actions) a

@@ -1,0 +1,11 @@
+# The GPS logger's ESP32-C6 (16 MB flash): two 1792 KB OTA app slots
+# (the app is ~1.5 MB without BLE, ESP-NOW, LAN, mDNS, SD and I2S), the
+# file system after them (~12.4 MB). Was partitions-8MiBplus-ota.csv: two
+# 2496 KB slots, ~11 MB of file system. A board moves to it once over USB
+# (tools/build_firmware.sh --migrate); an OTA does not change the table.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x4000,
+otadata,  data, ota,     0xd000,   0x2000,
+phy_init, data, phy,     0xf000,   0x1000,
+ota_0,    app,  ota_0,   0x10000,  0x1c0000,
+ota_1,    app,  ota_1,   0x1d0000, 0x1c0000,

@@ -37,7 +37,10 @@
 # partition table, otadata and the app. Then put the files back and run
 # ./deploy.sh (see the README, "Firmware updates over WiFi").
 # --publish writes firmware/ota/ (micropython-<commit>.bin, the page as
-# web-<commit>.html[.gz], manifest.json naming them) and copies it to
+# web-<commit>.html.gz, manifest.json naming them: the board keeps the page
+# only gzipped, made with its WEB_GZ_WBITS window, and inflates it for a
+# client without gzip; an older firmware takes such a manifest too, and the
+# new one removes the old plain /web.html once valid) and copies it to
 # OTA_DEST (host:/path) with scp, each file as <name>.tmp moved over the
 # live one with ssh (a board reading a half-copied file got a mix), the
 # manifest last: a board reading the old manifest meanwhile still finds
@@ -61,7 +64,8 @@ BOARD_DIR=${BOARD_DIR:-$PWD/boards/GPS_LOGGER_C6}
 BOARD=$(basename "$BOARD_DIR")
 CHIP=${CHIP:-esp32c6}
 PORT=${PORT:-/dev/ttyUSB0}
-APP_SIZE=0x270000                         # one OTA app slot
+APP_SIZE=0x1c0000                         # one OTA app slot (partitions-ota.csv)
+APP1=$(printf '0x%x' $((0x10000 + APP_SIZE)))  # the second slot's offset
 OUT=$PWD/firmware
 MODE=${1:-}
 case "$MODE" in
@@ -86,8 +90,11 @@ if [ -n "$DIRTY" ] || [ "$MODE" = --flash ]; then
 fi
 SHA=$(sha256sum "$OUT/gps_logger.py" | cut -d" " -f1)
 printf 'COMMIT = "%s"\nSHA = "%s"\nBUILD = %s\n' "$COMMIT" "$SHA" "$BUILD" > "$OUT/gps_frozen.py"
+# only the port's own modules (_boot.py mounts the file system) with the
+# logger's: not boards/manifest.py's asyncio, umqtt, webrepl, mip,
+# requests... (~25 KB the logger never imports)
 cat > "$OUT/manifest.py" <<EOF
-include("\$(PORT_DIR)/boards/manifest.py")
+freeze("\$(PORT_DIR)/modules")
 module("gps_logger.py", base_path="$OUT")
 module("gps_frozen.py", base_path="$OUT")
 module("gps_boot.py", base_path="$OUT")
@@ -96,9 +103,18 @@ EOF
 # shellcheck disable=SC1091
 source "$IDF_DIR/export.sh" >/dev/null
 make -C "$MPY_DIR/mpy-cross" >/dev/null
+BDIR=$MPY_DIR/ports/esp32/build-$BOARD
+# a changed board (sdkconfig, partition table, macros): a clean build, as
+# ESP-IDF keeps an existing build's sdkconfig over new defaults (BLE stayed
+# on after it was turned off)
+BSTAMP=$( (cat "$BOARD_DIR"/* 2>/dev/null || true) | sha256sum | cut -c1-16)
+if [ -d "$BDIR" ] && [ "$(cat "$BDIR/.gps_board" 2>/dev/null)" != "$BSTAMP" ]; then
+    rm -rf "$BDIR"
+fi
 make -C "$MPY_DIR/ports/esp32" BOARD="$BOARD" BOARD_DIR="$BOARD_DIR" \
     FROZEN_MANIFEST="$OUT/manifest.py" -j"$(nproc)" >/dev/null
-BDIR=$MPY_DIR/ports/esp32/build-$BOARD
+mkdir -p "$BDIR"
+echo "$BSTAMP" > "$BDIR/.gps_board"
 BIN=$BDIR/micropython.bin
 cp "$BIN" "$OUT/micropython.bin"
 SIZE=$(wc -c < "$BIN")
@@ -124,7 +140,7 @@ case "$MODE" in
     BACKUP=$OUT/app-backup-$STAMP.bin
     BACKUP1=$OUT/app1-backup-$STAMP.bin
     esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x10000 $APP_SIZE "$BACKUP" >/dev/null
-    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x280000 $APP_SIZE "$BACKUP1" >/dev/null
+    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash "$APP1" $APP_SIZE "$BACKUP1" >/dev/null
     echo "App slots backed up to $BACKUP and $BACKUP1 (the second one runs after an OTA)"
     # always the first slot: when it is the running one, a failed write
     # leaves no bootable app there (see the header)
@@ -211,8 +227,22 @@ case "$MODE" in
     mkdir -p "$OUT/ota"
     BINF=micropython-$COMMIT.bin
     cp "$OUT/micropython.bin" "$OUT/ota/$BINF"
-    cp web.html "$OUT/ota/web-$COMMIT.html"
-    gzip -9 -n -c web.html > "$OUT/ota/web-$COMMIT.html.gz"
+    # not gzip -9: its 32 KB window is what inflating it takes on the board,
+    # more than the heap has free; the firmware's own WEB_GZ_WBITS window
+    WBITS=$(sed -n 's/^WEB_GZ_WBITS = \([0-9][0-9]*\).*/\1/p' gps_logger.py)
+    case "$WBITS" in
+        9|1[0-5]) ;;
+        *) echo "No WEB_GZ_WBITS in gps_logger.py: '$WBITS'" >&2; exit 1 ;;
+    esac
+    python3 - "$WBITS" web.html "$OUT/ota/web-$COMMIT.html.gz" <<'EOF'
+import sys, zlib
+w, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+z = zlib.compressobj(9, zlib.DEFLATED, 16 + w)
+with open(src, "rb") as f:
+    gz = z.compress(f.read()) + z.flush()
+with open(dst, "wb") as f:
+    f.write(gz)
+EOF
     python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" <<'EOF'
 import hashlib, hmac, json, os, sys
 d, key_file, build, commit = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
@@ -224,8 +254,8 @@ binf = "micropython-%s.bin" % commit
 size, sha = meta(binf)
 m = {"build": build, "commit": commit, "size": size, "sha256": sha,
      "url": binf, "files": []}
-for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),
-                   ("/web.html", "web-%s.html" % commit)):
+# the page only gzipped (an older firmware after a rollback takes this too)
+for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),):
     n, h = meta(name)
     m["files"].append({"path": path, "size": n, "sha256": h, "url": name})
 # the bytes gps_logger._ota_signed covers
@@ -241,7 +271,7 @@ EOF
     # downloading it keeps reading the old file), the named files first,
     # the manifest naming them last
     MV=""
-    for f in "$BINF" "web-$COMMIT.html" "web-$COMMIT.html.gz" manifest.json; do
+    for f in "$BINF" "web-$COMMIT.html.gz" manifest.json; do
         scp -q "$OUT/ota/$f" "$DHOST:$DDIR/$f.tmp"
         MV+="mv -f $QDIR/$f.tmp $QDIR/$f && "
     done
