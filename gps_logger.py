@@ -6564,14 +6564,18 @@ def _low_mem(now):
 # with OTA_KEY checks, goes into the other app slot OTA_BLOCK bytes at a
 # time (the GPS read and the WDT fed between). It is read back against its
 # sha256, the files (the status page) are written to flash, the slot is set
-# to boot and the board resets. The new firmware then runs pending
-# (OTA_PENDING): OTA_VALID_AFTER of running with WiFi connected marks it
+# to boot and the board resets. The manifest's fields are checked first
+# (_ota_manifest_ok: its HMAC string joins them with "|"). The new firmware
+# then runs pending (OTA_PENDING): OTA_VALID_AFTER of running with WiFi
+# connected, and the manifest read again (the update path works), marks it
 # valid, and only then do the new page files (staged as .new) replace the
 # old ones. A crash or reset before that and the bootloader boots the old
-# one; no WiFi in OTA_HEALTH and it resets itself, the same. A build that
-# failed so is in OTA_BAD and not tried again (not after a power cut: it
-# may have been the cable). No set_boot() back: that left the old image
-# pending, and the next reset fell back to ota_0, the failed build.
+# one; no WiFi or manifest in OTA_HEALTH and it resets itself, the same. A
+# build that failed so is in OTA_BAD and not tried again; after a power-on
+# (a brownout too) or without WiFi or manifest it is a try (OTA_TRIES:
+# the cable, the router), tried again after OTA_RETRY, bad after
+# OTA_TRIES_MAX. No set_boot() back: that left the old image pending, and
+# the next reset fell back to ota_0, the failed build.
 OTA_URL = None                           # .env OTA_URL: the manifest
 OTA_KEY = None                           # .env OTA_KEY: its HMAC key (bytes)
 OTA_FIRST = 120000                       # ms after boot of the first check
@@ -6589,6 +6593,12 @@ OTA_MANIFEST_MAX = 4096                  # bytes a manifest may have
 OTA_PENDING = "/ota.pending"             # "<build> <commit>" just installed,
                                          # then the staged files, a line each
 OTA_BAD = "/ota.bad"                     # builds that failed their health
+OTA_TRIES = "/ota.tries"                 # "<build> <n>": its rollbacks after
+                                         # a power-on or with no WiFi/manifest
+OTA_TRIES_MAX = 2                        # such rollbacks before it is bad
+OTA_PROBE = 60000                        # ms between manifest reads of a
+                                         # pending firmware
+OTA_PAGES = ("/web.html", "/web.html.gz")  # the files a manifest may name
 try:
     from gps_frozen import BUILD as FW_BUILD, COMMIT as FW_COMMIT
 except ImportError:                      # (not frozen, or a firmware older
@@ -6628,6 +6638,41 @@ def _ota_signed(m):
     for f in m.get("files") or ():
         t += "|%s|%d|%s|%s" % (f["path"], f["size"], f["sha256"], f["url"])
     return t.encode()
+
+def _ota_str(v, hexlen=0):
+    """A manifest string field the "|"-joined HMAC string cannot be
+    re-split at; hexlen: lowercase hex of that length."""
+    if type(v) is not str or "|" in v:
+        return False
+    return not hexlen or (len(v) == hexlen
+                          and all(c in "0123456789abcdef" for c in v))
+
+def _ota_manifest_ok(m):
+    """The fields of a manifest are what build_firmware.sh writes: ints,
+    strings without "|", 64 hex sha256 and only the OTA_PAGES, each once.
+    _ota_signed joins them with "|", unescaped: a manifest moving a "|"
+    between fields kept the HMAC (a page path swallowing the next file, a
+    commit swallowing the firmware: the page installed as firmware). The
+    format stays, boards in the field read the same manifests."""
+    try:
+        if (type(m) is not dict or type(m["build"]) is not int or type(m["size"]) is not int
+                or not _ota_str(m["commit"]) or not _ota_str(m["url"])
+                or not _ota_str(m["sha256"], 64)):
+            return False
+        files = m.get("files") or []
+        if type(files) is not list:
+            return False
+        seen = []
+        for f in files:
+            if (type(f) is not dict or f.get("path") not in OTA_PAGES
+                    or f["path"] in seen or type(f.get("size")) is not int
+                    or not _ota_str(f.get("url"))
+                    or not _ota_str(f.get("sha256"), 64)):
+                return False
+            seen.append(f["path"])
+        return True
+    except (KeyError, TypeError, AttributeError):
+        return False
 
 def _ota_url(rel):
     """A manifest URL relative to the manifest's own folder."""
@@ -6764,6 +6809,42 @@ def _ota_mark_bad(build):
     except OSError:
         pass
 
+def _ota_tries():
+    """(build, n) of OTA_TRIES, or (None, 0)."""
+    try:
+        with open(OTA_TRIES) as f:
+            b, n = f.read().split()
+        return int(b), int(n)
+    except (OSError, ValueError):
+        return None, 0
+
+def _ota_try(build):
+    """A rollback that may not be the build's fault: at power-on (MicroPython
+    1.29 reports a brownout as one: a weak supply), or no WiFi or manifest
+    in OTA_HEALTH (the router, the server). The OTA_TRIES_MAX-th of one
+    build marks it bad: never blamed, a brownout reinstalled it after every
+    boot; blamed at once, a router outage excluded a good build for good.
+    -> True: now bad."""
+    b, n = _ota_tries()
+    n = n + 1 if b == build else 1
+    if n >= OTA_TRIES_MAX:
+        _ota_mark_bad(build)
+        _rm(OTA_TRIES)
+        return True
+    try:
+        with open(OTA_TRIES, "w") as f:
+            f.write("%d %d\n" % (build, n))
+    except OSError:
+        pass
+    return False
+
+def _ota_wait_tried():
+    """A build with a try behind it is installed again OTA_RETRY after
+    boot, not OTA_FIRST (ota["failed"] is RAM: gone with the reset)."""
+    b = _ota_tries()[0]
+    if b is not None:
+        ota["failed"] = (b, time.ticks_ms(), "rolled back")
+
 def _ota_file(f):
     """One manifest file (the page) staged on flash as <path>.new: it
     replaces the old one only once the new firmware is valid (_ota_promote:
@@ -6821,14 +6902,18 @@ def _ota_check():
         ota["state"] = "manifest %s" % code
         return
     m = json.loads(body)
-    build = int(m["build"])
+    if not _ota_manifest_ok(m):
+        ota["state"] = "bad manifest"
+        _diag_write("ota: manifest fields refused")
+        return
+    build = m["build"]
     if build <= FW_BUILD or build in _ota_bad():
         ota["state"] = "current"
         return
     f = ota.get("failed")
     if (f is not None and f[0] == build
             and _age(time.ticks_ms(), f[1]) < OTA_RETRY):
-        ota["state"] = "bad image"       # (2 MB every OTA_CHECK: no)
+        ota["state"] = f[2]              # (2 MB every OTA_CHECK: no)
         return
     if _hmac_hex(OTA_KEY, _ota_signed(m)) != m.get("hmac"):
         ota["state"] = "bad hmac"
@@ -6848,7 +6933,7 @@ def _ota_check():
     got = w.close()
     if (code != 200 or got != m["sha256"]
             or _slot_sha(part, m["size"]) != m["sha256"]):
-        ota["failed"] = (build, time.ticks_ms())
+        ota["failed"] = (build, time.ticks_ms(), "bad image")
         ota["state"] = "bad image"
         _diag_write("ota %s: download %s, sha256 mismatch" % (m["commit"],
                                                              code))
@@ -6863,9 +6948,11 @@ def _ota_check():
         part.set_boot()
     except Exception:
         # nothing boots: no pending note (it would blame a build that never
-        # ran), no staged page
+        # ran), no staged page; a page that failed its sha256 or could not
+        # be written waits OTA_RETRY too (the firmware came every check)
         _rm(OTA_PENDING)
         _ota_drop(paths)
+        ota["failed"] = (build, time.ticks_ms(), "bad page")
         raise
     _diag_final()
     _diag_write("ota %s installed (was %s), rebooting" % (m["commit"],
@@ -6902,13 +6989,15 @@ def ota_boot():
     pending would be aborted at the next reset."""
     p = _ota_pending()
     if p is None:
+        _ota_wait_tried()
         if esp32 is not None:
             _ota_valid()
         return
     build, c, paths = p
     if build == FW_BUILD:
         ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
-                   state="pending", paths=paths)
+                   probed=False, probe_at=None, state="pending",
+                   paths=paths)
         _diag_write("ota %s booted, checking" % c)
         return
     _ota_drop(paths)
@@ -6918,9 +7007,14 @@ def ota_boot():
         power = machine.reset_cause() == machine.PWRON_RESET
     except Exception:
         power = False
-    if power:
+    if power and _ota_try(build):
+        _diag_write("ota %s rolled back after a power-off, %d times: bad "
+                    "(running %s)" % (c, OTA_TRIES_MAX, FW_COMMIT))
+    elif power:
+        _ota_wait_tried()
         _diag_write("ota %s rolled back after a power-off, tried again "
-                    "later (running %s)" % (c, FW_COMMIT))
+                    "in %d min (running %s)" % (c, OTA_RETRY // 60000,
+                                                FW_COMMIT))
     else:
         _ota_mark_bad(build)
         _diag_write("ota %s rolled back by the bootloader (running %s)"
@@ -6928,18 +7022,40 @@ def ota_boot():
     if esp32 is not None:
         _ota_valid()
 
+def _ota_probe(now):
+    """The pending firmware reads the manifest (HTTP 200, fields as
+    _ota_check wants them), every OTA_PROBE until it did: a build that
+    cannot would never get the next one over WiFi, only over USB."""
+    at = ota.get("probe_at")
+    if at is not None and _age(now, at) < OTA_PROBE:
+        return
+    ota["probe_at"] = now
+    body = bytearray()
+    try:
+        code = HTTP_GET(OTA_URL, body.extend, OTA_MANIFEST_MAX)
+        ota["probed"] = code == 200 and _ota_manifest_ok(json.loads(body))
+        if not ota["probed"]:
+            ota["probe_err"] = "manifest %s" % code
+    except Exception as e:
+        ota["probe_err"] = repr(e)[:40]
+
 def _ota_health(now):
     """The pending firmware: valid after OTA_VALID_AFTER with WiFi connected
-    (then the staged page goes up); no WiFi in OTA_HEALTH and it resets,
-    the bootloader then boots the old image."""
+    and the manifest read (without OTA_URL WiFi only; then the staged page
+    goes up); neither in OTA_HEALTH and it resets, the bootloader then
+    boots the old image (a try: _ota_try)."""
     if wifi["state"] == "connected":
         ota["wifi_seen"] = True
+        if OTA_URL and not ota.get("probed"):
+            _ota_probe(now)
     age = _age(now, ota["pend_at"])
-    if ota["wifi_seen"] and age >= OTA_VALID_AFTER:
+    if (ota["wifi_seen"] and (ota.get("probed") or not OTA_URL)
+            and age >= OTA_VALID_AFTER):
         ota["pend"] = None
         _ota_valid()
         _ota_promote(ota.get("paths") or ())
         _rm(OTA_PENDING)
+        _rm(OTA_TRIES)
         ota["state"] = "ok"
         _diag_write("ota %s ok" % FW_COMMIT)
         return
@@ -6947,12 +7063,15 @@ def _ota_health(now):
         return
     build = ota["pend"]
     ota["pend"] = None
-    _ota_mark_bad(build)
+    bad = _ota_try(build)
     _ota_drop(ota.get("paths") or ())
     _rm(OTA_PENDING)
     _diag_final()
-    _diag_write("ota %s no wifi in %d s, rolling back" % (
-        FW_COMMIT, OTA_HEALTH // 1000))
+    what = "wifi"
+    if ota["wifi_seen"]:
+        what = "manifest (%s)" % ota.get("probe_err")
+    _diag_write("ota %s no %s in %d s, rolling back%s" % (
+        FW_COMMIT, what, OTA_HEALTH // 1000, ", bad" if bad else ""))
     machine.reset()
 
 def ota_tick(now):
