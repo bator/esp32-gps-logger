@@ -7478,6 +7478,7 @@ def _web_rows():
         ("fw", FW_COMMIT),
         ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
+        ("web_errs", _web_errs[0]),      # page requests that hit a bug
     ]
 
 _fl = [None, None]                       # (KB, ticks) of the last statvfs
@@ -7573,10 +7574,20 @@ def _sv_age():
     at = st["svs_at"]
     return None if at is None else _age(time.ticks_ms(), at) // 1000
 
-def _web_json_parts():
-    """The JSON in small pieces (no 8 KB string and its encoded copy)."""
+def _web_json_parts(rows=None, svs=None):
+    """The JSON in small pieces (no 8 KB string and its encoded copy).
+    rows, svs: _web_rows() and _sv_list(), built by _web_status before
+    the 200 (a bug in one is a 500, not a cut JSON); the rows go first
+    and are let go before the diag lines are read."""
+    if rows is None:
+        rows = _web_rows()
+    if svs is None:
+        svs = _sv_list()
     yield '{"device":' + json.dumps(DEVICE_ID) + ',"refresh_s":%d' % (
         WEB_REFRESH)
+    for key, v in rows:
+        yield ",%s:%s" % (json.dumps(key), json.dumps(v))
+    rows = None
     yield ',"diag":['
     sep = ""
     for line in _web_diag():             # one piece a line (no ~3 KB string)
@@ -7584,18 +7595,17 @@ def _web_json_parts():
         sep = ","
     yield '],"satellites":['
     sep = ""
-    for v in _sv_list():
+    for v in svs:
         yield sep + json.dumps({
             "name": _sv_name(v), "system": GNSS.get(v[6]), "svid": v[0],
             "cno": v[1], "elev": v[2], "azim": v[3], "used": v[4],
             "unhealthy": v[5]})
         sep = ","
-    yield '],"satellites_age_s":' + json.dumps(_sv_age())
-    for key, v in _web_rows():
-        yield ",%s:%s" % (json.dumps(key), json.dumps(v))
-    yield "}"
+    yield '],"satellites_age_s":' + json.dumps(_sv_age()) + "}"
 
 def _web_json():
+    """The whole JSON as one string: the tests' view of status.json (the
+    board streams _web_json_parts)."""
     return "".join(_web_json_parts())
 
 _web_end = [None]                        # ticks_ms deadline of the request
@@ -7616,11 +7626,27 @@ def _web_out(c, b):
     _web_left(c)
     c.sendall(b)
 
+def _web_head_len(d):
+    """The length of the request head in d: up to its blank line (CRLF or
+    bare LF), or an HTTP/0.9 request line alone ("GET /path"); -1 while it
+    is not all there."""
+    n = -1
+    for end in (b"\r\n\r\n", b"\n\n"):
+        i = d.find(end)
+        if i >= 0 and (n < 0 or i + len(end) < n):
+            n = i + len(end)
+    if n < 0:
+        i = d.find(b"\n")
+        if i >= 0 and d.find(b" HTTP/", 0, i) < 0:
+            n = i + 1
+    return n
+
 def _web_read(c):
     """The request head: recv until the blank line, at most WEB_REQ_MAX
     bytes. One recv(512) left the rest of a long request (cookies) unread,
     and closing a socket with unread data sends an RST that cut the reply
-    short."""
+    short. A bare-LF head and an HTTP/0.9 line end it too (they waited for
+    WEB_HEAD_WAIT and got nothing)."""
     data = b""
     end = _web_end[0]
     if end is not None:
@@ -7630,7 +7656,7 @@ def _web_read(c):
         if time.ticks_diff(head, end) < 0:
             _web_end[0] = head
     try:
-        while len(data) < WEB_REQ_MAX and b"\r\n\r\n" not in data:
+        while len(data) < WEB_REQ_MAX and _web_head_len(data) < 0:
             _web_left(c)
             b = c.recv(512)
             if not b:
@@ -7644,19 +7670,24 @@ def _web_read(c):
 def _web_host_ok(req):
     """DNS rebinding guard: a page of another site that got its name
     pointed at the board sends that name as Host. Allowed: no Host, the
-    board's IP, HOSTNAME or HOSTNAME.local (any case, with a port)."""
-    i = req.find(b"\r\nHost:")
+    board's IP, HOSTNAME or HOSTNAME.local (any case, with a port). The
+    header's name in any case, in a bare-LF head too, searched over the
+    whole head; a head cut at WEB_REQ_MAX without a Host is refused (its
+    Host could come after the cut: a long URL hid it)."""
+    n = _web_head_len(req)
+    r = req.lower()
+    i = r.find(b"\nhost:", 0, n if n >= 0 else len(r))
     if i < 0:
-        i = req.find(b"\r\nhost:")
-    if i < 0:
-        return True
-    j = req.find(b"\r\n", i + 7)
-    h = req[i + 7:j if j >= 0 else len(req)].strip()
+        return n >= 0 or len(req) < WEB_REQ_MAX   # (closed: all there)
+    j = r.find(b"\n", i + 6)
+    if j < 0:
+        return False                     # its line cut off
+    h = r[i + 6:j].strip()
     k = h.rfind(b":")
     if k >= 0 and b"]" not in h[k:]:
         h = h[:k]
     try:
-        h = h.decode().lower()
+        h = h.decode()
     except UnicodeError:
         return False
     if h.endswith("."):
@@ -7754,17 +7785,30 @@ def _web_reply(c, req):
                   ("open http://%s/ (or %s.local)" % (
                       wifi.get("ip") or "<board ip>", HOSTNAME),))
         return
-    parts = req.split(b" ", 2)
+    parts = req.split(None, 2)          # (HTTP/0.9: "GET /\r\n")
     path = parts[1] if len(parts) > 1 else b"/"
+    parts = None
     if path.startswith(b"/status.json"):
-        _sv_fresh()
-        _web_send(c, "200 OK", "application/json", _web_json_parts())
+        _web_status(c)
     elif path.startswith(b"/hist?"):
         _web_hist(c, path)
     elif path == b"/" or path.startswith(b"/?"):
         _web_page(c, _web_gzip(req))
     else:
         _web_send(c, "404 Not Found", "text/plain", ("not found",))
+
+def _web_status(c):
+    """status.json: its rows and satellite list built before the 200: a
+    bug in one is a 500 with the error (it was a 200 with a cut JSON, and
+    the page said OFFLINE)."""
+    _sv_fresh()
+    try:
+        parts = _web_json_parts(_web_rows(), _sv_list())
+    except Exception as e:
+        _web_bug(e)
+        _web_send(c, "500 Internal Server Error", "text/plain", (repr(e),))
+        return
+    _web_send(c, "200 OK", "application/json", parts)
 
 def _web_hist(c, path):
     """/hist?d=YYYYMMDD&o=N: the day's history file from byte N on, at most
@@ -7807,6 +7851,24 @@ def _web_hist(c, path):
         f.close()
 
 _web_errs = [0]                          # page requests that raised a bug
+_bugs = []                               # the kinds of caught bugs in diag
+BUG_KINDS = 8                            # at most this many kinds a boot
+
+def _bug_once(line):
+    """A caught bug's diag line, once a kind (a bug every request or every
+    loop must not fill the log), BUG_KINDS kinds at most."""
+    if line in _bugs or len(_bugs) >= BUG_KINDS:
+        return
+    _bugs.append(line)
+    _diag_write(line)
+
+def _web_bug(e):
+    """A bug on a page request: counted (web_errs in the JSON), each new
+    kind in diag (only the first since boot was). It must not reset the
+    logger (run()'s handler)."""
+    print("web error", repr(e))
+    _web_errs[0] += 1
+    _bug_once("web error %s" % repr(e)[:60])
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
@@ -7829,11 +7891,8 @@ def web_tick():
         _web_reply(c, req)
     except (OSError, MemoryError) as e:
         print("web client", repr(e))
-    except Exception as e:               # a bug on a page request must not
-        print("web error", repr(e))      # reset the logger (run's handler)
-        _web_errs[0] += 1
-        if _web_errs[0] == 1:
-            _diag_write("web error %r" % (e,))
+    except Exception as e:               # a bug on a page request
+        _web_bug(e)
     finally:
         _web_end[0] = None
         try:
@@ -7973,6 +8032,38 @@ def run():
             pass
         wifi_stop()
 
+TICK_PAUSE = 5000                        # ms a side tick that raised sits out
+_tick_bug = {}                           # its name -> ticks of the bug
+
+def _guarded(name, fn, arg=None):
+    """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
+    (once a kind), the tick skipped for TICK_PAUSE (no retry every 20 ms;
+    after a MemoryError a gc.collect) and the loop, the logging, goes on.
+    It escaped into run()'s crash branch: a reset and a boot-fail count
+    each time, and a persistent one left the board in the REPL after
+    BOOT_FAIL_MAX boots, logging nothing. Not guarded: log_tick and the
+    GPS reads (the logging itself: a reset is their recovery), and nothing
+    while an OTA image is pending (its crash rolls it back). Nothing is
+    fed here: a tick that hangs still fires the WDT."""
+    at = _tick_bug.get(name)
+    if at is not None:
+        if _age(time.ticks_ms(), at) < TICK_PAUSE:
+            return
+        del _tick_bug[name]
+    try:
+        if arg is None:
+            fn()
+        else:
+            fn(arg)
+    except Exception as e:
+        if ota["pend"] is not None:
+            raise
+        if isinstance(e, MemoryError):
+            gc.collect()
+        _tick_bug[name] = time.ticks_ms()
+        print("bug", name, repr(e))
+        _bug_once("bug %s %s" % (name, repr(e)[:60]))
+
 def _loop():
     global _wdt
     if _wdt is None:
@@ -7987,12 +8078,12 @@ def _loop():
         read_uart()
         gps_check(time.ticks_ms())
         log_tick()
-        wifi_tick()
+        _guarded("wifi", wifi_tick)
         keepalive_tick(time.ticks_ms())
         feed()
-        upload_tick()
+        _guarded("upload", upload_tick)
         web_tick()
-        ota_tick(time.ticks_ms())
+        _guarded("ota", ota_tick, time.ticks_ms())
         now = time.ticks_ms()
         if (not _boot_ok_done
                 and time.ticks_diff(now, loop_start) >= BOOT_OK_MS):

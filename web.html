@@ -257,7 +257,7 @@ var SHOWN = ("fix sats hdop hacc fix_src ubx utc position pos6 nmea rx_bytes rx_
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
-var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime"];
+var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime", "web_errs"];
 
 function esc(v) {
   if (v === null || v === undefined) return "-";
@@ -286,7 +286,7 @@ function hms(s) {                       // as _hms() in gps_logger.py
 function num(n) { return n === null || n === undefined ? "-" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
 function gid(sv) { return GNSS[sv.system] === undefined ? 1 : GNSS[sv.system]; }
 function cls(sv) { return "g" + gid(sv) + (sv.used ? "" : " u"); }
-function tip(sv) { return esc(sv.name) + " " + (sv.cno || "-") + " dBHz"; }
+function tip(sv) { return esc(sv.name) + " " + esc(sv.cno || "-") + " dBHz"; }
 function fixTone(fix) { return fix.indexOf("3D") === 0 ? "ok" : fix.indexOf("fix") >= 0 ? "warn" : "bad"; }
 function tile(lat, lon, z) {            // slippy-map tile and pixel offset in it
   var n = Math.pow(2, z), r = lat * Math.PI / 180;
@@ -352,7 +352,7 @@ function logRow(l) {
     title = "RECEIVER";
     src = "GPS";
     if (/^gps reset loop/.test(l)) { k = "er"; ic = "warn"; }
-  } else if (/^(crash|reboot|upload (err|aborted|low idf|ca err))/.test(l)) {
+  } else if (/^(crash|reboot|bug|web error|upload (err|aborted|low idf|ca err))/.test(l)) {
     k = "er";
     ic = "err";
   }
@@ -507,7 +507,7 @@ function view(d, prev) {
     (ha !== null ? cell("ACC", "&plusmn;" + ha.toFixed(1), "m", ha > MAX_HACC ? "warn" : "") :
       cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "")) +
     cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 || late ? "warn" : "") +
-    (q4 ? cell("WIFI", wifiIcon(q4[0]) + q4[1] + '<em>%</em><em class="db">' + d.rssi + " dBm</em>", "", q4[2]) :
+    (q4 ? cell("WIFI", wifiIcon(q4[0]) + q4[1] + '<em>%</em><em class="db">' + esc(d.rssi) + " dBm</em>", "", q4[2]) :
       cell("WIFI", esc(ws[0]).toUpperCase())) +
     (d.fix_src === "pvt" ? cell("UBX BAD", ubp.toFixed(2), "%", ubp > 1 ? "warn" : "") :
       cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : ""));
@@ -523,7 +523,7 @@ function view(d, prev) {
     bars += '<i class="' + cls(s) + '" style="height:' + Math.min(Math.floor((s.cno || 0) * 100 / 45), 100) +
       '%" title="' + tip(s) + '"></i>';
     tbl += '<tr class="' + (s.used ? "" : "u") + '"><td>' + esc(s.name) + (s.unhealthy ? " !" : "") + "</td><td>" +
-      (s.cno || "-") + "</td><td>" + (up ? s.elev + "&deg;" : "-") + "</td><td>" + (up ? s.azim + "&deg;" : "-") +
+      esc(s.cno || "-") + "</td><td>" + (up ? esc(s.elev) + "&deg;" : "-") + "</td><td>" + (up ? esc(s.azim) + "&deg;" : "-") +
       "</td><td>" + (s.used ? "&#9679;" : "") + "</td></tr>";
   }
   v.dots = dots;
@@ -587,7 +587,7 @@ function view(d, prev) {
         '<span class="sx-chip">since ' + when(Date.now() - d.uptime * 1000) + "</span>" : "") + "</td></tr>" +
       "<tr><td>Last boot</td><td" + (d.boot_cause === 3 ? ' class="warn"' : "") + ">" + esc(BOOT[d.boot_cause] || d.boot_cause) + "</td></tr>" +
       (pr ? "<tr><td>Previous run</td><td" + (/crash/.test(pr) ? ' class="warn"' : "") + ">" + esc(prevText(d)) + "</td></tr>" : "") +
-      "<tr><td>Chip</td><td>" + (d.temp === null || d.temp === undefined ? "-" : d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz</td></tr>" +
+      "<tr><td>Chip</td><td>" + esc(d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz</td></tr>" +
       (d.utc ? "<tr><td>GPS time</td><td>" + esc(String(d.utc).slice(11, 19)) + " UTC</td></tr>" : "") + "</table>";
   // Event log: rows newest first, filtered by the chips; chart and donut
   // from the status lines
@@ -674,6 +674,9 @@ function histNext(i) {
   }
   var h = hist, day = h.days[i], o = h.off[day] || 0, x = new XMLHttpRequest();
   x.open("GET", "/hist?d=" + day + "&o=" + o, true);
+  // one char a byte: the offsets count bytes (as UTF-8 a non-ASCII byte
+  // was one char, or U+FFFD, and shifted the next o=)
+  x.overrideMimeType("text/plain; charset=x-user-defined");
   x.timeout = 10000;
   x.onload = function () {
     if (h !== hist) return;             // another day was picked meanwhile
@@ -685,15 +688,22 @@ function histNext(i) {
   x.send();
 }
 function histDue() { return !hist.busy && !hist.done && Date.now() - hist.at >= 60000; }
-// The day: today or one of the board's days (the JSON's days, UTC names
-// read as local days), stepped with the arrows
+// The day: today or one of the board's days (the JSON's days are UTC
+// files: each offers the local days of its first and last moment, so east
+// of UTC an after-midnight drive in the file of the day before is found),
+// stepped with the arrows
 var boardDays = [];
 function localYmd(ms) { var d = new Date(ms); return d.getFullYear() + two(d.getMonth() + 1) + two(d.getDate()); }
 function dayList(days) {               // -> YYYYMMDD days oldest first, today (local) last
   var today = localYmd(Date.now()), out = [];
   for (var i = 0; i < (days || []).length; i++) {
     var s = String(days[i]);
-    if (/^\d{8}$/.test(s) && s < today && out.indexOf(s) < 0) out.push(s);
+    if (!/^\d{8}$/.test(s)) continue;
+    var u = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8));
+    for (var k = 0; k < 2; k++) {
+      var l = localYmd(u + k * 86399999);
+      if (l < today && out.indexOf(l) < 0) out.push(l);
+    }
   }
   out.sort();
   out.push(today);
@@ -868,7 +878,11 @@ function statView(s, on) {              // -> {btn, sstat, scat} (pure, for test
   v.scat = h + '<div class="legend"><span style="color:var(--ok)">- - CEP50</span><span style="color:var(--warn)">- - CEP95</span></div>';
   return v;
 }
-function statPaint() {
+var statKey = "";
+function statPaint() {                  // (the scatter: up to STAT_MAX dots)
+  var n = stat.s.length, k = stat.on + "/" + n + (n ? "/" + stat.s[0][0] + "/" + stat.s[n - 1][0] : "");
+  if (k === statKey) return;
+  statKey = k;
   var v = statView(stat.s, stat.on);
   document.getElementById("sbtn").innerHTML = v.btn;
   paint({sstat: v.sstat, scat: v.scat});
@@ -899,7 +913,10 @@ function fitView(lat, lon, el, live) {
   zf = Math.max(13, zf);
   var z = Math.ceil(zf - 1e-9), k = Math.pow(2, z), sc = Math.pow(2, zf - z);
   var me = wpx(lat, lon, z);
-  if (hist.pts.length < 2) return {z: z, sc: sc, X: me[0], Y: me[1]};
+  if (hist.pts.length < 2) {            // a past day's one point: on it (the fix may be far away)
+    var c = withMe || !hist.pts.length ? me : wpx(hist.pts[0][1], hist.pts[0][2], z);
+    return {z: z, sc: sc, X: c[0], Y: c[1]};
+  }
   var X = (x0 + x1) / 2 * k, Y = (y0 + y1) / 2 * k + (h * .42 - (top + bot) / 2) / sc;
   // today's track wider than zoom 13 shows: the centre moved just enough to
   // keep the position on the map (24 px from the sides, 16 from the bands)
@@ -993,11 +1010,14 @@ function placeMap(d) {
   acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
 }
 
-var last = 0, every = 15, prevD = null;
+var last = 0, every = 15, prevD = null, drawn = {};
+// a box rewritten only when its HTML changed: drawn holds what was written
+// (innerHTML reads back normalised, &middot; as U+00B7: it always differed)
 function paint(v) {
   for (var id in v) {
+    if (drawn[id] === v[id]) continue;
     var e = document.getElementById(id);
-    if (e && e.innerHTML !== v[id]) e.innerHTML = v[id];
+    if (e) { e.innerHTML = v[id]; drawn[id] = v[id]; }
   }
 }
 function stale() {
@@ -1011,7 +1031,12 @@ function tick() {
   x.timeout = 10000;
   x.onload = function () {
     var d = null;
-    try { d = JSON.parse(x.responseText); } catch (e) { stale(); }
+    try { d = JSON.parse(x.responseText); } catch (e) {
+      stale();
+      // the board answered, a bug building the JSON: its error
+      if (x.status === 500) document.getElementById("live").innerHTML = "BOARD ERROR &middot; " +
+        esc(String(x.responseText).slice(0, 60));
+    }
     // a bug drawing a box is not the board gone: LIVE stays, the error shows
     if (d) try {
       every = d.refresh_s || 15;
