@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import builtins
+import calendar
 import gc as real_gc
 import hashlib
 import importlib
@@ -2154,12 +2155,19 @@ try:
     gl.wifi_start()
     check("K5: embedded quote in DEVICE_ID uses default (valid JSON)",
           gl.DEVICE_ID == "Dawarich-GPS-tracker")
-    loc = ('{"type":"Feature","geometry":{"type":"Point",'
-           '"coordinates":[13.4,52.5]},"properties":{'
-           '"timestamp":"2026-10-05T00:00:00Z","device_id":"%s"}}'
-           % gl.DEVICE_ID)
-    json.loads('{"locations":[%s]}' % loc)
-    check("K5: default device_id produces valid JSON", True)
+    # the firmware's own upload body (it was a JSON the test built itself)
+    k5_path = os.path.join(tmpdir, "20261005_23k5.trk")
+    make_trk(k5_path, 3)
+    k5_n, k5_ok, k5_size = gl.read_batch(k5_path, 0)[:3]
+    try:
+        k5_locs = json.loads(bytes(gl._body[:k5_size]))["locations"]
+    except (ValueError, KeyError, TypeError) as e:
+        k5_locs = repr(e)
+    os.remove(k5_path)
+    check("K5: the default device_id gives a valid upload body",
+          isinstance(k5_locs, list) and len(k5_locs) == 3 == k5_ok
+          and all(p_["properties"]["device_id"] == "Dawarich-GPS-tracker"
+                  for p_ in k5_locs), repr(k5_locs)[:300])
 
     # --- K6: hidden SSID tried after / when nothing visible ----------------
     env_hid = (env_hot + "SSID2_HIDDEN=1\n")
@@ -12545,11 +12553,25 @@ else:
           and "<small>Last upload</small><b class=\"\">-</b>" in ft.get("sysNone", "-"),
           repr(ft.get("sysDead", "")[-500:]))
     pd = ft.get("pastDays") or ["?"]
+
+    def _local_days(utc_days):
+        # each UTC day: the local days of its first and last millisecond
+        # (the page's dayList), today and later left out, today last
+        today = time.strftime("%Y%m%d", time.localtime())
+        out = set()
+        for s in utc_days:
+            t = calendar.timegm((int(s[:4]), int(s[4:6]), int(s[6:]), 0, 0, 0))
+            for x in (t, t + 86399.999):
+                d = time.strftime("%Y%m%d", time.localtime(x))
+                if d < today:
+                    out.add(d)
+        return sorted(out) + [today]
     check("PAGE-DAYS: the days oldest first (bad, duplicate and today's "
           "skipped, today last); the arrow steps to a past local day, read "
           "once from its UTC files, drawn without a fix; and back to today",
-          ft.get("days") == ["20261029", "20261030", ft.get("today")]
-          and pd[-1] == "20261030" and len(pd) in (1, 2)
+          ft.get("days") == _local_days(["20261029", "20261030",
+                                          ft.get("today")])
+          and "20261030" in pd and len(pd) in (1, 2)
           and ft.get("pastEnd") == 86400000
           and ft.get("nav0") == ["TODAY", False, True]
           and ft.get("pickUrls") == ["/hist?d=%s&o=0" % pd[0]]
@@ -12612,6 +12634,32 @@ else:
           ft.get("pageErr", ["", ""])[0] == ""
           and ft.get("pageErr", ["", ""])[1].startswith(
               "LIVE &middot; PAGE ERROR boom"), repr(ft.get("pageErr")))
+    check("WEBR-1: a UTC day file offers both local days it covers (UTC+1: "
+          "the after-midnight part of the next day; UTC-5: the evening "
+          "before); picking that day reads the file, its points shown",
+          ft.get("wr1") == [["20261031", "20261101", "20261103"],
+                            ["20261031", "20261101"], 2]
+          and ft.get("wr1w") == ["20261030", "20261031", "20261103"],
+          repr((ft.get("wr1"), ft.get("wr1w"))))
+    check("WEBR-3: a past day with one point is centred on it (it was "
+          "~58 000 px off the map); today with one point keeps the fix",
+          ft.get("wr3") == [0, 0, 0, 0], repr(ft.get("wr3")))
+    check("WEBR-4: /hist offsets count bytes (x-user-defined: one char a "
+          "byte), so a non-ASCII byte neither shifts the next o= nor makes "
+          "a full reply look short",
+          ft.get("wr4") == [80, 80, True, 2], repr(ft.get("wr4")))
+    check("WEBR-7: a poll like the last one rewrites no box (innerHTML comes "
+          "back normalised, &middot; as U+00B7) and builds no static-test "
+          "scatter; a change is still drawn",
+          ft.get("wr7") == [[], 1, 1, 2, "STOP", True], repr(ft.get("wr7")))
+    check("WEBR-8: rssi, temp, cno, elev and azim from the JSON reach the "
+          "HTML coerced or escaped", ft.get("wr8") == [], repr(ft.get("wr8")))
+    check("WEBR-2: caught bugs ('bug <tick>', 'web error') are error rows; "
+          "a 500 from the board shows its error, not NO ANSWER",
+          ft.get("wrBug") == ["er", "er"]
+          and ft.get("wr2") == ["off", "BOARD ERROR &middot; "
+                                       "TypeError(&#39;row bug&#39;)"],
+          repr((ft.get("wrBug"), ft.get("wr2"))))
     gx = ft.get("gpx", "")
     check("PAGE-GPX: GPX 1.1, a segment per 5 min gap, ele when known, "
           "escaped name",
@@ -14276,6 +14324,229 @@ finally:
 check("R2-WEB: a TypeError on a page request does not escape web_tick",
       r_web == "ok" and gl._web_errs[0] == 1 and _Cli.closed, r_web)
 shutil.rmtree(_r2_dir, ignore_errors=True)
+
+# --- web review (WEBR-n) ------------------------------------------------------
+_wr_dir = tempfile.mkdtemp(prefix="wr-")
+_wr_saved = (gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl._web_rows, gl.WEB_PAGE)
+gl.DIAG = 60000
+gl.DIAG_FILE = os.path.join(_wr_dir, "diag.log")
+gl.DIAG_OLD = os.path.join(_wr_dir, "diag.old")
+
+
+def _wr_bugs(prefix):
+    return [x for x in diag_lines() if x.startswith(prefix)]
+
+
+# WEBR-2: status.json builds its rows before the 200: a bug in one is a 500
+# with the error (it was a 200 with a cut JSON: the page said OFFLINE),
+# counted in web_errs and logged once per kind (only the first error since
+# boot reached diag)
+def _wr_row_bug():
+    raise TypeError("row bug")
+
+
+gl._web_errs[0] = 0
+gl._bugs[:] = []
+gl.wifi_reset()
+gl._web_rows = _wr_row_bug
+c, c2 = RvConn(b""), RvConn(b"")
+try:
+    for c_ in (c, c2):
+        try:
+            gl._web_reply(c_, b"GET /status.json HTTP/1.1\r\n\r\n")
+        except Exception as e:           # (web_tick's catch, after the 200)
+            print("web error", repr(e))
+finally:
+    gl._web_rows = _wr_saved[3]
+w2_head, _, w2_body = c.sent.partition(b"\r\n\r\n")
+check("WEBR-2: a bug building status.json is a 500 with the error, not a "
+      "200 with a cut JSON",
+      w2_head.startswith(b"HTTP/1.0 500") and b"TypeError" in w2_body
+      and b"row bug" in w2_body and c2.sent.startswith(b"HTTP/1.0 500"),
+      repr(c.sent[:200]))
+_wsaved = (gl._web_sock, gl._web_read, gl._web_reply, gl.WEB)
+gl._web_sock, gl.WEB = _Lsn(), True
+gl._web_read = lambda c: b"GET / HTTP/1.0\r\n\r\n"
+gl.wifi["state"] = "connected"
+try:
+    for e_ in (KeyError("k"), KeyError("k"), ValueError("v")):
+        gl._web_reply = lambda c, r, e_=e_: (_ for _ in ()).throw(e_)
+        gl.web_tick()
+finally:
+    gl._web_sock, gl._web_read, gl._web_reply, gl.WEB = _wsaved
+    gl.wifi_reset()
+try:
+    w2_errs = json.loads(gl._web_json()).get("web_errs")
+except ValueError:
+    w2_errs = "bad json"
+check("WEBR-2: every new kind of web error reaches diag once (a repeat does "
+      "not); status.json has web_errs",
+      _wr_bugs("web error") == ["web error TypeError('row bug')",
+                                "web error KeyError('k')",
+                                "web error ValueError('v')"]
+      and gl._web_errs[0] == 5 and w2_errs == 5,
+      repr((_wr_bugs("web error"), gl._web_errs[0], w2_errs)))
+gl._web_errs[0] = 0
+
+# WEBR-5: the DNS-rebinding guard matches Host in any case, a bare-LF head
+# too, and a head cut at WEB_REQ_MAX (its Host maybe after the cut) is no
+# "no Host"
+gl.wifi["ip"] = "192.168.1.40"
+w5_hn = gl.HOSTNAME
+w5 = [gl._web_host_ok(r) for r in (
+    b"GET / HTTP/1.1\r\nHOST: evil.example\r\n\r\n",
+    b"GET / HTTP/1.1\r\nhOsT: evil.example\r\n\r\n",
+    b"GET / HTTP/1.1\nHost: evil.example\n\n",
+    gl._web_read(RvConn(b"GET /" + b"a" * 2600
+                        + b" HTTP/1.1\r\nHost: evil.example\r\n\r\n")),
+    b"GET / HTTP/1.1\r\nHost: 192.168.1.4",
+    b"GET / HTTP/1.1\r\nHOST: " + w5_hn.upper().encode() + b".LOCAL:80\r\n\r\n",
+    b"GET / HTTP/1.1\nhost: 192.168.1.40\n\n",
+    b"GET / HTTP/1.0\r\nUser-Agent: curl\r\n\r\n",
+    b"GET /status.json\r\n")]
+gl.wifi_reset()
+check("WEBR-5: Host any case, bare LF, a cut head: a foreign name or an "
+      "unknown Host is refused; the board's names and no Host pass",
+      w5 == [False, False, False, False, False, True, True, True, True],
+      repr(w5))
+
+
+# WEBR-6: a bare-LF head (\n\n) and an HTTP/0.9 request line end the head:
+# they waited for more until the timeout and got nothing
+class RvHold(RvConn):
+    """A client that sent its request and waits: recv times out."""
+    def recv(self, n):
+        if not self.req:
+            raise OSError(110)
+        return RvConn.recv(self, n)
+
+
+w6 = []
+for r_ in (b"GET /status.json HTTP/1.0\n\n", b"GET /status.json\r\n",
+           b"GET /\n", b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"):
+    try:
+        w6.append(gl._web_read(RvHold(r_)) == r_)
+    except OSError as e:
+        w6.append(repr(e))
+try:
+    gl._web_read(RvHold(b"GET / HTTP/1.1\r\nHost: x\r\n"))
+    w6.append("no wait")
+except OSError:
+    w6.append("waits")
+gl.WEB_PAGE = os.path.join(ROOT, "web.html")
+c = RvConn(b"")
+gl._web_reply(c, b"GET /\r\n")
+c_lf = RvConn(b"")
+gl._web_reply(c_lf, b"GET / HTTP/1.0\nAccept: */*\n\n")
+gl.WEB_PAGE = _wr_saved[4]
+check("WEBR-6: a bare-LF or HTTP/0.9 head is read without waiting for more "
+      "and answered; an unfinished head still waits",
+      w6 == [True, True, True, True, "waits"]
+      and c.sent.startswith(b"HTTP/1.0 200 OK")
+      and b"<html" in c.sent[:2000]
+      and c_lf.sent.startswith(b"HTTP/1.0 200 OK"),
+      repr((w6, c.sent[:60], c_lf.sent[:60])))
+
+# WEBR-9: a bug in the upload, OTA or WiFi tick is logged (once a kind) and
+# the loop goes on, the tick paused WR_PAUSE (no hot retry), after a
+# MemoryError a gc.collect: it escaped into run()'s crash branch, a reset
+# and a boot-fail count, and a persistent one left the board in the REPL
+# after BOOT_FAIL_MAX boots, logging nothing. log_tick is not guarded,
+# nor is anything while an OTA image is pending (its crash rolls it back)
+_w9_saved = (gl.upload_tick, gl.ota_tick, gl.wifi_tick, gl.log_tick,
+             gl.time.sleep_ms, gl.gc.collect, gl._wdt, gl._boot_ok)
+w9 = {"log": 0, "up": 0, "ota": 0, "wifi": 0, "mem": 0, "gc": 0}
+
+
+def _w9_up():
+    w9["up"] += 1
+    raise ValueError("bad batch")
+
+
+def _w9_ota(now):
+    w9["ota"] += 1
+    w9["mem"] += 1
+    raise MemoryError()
+
+
+def _w9_wifi():
+    w9["wifi"] += 1
+    raise TypeError("wifi bug")
+
+
+def _w9_log():
+    w9["log"] += 1
+
+
+def _w9_gc():
+    if w9["mem"]:
+        w9["mem"] -= 1
+        w9["gc"] += 1
+    return real_gc.collect()
+
+
+_w9_n = [0, 600]
+
+
+def _w9_sleep(ms):
+    _clock[0] += ms
+    _w9_n[0] += 1
+    if _w9_n[0] >= _w9_n[1]:
+        raise KeyboardInterrupt
+
+
+def _w9_run(n):
+    _w9_n[:] = [0, n]
+    gl._wdt = None
+    try:
+        gl._loop()
+        return "returned"
+    except KeyboardInterrupt:
+        return "ki"
+    except Exception as e:
+        return repr(e)
+
+
+gl.upload_tick, gl.ota_tick, gl.wifi_tick = _w9_up, _w9_ota, _w9_wifi
+gl.log_tick, gl.time.sleep_ms, gl.gc.collect = _w9_log, _w9_sleep, _w9_gc
+gl._boot_ok = lambda: None
+gl.wifi_reset()
+gl.ota["pend"] = None
+gl._tick_bug.clear()
+diag_clear()
+try:
+    w9_r = _w9_run(600)                  # 12 s of loop
+    w9_calls = dict(w9)
+    w9_fed = gl._wdt.fed if gl._wdt is not None else 0
+    _clock[0] += 10000                   # past the pause
+    gl.wifi_tick = lambda: None
+    gl.ota["pend"] = 123                 # a new image runs pending
+    w9_pend = _w9_run(5)
+    gl.ota["pend"] = None
+    gl.upload_tick = lambda: None
+    gl.log_tick = lambda: (_ for _ in ()).throw(RuntimeError("log bug"))
+    w9_log = _w9_run(5)
+finally:
+    (gl.upload_tick, gl.ota_tick, gl.wifi_tick, gl.log_tick,
+     gl.time.sleep_ms, gl.gc.collect, gl._wdt, gl._boot_ok) = _w9_saved
+    gl.ota["pend"] = None
+    gl.wifi_reset()
+check("WEBR-9: an upload / OTA / WiFi tick that raises: the loop goes on "
+      "(the WDT fed), one diag line a kind, the tick paused (not every "
+      "20 ms), gc.collect after a MemoryError",
+      w9_r == "ki" and w9_calls["log"] == 600 and w9_fed >= 600
+      and all(2 <= w9_calls[k] <= 4 for k in ("up", "ota", "wifi"))
+      and w9_calls["gc"] == w9_calls["ota"]
+      and sorted(_wr_bugs("bug ")) == ["bug ota MemoryError()",
+                                      "bug upload ValueError('bad batch')",
+                                      "bug wifi TypeError('wifi bug')"],
+      repr((w9_r, w9_calls, w9_fed, _wr_bugs("bug "))))
+check("WEBR-9: a pending OTA image and a log_tick bug still crash (run()'s "
+      "branch resets; the bootloader rolls the image back)",
+      w9_pend == "ValueError('bad batch')"
+      and w9_log == "RuntimeError('log bug')", repr((w9_pend, w9_log)))
+(gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl._web_rows, gl.WEB_PAGE) = _wr_saved
+shutil.rmtree(_wr_dir, ignore_errors=True)
 
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
