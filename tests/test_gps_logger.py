@@ -7800,8 +7800,10 @@ check("UPL-6: trk2gpx drops times out of range and a point with a field "
 with open(os.path.join(ROOT, "web.html")) as f:
     th_src = f.read()
 th_hex = sorted(set(c.lower() for c in re.findall(r"#[0-9a-fA-F]{6}\b", th_src)))
-check("PAGE-THEME: the carbon palette only, no navy / cyan / graphite left, "
-      "the Atlas map unfiltered", len(th_hex) <= 20
+check("PAGE-THEME: the carbon palette only (plus the map's navigation "
+      "blue), no navy / cyan / graphite left, the Atlas map unfiltered",
+      len(th_hex) <= 22
+      and not [c for c in th_hex if c in ("#3b82f6",)]
       and not any(c in th_src for c in ("#22d3ee", "#060b16", "#16233d",
                                         "rgba(34,211,238", "#1d2622",
                                         "#d6e2ff"))
@@ -14040,8 +14042,14 @@ else:
           and dom.get("brokenBody") == "off" and dom.get("never") == "NO ANSWER",
           repr(dom))
     hd = v.get("hist", {})
-    p1 = hd.get("path1", "")
-    p2 = hd.get("path", "")
+    # the track's own line (the white casing under it has the same d)
+    def main_path(svg):
+        m = re.search(r'<path d="([^"]*)"', svg)
+        return '<svg width="1" height="1"><path d="' + (m.group(1) if m else "")
+    p1c = hd.get("path1", "")
+    p2c = hd.get("path", "")
+    p1 = main_path(p1c)
+    p2 = main_path(p2c) + '"/>' + p2c[p2c.find("<circle"):]
     check("PAGE-HIST: the day history is asked after the first status, "
           "from byte 0, then only from where it got to",
           dom.get("hist") == ["/hist?d=D&o=0"]
@@ -14053,6 +14061,10 @@ else:
           and hd.get("pts") == 11 and p2.count("M") == 2
           and p2.startswith('<svg width="1" height="1"><path d="M'),
           repr((hd.get("pts1"), hd.get("pts"), p1[:80], p2[-80:])))
+    check("PAGE-HIST: the track blue on a white casing (the same line twice)",
+          p2c.count('<path class="c" d="') == 1 and p2c.count('<path d="') == 1
+          and re.search(r'<path class="c" d="([^"]*)"', p2c).group(1)
+          == re.search(r'<path d="([^"]*)"', p2c).group(1), repr(p2c[:120]))
     check("PAGE-HIST: the shown track's start and end marked on the map",
           p2.count('<circle class="s"') == 1 and p2.count('<circle class="e"') == 1,
           repr(p2[-160:]))
@@ -14069,10 +14081,50 @@ else:
           "telemetry strip (below zoom 13); without a fix the track's centre",
           v.get("feat", {}).get("fitLive") == [[True, True, True]] * 2,
           repr(v.get("feat", {}).get("fitLive")))
-    check("PAGE-MAP: the coordinates go above the pin in the band's lower "
-          "half (on a phone they were under the telemetry strip)",
-          v.get("feat", {}).get("coordUp") == ["coord up", "coord"],
-          repr(v.get("feat", {}).get("coordUp")))
+    check("PAGE-MAP: the now card on the band's half away from the dot",
+          v.get("feat", {}).get("cardSide") == ["now top", "now"],
+          repr(v.get("feat", {}).get("cardSide")))
+    nw = v.get("feat", {}).get("now", {})
+    check("PAGE-NOW: Photon's answer read as street and number (a place's "
+          "name first), district and city under it; nothing named: none",
+          nw.get("addr") == {"st": "Fűtőház utca 16", "sub": "Víziváros, Székesfehérvár"}
+          and nw.get("poi") == {"st": "Berényi út 72", "sub": "Videoton, Székesfehérvár"}
+          and nw.get("street") == {"st": "Budai út", "sub": "Székesfehérvár"}
+          and nw.get("none") is None, repr(nw))
+    check("PAGE-NOW: here for since the track came within reach (2 h), 0 "
+          "km/h standing (an old track too); moving ~36 km/h; none when "
+          "the track ends elsewhere or on a past day",
+          nw.get("still") == [117, 0] and nw.get("go") == [True, 36]
+          and nw.get("away") is None and nw.get("past") is None
+          and nw.get("stale") == 0, repr(nw))
+    check("PAGE-NOW: a stray fix (under 2 min off) does not end the stay, "
+          "6 min away does",
+          nw.get("stray") == 117 and nw.get("left") == 59, repr(nw))
+    check("PAGE-NOW: heading over the track's last 30 m (north 0, east 90), "
+          "none on a shorter one",
+          nw.get("headN") == 0 and nw.get("headE") == 90
+          and nw.get("headNone") is None, repr(nw))
+    cd = nw.get("card", {})
+    check("PAGE-NOW: the card: address, district and city, HERE FOR / SPEED "
+          "/ ACCURACY / LAST FIX, the coordinates under them; without an "
+          "address the coordinates as its title",
+          cd.get("nst") == "Fűtőház utca 16" and cd.get("nsub") == "Víziváros, Székesfehérvár"
+          and "HERE FOR<b>2 h 00 min</b>" in cd.get("nr", "")
+          and "SPEED<b>0 km/h</b>" in cd.get("nr", "")
+          and "ACCURACY<b>&plusmn;4 m</b>" in cd.get("nr", "")
+          and 'class="fa">LAST FIX<b>2 s</b>' in cd.get("nr", "")
+          and cd.get("ncoord") == "47.18000&deg; N"
+          and nw.get("bare", {}).get("nst") == "47.18000&deg; N"
+          and "HERE FOR" not in nw.get("bare", {}).get("nr", "")
+          and "SPEED<b>&ndash;</b>" in nw.get("bare", {}).get("nr", "")
+          and "&plusmn;5 m" in nw.get("bare", {}).get("nr", ""), repr(nw))
+    check("PAGE-NOW: the address from Atlas' Photon; asked again only after "
+          "25 m and 20 s, one at a time",
+          (nw.get("url") or "").startswith("https://atlas.crusand.org/api/v1/photon/reverse?lat=47.18000&lon=18.42000")
+          and nw.get("got") == "Fűtőház utca 16" and nw.get("asks") == [1, 1, 2, 2],
+          repr(nw))
+    check("PAGE-NOW: moving, a cone the way the track goes",
+          nw.get("cone") == ["cone on", "rotate(0deg)"], repr(nw.get("cone")))
     check("PAGE-MAP: the free band is measured (header bottom, strip top), "
           "defaults without a layout",
           v.get("feat", {}).get("band") == [[44, 204], [70, 250]],

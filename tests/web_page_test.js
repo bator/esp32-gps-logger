@@ -210,18 +210,77 @@ ft.fitLive = (() => {
   }
   return out;
 })();
-// the coordinates above the pin in the band's lower half (a phone shows
-// them under it: under the strip there)
-ft.coordUp = (() => {
+// the "now" card on the band's half away from the dot (the dot low:
+// the card at the top)
+ft.cardSide = (() => {
   const q = page(375), m = q.doc.getElementById("map");
   m.offsetHeight = 300;
   q.c.hist = q.c.histNew(null);
   q.c.hist.pts.push([Date.now() - 60000, 47.20, 18.42, 100], [Date.now(), 47.18, 18.42, 100]);
   q.c.placeMap({position: "47.18, 18.42"});
-  const low = q.doc.getElementById("coord").className;
+  const low = q.doc.getElementById("now").className;
   q.c.hist.pts.reverse();
   q.c.placeMap({position: "47.20, 18.42"});
-  return [low, q.doc.getElementById("coord").className];
+  return [low, q.doc.getElementById("now").className];
+})();
+// the card: Photon's answer, how long here, speed, heading, the address
+// asked again only after ADDR_M metres and ADDR_S seconds
+ft.now = (() => {
+  const q = page(1100), c = q.c, out = {};
+  out.addr = c.addrOf({features: [{properties: {type: "house", street: "Fűtőház utca", housenumber: "16",
+    district: "Víziváros", city: "Székesfehérvár"}}]});
+  out.poi = c.addrOf({features: [{properties: {type: "house", name: "Videoton", street: "Berényi út", housenumber: "72",
+    city: "Székesfehérvár"}}]});
+  out.street = c.addrOf({features: [{properties: {type: "street", name: "Budai út", city: "Székesfehérvár"}}]});
+  out.none = c.addrOf({features: []});
+  const now = Date.now(), still = [], go = [];
+  for (let k = 0; k <= 120; k++) still.push([now - (120 - k) * 60000, 47.18 + (k < 3 ? 0.01 : 0.00002 * (k % 2)), 18.42, 100]);
+  for (let k = 0; k <= 60; k++) go.push([now - (60 - k) * 1000, 47.18 + k * 0.00009, 18.42, 100]);   // ~10 m/s north
+  c.hist = c.histNew(null);
+  const hs = c.hereFor(still, 47.18, 18.42, 60, now);
+  out.still = [Math.round(hs.ms / 60000), hs.kmh];
+  const hg = c.hereFor(go, 47.18 + 60 * 0.00009, 18.42, 60, now);
+  out.go = [hg.ms < 60000, Math.round(hg.kmh)];
+  out.away = c.hereFor(still, 47.30, 18.42, 60, now).ms;
+  // a stray fix 200 m off (under 2 min) keeps the stay; 5 min off ends it
+  const stray = still.map((q2) => q2.slice());
+  stray[60][1] = 47.182;
+  out.stray = Math.round(c.hereFor(stray, 47.18, 18.42, 60, now).ms / 60000);
+  for (let k = 55; k <= 60; k++) stray[k][1] = 47.182;
+  out.left = Math.round(c.hereFor(stray, 47.18, 18.42, 60, now).ms / 60000);
+  out.stale = c.hereFor(still.map((q2) => [q2[0] - 600000, q2[1], q2[2], q2[3]]), 47.18, 18.42, 60, now).kmh;
+  c.hist = c.histNew("20261030");
+  out.past = c.hereFor(still, 47.18, 18.42, 60, now).ms;
+  out.headN = Math.round(c.heading(go));
+  out.headE = Math.round(c.heading([[0, 47, 18], [1, 47, 18.001]]));
+  out.headNone = c.heading([[0, 47, 18], [1, 47.0001, 18]]);
+  out.card = c.nowCard({hacc: 3.6, good_age_s: 2}, out.addr, {ms: 7200000, kmh: 0}, "47.18000&deg; N");
+  out.bare = c.nowCard({hdop: 2}, null, {ms: null, kmh: null}, "47.18000&deg; N");
+  // the address requests
+  const asks = () => q.xhrs.filter((x) => x.url.indexOf(c.ADDR) === 0).length;
+  c.hist = c.histNew(null);
+  c.addrLoad(47.18, 18.42);
+  out.url = q.xhrs.filter((x) => x.url.indexOf(c.ADDR) === 0).map((x) => x.url)[0];
+  const ax = q.xhrs.filter((x) => x.url.indexOf(c.ADDR) === 0)[0];
+  ax.status = 200;
+  ax.responseText = JSON.stringify({features: [{properties: {street: "Fűtőház utca", housenumber: "16", city: "Székesfehérvár"}}]});
+  ax.onload();
+  out.got = c.addr.a && c.addr.a.st;
+  c.addrLoad(47.18005, 18.42);              // 5 m: not again
+  const n1 = asks();
+  c.addr.t = 0;
+  c.addrLoad(47.18005, 18.42);              // 5 m, time passed: not again
+  const n2 = asks();
+  c.addrLoad(47.1805, 18.42);               // 55 m, time passed: again
+  const n3 = asks();
+  c.addrLoad(47.1810, 18.42);               // moved, but asked just now / busy: not again
+  out.asks = [n1, n2, n3, asks()];
+  // the dot moving: the cone on, turned the way it goes
+  c.hist = c.histNew(null);
+  go.forEach((g) => c.hist.pts.push(g));
+  c.placeMap({position: (47.18 + 60 * 0.00009).toFixed(5) + ", 18.42000", hacc: 3});
+  out.cone = [q.doc.getElementById("cone").className, q.doc.getElementById("cone").style.transform];
+  return out;
 })();
 // the bands measured on the page: a two-line header on a phone (70 px)
 // and an alert pushing the strip down; without a layout the defaults
@@ -276,10 +335,10 @@ ft.pickLine = p.doc.getElementById("tline").innerHTML;
 ft.nav1 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev").disabled,
   p.doc.getElementById("dnext").disabled];
 p.c.hlTrip(0);
-ft.hlMap = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
+ft.hlMap = (p.doc.getElementById("trk").innerHTML.match(/<path (class="hl" )?d=/g) || []).length;
 ft.hlLine = p.doc.getElementById("tline").innerHTML.indexOf('class="tr go on"') >= 0;
 p.c.hlTrip(0);
-ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
+ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path (class="hl" )?d=/g) || []).length;
 for (let k = 0; k < 3 && p.c.hist.past; k++) p.c.step(1);   // (via 20261031 east of UTC)
 ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
 // REV-4: at 00:30 local on Nov 2 in Budapest (23:30 UTC on Nov 1) today
