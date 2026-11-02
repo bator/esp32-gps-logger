@@ -19,18 +19,18 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .tm,.none,.p h2,.hud,.coord,.legend,.svt{font-family:"JetBrains Mono",ui-monospace,monospace}
 /* map */
 .map{position:relative;height:360px;overflow:hidden;background:#0f0f12}
-.tiles{position:absolute;left:50%;top:42%;filter:invert(1) grayscale(1) brightness(.62) contrast(1.15)}
+.tiles{position:absolute;left:50%;top:42%}  /* the Atlas map as it is, its own colours */
 .tiles img{position:absolute;width:256px;height:256px}
-.map:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(9,9,11,.55) 0,rgba(9,9,11,0) 22%,rgba(9,9,11,0) 55%,var(--b) 100%),radial-gradient(circle at 50% 42%,rgba(228,228,231,.1),transparent 45%)}
-.grid{position:absolute;inset:0;z-index:1;background-image:linear-gradient(rgba(228,228,231,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(228,228,231,.06) 1px,transparent 1px);background-size:40px 40px}
-.acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(228,228,231,.6);background:radial-gradient(circle,rgba(228,228,231,.18),rgba(228,228,231,.04) 70%);z-index:2}
-.pin{position:absolute;left:50%;top:42%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--a);box-shadow:0 0 0 4px rgba(228,228,231,.25),0 0 22px var(--a);z-index:3}
-.pin:after{content:"";position:absolute;inset:-14px;border-radius:50%;border:1px solid rgba(228,228,231,.5);animation:p 2s infinite}
+.map:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(9,9,11,0) 72%,var(--b) 100%)}
+.grid{display:none}
+.acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1.5px solid rgba(9,9,11,.7);background:rgba(9,9,11,.12);z-index:2}
+.pin{position:absolute;left:50%;top:42%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#09090b;border:3px solid #fff;box-sizing:border-box;box-shadow:0 1px 6px rgba(0,0,0,.5);z-index:3}
+.pin:after{content:"";position:absolute;inset:-14px;border-radius:50%;border:2px solid rgba(9,9,11,.6);animation:p 2s infinite}
 @keyframes p{from{transform:scale(.5);opacity:1}to{transform:scale(2.2);opacity:0}}
 .nofix .pin,.nofix .acc{display:none}
-.coord{position:absolute;left:50%;top:42%;transform:translate(16px,-34px);font-size:11px;font-weight:600;color:var(--a);z-index:4;white-space:nowrap;text-shadow:0 0 8px rgba(228,228,231,.6)}
+.coord{position:absolute;left:50%;top:42%;transform:translate(16px,-34px);font-size:11px;font-weight:600;color:#fff;background:rgba(9,9,11,.82);padding:3px 7px;border-radius:4px;z-index:4;white-space:nowrap}
 .nofix .coord{transform:translate(-50%,-50%);color:var(--warn);text-shadow:none;font-size:13px}
-.hud{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:12px;padding:14px 16px;z-index:4;max-width:1100px;margin:auto;box-sizing:border-box}
+.hud{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:12px;padding:10px 16px;z-index:4;max-width:1100px;margin:auto;box-sizing:border-box;background:rgba(9,9,11,.82);border-radius:0 0 12px 12px}
 .hud h1{font-size:14px;font-weight:700;letter-spacing:.18em;margin:0;color:#fff}
 .live{font-size:11px;font-weight:600;color:var(--ok);letter-spacing:.1em;display:flex;align-items:center;gap:6px}
 .live:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}
@@ -38,7 +38,7 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .hud .up{margin-left:auto;color:var(--m);font-size:12px}
 .trk{position:absolute;left:50%;top:42%;z-index:1;pointer-events:none}
 .trk svg{position:absolute;overflow:visible}
-.trk path{fill:none;stroke:#e4e4e7;stroke-width:3;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round;opacity:.9;filter:drop-shadow(0 0 4px rgba(228,228,231,.7))}
+.trk path{fill:none;stroke:#09090b;stroke-width:3.5;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round;opacity:.85;filter:drop-shadow(0 0 1.5px #fff)}
 .hud .day{color:var(--a);font-size:11px;font-weight:600;letter-spacing:.1em;white-space:nowrap}.hud .day em{font-style:normal}
 .attr{position:absolute;right:8px;bottom:6px;font-size:10px;color:var(--m);z-index:4}
 .attr a{color:inherit}
@@ -237,7 +237,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .tr.go{cursor:pointer}.tr.go span{color:var(--t)}.tr.go span b{color:#fff}
 .tr.go:hover span,.tr.go.on span,.tr.go.on span b{color:var(--a)}.tr.go.on i:after{border-left-color:#fff}
 .tr.end i:after{display:none}
-.trk path.hl{stroke:#fff;stroke-width:5;filter:drop-shadow(0 0 6px rgba(255,255,255,.8))}
+.trk path.hl{stroke:#09090b;stroke-width:5.5;opacity:1;filter:drop-shadow(0 0 2px #fff)}
 .hint{font-size:11px;color:var(--m);margin-top:8px}
 /* a narrow HUD wraps whole items (offline with a day's km it needs ~490 px;
    squeezed, the uptime broke over 5 lines into the map); the uptime of the

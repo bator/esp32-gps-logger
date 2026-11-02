@@ -7794,17 +7794,19 @@ check("UPL-6: trk2gpx drops times out of range and a point with a field "
 
 # PAGE-THEME: one colour world (Bator picked "carbon"): every colour on
 # the page is one of the theme's roles (no navy, cyan or graphite left
-# from the panels' separate origins: 34 colours before), and the map is a
-# neutral dark grey (no blue tint)
+# from the panels' separate origins: 34 colours before); the map is the
+# Atlas map as it is, in its own colours (Bator: "the Atlas map, not this
+# black"), no filter on the tiles
 with open(os.path.join(ROOT, "web.html")) as f:
     th_src = f.read()
 th_hex = sorted(set(c.lower() for c in re.findall(r"#[0-9a-fA-F]{6}\b", th_src)))
 check("PAGE-THEME: the carbon palette only, no navy / cyan / graphite left, "
-      "a grey map", len(th_hex) <= 20
+      "the Atlas map unfiltered", len(th_hex) <= 20
       and not any(c in th_src for c in ("#22d3ee", "#060b16", "#16233d",
                                         "rgba(34,211,238", "#1d2622",
                                         "#d6e2ff"))
-      and "hue-rotate" not in th_src and "grayscale(1)" in th_src,
+      and "hue-rotate" not in th_src and "invert(1)" not in th_src
+      and re.search(r"\.tiles\{[^}]*filter", th_src) is None,
       repr(th_hex))
 
 # DIAG: persistent diagnostic log (what happened on a walk)
