@@ -2783,7 +2783,7 @@ def _wifi_round_failed(w):
     off between rounds (_wifi_begin_round turns it on); with nothing to
     upload, sleep (not yet while _web_search)."""
     now = time.ticks_ms()
-    if _nothing_to_send() and not _web_search(now):
+    if _nothing_to_send() and not _web_search(now) and not _ota_wants_radio():
         _wifi_off(w, "sleep")
         return
     _radio_off(w)
@@ -2915,6 +2915,13 @@ def _radio_idle_ok():
         return True
     sl = log["still"]
     return bool(sl["active"] and not sl["home"] and not pending())
+
+def _ota_wants_radio():
+    """A new firmware still has to read the manifest to be valid
+    (_ota_probe): the radio stays on and rounds go on for it. A failed
+    first read and then the idle sleep was no retry, so a rollback at
+    OTA_HEALTH (and two of them marked a good build bad)."""
+    return ota.get("pend") is not None
 
 def _nothing_to_send():
     """All uploaded, or no GEO_URL/API_KEY ("no .env": never sends, so the
@@ -3422,6 +3429,8 @@ def wifi_tick():
                 wifi["idle_at"] = now
                 if WEB and (wifi.get("home") or WEB_AWAY):
                     pass                 # the status page keeps it on
+                elif _ota_wants_radio():
+                    pass                 # so does a firmware to confirm
                 elif _radio_idle_ok():
                     _wifi_off(w, "sleep")
                 else:
@@ -3477,7 +3486,7 @@ def wifi_tick():
             if _age(now, wifi["idle_at"]) < WIFI_IDLE:
                 return
             wifi["idle_at"] = now
-            if (_nothing_to_send()
+            if (_nothing_to_send() and not _ota_wants_radio()
                     and not (WEB and (WEB_AWAY or _has_home()))):
                 wifi["wake_at"] = None
                 return
@@ -4036,7 +4045,7 @@ def _cut_to_footer(path, good, sz):
         f = open(path, "r+b")
         f.seek(good - n, 0)
         f.write(FOOTER.encode())
-    except OSError:
+    except (OSError, MemoryError):       # (it runs when heap is short too)
         log["err"] += 1
     if f is not None:
         try:
@@ -6464,6 +6473,8 @@ def _tls_reboot():
     is fragmented for good. Write what is in RAM and restart."""
     if up.get("enomem", 0) < TLS_REBOOT_N or not at_home():
         return False
+    if _ota_wants_radio():
+        return False                     # (a reset aborts a pending image)
     print("upload: TLS out of memory %d times, reboot" % up["enomem"])
     try:
         flush(_still_hold())
@@ -6491,8 +6502,8 @@ def _low_reboot(fmt, n, low_ms):
     restart. Its own reason, not the ENOMEM run; at most one per
     LOWIDF_REBOOT_GAP for either (LOWIDF_MARK tells the next boot).
     fmt % n: what is low ("idf %d KB", "mem %d B")."""
-    if not at_home() or low_ms < LOWIDF_WAIT:
-        return False
+    if not at_home() or low_ms < LOWIDF_WAIT or _ota_wants_radio():
+        return False                     # (a reset aborts a pending image)
     if up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP:
         return False                     # rebooted for it a short while ago
     what = fmt % n

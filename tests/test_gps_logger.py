@@ -12552,6 +12552,27 @@ check("REV-3b: a partly landed batch is not written twice across the "
       "WFAIL_SWITCH file change", f3b != f3 and len(p3[0]) == 30
       and len(all3) == 60 and len(set(all3)) == 60,
       "old=%d new=%d unique=%d" % (len(p3[0]), len(p3[1]), len(set(all3))))
+# REV-3c: the footer cut runs after writes failed, often for want of heap:
+# a MemoryError there is a failed write, not a crash (run() reset the board)
+def _oom_open(name, mode="r", *a, **k):
+    if "+" in mode:
+        raise MemoryError
+    return _open3(name, mode, *a, **k)
+
+
+err0 = gl.log["err"]
+builtins.open = _oom_open
+try:
+    try:
+        gl._cut_to_footer(f3, 100, 200)
+        cut_r = "ok"
+    except MemoryError:
+        cut_r = "MemoryError escaped"
+finally:
+    builtins.open = _open3
+check("REV-3c: a MemoryError while cutting a failing file back to its "
+      "footer is counted, not raised", cut_r == "ok"
+      and gl.log["err"] == err0 + 1, cut_r)
 gl.LOG_DIR = _rev_dir
 gl.log_reset()
 shutil.rmtree(_r3, ignore_errors=True)
@@ -13302,6 +13323,44 @@ try:
           and pr[0][5] == 1 and pr[3][5] == 0
           and 2 <= pr[1][5] <= gl.OTA_HEALTH // gl.OTA_PROBE + 2,
           repr(pr))
+    # OTA-AWAKE: until the new firmware has read the manifest the radio
+    # does not sleep (a failed first probe, then the idle sleep: no retry,
+    # a rollback at OTA_HEALTH, and two such marked a good build bad), and
+    # no low-memory or TLS reboot aborts the pending image (the bootloader
+    # rolls it back, and older firmware blames the build)
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+    with open(gl.OTA_PENDING, "w") as f:
+        f.write("200 abc0200\n")
+    _files.clear()
+    gl.ota_boot()
+    gl.wifi_reset()
+    w_ = gl.network.WLAN(gl.network.STA_IF)
+    gl.log_reset()
+    saved_ld = gl.LOG_DIR
+    gl.LOG_DIR = _ota_dir
+    _resets_before = len(_ota_log)
+    try:
+        gl._wifi_round_failed(w_)
+        aw_round = gl.wifi["state"]
+        gl.up["enomem"] = gl.TLS_REBOOT_N
+        gl.wifi["home"] = True
+        gl.wifi["state"] = "connected"
+        aw_tls = gl._tls_reboot()
+        aw_low = gl._low_reboot("mem %d B", 4000, gl.LOWIDF_WAIT + 1000)
+        aw_reset = list(_ota_log[_resets_before:])
+    finally:
+        gl.LOG_DIR = saved_ld
+        gl.up["enomem"] = 0
+        gl.wifi["home"] = False
+        gl.wifi_reset()
+    check("OTA-AWAKE: while a new firmware waits to read the manifest a "
+          "failed round searches on (no sleep), and no TLS or low-memory "
+          "reboot aborts it",
+          aw_round == "not found" and gl.ota["pend"] == 200
+          and aw_tls is False and aw_low is False and aw_reset == [],
+          repr((aw_round, aw_tls, aw_low, aw_reset)))
+    _ota_reset()
     # a reset in between keeps the state: _ota_env leaves "pending" alone
     gl.ota["state"] = "pending"
     gl._ota_env({"OTA_URL": "http://ota.lan/m.json", "OTA_KEY": "k"})
