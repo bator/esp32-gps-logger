@@ -38,6 +38,8 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .hud .up{margin-left:auto;color:var(--m);font-size:12px}
 .trk{position:absolute;left:50%;top:42%;z-index:1;pointer-events:none}
 .trk svg{position:absolute;overflow:visible}
+.trk circle{stroke-width:3;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 1.5px #fff)}
+.trk circle.s{fill:#fff;stroke:#09090b}.trk circle.e{fill:#09090b;stroke:#fff}
 .trk path{fill:none;stroke:#09090b;stroke-width:3.5;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round;opacity:.85;filter:drop-shadow(0 0 1.5px #fff)}
 .hud .day{color:var(--a);font-size:11px;font-weight:600;letter-spacing:.1em;white-space:nowrap}.hud .day em{font-style:normal}
 .attr{position:absolute;right:8px;bottom:6px;font-size:10px;color:var(--m);z-index:4}
@@ -243,17 +245,17 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
    squeezed, the uptime broke over 5 lines into the map); the uptime of the
    last answer is not shown offline */
 @media(max-width:760px){.hud{flex-wrap:wrap;row-gap:6px}.hud>*{white-space:nowrap}.off .hud .up{display:none}
-.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}.coord.up{transform:translate(-50%,-44px)}}
 </style>
 </head>
 <body>
 <div class="map nofix" id="map">
   <div class="tiles" id="tiles"></div><div class="grid"></div><div class="trk" id="trk"></div>
   <div class="acc" id="acc"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
-  <div class="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
+  <div class="hud" id="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
   <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &middot; <a href="https://www.geoapify.com/">Geoapify</a></div>
 </div>
-<div class="wrap">
+<div class="wrap" id="wrap">
   <div class="alert" id="gl"></div>
   <div class="tm" id="tm"></div>
   <div class="g">
@@ -1145,14 +1147,28 @@ function wpx(lat, lon, z) {
   var k = 256 * Math.pow(2, z), r = lat * Math.PI / 180;
   return [(lon + 180) / 360 * k, (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * k];
 }
-// The view: the position and the day's track fitted between the header
-// and the telemetry strip, centred on them. A fractional zoom (ZOOM at
-// most, 13 at least): the tiles of the zoom above, scaled down (sc <= 1,
-// crisp). -> the tile zoom, the scale and the world pixel at the map's
-// anchor (50%, 42%). live: lat, lon is a fix (it stays on the map even when
-// the track is wider than zoom 13 shows)
-function fitView(lat, lon, el, live) {
-  var w = el.offsetWidth, h = el.offsetHeight, top = 44, bot = h - 90, zf = ZOOM;
+// The map's free band: below the header, above the telemetry strip (and
+// an alert over it), as laid out (the header wraps on a phone); without a
+// layout the desktop's
+function mapBand(el) {
+  var h = el.offsetHeight, b = {top: 44, bot: h - 96};
+  var hud = document.getElementById("hud"), wr = document.getElementById("wrap");
+  if (el.getBoundingClientRect && hud.getBoundingClientRect && wr.getBoundingClientRect) {
+    var m = el.getBoundingClientRect().top, t = hud.getBoundingClientRect().bottom - m,
+      u = Math.min(h, wr.getBoundingClientRect().top - m);
+    if (u - t >= 100) { b.top = t; b.bot = u; }
+  }
+  return b;
+}
+// The view: the position and the day's track fitted into the free band,
+// centred on them. A fractional zoom (ZOOM at most, 6 at least: a day
+// across the country fits): the tiles of the zoom above, scaled down
+// (sc <= 1, crisp). -> the tile zoom, the scale and the world pixel at the
+// map's anchor (50%, 42%). live: lat, lon is a fix (it stays on the map
+// even when the track is wider than zoom 6 shows)
+function fitView(lat, lon, el, live, band) {
+  band = band || mapBand(el);
+  var w = el.offsetWidth, h = el.offsetHeight, top = band.top, bot = band.bot, zf = ZOOM;
   // a past day: its track alone (the live position may be far away)
   // a trip picked in the timeline: that trip alone
   var hl = hlRange(), x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, withMe = !hl && !(hist.past && hist.pts.length);
@@ -1161,9 +1177,10 @@ function fitView(lat, lon, el, live) {
     var q = wpx(ps[i][1], ps[i][2], 0);
     x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]);
   }
+  // 24 px a side, 20 above and below: the start and end marks clear of the bands
   if (x1 > x0) zf = Math.min(zf, Math.log((w - 48) / (x1 - x0)) / Math.LN2);
-  if (y1 > y0) zf = Math.min(zf, Math.log((bot - top - 32) / (y1 - y0)) / Math.LN2);
-  zf = Math.max(13, zf);
+  if (y1 > y0) zf = Math.min(zf, Math.log((bot - top - 40) / (y1 - y0)) / Math.LN2);
+  zf = Math.max(6, zf);
   var z = Math.ceil(zf - 1e-9), k = Math.pow(2, z), sc = Math.pow(2, zf - z);
   var me = wpx(lat, lon, z);
   if (hist.pts.length < 2) {            // a past day's one point: on it (the fix may be far away)
@@ -1171,7 +1188,7 @@ function fitView(lat, lon, el, live) {
     return {z: z, sc: sc, X: c[0], Y: c[1]};
   }
   var X = (x0 + x1) / 2 * k, Y = (y0 + y1) / 2 * k + (h * .42 - (top + bot) / 2) / sc;
-  // today's track wider than zoom 13 shows: the centre moved just enough to
+  // today's track wider than zoom 6 shows: the centre moved just enough to
   // keep the position on the map (24 px from the sides, 16 from the bands)
   if (live && withMe) {
     var mx = (w / 2 - 24) / sc, ya = (h * .42 - top - 16) / sc, yb = (bot - 16 - h * .42) / sc;
@@ -1183,6 +1200,16 @@ function fitView(lat, lon, el, live) {
 function hlRange() {
   var t = hist.hl === null || hist.hl === undefined || !hist.trips ? null : hist.trips[hist.hl];
   return t ? [t.i0, t.i1] : null;
+}
+// the shown track's start (a ring) and end (a dot), the size kept on screen
+function ends(t, z, i0, i1, sc) {
+  var o = "", r = (7 / sc).toFixed(1), q = [["s", i0], ["e", i1]];
+  for (var j = 0; j < 2; j++) {
+    var p = hist.pts[q[j][1]], m = wpx(p[1], p[2], z);
+    o += '<circle class="' + q[j][0] + '" cx="' + ((m[0] - t.x * 256)).toFixed(1) + '" cy="' +
+      ((m[1] - t.y * 256)).toFixed(1) + '" r="' + r + '"/>';
+  }
+  return o;
 }
 function histPath(t, z, i0, i1) {       // SVG path in the tile layer's pixels
   var k = Math.pow(2, z), d = "", prev = 0;
@@ -1226,7 +1253,7 @@ function placeMap(d) {
   el.className = fix ? "map" : "map nofix";
   var lat = fix ? +p[0] : hist.pts[0][1], lon = fix ? +p[1] : hist.pts[0][2];
   // tiles to cover the element from its centre (a wide screen needs more)
-  var v = fitView(lat, lon, el, fix), z = v.z, sc = v.sc, me = wpx(lat, lon, z);
+  var band = mapBand(el), v = fitView(lat, lon, el, fix, band), z = v.z, sc = v.sc, me = wpx(lat, lon, z);
   var nx = Math.ceil(el.offsetWidth / 512 / sc) + 1, ny = Math.ceil(el.offsetHeight / 512 / sc) + 1;
   var t = {x: Math.floor(v.X / 256), y: Math.floor(v.Y / 256), fx: v.X % 256, fy: v.Y % 256,
     mpp: tile(lat, lon, z).mpp / sc};
@@ -1239,6 +1266,10 @@ function placeMap(d) {
     s.left = "calc(50% + " + ((me[0] - v.X) * sc).toFixed(1) + "px)";
     s.top = "calc(42% + " + ((me[1] - v.Y) * sc).toFixed(1) + "px)";
   }
+  // on a phone the coordinates sit under the pin: above it in the band's
+  // lower half (not under the telemetry strip)
+  var py = el.offsetHeight * .42 + (me[1] - v.Y) * sc;
+  document.getElementById("coord").className = py > (band.top + band.bot) / 2 ? "coord up" : "coord";
   if (key !== mapKey) {
     var h = "";
     for (var dx = -nx; dx <= nx; dx++) for (var dy = -ny; dy <= ny; dy++)
@@ -1255,7 +1286,8 @@ function placeMap(d) {
     trkKey = key + "/" + hist.pts.length + "/" + hist.hl;
     var hr = hlRange();
     trk.innerHTML = hist.pts.length ? '<svg width="1" height="1"><path d="' + histPath(t, z) + '"/>' +
-      (hr ? '<path class="hl" d="' + histPath(t, z, hr[0], hr[1]) + '"/>' : "") + "</svg>" : "";
+      (hr ? '<path class="hl" d="' + histPath(t, z, hr[0], hr[1]) + '"/>' : "") +
+      ends(t, z, hr ? hr[0] : 0, hr ? hr[1] : hist.pts.length - 1, sc) + "</svg>" : "";
   }
   // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
   var acc = document.getElementById("acc"), px = typeof d.hacc === "number" ? d.hacc * 2 / t.mpp :
