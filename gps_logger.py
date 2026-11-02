@@ -3641,9 +3641,15 @@ def _still_hold():
     drift (the open window, or the previous one it may pair with), or None.
     Periodic flushes keep those lines in RAM, so a stay that is entered
     drops all of them: before, the minute already on flash was uploaded
-    after every boot or new fix."""
+    after every boot or new fix. HOLD_RELEASE after the last usable fix
+    nothing is held: a fix that stays unusable (indoors, HDOP 9) closes no
+    window and is no fix loss either, and the lines held at the door stayed
+    in RAM for hours (a reboot dropped them)."""
     sl = log["still"]
     if sl["active"]:
+        return None
+    la = sl["last_at"]
+    if la is not None and _age(time.ticks_ms(), la) >= HOLD_RELEASE:
         return None
     h = sl["hold_tc"]                    # a window restarted after a gap
     c = None
@@ -3657,19 +3663,22 @@ def _still_hold():
     if p:
         t = p[1]
     elif sl["win_at"] is not None:
-        r, q = sl["ref"], sl["pos"]
-        if (c is not None and q is not None
-                and _dist(r[0], r[1], c[0], c[1]) > 2 * STILL_RADIUS
-                and _dist(c[0], c[1], q[0], q[1]) > 2 * STILL_RADIUS):
-            # the open window has spread out (its centroid far from both
-            # its first and its latest fix): a drive, not a stay's drift.
-            # Before, up to two minutes of a drive sat in RAM only. (Both
-            # ends, so one multipath jump at either is still drift.)
+        if c is not None and _spread(sl["ref"], c, sl["pos"]):
+            # the open window has spread out: a drive, not a stay's drift.
+            # Before, up to two minutes of a drive sat in RAM only.
             return h
         t = sl["win_tc"]
     else:
         return h
     return h if h is not None and h < t else t
+
+def _spread(r, c, q, m=2 * STILL_RADIUS):
+    """True when a window with its first fix r, centroid c and latest fix q
+    has spread out: its centroid more than m from both ends, a drive and no
+    stay's drift. (Both ends, so one multipath jump at either is still
+    drift.)"""
+    return (q is not None and _dist(r[0], r[1], c[0], c[1]) > m
+            and _dist(c[0], c[1], q[0], q[1]) > m)
 
 def _still_mean(sl, pos):
     """Fold pos into the anchor, a running mean over STILL_MEAN_N fixes.
@@ -3850,6 +3859,7 @@ def flush(hold=None):
             log["wfails"] = log.get("wfails", 0) + 1
             if not creating and log["wfails"] >= WFAIL_SWITCH and batch:
                 print("track file failing, new file", path)
+                _cut_to_footer(path, log.get("good_size"), sz)
                 tc = batch[0][-17:-1]
                 seg = log["new_seg"], log["seg_tc"]
                 start_file(tc[:8] + "_" + tc[9:15])
@@ -3872,6 +3882,28 @@ def flush(hold=None):
         del q[:i]                        # the breaks written
         log["new_seg"] = bool(q)
     del batch[:k]
+
+def _cut_to_footer(path, good, sz):
+    """Before a failing file is left: a failed append that partly landed
+    left the start of the batch after the last good footer, without one,
+    and the new file takes the whole batch. Write FOOTER back where it was
+    (once, best effort): readers stop there, so the tail is not uploaded
+    twice. Only a footer written this session (good), the file longer."""
+    n = len(FOOTER)
+    if good is None or good < n or sz is None or sz <= good:
+        return
+    f = None
+    try:
+        f = open(path, "r+b")
+        f.seek(good - n, 0)
+        f.write(FOOTER.encode())
+    except OSError:
+        log["err"] += 1
+    if f is not None:
+        try:
+            f.close()
+        except OSError:
+            log["err"] += 1
 
 def _hist_add(lines, k):
     """Append lines[:k], the track lines just written, to the day history:
@@ -4224,6 +4256,14 @@ def _still_window(now, pos):
     c = None
     if sm[2] >= STILL_MIN_FIXES:
         c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
+        if _spread(r, c, pos, STILL_EXIT // 2):
+            # its ends STILL_EXIT apart through the centroid: a drive (a
+            # bike from ~10 km/h) pairs with nothing. Out and back with the
+            # turn near a window boundary, the way out and the way back had
+            # the same centroid, and the pair dropped the held lines as
+            # drift. (Indoor drift that strays 80 m still pairs.)
+            c = None
+            sl["hold_tc"] = None
     prev = sl["prev"]
     sl["prev"] = (c, sl["win_tc"], sm[2]) if c else None
     sl["win_at"] = None
@@ -4637,6 +4677,10 @@ def log_tick():
             and _age(now, log["last_flush"]) >= FLUSH):
         _close_file()
     if log["full"]:
+        if log["fix"] and not has_fix(now):
+            # nothing is recorded, but NEW_FILE_GAP counts from the loss,
+            # not from when space returns
+            log["fix"], log["lost_at"] = False, now
         last = log.get("full_check")
         if last is not None and _age(now, last) < FULL_CHECK:
             return
@@ -4658,13 +4702,10 @@ def log_tick():
             flush(_still_hold())
         elif log["batch"] and _age(now, log["last_flush"]) >= FLUSH:
             # anchor points written without a fix; and HOLD_RELEASE after
-            # the fix was lost the drift hold is let go: without a new fix
-            # the end of a trip would stay in RAM only (lost on power-off)
-            hold = _still_hold()
-            if (hold is not None and log.get("lost_at") is not None
-                    and _age(now, log["lost_at"]) >= HOLD_RELEASE):
-                hold = None
-            flush(hold)
+            # the last usable fix the drift hold is let go (_still_hold):
+            # without a new fix the end of a trip would stay in RAM only
+            # (lost on power-off)
+            flush(_still_hold())
         return
     if not log["fix"]:
         log["fix"] = True
