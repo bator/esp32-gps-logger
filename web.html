@@ -158,9 +158,10 @@ circle.u{fill:none;filter:none;opacity:.7}
 .gt-dg small{display:block;font-size:11px;color:#8b9590;margin-top:4px}.gt-dg b{font:500 14px "JetBrains Mono",monospace}.gt-dg b em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590}
 .gt-lk{display:flex;align-items:center;gap:8px;margin-top:6px}.gt-lk span{font:500 10px "JetBrains Mono",monospace;color:#8b9590;width:26px;flex:none}
 .gt-lk div{flex:1;display:flex;gap:2px;height:8px;min-width:0}.gt-k{flex:1;min-width:0;background:rgba(215,236,224,.07)}.gt-k.ok{background:#7fbf9a}.gt-k.am{background:#f5a524}.gt-k.rd{background:#ef5b4c}
+.gt-mks{position:relative;height:22px;margin:2px 0 0 34px}.gt-mk{position:absolute;top:0;transform:translateX(-50%);font:500 10px "JetBrains Mono",monospace;color:#ef5b4c;white-space:nowrap;text-align:center}
+.gt-mk i{display:block;width:0;height:0;margin:0 auto 2px;border:4px solid transparent;border-bottom-color:#ef5b4c;border-top:0}
 .gt-ax{padding-left:34px}.gt-lg .gt-sep{margin-left:6px;color:#d7ece0}.gt-lg b.ok{background:#7fbf9a}
 .gt-n{display:block;font:400 26px Audiowide,monospace!important}
-.gt-sum{font:500 11px "JetBrains Mono",monospace;color:#ffe2b0;margin:-2px 0 8px}
 .gt-an>p{display:flex;justify-content:space-between;margin:0;padding:6px 0;border-top:1px solid rgba(245,165,36,.18);font:500 12px "JetBrains Mono",monospace;color:#ffe2b0}
 .gt-an>p b{font-weight:500;color:#f5a524}.gt-an>p.gt-more{color:#b9a27a;font-size:11px}
 .gt-ok{margin:12px 0 0;font-size:12px;color:#8b9590}
@@ -666,7 +667,15 @@ function evTele(a, cols) {
   }
   var an = a.drops > 0, mid = a.t0 + (a.t1 - a.t0) / 2;
   function hmin(m) { return m < 60 ? m + "<em>min</em>" : Math.floor(m / 60) + "<em>h</em> " + two(m % 60) + "<em>min</em>"; }
-  var ep = "";
+  // a marker under the strip at each drop-out's start, its time below
+  // (none closer than 9% to the one before: the dot stays, the time goes)
+  var ep = "", mk = "", span = Math.max(1, (k0 + nb) * 300000 - k0 * 300000), lastx = -1;
+  for (i = 0; i < a.eps.length; i++) {
+    var s0 = a.eps[i][1] - a.eps[i][2] * 60000, x = Math.max(0, Math.min(100, (s0 - k0 * 300000) / span * 100));
+    if (x < 0 || s0 < a.t0 - 300000) continue;
+    mk += '<span class="gt-mk" style="left:' + x.toFixed(1) + '%"><i></i>' + (x - lastx >= 9 || lastx < 0 ? when(s0) : "") + "</span>";
+    if (x - lastx >= 9 || lastx < 0) lastx = x;
+  }
   for (i = a.eps.length - 1; i >= 0 && i >= a.eps.length - 5; i--) {
     var e = a.eps[i];
     ep += "<p><span>" + when(e[1] - e[2] * 60000) + "&ndash;" + when(e[1]) + "</span><b>" + e[2] + " min</b></p>";
@@ -680,6 +689,7 @@ function evTele(a, cols) {
     '<div class="gt-big"><b>' + (fixn ? Math.round(good * 100 / fixn) : 0) + "%</b><span>precise (HDOP &le; 2)" +
     (hs.length ? MD + "typical " + hs[Math.floor(hs.length / 2)].toFixed(1) : "") + "</span></div>" +
     '<div class="gt-dm">' + dm + '</div><div class="gt-lk"><span>link</span><div>' + lk + "</div></div>" +
+    (mk ? '<div class="gt-mks">' + mk + "</div>" : "") +
     '<div class="gt-ax"><span>' + when(a.t0) + "</span><span>" + when(mid) + "</span><span>NOW</span></div>" +
     '<div class="gt-lg"><span><b class="on"></b>precise</span><span><b class="am"></b>moderate</span>' +
     '<span><b class="rd"></b>poor</span><span><b class="x"></b>no fix</span><span class="gt-sep">link:</span>' +
@@ -689,8 +699,8 @@ function evTele(a, cols) {
     "</b><small>it sent nothing" + (a.drops ? " (" + a.drops + " drop-out" + (a.drops === 1 ? "" : "s") + ")" : "") +
     '</small></div></div><p class="gt-bad"><b>' + num(a.bad) + "</b> broken messages" +
     (a.bad ? MD + "1 in " + num(Math.round((a.okn + a.bad) / a.bad)) : MD + "none") + "</p>" +
-    (an ? '<div class="gt-an"><h4><i>!</i>Link anomaly detected</h4>' +
-      '<div class="gt-sum">when it sent nothing, newest first</div>' + ep + "</div>" :
+    (an ? '<div class="gt-an"><h4><i>!</i>' + a.dn + " min without data, in " + a.drops + " drop-out" + (a.drops === 1 ? "" : "s") +
+      ":</h4>" + ep + "</div>" :
       '<p class="gt-ok">No drop-out in the window: the receiver sent data every minute.</p>') +
     "</div></div></div>";
 }

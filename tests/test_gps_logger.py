@@ -13826,11 +13826,14 @@ else:
     # column (red where no data came), and the anomaly card lists each
     # drop-out with its local time and length, newest first
     check("PAGE-TELE: the link strip shares the matrix's columns and time "
-          "axis; each drop-out listed with its time and length",
+          "axis, a marker with the start time under each drop-out; the card "
+          "heads its list with their total",
           evt.count('<i class="gt-k') == 36
           and evt.count('<i class="gt-k rd"') >= 1
           and "<span>11:00&ndash;11:09</span><b>9 min</b>" in evt
-          and "when it sent nothing, newest first" in evt
+          and "<h4><i>!</i>9 min without data, in 1 drop-out:</h4>" in evt
+          and '<span class="gt-mk" style="left:' in evt
+          and '"><i></i>11:00</span>' in evt
           and "<svg" not in evt, evt[-1500:])
     evg = evw.get("evg", "")
     check("PAGE-EV: the grouped table - a header row, a row a kind with its "
