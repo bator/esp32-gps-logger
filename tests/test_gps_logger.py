@@ -8902,6 +8902,42 @@ check("PVT-SECONDS: seconds published in one read are each a point",
       queued == 3 and len(q_lines) == 3
       and q_lines[0] == "47.500000,19.000000,100.0,2,0.0,20261031T120000Z\n"
       and q_lines[2].startswith("47.500020,19.000000,"), repr(q_lines))
+# PVT-THIN: a POST blocking 40 s (a weak hotspot while driving) left 40
+# seconds published with no log_tick: the queue kept the newest
+# SECONDS_Q, so the first 32 seconds were a gap in the track with no
+# segment break. Full, it drops the second whose neighbours are closest:
+# the same SECONDS_Q seconds spread over the whole block, start and end
+# kept, in order, the thinned ones counted
+th_td = tempfile.mkdtemp(prefix="pvtthin-")
+saved_dir = gl.LOG_DIR
+try:
+    gl.LOG_DIR = th_td
+    gl.reset()
+    gl.log_reset()
+    _uart_rx[:] = []
+    for s_ in range(41):
+        for k in range(5):
+            _uart_rx.extend(pvt_frame(t_at(s_), 475000000 + 2000 * s_,
+                                      190000000, nano=k * 200000000))
+    gl.read_uart()
+    th_n = gl.st.get("q_thin")
+    gl.log_tick()
+    th_lines = list(gl.log["batch"])
+finally:
+    gl.LOG_DIR = saved_dir
+    shutil.rmtree(th_td, ignore_errors=True)
+th_t = [l.rstrip().rsplit(",", 1)[1] for l in th_lines]
+check("PVT-THIN: 40 s published without log_tick keep SECONDS_Q seconds "
+      "spread over all of them, not the newest only",
+      len(th_lines) == gl.SECONDS_Q and th_t[0] == "20261031T120000Z"
+      and th_t[-1] == "20261031T120039Z" and th_t == sorted(th_t)
+      and th_n == 40 - gl.SECONDS_Q, repr((th_n, th_t)))
+th_rows = dict(gl._web_rows())
+check("PVT-THIN: status.json counts thinned seconds, lost points and track "
+      "write errors", th_rows.get("q_thin") == 40 - gl.SECONDS_Q
+      and "track_drop" in th_rows and "write_errs" in th_rows,
+      repr({k: th_rows.get(k) for k in ("q_thin", "track_drop",
+                                        "write_errs")}))
 
 # TRK2: a file opened on NAV-PVT fixes is "#TRK2", its lines written from
 # the integers (no single-precision grid); readers take TRK1 and TRK2

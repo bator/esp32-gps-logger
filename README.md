@@ -858,6 +858,10 @@ console line.
 
 - **Sampling.** Each averaged second is sampled once. Seconds published
   together after a blocking POST, scan or setup are queued and all sampled.
+  The queue holds 8 (`SECONDS_Q`). A longer block (a POST over a weak
+  hotspot can take up to a minute) thins it evenly instead of dropping
+  its start, so the track keeps 8 points spread over the whole block
+  rather than a gap (`q_thin` in `/status.json` counts the thinned ones).
   A point is recorded when it is more than 3 m from the last one.
 - **Filter.** Skipped: fresh HDOP above 5, or a GST estimate above 20 m (the
   larger of latitude and longitude, 1σ). A cold start can show a good HDOP

@@ -397,6 +397,7 @@ def reset():
               speed=None, used=None, view={},
               hdop=None, ttff=None, pos_at=None, hdop_at=None,
               seq=0, epochs=0, extra=0, setup_at=None, mute_at=None,
+              q_thin=0,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
@@ -571,11 +572,21 @@ def _published(now):
     if st["ttff"] is None:
         st["ttff"] = time.ticks_diff(now, st["start"]) // 1000
     # queued for log_tick: after a blocking POST, scan or setup read_uart
-    # publishes several seconds at once, and each is a point
+    # publishes several seconds at once, and each is a point. Full (a POST
+    # over a weak hotspot blocks up to HTTP_MAX): the second whose
+    # neighbours are closest goes, oldest first. The newest were kept
+    # before, so 40 s blocked was a 32 s gap with no segment break; now
+    # SECONDS_Q seconds are spread over the whole block, same RAM
     q = st["q"]
     q.append(_snap())
     if len(q) > SECONDS_Q:
-        q.pop(0)
+        k, g = 1, None
+        for i in range(1, len(q) - 1):
+            d = q[i + 1][0] - q[i - 1][0]
+            if g is None or d < g:
+                k, g = i, d
+        del q[k]
+        st["q_thin"] += 1
 
 # a published second as a tuple in this order (seq first, pos_at at 8): one
 # small allocation a second rather than a dict
@@ -8176,7 +8187,10 @@ def _web_rows():
         ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
         ("web_errs", _web_errs[0]),      # page requests that hit a bug
-    ]
+        ("track_drop", log.get("drop", 0)),   # points lost (full flash,
+        ("write_errs", log.get("err", 0)),    # MAX_BATCH, time back), track
+        ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
+    ]                                    # while the loop was blocked
 
 _fl = [None, None]                       # (KB, ticks) of the last statvfs
 
