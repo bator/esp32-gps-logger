@@ -13815,7 +13815,10 @@ else:
           "sentences, one 9 min drop-out in an anomaly card",
           "GPS telemetry" in evt and evt.count('<i class="gt-c') == 36
           and "<b>56%</b>" in evt and "typical 1.2" in evt
-          and '<b class="gt-n">5</b><small>Broken sentences' in evt
+          and '<b class="gt-n">2<em>h</em> 33<em>min</em></b><small>the receiver sent data</small>' in evt
+          and '<b class="gt-n a">9<em>min</em></b><small>it sent nothing (1 drop-out)</small>' in evt
+          and "<b>5</b> broken messages &middot; 1 in 18\u202f361" in evt
+          and "of minutes" not in evt
           and 'class="gt-chip a">Anomaly' in evt and "evc" not in evw,
           evt[:900])
     # (Bator: "with no scale, how do I know when it happened?") the link
@@ -13827,7 +13830,7 @@ else:
           evt.count('<i class="gt-k') == 36
           and evt.count('<i class="gt-k rd"') >= 1
           and "<span>11:00&ndash;11:09</span><b>9 min</b>" in evt
-          and "9 min without data &middot; 1 drop-out<" in evt
+          and "when it sent nothing, newest first" in evt
           and "<svg" not in evt, evt[-1500:])
     evg = evw.get("evg", "")
     check("PAGE-EV: the grouped table - a header row, a row a kind with its "

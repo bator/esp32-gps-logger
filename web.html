@@ -164,6 +164,9 @@ circle.u{fill:none;filter:none;opacity:.7}
 .gt-an>p{display:flex;justify-content:space-between;margin:0;padding:6px 0;border-top:1px solid rgba(245,165,36,.18);font:500 12px "JetBrains Mono",monospace;color:#ffe2b0}
 .gt-an>p b{font-weight:500;color:#f5a524}.gt-an>p.gt-more{color:#b9a27a;font-size:11px}
 .gt-ok{margin:12px 0 0;font-size:12px;color:#8b9590}
+.gt-n.a{color:#f5a524}.gt-n em{font:400 12px Inter,sans-serif;font-style:normal;color:#8b9590;margin:0 2px}
+.gt-bad{margin:12px 0 0;font-size:12px;color:#8b9590}.gt-bad b{font:500 13px "JetBrains Mono",monospace;color:#e7efe9}
+
 .gt-an{position:relative;margin-top:14px;background:linear-gradient(180deg,rgba(245,165,36,.16),rgba(245,165,36,.05));padding:12px 14px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
 .gt-an:before{border-color:rgba(245,165,36,.45)}
 .gt-an h4{margin:0 0 8px;font:400 13px Audiowide,monospace;color:#ffe2b0;display:flex;gap:10px;align-items:center}
@@ -403,7 +406,7 @@ function evKind(l) {
 }
 function evNew() {                      // the aggregate of a diag log read so far
   return {rest: "", n: 0, n3: 0, nno: 0, t0: null, t1: null, b5: {}, bk: [], g: {}, pend: [],
-    lk: null, lt: null, tu: null, drops: 0, run: 0, lng: 0, bad: 0, up: 0, dn: 0, eps: []};
+    lk: null, lt: null, tu: null, drops: 0, run: 0, lng: 0, bad: 0, okn: 0, up: 0, dn: 0, eps: []};
 }
 // UTC "20261102T091639Z" -> ms, or null
 function evUtc(u) {
@@ -464,7 +467,7 @@ function evLink(a, l, b, fix, t) {
   if (fix && h > 0) { b[4] += h; b[5]++; }
   a.lk = [up, ok, er]; a.lt = t;
   if (!p || up <= p[0] || ok < p[1] || er < p[2] || up - p[0] > 180) { a.run = 0; return; }
-  a.bad += er - p[2];
+  a.bad += er - p[2]; a.okn += ok - p[1];
   if (ok === p[1]) {                     // a drop-out: from the line before to this one
     a.dn++; b[6]++;
     if (!a.run) {
@@ -661,7 +664,8 @@ function evTele(a, cols) {
     // the receiver link under it: data every minute, some, none (no line: the board was off)
     lk += '<i class="gt-k' + (dd === null ? "" : !dd ? " ok" : dd < .5 ? " am" : " rd") + '"></i>';
   }
-  var lm = a.up + a.dn, upc = lm ? Math.round(a.up * 100 / lm) : 100, an = a.drops > 0, mid = a.t0 + (a.t1 - a.t0) / 2;
+  var an = a.drops > 0, mid = a.t0 + (a.t1 - a.t0) / 2;
+  function hmin(m) { return m < 60 ? m + "<em>min</em>" : Math.floor(m / 60) + "<em>h</em> " + two(m % 60) + "<em>min</em>"; }
   var ep = "";
   for (i = a.eps.length - 1; i >= 0 && i >= a.eps.length - 5; i--) {
     var e = a.eps[i];
@@ -680,12 +684,13 @@ function evTele(a, cols) {
     '<div class="gt-lg"><span><b class="on"></b>precise</span><span><b class="am"></b>moderate</span>' +
     '<span><b class="rd"></b>poor</span><span><b class="x"></b>no fix</span><span class="gt-sep">link:</span>' +
     '<span><b class="ok"></b>data</span><span><b class="am"></b>gaps</span><span><b class="x"></b>none</span></div></div>' +
-    '<div class="gt-b"><div class="gt-l">Receiver link</div><div class="gt-dg"><div><b class="gt-n">' + upc +
-    "%</b><small>of minutes with data</small></div><div><b class=\"gt-n\">" + num(a.bad) +
-    "</b><small>Broken sentences</small></div></div>" +
+    '<div class="gt-b"><div class="gt-l">Receiver link<em>while the board ran</em></div><div class="gt-dg"><div><b class="gt-n">' +
+    hmin(a.up) + "</b><small>the receiver sent data</small></div><div><b class=\"gt-n" + (a.dn ? " a" : "") + '">' + hmin(a.dn) +
+    "</b><small>it sent nothing" + (a.drops ? " (" + a.drops + " drop-out" + (a.drops === 1 ? "" : "s") + ")" : "") +
+    '</small></div></div><p class="gt-bad"><b>' + num(a.bad) + "</b> broken messages" +
+    (a.bad ? MD + "1 in " + num(Math.round((a.okn + a.bad) / a.bad)) : MD + "none") + "</p>" +
     (an ? '<div class="gt-an"><h4><i>!</i>Link anomaly detected</h4>' +
-      '<div class="gt-sum">' + a.dn + " min without data" + MD + a.drops + " drop-out" + (a.drops === 1 ? "" : "s") +
-      "</div>" + ep + "</div>" :
+      '<div class="gt-sum">when it sent nothing, newest first</div>' + ep + "</div>" :
       '<p class="gt-ok">No drop-out in the window: the receiver sent data every minute.</p>') +
     "</div></div></div>";
 }
