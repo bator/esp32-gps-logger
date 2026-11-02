@@ -13703,7 +13703,7 @@ else:
           and "<small>WIFI</small><b>OFF</b>" in tm2
           and v2.get("coord", "").startswith("NO FIX")
           and v.get("coord", "").startswith("47.10000&deg; N  18.40000&deg; E")
-          and "NO SATELLITE LIST" in v2.get("bars", ""), tm2[:400])
+          and "NO SATELLITE LIST" in v2.get("sig", ""), tm2[:400])
     check("PAGE: sky radar - horizon east at x 90, zenith centre, hollow unused",
           '<circle class="g0" cx="90" cy="0" r="3.4"><title>GPS 16 26 dBHz'
           in v.get("dots", "")
@@ -13711,12 +13711,21 @@ else:
           and "SBAS 5" not in v.get("dots", "-")
           and v.get("skyh") == "Sky &middot; 1 locked / 3 tracked",
           v.get("dots", "")[:300])
-    check("PAGE: one bar per satellite (45 dBHz full, stub for none)",
-          '<i class="g0" style="height:57%" title="GPS 16 26 dBHz">'
-          in v.get("bars", "")
-          and '<i class="g3 u" style="height:26%"' in v.get("bars", "")
-          and '<i class="g1 u" style="height:0%" title="SBAS 5 - dBHz">'
-          in v.get("bars", ""), v.get("bars", "")[:300])
+    # PAGE-SIGNAL: in words, not dB-Hz (Bator: "what is a dB-Hz? in human
+    # language"): an overall grade, satellites in use of those in view,
+    # how many are strong / fair / weak; a bar a satellite, strongest
+    # first, its number under it, a hollow one not in use; zones named
+    # strong (35+), fair (25-34), weak; it replaced the Static test
+    sg = v.get("sig", "")
+    check("PAGE-SIGNAL: overall grade and counts in words, a bar a "
+          "satellite (strongest first, hollow when not in use), zones named",
+          '<b class="q-fair">Fair<em>overall</em></b>' in sg
+          and "1<em>satellite in use, of 3 in view</em>" in sg
+          and "0 strong &middot; 1 fair &middot; 0 weak" in sg
+          and sg.index('class="sg-b q-fair"') < sg.index('class="sg-b sg-u')
+          and "<span>16</span>" in sg and "dB" not in sg
+          and all("<em>%s</em>" % z in sg for z in ("strong", "fair", "weak")),
+          sg[:400])
     sy = v.get("sys", "")
     check("PAGE: Systems - every JSON key shown, escaped; readiness, "
           "storage, uplink and device sections; a silent GPS link an error",

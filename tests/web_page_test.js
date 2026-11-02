@@ -439,7 +439,7 @@ ft.wr7 = (() => {
   };
   q.xhrs[0].responseText = text;
   q.xhrs[0].onload();
-  const ids = ["tm", "sys", "skyh", "bh", "svt", "coord", "tkpi", "tline"];
+  const ids = ["tm", "sys", "skyh", "sig", "svt", "coord", "tkpi", "tline"];
   const w1 = ids.map((id) => els[id] ? els[id].writes : 0);
   q.c.tick();
   const x2 = st(q)[1];

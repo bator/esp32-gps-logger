@@ -62,7 +62,7 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .col{display:flex;flex-direction:column;gap:12px}.col .p:last-child{flex:1}
 /* sky radar */
 .radar svg{display:block;width:100%;max-width:380px;margin:auto}
-.col.l .p{flex:none}.col.l .radar{flex:1;display:flex;flex-direction:column}
+.col.l .p{flex:none}.col.l .radar{flex:1;display:flex;flex-direction:column;contain:size;min-height:320px}  /* (its own size 0: it fills what Systems leaves, not its width) */
 .col.l .radar svg{flex:1;height:0;min-height:240px;max-width:none}
 .rg{fill:none;stroke:rgba(34,211,238,.18)}.rx{stroke:rgba(34,211,238,.12)}
 .sweep{fill:url(#sw)}
@@ -74,8 +74,22 @@ circle.u{fill:none;filter:none;opacity:.7}
 .legend i{display:inline-block;width:8px;height:8px;border-radius:4px;background:var(--s);box-shadow:0 0 6px var(--s);margin-right:5px}
 .legend .u i{background:none;border:1.5px solid var(--m);box-shadow:none;box-sizing:border-box}
 /* signal */
-.r{display:flex;align-items:flex-end;gap:2px;height:90px;background:linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 0/100% 1px no-repeat,linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 33.33%/100% 1px no-repeat,linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 66.67%/100% 1px no-repeat}
-.r i{flex:1;min-height:2px;background:linear-gradient(0deg,var(--s),transparent 140%);box-shadow:0 0 6px var(--s)}
+/* Signal: a bar a satellite, in words (strong / fair / weak), no dB-Hz */
+.sg-h{display:flex;gap:2px 22px;align-items:baseline;flex-wrap:wrap;margin:0 0 4px}.sg-h b{font:500 26px "JetBrains Mono",monospace;color:#fff}.sg-h .q-strong{color:#7fe39a}.sg-h .q-fair{color:#a3e635}.sg-h .q-weak{color:#fbbf24}.sg-h .q-none{color:#f87171}
+.sg-h b em{font:400 12px "JetBrains Mono",monospace;color:#8a96ad;font-style:normal;margin-left:6px}
+.sg-s{color:#8a96ad;font-size:12px;margin:0 0 10px}
+.q-strong{color:#7fe39a}.q-fair{color:#a3e635}.q-weak{color:#fbbf24}.q-none{color:#f87171}
+.sg-c{position:relative;height:150px;padding-right:58px}
+.sg-z{position:absolute;inset:0 0 18px 0;display:flex;flex-direction:column}.sg-z i{position:relative;display:block}
+.sg-z i:before{content:"";position:absolute;inset:0 58px 0 0;background:currentColor;opacity:.05}
+.sg-z i.q-strong{height:30%}.sg-z i.q-fair{height:20%}.sg-z i.q-weak{height:50%}
+.sg-z em{position:absolute;right:0;top:50%;transform:translateY(-50%);font:10px "JetBrains Mono",monospace;font-style:normal}
+.sg-r{position:relative;display:flex;gap:4px;height:100%}
+.sg-k{flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-width:0}
+.sg-k span{height:18px;line-height:18px;text-align:center;font:10px "JetBrains Mono",monospace;color:#8a96ad;overflow:hidden}
+.sg-b{display:block;margin:0 18%;border-radius:3px 3px 1px 1px;background:currentColor}
+.sg-b.sg-u{background:none;border:1.5px solid #7487ae;box-sizing:border-box;color:#7487ae}.sg-b.sg-0{border-style:dashed;height:3px!important}
+.sg-l{font-size:11px;color:#8a96ad;margin-top:6px}.sg-l i{display:inline-block;width:9px;height:9px;border:1.5px solid #7487ae;border-radius:2px;margin:0 6px 0 14px;vertical-align:-1px}
 .r .u{opacity:.25;box-shadow:none}
 /* systems */
 
@@ -191,7 +205,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
    squeezed, the uptime broke over 5 lines into the map); the uptime of the
    last answer is not shown offline */
 @media(max-width:760px){.hud{flex-wrap:wrap;row-gap:6px}.hud>*{white-space:nowrap}.off .hud .up{display:none}
-.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.ev-grp{grid-template-columns:28px 1fr 46px 54px}.ev-grp .ev-dt,.ev-grp .ev-sk,.ev-grp.ev-hd{display:none}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -220,9 +234,9 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
       </div>
       <div class="p"><div class="ph"><h2>Track</h2><button class="btn" id="dprev" onclick="step(-1)">&lsaquo;</button><span class="dn" id="dname">TODAY</span><button class="btn" id="dnext" onclick="step(1)">&rsaquo;</button><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
         <div class="kpi" id="tkpi"></div><div id="tline"></div></div>
+      <div class="p sg"><h2>Signal</h2><div id="sig"></div></div>
     </div>
     <div class="col">
-      <div class="p"><h2 id="bh">Signal &middot; dBHz</h2><div class="r" id="bars"></div></div>
       <div class="p sx" id="sys"></div>
     </div>
   </div>
@@ -633,6 +647,32 @@ function sxLeft(kb) {
   return h >= 48 ? ["&asymp;" + Math.floor(h / 24), "days"] : ["&asymp;" + Math.floor(h), "h"];
 }
 
+// Signal: how clear each satellite's signal is (C/N0) in words: strong
+// from 35 dB-Hz, fair from 25, weak below (a weak one is easily lost); a
+// bar a satellite, strongest first, its number under it, hollow when the
+// receiver does not use it. The overall grade is the mean of those in use
+function sigQ(c) { return c >= 35 ? "strong" : c >= 25 ? "fair" : c > 0 ? "weak" : "none"; }
+function sigView(svs) {
+  if (!svs.length) return '<span class="none">NO SATELLITE LIST YET</span>';
+  var s = svs.slice().sort(function (a, b) { return (+b.cno || 0) - (+a.cno || 0); }), bars = "";
+  var used = 0, sum = 0, n = {strong: 0, fair: 0, weak: 0, none: 0}, idle = 0;
+  for (var i = 0; i < s.length; i++) {
+    var c = +s[i].cno || 0, hh = Math.min(c, 50) * 2;      // % of the bar area (50 at the top)
+    if (s[i].used) { used++; sum += c; n[sigQ(c)]++; }
+    else if (!c) idle++;
+    bars += '<div class="sg-k"><i class="sg-b ' + (s[i].used ? "q-" + sigQ(c) : "sg-u" + (c ? "" : " sg-0")) +
+      '" style="height:calc((100% - 18px) * ' + (Math.max(hh, 2) / 100).toFixed(2) + ')"></i><span>' + esc(s[i].svid) + "</span></div>";
+  }
+  var q = used ? sigQ(sum / used) : "none", word = {strong: "Strong", fair: "Fair", weak: "Weak", none: "None"}[q];
+  return '<div class="sg-h"><b class="q-' + q + '">' + word + "<em>overall</em></b><b>" + used + "<em>satellite" + (used === 1 ? "" : "s") +
+    " in use, of " + s.length + " in view</em></b></div>" +
+    '<p class="sg-s">' + n.strong + " strong &middot; " + n.fair + " fair &middot; " + n.weak + " weak" +
+    (idle ? " &middot; " + idle + " seen without a signal yet" : "") + "</p>" +
+    '<div class="sg-c"><div class="sg-z"><i class="q-strong"><em>strong</em></i><i class="q-fair"><em>fair</em></i><i class="q-weak"><em>weak</em></i></div>' +
+    '<div class="sg-r">' + bars + "</div></div>" +
+    '<div class="sg-l">a bar a satellite (its number below), taller = clearer signal<i></i>seen, not in use</div>';
+}
+
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it;
 // prev: the poll before, for rates)
 function view(d, prev) {
@@ -664,7 +704,7 @@ function view(d, prev) {
       cell("WIFI", esc(ws[0]).toUpperCase())) +
     (d.fix_src === "pvt" ? cell("UBX BAD", ubp.toFixed(2), "%", ubp > 1 ? "warn" : "") :
       cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : ""));
-  var dots = "", bars = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
+  var dots = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
   for (var i = 0; i < svs.length; i++) {
     var s = svs[i], up = s.elev !== null && s.elev >= 0;
     if (s.used) used++;
@@ -673,17 +713,13 @@ function view(d, prev) {
       dots += '<circle class="' + cls(s) + '" cx="' + Math.round(r * Math.sin(a)) + '" cy="' + Math.round(-r * Math.cos(a)) +
         '" r="' + (2.4 + Math.floor((s.cno || 0) / 14)) + '"><title>' + tip(s) + "</title></circle>";
     }
-    bars += '<i class="' + cls(s) + '" style="height:' + Math.min(Math.floor((s.cno || 0) * 100 / 45), 100) +
-      '%" title="' + tip(s) + '"></i>';
     tbl += '<tr class="' + (s.used ? "" : "u") + '"><td>' + esc(s.name) + (s.unhealthy ? " !" : "") + "</td><td>" +
       esc(s.cno || "-") + "</td><td>" + (up ? esc(s.elev) + "&deg;" : "-") + "</td><td>" + (up ? esc(s.azim) + "&deg;" : "-") +
       "</td><td>" + (s.used ? "&#9679;" : "") + "</td></tr>";
   }
   v.dots = dots;
-  v.bars = bars || '<span class="none">NO SATELLITE LIST YET</span>';
+  v.sig = sigView(svs);
   v.skyh = "Sky &middot; " + used + " locked / " + svs.length + " tracked";
-  v.bh = "Signal &middot; dBHz" + (d.satellites_age_s === null || d.satellites_age_s === undefined ? "" :
-    " &middot; list " + hms(d.satellites_age_s) + " old");
   v.svh = "Satellite table &middot; " + svs.length;
   v.svt = tbl;
   var rx = String(d.receiver || "unknown receiver"), comma = rx.indexOf(", ");
