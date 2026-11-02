@@ -1,4 +1,5 @@
-# 16 MB flash: two 2.4 MB OTA app slots, the file system after them (~11 MB)
+# 16 MB flash: two 1792 KB OTA app slots, the file system after them
+# (~12.4 MB); the table is partitions-ota.csv (mpconfigboard.cmake)
 
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=
@@ -6,4 +7,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-8MiBplus-ota.csv"
+
+# no BLE: the logger never uses it (~300 KB of the app, and the
+# controller's RAM)
+CONFIG_BT_ENABLED=n

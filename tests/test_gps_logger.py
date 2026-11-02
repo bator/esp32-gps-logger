@@ -12,6 +12,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -7342,6 +7343,43 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and "--flash again" in err
           and "failed check or write leaves the board as it was" not in bsrc,
           "rc=%d %r" % (rc, err[-400:]))
+    # BUILD-SLIM: the board leaves out what the logger never uses (BLE,
+    # ESP-NOW, LAN, mDNS, SD card, I2S: ~400 KB of the 2.02 MB app, and
+    # the BLE controller's RAM) and freezes only the port's own modules
+    # with the logger (asyncio, umqtt, webrepl, mip, requests... ~25 KB
+    # unused); the smaller app fits 1792 KB slots (2 x 2496 KB before: the
+    # file system gets ~1.4 MB more on 16 MB, more of 8 MB)
+    rc, out, err, work, calls = build_run([], {})
+    with open(os.path.join(work, "firmware", "manifest.py")) as f:
+        man = f.read()
+    bd = os.path.join(ROOT, "boards", "GPS_LOGGER_C6")
+    with open(os.path.join(bd, "mpconfigboard.h")) as f:
+        bh = f.read()
+    with open(os.path.join(bd, "mpconfigboard.cmake")) as f:
+        bc = f.read()
+    with open(os.path.join(bd, "sdkconfig.board")) as f:
+        bs = f.read()
+    with open(os.path.join(bd, "partitions-ota.csv")) as f:
+        pt = [ln.split(",") for ln in f.read().splitlines()
+              if ln.strip() and not ln.startswith("#")]
+    pt = {r[0].strip(): (int(r[3], 16), int(r[4], 16)) for r in pt}
+    with open(os.path.join(ROOT, "tools", "build_firmware.sh")) as f:
+        app = re.search(r"^APP_SIZE=(0x[0-9a-f]+)", f.read(), re.M)
+    app = int(app.group(1), 16) if app else None
+    off = ["MICROPY_PY_BLUETOOTH", "MICROPY_PY_ESPNOW",
+           "MICROPY_PY_NETWORK_LAN", "MICROPY_HW_ENABLE_SDCARD",
+           "MICROPY_PY_MACHINE_I2S", "MICROPY_HW_ENABLE_MDNS_QUERIES",
+           "MICROPY_HW_ENABLE_MDNS_RESPONDER"]
+    check("BUILD-SLIM: no BLE/ESP-NOW/LAN/mDNS/SD/I2S, only the port's and "
+          "the logger's modules frozen, 1792 KB slots the script knows",
+          rc == 0 and "boards/manifest.py" not in man
+          and 'freeze("$(PORT_DIR)/modules")' in man
+          and all(re.search(r"#define %s\s+\(0\)" % m, bh) for m in off)
+          and "sdkconfig.ble" not in bc and "CONFIG_BT_ENABLED=n" in bs
+          and "partitions-ota.csv" in bc
+          and pt.get("ota_0") == (0x10000, 0x1c0000)
+          and pt.get("ota_1") == (0x1d0000, 0x1c0000) and app == 0x1c0000,
+          repr((rc, man[-200:], pt, app)))
     rc, out, err, work, calls = build_run(["--flash"], {})
     flash_build = frozen_marker(work).get("BUILD", 0)
     steps = [c[c.index("read_flash") + 1] if "read_flash" in c else
@@ -7350,9 +7388,9 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     check("BUILD-FLASH: check, backup, write, otadata erased (the written "
           "slot boots); no REPL step; deploy.sh named",
           rc == 0
-          and steps == ["0x8000", "0x10000", "0x280000", "write", "esptool"]
+          and steps == ["0x8000", "0x10000", "0x1d0000", "write", "esptool"]
           and erase and erase[0][-2:] == ["0xd000", "0x2000"]
-          and [c for c in calls if "read_flash" in c][1][-2] == "0x270000"
+          and [c for c in calls if "read_flash" in c][1][-2] == "0x1c0000"
           and "./deploy.sh" in out
           and "write_flash 0x10000" in out and ", then ./deploy.sh" in out
           and "app1-backup-" in out.rstrip().splitlines()[-1]
@@ -13013,6 +13051,7 @@ check("PAGE-PVT: status JSON hacc (m), fix_src and ubx ok / bad; nmea kept",
       repr((jd3.get("hacc"), jd3.get("fix_src"), jd3.get("ubx"),
             jd1.get("hacc"))))
 gl.reset()
+import re
 import shutil
 import subprocess
 node = shutil.which("node")

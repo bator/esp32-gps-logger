@@ -61,7 +61,8 @@ BOARD_DIR=${BOARD_DIR:-$PWD/boards/GPS_LOGGER_C6}
 BOARD=$(basename "$BOARD_DIR")
 CHIP=${CHIP:-esp32c6}
 PORT=${PORT:-/dev/ttyUSB0}
-APP_SIZE=0x270000                         # one OTA app slot
+APP_SIZE=0x1c0000                         # one OTA app slot (partitions-ota.csv)
+APP1=$(printf '0x%x' $((0x10000 + APP_SIZE)))  # the second slot's offset
 OUT=$PWD/firmware
 MODE=${1:-}
 case "$MODE" in
@@ -86,8 +87,11 @@ if [ -n "$DIRTY" ] || [ "$MODE" = --flash ]; then
 fi
 SHA=$(sha256sum "$OUT/gps_logger.py" | cut -d" " -f1)
 printf 'COMMIT = "%s"\nSHA = "%s"\nBUILD = %s\n' "$COMMIT" "$SHA" "$BUILD" > "$OUT/gps_frozen.py"
+# only the port's own modules (_boot.py mounts the file system) with the
+# logger's: not boards/manifest.py's asyncio, umqtt, webrepl, mip,
+# requests... (~25 KB the logger never imports)
 cat > "$OUT/manifest.py" <<EOF
-include("\$(PORT_DIR)/boards/manifest.py")
+freeze("\$(PORT_DIR)/modules")
 module("gps_logger.py", base_path="$OUT")
 module("gps_frozen.py", base_path="$OUT")
 module("gps_boot.py", base_path="$OUT")
@@ -96,9 +100,18 @@ EOF
 # shellcheck disable=SC1091
 source "$IDF_DIR/export.sh" >/dev/null
 make -C "$MPY_DIR/mpy-cross" >/dev/null
+BDIR=$MPY_DIR/ports/esp32/build-$BOARD
+# a changed board (sdkconfig, partition table, macros): a clean build, as
+# ESP-IDF keeps an existing build's sdkconfig over new defaults (BLE stayed
+# on after it was turned off)
+BSTAMP=$( (cat "$BOARD_DIR"/* 2>/dev/null || true) | sha256sum | cut -c1-16)
+if [ -d "$BDIR" ] && [ "$(cat "$BDIR/.gps_board" 2>/dev/null)" != "$BSTAMP" ]; then
+    rm -rf "$BDIR"
+fi
 make -C "$MPY_DIR/ports/esp32" BOARD="$BOARD" BOARD_DIR="$BOARD_DIR" \
     FROZEN_MANIFEST="$OUT/manifest.py" -j"$(nproc)" >/dev/null
-BDIR=$MPY_DIR/ports/esp32/build-$BOARD
+mkdir -p "$BDIR"
+echo "$BSTAMP" > "$BDIR/.gps_board"
 BIN=$BDIR/micropython.bin
 cp "$BIN" "$OUT/micropython.bin"
 SIZE=$(wc -c < "$BIN")
@@ -124,7 +137,7 @@ case "$MODE" in
     BACKUP=$OUT/app-backup-$STAMP.bin
     BACKUP1=$OUT/app1-backup-$STAMP.bin
     esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x10000 $APP_SIZE "$BACKUP" >/dev/null
-    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x280000 $APP_SIZE "$BACKUP1" >/dev/null
+    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash "$APP1" $APP_SIZE "$BACKUP1" >/dev/null
     echo "App slots backed up to $BACKUP and $BACKUP1 (the second one runs after an OTA)"
     # always the first slot: when it is the running one, a failed write
     # leaves no bootable app there (see the header)

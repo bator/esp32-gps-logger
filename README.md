@@ -286,10 +286,20 @@ write the backup with the `esptool.py` command `--flash` prints, then run
 ### 5. Firmware updates over WiFi (OTA)
 
 The firmware is built for `boards/GPS_LOGGER_C6`: MicroPython's
-`ESP32_GENERIC_C6` with two 2.4 MB OTA app slots
-(`partitions-8MiBplus-ota.csv`, 16 MB flash; the file system takes the
-~11 MB after them) and the bootloader's rollback on. The old single-slot
-app (1984 KB) was 98% full.
+`ESP32_GENERIC_C6` with two 1792 KB OTA app slots
+(`boards/GPS_LOGGER_C6/partitions-ota.csv`, 16 MB flash; the file system
+takes the ~12.4 MB after them) and the bootloader's rollback on. It leaves
+out what the logger never uses: BLE, ESP-NOW, Ethernet, mDNS, the SD card
+and I2S, and of the frozen packages all but the port's own modules
+(asyncio, umqtt, webrepl, mip, requests...). That made the app 1.51 MB
+instead of 2.02 MB, and the BLE controller's ~34 KB of static RAM is free
+for the ESP-IDF heap. The old single-slot app (1984 KB) was 98% full.
+
+Until 2026-11 the slots were 2496 KB (`partitions-8MiBplus-ota.csv`, ~11 MB
+of file system). An OTA never changes the partition table: the slim app
+runs in the old slots too (MicroPython finds the file system after the
+last partition on the board's own table), and the board gets the ~1.4 MB
+more file system only with the move below.
 
 **Once, over USB:** `--migrate` moves a board to this table. It erases the
 whole flash, file system included, so first let every point upload and copy
