@@ -3,7 +3,8 @@
 # page web.html, plain and gzipped) on the ESP32, then reboot.
 # It must run precompiled: compiling on the device grows the Python heap,
 # which leaves too little IDF heap for TLS uploads. main.py imports
-# gps_logger at boot (hold GPIO25 during reset to skip).
+# gps_logger at boot (hold the boot-bypass pin during reset to skip it:
+# GPIO10 on the ESP32-C6, GPIO25 on the ESP32; main.py's SKIP_PIN).
 # On a firmware with the logger frozen in (tools/build_firmware.sh) only
 # main.py and the page go up, and only if the frozen logger is this
 # gps_logger.py (same SHA-256; FORCE=1 deploys them anyway). FORCE_MPY=1
@@ -17,7 +18,9 @@
 # (Not <name>.new: an OTA stages the page it installs as /web.html.new.)
 # While an OTA install is being validated (/ota.pending) it stops: its
 # reset would abort the pending firmware (the bootloader rolls back and the
-# build is blamed). Wait the ~2 minutes, or FORCE=1. That is the first
+# build is blamed). Wait the ~2 minutes, or FORCE_PENDING=1 (not FORCE=1:
+# that one is for a stale frozen logger only, and one variable meant for
+# that walked past this guard too). That is the first
 # question to the board: each mpremote session stops the logger (raw REPL),
 # so every exit restarts it, by a reset, or with an OTA pending by running
 # the logger again without one (a soft reset does not run main.py from the
@@ -67,8 +70,11 @@ if [ "$OTAPEND" != False ]; then
     else
         echo "Could not tell whether an OTA install is pending: '$BOARD'" >&2
     fi
-    [ "${FORCE:-0}" = 1 ] || exit 1
-    echo "FORCE=1: deploying during the OTA validation" >&2
+    if [ "${FORCE_PENDING:-0}" != 1 ]; then
+        echo "(FORCE_PENDING=1 deploys anyway, without a reset; FORCE=1 does not)" >&2
+        exit 1
+    fi
+    echo "FORCE_PENDING=1: deploying during the OTA validation" >&2
 fi
 MACHINE=$(tail -n 1 <<< "$BOARD")
 case "$MACHINE" in
@@ -185,9 +191,9 @@ echo "Copied and checked: $FILES"
 # frozen module: '' comes first in sys.path).
 # Clear the RTC boot-fail counter so a previous crash lock (REPL after 5
 # failures) does not survive this deploy reset. Power-on also clears it.
-# With an OTA pending (FORCE=1) no reset: it would abort the pending image;
-# the EXIT trap runs the logger again and the new files count from the
-# next boot.
+# With an OTA pending (FORCE_PENDING=1) no reset: it would abort the
+# pending image; the EXIT trap runs the logger again and the new files
+# count from the next boot.
 RESET=(+ reset)
 [ "$OTAPEND" = False ] || RESET=()
 $MPREMOTE connect "$PORT" \

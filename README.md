@@ -202,9 +202,10 @@ a nearly full flash can no longer leave an unimportable module (not
 question to the board is whether an OTA install is being validated
 (`/ota.pending`, about 2 minutes): then it stops before anything else, as
 its reset would abort the pending firmware, the bootloader would roll back
-and the build would be blamed (`FORCE=1` deploys anyway, the staged page
-left alone, and ends without a reset: the logger runs again, the new
-files count from the next boot). Then it
+and the build would be blamed (`FORCE_PENDING=1` deploys anyway, the staged
+page left alone, and ends without a reset: the logger runs again, the new
+files count from the next boot; `FORCE=1` does not, it is for a stale
+frozen logger only). Then it
 removes a stray `gps_logger.py`, clears the boot-fail counter and resets
 the board. When it cannot tell whether the firmware has the logger frozen
 in (no clear answer from the board), it stops instead of guessing.
@@ -252,8 +253,13 @@ free that an allocation rarely has to.
 when it differs from the build's. Then it backs up the app partition to
 `firmware/` and writes only the app at 0x10000: the bootloader, the
 partition table and the file system (`.env`, tracks) stay as they are.
-Nothing on the file system is touched before the write, so a failed check
-or write leaves the board as it was. Run `./deploy.sh` right after: it
+Nothing on the file system is touched before or by the write, so a failed
+check leaves the board as it was. A failed write does not: it always goes
+to the first slot, which is the running one unless an OTA switched to the
+second, so the board may not boot an app afterwards. The ROM download mode
+over USB is never touched: run `--flash` again, or write the backup back
+with the `esptool.py` command it prints (with the second slot running, the
+board still boots that one). Run `./deploy.sh` right after: it
 removes the old `gps_logger.mpy` (until then it shadows the frozen module
 and runs as before) and any stray `gps_logger.py` (`''` comes first in
 `sys.path`), and clears the boot-fail counter. Right after esptool's reset
@@ -287,17 +293,32 @@ whole flash, file system included, so first let every point upload and copy
 the files off:
 
 ```bash
-.venv/bin/mpremote connect /dev/ttyACM0 cp :/.env env.backup + cp -r :/hist . + reset
+# /.env holds the WiFi, API and OTA keys: outside the repo, mode 600
+B=~/.config/gps-logger/migrate-$(date +%Y%m%d); mkdir -p "$B" && chmod 700 "$B"
+.venv/bin/mpremote connect /dev/ttyACM0 cp :/.env "$B/env" + cp -r :/hist "$B/" + reset
+chmod 600 "$B/env"
 PORT=/dev/ttyACM0 tools/build_firmware.sh --migrate   # 16 MB only; backs up the first 4 MB
 # put .env back (with OTA_URL / OTA_KEY added), /hist too, then:
+.venv/bin/mpremote connect /dev/ttyACM0 cp "$B/env" :/.env + cp -r "$B/hist" :/
 PORT=/dev/ttyACM0 ./deploy.sh
 ```
 
+The backup `--migrate` writes (`firmware/full-backup-*.bin`, mode 600)
+holds the start of the old file system, `/.env` and its keys too: keep it
+off shared places and delete it once the board runs. `.gitignore` also
+ignores `env.backup`, `hist/` and `*.env*`, for a copy made in the repo
+anyway.
+
 **Then:** `tools/build_firmware.sh --publish` writes `firmware/ota/`
 (`micropython-<commit>.bin`, the page as `web-<commit>.html[.gz]`,
-`manifest.json`) and copies it with `scp` to `OTA_DEST`, a folder a web
-server on the LAN serves: the files first, the manifest naming them last,
-so a board reading the old manifest meanwhile still finds its files. The
+`manifest.json`) and copies it with `scp` to `OTA_DEST` (`host:/path`), a
+folder a web server on the LAN serves: each file as `<name>.tmp`, moved
+over the live one with `ssh` (one rename: a board downloading a
+republished `.bin` keeps reading the old one, and none reads a half-copied
+manifest), the files first, the manifest naming them last, so a board
+reading the old manifest meanwhile still finds its files. A build that is
+not newer than the published manifest's is refused (a board only takes a
+newer one; `FORCE=1` publishes it anyway). The
 manifest carries the build (the commit time), the commit, size and SHA-256
 of each file, and an HMAC-SHA256 over them with the key in `OTA_KEY_FILE`
 (default `~/.config/gps-logger/ota.key`). The key is printable ASCII without
@@ -321,14 +342,27 @@ the other app slot 4 KB at a time, with the GPS read and the watchdog fed
 between (~1 min; the HTTP body ends at its Content-Length). It is read back
 against its SHA-256, the page files are staged as `<file>.new`, the slot is
 set to boot and the board resets. Before any of that the manifest's fields
-are checked (whole numbers, a 64-hex SHA-256, no `|` in a string, only
-`/web.html` and `/web.html.gz`, each once): the HMAC covers them joined by
-`|`, so a manifest with a `|` moved between fields would keep it (`bad
-manifest`; the format itself is unchanged). The new firmware runs pending:
+are checked (whole numbers, a 64-hex SHA-256, no `|` in a string, the
+commit 1–20 lowercase hex with an optional `-dirty`, only `/web.html` and
+`/web.html.gz`, each once): the HMAC covers them joined by `|`, so a
+manifest with a `|` moved between fields would keep it (`bad manifest`;
+the format itself is unchanged). The HMAC is compared in constant time.
+A refused manifest is one diagnostic line until a good one comes, and no
+unverified field goes into it (a commit with newlines wrote forged lines);
+any diag line is one line, cut at 220 bytes. A `/gps_logger.mpy` or `.py`
+on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
+(`''` comes first in `sys.path`): on a frozen firmware the install moves
+it aside as `<name>.ota-old`, the valid new firmware deletes it, and
+after a rollback `main.py` puts it back before the import. A Ctrl-C
+between `set_boot` and the reset no longer skips the reset (left there,
+the next reset booted the new slot with no pending note, valid without a
+health check); a boot slot that is set but not the running one at boot
+(no reset since) is booted once. The new firmware runs pending:
 2 minutes with WiFi connected (`OTA_VALID_AFTER`), and the manifest read
-once more (HTTP 200, every minute until it is: `OTA_PROBE`; a build whose
-update path is broken would otherwise only get the next one over USB),
-mark it valid, and only then do the
+once more (HTTP 200, the fields and the HMAC as above, every minute until
+it is: `OTA_PROBE`; a build whose update path is broken would otherwise
+only get the next one over USB, and a manifest signed with another key no
+longer makes it valid), mark it valid, and only then do the
 staged page files replace the old ones (on a file system that does not
 rename over a file, the old one is moved aside first and back if the new
 one still does not go up; a page that does not go up is a diag line,
@@ -339,15 +373,27 @@ the old slot to boot itself: that left the old image pending, and the next
 reset fell back to `ota_0`). A download that fails its SHA-256, or a page
 file that fails its SHA-256 or cannot be written, is tried again an hour
 later (`OTA_RETRY`), not every check; an error (server down) goes to the
-diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not tried again.
-A rollback that may not be the build's fault is a try instead, counted per
-build in `/ota.tries`: one at power-on (the cable pulled; MicroPython 1.29
-reports a brownout as a power-on too, and a build that browned out on a
-weak supply was reinstalled after every boot) and the no WiFi / no
-manifest reset (a router or server outage). The build is tried again an
+diagnostic log once per kind. A build that crashed (the logger's crash
+branch notes it in `/ota.mark`) or whose watchdog fired while the logger
+ran is noted in `/ota.bad` and not tried again. Any other rollback may
+not be the build's fault and is a try instead, counted per build in
+`/ota.tries`: at power-on (the cable pulled; MicroPython 1.29 reports a
+brownout as a power-on too, and a build that browned out on a weak supply
+was reinstalled after every boot), the no WiFi / no manifest reset (a
+router or server outage), and a reset from outside (`mpremote reset`, a
+USB-JTAG reset, the watchdog after an `mpremote` session stopped the
+logger: Ctrl-C notes `stop`; each of these marked a good build bad at
+once). A panic is a try too: it reads as a hard reset, like `mpremote
+reset`, and no Python code runs to note it. The build is tried again an
 hour after the next boot (`OTA_RETRY`) and is bad after 2 tries
-(`OTA_TRIES_MAX`). A boot without a pending note confirms the running
-image. Each step is in the
+(`OTA_TRIES_MAX`); the health reset removes the note before it counts its
+try, so a power cut between them cannot count one attempt twice, and it
+writes the points in RAM first. A boot without a pending note confirms
+the running image. Points waiting for upload hold the check back, but not
+for good: with no successful upload for 24 hours (`OTA_STUCK`; `err
+payload` is cleared by a 2xx only, so an upload bug held back the update
+that fixes it) it checks anyway, one diag line `ota: uploads stuck`.
+Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
 The status page shows the running build under *Systems*: the `FIRMWARE` row
 gives the build's date (the commit time, `fw_build` in the JSON, local
@@ -420,6 +466,11 @@ boot cause 2 (hard reset), the same as the logger's own `machine.reset()`
 1 (power on). The counter is cleared after 60 s (`BOOT_OK_MS`) of a healthy
 main loop, by `deploy.sh` or by a power cycle. By hand:
 `mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
+In the REPL after 5 the board no longer waits for good: after 30 minutes
+(`BOOT_RETRY_MS`) a timer sets the count back to 4 and resets, one more
+start (a failure is another 30 minutes in the REPL). That timer can reset
+an `mpremote` session that runs past it: `_retry.deinit()` at the REPL
+stops it, and the boot bypass skips all of it.
 
 **Getting tracks:** they live in `/gpx/`. With the boot bypass held:
 
@@ -1236,8 +1287,9 @@ home.
   POSTs.
 - An uncaught exception is printed, the batch is flushed (without the drift
   held for a stay), and the board resets after ~1 s.
-- The [boot loop guard](#using-it) stops repeated crashes; a missing or
-  failing OLED is switched off instead of crashing.
+- The [boot loop guard](#using-it) stops repeated crashes (and retries
+  every 30 minutes); a missing or failing OLED is switched off instead of
+  crashing.
 
 ## Configuration
 
@@ -1362,7 +1414,7 @@ with a NEO-6M; most never need changing.
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
-| `OTA_PROBE` / `OTA_TRIES_MAX` | 1 min / 2 | How often a pending firmware reads the manifest until it did; rollbacks at power-on or without WiFi / manifest before a build is bad |
+| `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
@@ -1399,10 +1451,13 @@ every pull request:
   - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
     board-side code under CPython): copy, check and rename, too little
     flash, a cut copy, frozen firmware (stale, `FORCE`, `FORCE_MPY`, no
-    clear answer);
+    clear answer), an OTA pending (`FORCE_PENDING`);
   - `tools/build_firmware.sh` with a fake ESP-IDF, MicroPython tree,
-    `esptool.py` and `mpremote`: the `gps_frozen` marker, and `--flash`
-    touching nothing on the board before a successful write.
+    `esptool.py`, `mpremote`, `scp` and `ssh`: the `gps_frozen` marker,
+    `--flash` touching nothing on the board before a successful write,
+    `--migrate`'s 16 MB check and private backup, `--publish` moving each
+    file in from a `.tmp` and refusing a build not newer than the published
+    one.
 - `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
 - `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`,
   `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
