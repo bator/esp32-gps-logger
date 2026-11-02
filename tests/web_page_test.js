@@ -213,7 +213,7 @@ ft.fitLive = (() => {
 // the "now" card on the band's half away from the dot (the dot low:
 // the card at the top)
 ft.cardSide = (() => {
-  const q = page(375), m = q.doc.getElementById("map");
+  const q = page(1100), m = q.doc.getElementById("map");
   m.offsetHeight = 300;
   q.c.hist = q.c.histNew(null);
   q.c.hist.pts.push([Date.now() - 60000, 47.20, 18.42, 100], [Date.now(), 47.18, 18.42, 100]);
@@ -221,7 +221,16 @@ ft.cardSide = (() => {
   const low = q.doc.getElementById("now").className;
   q.c.hist.pts.reverse();
   q.c.placeMap({position: "47.20, 18.42"});
-  return [low, q.doc.getElementById("now").className];
+  const out = [low, q.doc.getElementById("now").className];
+  // a phone: always at the top, the band starting under it
+  const r = page(375), rm = r.doc.getElementById("map"), card = r.doc.getElementById("now");
+  rm.offsetHeight = 340; card.offsetHeight = 46;
+  r.c.hist = r.c.histNew(null);
+  r.c.hist.pts.push([Date.now() - 60000, 47.20, 18.42, 100], [Date.now(), 47.18, 18.42, 100]);
+  r.c.placeMap({position: "47.20, 18.42"});
+  rm.className = "map";
+  out.push(card.className, card.style.top, r.c.mapBand(rm).top);
+  return out;
 })();
 // the card: Photon's answer, how long here, speed, heading, the address
 // asked again only after ADDR_M metres and ADDR_S seconds

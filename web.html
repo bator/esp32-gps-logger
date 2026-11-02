@@ -46,6 +46,7 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .now .r{display:flex;gap:18px;font:500 10px "JetBrains Mono",monospace;color:#8e8e96;letter-spacing:.06em}
 .now .r b{display:block;font:600 15px "JetBrains Mono",monospace;color:#fff;letter-spacing:0;margin-top:2px;white-space:nowrap}
 .now .nc{margin-top:8px;font:500 10.5px "JetBrains Mono",monospace;color:#71717a}.now .nc:empty{display:none}
+.now .nm{display:none;font:500 11px "JetBrains Mono",monospace;color:#a1a1aa;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hud{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:12px;padding:10px 16px;z-index:4;max-width:1100px;margin:auto;box-sizing:border-box;background:rgba(9,9,11,.82);border-radius:0 0 12px 12px}
 .hud h1{font-size:14px;font-weight:700;letter-spacing:.18em;margin:0;color:#fff}
 .live{font-size:11px;font-weight:600;color:var(--ok);letter-spacing:.1em;display:flex;align-items:center;gap:6px}
@@ -264,15 +265,15 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
    squeezed, the uptime broke over 5 lines into the map); the uptime of the
    last answer is not shown offline */
 @media(max-width:760px){.hud{flex-wrap:wrap;row-gap:6px}.hud>*{white-space:nowrap}.off .hud .up{display:none}
-.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.now{left:12px;right:12px;max-width:none;padding:9px 12px}.now h3{font-size:15px}.now p{margin-bottom:6px}
-.now .r{gap:12px}.now .r b{font-size:13px}.now .r .fa{display:none}}
+.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:380px}.wrap{margin-top:-70px}
+.now{left:12px;right:12px;max-width:none;height:48px;padding:7px 11px;border-radius:10px}.now h3{font-size:14px}.now p,.now .r,.now .nc{display:none}.now .nm{display:block}}
 </style>
 </head>
 <body>
 <div class="map nofix" id="map">
   <div class="tiles" id="tiles"></div><div class="grid"></div><div class="trk" id="trk"></div>
   <div class="acc" id="acc"></div><div class="cone" id="cone"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
-  <div class="now" id="now"><h3 id="nst"></h3><p id="nsub"></p><div class="r" id="nr"></div><div class="nc" id="ncoord"></div></div>
+  <div class="now" id="now"><h3 id="nst"></h3><p id="nsub"></p><div class="r" id="nr"></div><div class="nc" id="ncoord"></div><div class="nm" id="nm"></div></div>
   <div class="hud" id="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
   <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &middot; <a href="https://www.geoapify.com/">Geoapify</a></div>
 </div>
@@ -1184,6 +1185,9 @@ function mapBand(el) {
       u = Math.min(h, wr.getBoundingClientRect().top - m);
     if (u - t >= 100) { b.top = t; b.bot = u; }
   }
+  // a phone: the now card sits at the top, the band starts under it
+  var card = document.getElementById("now");
+  if (el.offsetWidth < 760 && card.offsetHeight && el.className.indexOf("nofix") < 0) b.top += card.offsetHeight + 8;
   return b;
 }
 // The view: the position and the day's track fitted into the free band,
@@ -1294,9 +1298,10 @@ function placeMap(d) {
   }
   // the card on the band's half away from the dot
   var py = el.offsetHeight * .42 + (me[1] - v.Y) * sc, card = document.getElementById("now");
-  var low = py > (band.top + band.bot) / 2;
-  card.className = low ? "now top" : "now";
-  card.style.top = (low ? band.top + 8 : Math.max(band.top + 8, band.bot - 10 - card.offsetHeight)) + "px";
+  var low = py > (band.top + band.bot) / 2, phone = el.offsetWidth < 760;
+  card.className = low || phone ? "now top" : "now";
+  card.style.top = (phone ? band.top - card.offsetHeight - 2 : low ? band.top + 8 :
+    Math.max(band.top + 8, band.bot - 10 - card.offsetHeight)) + "px";
   if (fix) nowPaint(d, lat, lon);
   if (key !== mapKey) {
     var h = "";
@@ -1378,7 +1383,10 @@ function nowCard(d, addr, h, coords) {
     st("SPEED", h.kmh === null ? "&ndash;" : Math.round(h.kmh) + " km/h") +
     st("ACCURACY", ha === null ? "&ndash;" : "&plusmn;" + Math.round(ha) + " m") +
     (typeof d.good_age_s === "number" ? st("LAST FIX", d.good_age_s + " s", "fa") : "");
-  return {nst: addr ? esc(addr.st) : coords, nsub: addr ? esc(addr.sub) : "", nr: r, ncoord: addr ? coords : ""};
+  // a phone: one line under the address
+  var nm = [h.ms !== null ? "here " + esc(hms(h.ms / 1000)) : "", h.kmh === null ? "" : Math.round(h.kmh) + " km/h",
+    ha === null ? "" : "&plusmn;" + Math.round(ha) + " m"].filter(Boolean).join(" &middot; ");
+  return {nst: addr ? esc(addr.st) : coords, nsub: addr ? esc(addr.sub) : "", nr: r, ncoord: addr ? coords : "", nm: nm};
 }
 // the address: asked when the position moved ADDR_M metres, at most every
 // ADDR_S seconds; the card shows the coordinates until (or if never) known
@@ -1408,7 +1416,7 @@ function nowPaint(d, lat, lon) {
   var a = addr.a && addr.at && metres(addr.at, [0, lat, lon]) < 4 * ADDR_M ? addr.a : null;
   // the coordinates as the status painted them (view() runs first)
   var c = nowCard(d, a, h, drawn.ncoord || "");
-  paint({nst: c.nst, nsub: c.nsub, nr: c.nr});
+  paint({nst: c.nst, nsub: c.nsub, nr: c.nr, nm: c.nm});
   document.getElementById("ncoord").style.display = a ? "" : "none";
   var hd = h.kmh !== null && h.kmh >= 3 ? heading(hist.pts) : null, cone = document.getElementById("cone");
   cone.className = hd === null ? "cone" : "cone on";

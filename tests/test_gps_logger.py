@@ -14081,8 +14081,9 @@ else:
           "telemetry strip (below zoom 13); without a fix the track's centre",
           v.get("feat", {}).get("fitLive") == [[True, True, True]] * 2,
           repr(v.get("feat", {}).get("fitLive")))
-    check("PAGE-MAP: the now card on the band's half away from the dot",
-          v.get("feat", {}).get("cardSide") == ["now top", "now"],
+    check("PAGE-MAP: the now card on the band's half away from the dot; on "
+          "a phone always at the top, the track fitted under it",
+          v.get("feat", {}).get("cardSide") == ["now top", "now", "now top", "50px", 98],
           repr(v.get("feat", {}).get("cardSide")))
     nw = v.get("feat", {}).get("now", {})
     check("PAGE-NOW: Photon's answer read as street and number (a place's "
@@ -14106,8 +14107,8 @@ else:
           and nw.get("headNone") is None, repr(nw))
     cd = nw.get("card", {})
     check("PAGE-NOW: the card: address, district and city, HERE FOR / SPEED "
-          "/ ACCURACY / LAST FIX, the coordinates under them; without an "
-          "address the coordinates as its title",
+          "/ ACCURACY / LAST FIX, the coordinates under them (a phone: one "
+          "line); without an address the coordinates as its title",
           cd.get("nst") == "Fűtőház utca 16" and cd.get("nsub") == "Víziváros, Székesfehérvár"
           and "HERE FOR<b>2 h 00 min</b>" in cd.get("nr", "")
           and "SPEED<b>0 km/h</b>" in cd.get("nr", "")
@@ -14117,7 +14118,9 @@ else:
           and nw.get("bare", {}).get("nst") == "47.18000&deg; N"
           and "HERE FOR" not in nw.get("bare", {}).get("nr", "")
           and "SPEED<b>&ndash;</b>" in nw.get("bare", {}).get("nr", "")
-          and "&plusmn;5 m" in nw.get("bare", {}).get("nr", ""), repr(nw))
+          and "&plusmn;5 m" in nw.get("bare", {}).get("nr", "")
+          and cd.get("nm") == "here 2 h 00 min &middot; 0 km/h &middot; &plusmn;4 m"
+          and nw.get("bare", {}).get("nm") == "&plusmn;5 m", repr(nw))
     check("PAGE-NOW: the address from Atlas' Photon; asked again only after "
           "25 m and 20 s, one at a time",
           (nw.get("url") or "").startswith("https://atlas.crusand.org/api/v1/photon/reverse?lat=47.18000&lon=18.42000")
