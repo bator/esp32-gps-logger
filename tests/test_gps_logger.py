@@ -3479,6 +3479,28 @@ try:
     check("REVIEW-4: a valid second without a position is no fix",
           gl.st["valid"] is False and gl.st["pos_at"] == fix_at)
 
+    # NMEA-DR: GGA quality 6 and RMC mode E are an estimate (dead
+    # reckoning, the last fix carried on) and were a fix; NAV-PVT's
+    # DR-only fix is not one (PVT-FILTER). DGPS (2) still is
+    def dr_case(q, mode, gga=True, rmc=True):
+        gl.reset()
+        for t in ("120040.00", "120041.00", "120042.00"):
+            if rmc:
+                gl.handle(nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,0.0,"
+                               "171026,,%s" % (t, "" if mode is None
+                                                else "," + mode)))
+            if gga:
+                gl.handle(nmea("GPGGA,%s,4730.000,N,01900.000,E,%d,04,2.0,"
+                               "100.0,M,40.0,M,," % (t, q)))
+        return gl.st["valid"], gl.st["seq"]
+
+    dr = (dr_case(6, "E"), dr_case(6, "A", rmc=False),
+          dr_case(1, "E", gga=False), dr_case(2, "D"), dr_case(1, "A"),
+          dr_case(1, None, gga=False))       # (NMEA 2.2: no mode field)
+    check("NMEA-DR: GGA quality 6 / RMC mode E -> no fix; 1, 2 still are",
+          dr == ((False, 0), (False, 0), (False, 0), (True, 2), (True, 2),
+                 (True, 2)), repr(dr))
+
     # AVG: five fixes of one second publish their mean, once
     gl.reset()
     lats = ("4730.0000", "4730.0010", "4730.0020", "4730.0030", "4730.0040")
@@ -7423,6 +7445,37 @@ check("SETUP-CHECK: acknowledged but still 1 fix/s, or no GST -> set up again",
       v_slow > 0 and v_nogst > 0 and v_good == 0,
       "slow=%d nogst=%d good=%d" % (v_slow, v_nogst, v_good))
 
+# RATE-NAK: a CFG-RATE refused (NAK) is an answer, as NAV5's is: it was
+# taken for silence (the blind burst, setup_ok False, set up again and
+# again). The message frames go acknowledged, the receiver stays at its
+# rate (1 fix/s is then no "not taken" verdict), a diag line says so
+
+
+def rate_nak_run(nak):
+    refused = _uart_nak_frames if isinstance(nak, bytes) else _uart_nak
+    refused.add(nak)
+    said = []
+    saved_dw = gl._diag_write
+    gl._diag_write = said.append
+    try:
+        n = verify_run(1, True)
+        state = (gl.st["setup_ok"], gl.st["nav5_ok"], gl.st["checked"],
+                 gl.st["extra"])
+    finally:
+        refused.discard(nak)
+        gl._diag_write = saved_dw
+    return n, state, [ln for ln in said if "rate" in ln]
+
+
+rn1 = rate_nak_run((0x06, 0x08))           # every CFG-RATE refused
+rn5 = rate_nak_run(gl._rate(1000 // gl.GPS_HZ))
+check("RATE-NAK: CFG-RATE refused -> setup ok at 1 Hz, not set up again",
+      rn1[:2] == (0, (True, True, True, 0)) and rn5[:2] == rn1[:2]
+      and rn1[2] == ["gps rate %d ms refused" % 1000,
+                     "gps rate %d ms refused" % (1000 // gl.GPS_HZ)]
+      and rn5[2] == ["gps rate %d ms refused" % (1000 // gl.GPS_HZ)],
+      repr((rn1, rn5)))
+
 # SETUP-NOFIX: a setup before the first fix (at boot, indoors) got its one
 # verdict GPS_VERIFY later with no valid second to tell by: "taken", the
 # backoff reset, and a receiver left at 1 Hz (a stale RATE ACK) was never
@@ -7532,6 +7585,23 @@ gl.handle(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
 check("SETUP-BACKOFF: a receiver restart starts the backoff afresh",
       gl.st.get("ack_n") == 0 and gl.st["setup_wait"] == gl.GPS_RETRY,
       "%r %r" % (gl.st.get("ack_n"), gl.st["setup_wait"]))
+# SETUP-BACKOFF-CAP: ack_n grows for as long as the receiver keeps ignoring
+# (a retry a minute: 43200 after a month), and GPS_RETRY << (n - 1) grew
+# with it, a long int per setup (5 KB at 43200) on a ~15 KB free heap. A
+# count no receiver reaches shows it here (CPython: too many digits)
+cap_waits = []
+for n_ in (2, 4, 5, 43200, 1 << 70):
+    gl.reset()
+    _uart_rx[:] = []
+    gl.st["ack_n"] = n_
+    try:
+        gl.gps_setup()
+        cap_waits.append(gl.st["setup_wait"])
+    except (OverflowError, MemoryError) as e_:
+        cap_waits.append(repr(e_))
+check("SETUP-BACKOFF-CAP: the shift is capped, the wait GPS_IGNORED_MAX",
+      cap_waits == [2 * gl.GPS_RETRY, 8 * gl.GPS_RETRY]
+      + [gl.GPS_IGNORED_MAX] * 3, repr(cap_waits))
 
 # SATS-ORDER: a satellite poll and a setup due in the same gps_check: the
 # setup first, the poll right after it (before, its answer was lost in the
@@ -7813,6 +7883,91 @@ check("RXBUF-FIND: no per-byte Python loop over what the UART delivers",
       and gl.st["banners"] == 2,
       "%d indexings for %d B, ok=%d banners=%d" % (
           IdxCount.n, len(f_data), gl.st["ok"], gl.st["banners"]))
+
+# NMEA-INPLACE: handle() reads a sentence in the buffer (read_uart's bounds,
+# no copy) and decodes only the types it reads; it counts and parses as the
+# copying one did (here as it was, the reference) on random sentences: bad
+# checksums, odd hex, junk and blanks around, unknown types, other address
+# lengths, bytes over 0x7F, the PVT mode's "turned off" count
+
+
+def old_handle(line):
+    line = line.strip()
+    i = line.rfind(b"$")
+    if i > 0:
+        line = line[i:]
+    if not line:
+        return
+    star = line.rfind(b"*")
+    ok = line.startswith(b"$") and star >= 0
+    if ok:
+        c = 0
+        for b in memoryview(line)[1:star]:
+            c ^= b
+        try:
+            ok = c == int(line[star + 1:star + 3], 16)
+        except ValueError:
+            ok = False
+    if not ok:
+        gl.st["err"] += 1
+        return
+    gl.st["good"] = time.ticks_ms()
+    try:
+        f = line[1:line.rfind(b"*")].decode().split(",")
+        fn = gl.HANDLERS.get(f[0][2:])
+        if fn:
+            fn(f[0][:2], f)
+            if gl.st.get("mode") == "pvt" and f[0][2:] in gl._PVT_OFF:
+                gl._extra(f[0][:2], f)
+        gl.st["ok"] += 1
+    except (ValueError, IndexError, UnicodeError):
+        gl.st["err"] += 1
+
+
+ip_rnd = random.Random(29)
+ip_bodies = ("GPRMC,120000.00,A,4730.000,N,01900.000,E,0.1,90.0,171026,,,A",
+             "GNGGA,120000.20,4730.000,N,01900.000,E,1,08,1.0,100.0,M,,M,,",
+             "GPGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2", "GLGSV,3,1,12,01,40,083,46",
+             "GPGST,120000.00,20,,,,3.0,2.5,6.0", "GPVTG,,T,,M,0.0,N,0.0,K,A",
+             "GPTXT,01,01,02,u-blox ag", "GPZDA,120000.00,17,10,2026,00,00",
+             "PUBX,00,120000", "GPRMCX,1,2", "GPRM", "GPRMC", "GPGGA,1",
+             "GP\xe9MC,1,A", "GPRMC,12\xe90000.00,A,,,,,,,171026,,,N",
+             "\xe9GRMC,120000.00,A,4730.000,N,01900.000,E,0.1,,171026,,,A",
+             "\xe9GGSV,3,1,12,01,40,083,46")
+ip_keys = ("ok", "err", "good", "valid", "lat", "time", "date", "quality", "used",
+           "fixtype", "pdop", "view", "extra", "speed", "status", "seq")
+ip_bad = []
+for n_ in range(1500):
+    body = ip_rnd.choice(ip_bodies).encode()
+    if ip_rnd.random() < 0.3:
+        k = ip_rnd.randrange(len(body))
+        body = body[:k] + bytes((ip_rnd.randrange(256),)) + body[k + 1:]
+    c = 0
+    for ch in body:
+        c ^= ch
+    ck = ip_rnd.choice(("%02X" % c, "%02x" % c, "%02X" % (c ^ 1), "%X" % c,
+                        "", " %X" % c, "%02X\r" % c, "%02Xzz" % c, "+%X" % c))
+    line = b"$" + body + b"*" + ck.encode()
+    if ip_rnd.random() < 0.2:
+        line = ip_rnd.choice((b"  ", b"\xb5b\x01", b"$GPGG", b"\t")) + line
+    if ip_rnd.random() < 0.2:
+        line += ip_rnd.choice((b" ", b"\r", b"*", b"$"))
+    pad = bytearray(b"xx\n" + line + b"\r\n12")
+    mode = "pvt" if n_ % 3 == 0 else "nmea"
+    got = []
+    for run in range(2):
+        gl.reset()
+        gl.st.update(mode=mode, setup_at=_clock[0] - 5000)
+        if run:
+            gl.handle(pad, 3, 3 + len(line))
+        else:
+            old_handle(line)
+        gl.handle(rv_nmea("GPRMC,120001.00,V,,,,,,,171026,,,N"))
+        got.append([gl.st[k_] for k_ in ip_keys])
+    if got[0] != got[1]:
+        ip_bad.append((line, got))
+check("NMEA-INPLACE: in place it counts and parses as the copying handle()",
+      not ip_bad, "%d differ, first %r" % (len(ip_bad), ip_bad[:1]))
 
 
 # RXBUF-DROP: the rest moves to the front in one slice store (MicroPython
@@ -8573,6 +8728,55 @@ finally:
 check("PVT-CHECK: a NAK of the CFG-VALSET -> PVT off, the NMEA setup next",
       nak_state == (True, False) and gl.st["mode"] == "nmea"
       and nmea_set(_uart_tx) == want_nmea, repr(nak_state))
+
+# PVT-NAK-STOP: an M8 that refused a frame of its NAV-PVT setup (or stopped
+# answering) got the frames after it anyway, blind: the NMEA-off ones left
+# it silent, no NMEA and no NAV-PVT, until the next setup (a running
+# backoff: minutes). Now the setup stops there, and a NAK makes the NMEA
+# setup due within GPS_RETRY
+
+
+def m8_stop(nak=None, silent=None):
+    saved = gl.GPS_PVT
+    gl.GPS_PVT = True
+    gl.reset()
+    _uart_rx[:] = []
+    gl._ubx_frame(M8_VER)
+    gl.st["setup_wait"] = gl.GPS_RETRY_MAX       # a backoff running
+    _uart_nak_frames.add(nak)
+    _uart_silent.add(silent)
+    try:
+        _uart_tx[:] = []
+        gl.gps_setup()
+        sent = [f for f in _uart_tx if f[2:3] == b"\x06"]
+        state = (gl.st["pvt_bad"], gl.st["setup_ok"], gl.st["setup_wait"])
+    finally:
+        _uart_nak_frames.discard(nak)
+        _uart_silent.discard(silent)
+        gl.GPS_PVT = saved
+    _uart_tx[:] = []
+    _clock[0] += gl.GPS_RETRY + 1000
+    gl.gps_check(_clock[0])
+    return sent, state, list(_uart_tx)
+
+
+s_on, st_on, again_on = m8_stop(nak=want8[0])
+s_gsa, st_gsa, _ = m8_stop(nak=want8[3])
+s_sil, st_sil, _ = m8_stop(silent=(0x06, 0x01))
+check("PVT-NAK-STOP: M8 NAK of NAV-PVT on -> no NMEA-off frame, NMEA setup "
+      "within GPS_RETRY",
+      want8[0] in s_on and not any(f in s_on for f in want8[1:])
+      and gl._rate(200) not in s_on
+      and st_on == (True, False, gl.GPS_RETRY)
+      and nmea_set(again_on) == want_nmea,
+      repr((st_on, [f.hex() for f in s_on])))
+check("PVT-NAK-STOP: a NAK (or silence) mid-way -> the frames after it not "
+      "sent",
+      all(f in s_gsa for f in want8[:4])
+      and not any(f in s_gsa for f in want8[4:]) and st_gsa[:2] == (True, False)
+      and want8[0] in s_sil and not any(f in s_sil for f in want8[1:])
+      and st_sil[:2] == (False, False),
+      repr((st_gsa, st_sil, [f.hex() for f in s_sil])))
 
 # PVT-RESTART: a restarted receiver is back at NMEA: its banner counts, its
 # NMEA positions keep the track going, and the setup turns PVT on again
