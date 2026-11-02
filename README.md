@@ -458,7 +458,8 @@ GPS, `heap grew in <step> to N KB` when the
 Python heap grew during an upload step (`read_batch`, `connect`,
 `tls_wrap`, `post`, the whole POST: the step that took IDF heap), a
 `reboot tls memory` or
-`reboot low idf N KB S s` line before such a reboot, and a `crash` line
+`reboot low idf N KB S s` / `reboot low mem N B S s` line before such a
+reboot, and a `crash` line
 before a crash reset. A reset loop that goes on writes its first warning,
 then `gps reset loop N more windows` every 5 minutes (`GPS_LOOP_SAY`) and
 once when it ends, not a line every 10 s. Past 32 KB the file becomes
@@ -1106,7 +1107,10 @@ home.
   without a success count as a server problem: backoff, no more quarantine
   (rejections of a `.bad` itself do not count here).
   A full `.bad` (64 kB) pauses that file (`BAD FULL`) instead of dropping
-  points; pull or delete it, then reset.
+  points; pull or delete it, then reset. `BAD FULL` lasts while that `.bad`
+  is on flash and its track waits; a copy that fails for another reason
+  (the flash reserve, an I/O error) is `fs err` and is tried again.
+  Points moved to a `.bad` leave `left` once (a `.bad` is not counted).
 - Other errors back off from 15 s up to 30 minutes (`Retry-After` is
   honoured); 401 waits 30 minutes. Between POSTs it pauses 5 s at home, 30 s
   elsewhere. Flash and memory errors back off too, and with every waiting
@@ -1167,7 +1171,9 @@ home.
   cert")`, which is how a failed allocation parsing `/ca.der` arrives, only
   while the `SSLContext` is made with the IDF heap's largest block under
   `TLS_MIN_KB` (else the file is bad: `ca err`).
-- **Low IDF heap:** below `TLS_MIN_KB` no POST is tried; the upload runs
+- **Low IDF heap:** below `TLS_MIN_KB` no POST over https is tried (a
+  plain `http://` `GEO_URL` needs no TLS block: neither this nor the
+  Python heap margin below applies to it); the upload runs
   `gc.collect()` and checks again every 30 s at home (`LOWIDF_RETRY`). Only
   if it stays low for 5 minutes (`LOWIDF_WAIT`) with tracks waiting does
   the board reboot (`reboot low idf` in the diagnostic log), and at most
@@ -1184,7 +1190,9 @@ home.
   which returns an empty grown area, and measures again. It also wants
   12 KB of free Python heap then, 8 KB on the frozen firmware
   (`TLS_MIN_PY_KB`; else `low mem` and a retry every 30 s,
-  `LOWIDF_RETRY`): the socket and TLS objects must fit without growing the
+  `LOWIDF_RETRY`; at home, low for 5 minutes, the same clean reboot as a
+  low IDF heap, `reboot low mem` in the diagnostic log, within the same
+  once per 30 minutes): the socket and TLS objects must fit without growing the
   heap. A POST itself takes a few KB (sockets, header lines; the
   `SSLContext`, ~3 KB, is made at boot); frozen, no module bytecode
   fragments the heap, so 8 KB leaves room.
@@ -1302,10 +1310,10 @@ with a NEO-6M; most never need changing.
 | `RTC_DRIFT` | 5 s | Board clock vs GPS time before the clock is set again (certificate dates) |
 | `TLS_REBOOT_N` | 5 | TLS allocation failures in a row (at home) before a clean reboot |
 | `TLS_MIN_KB` | 48 KB | Largest IDF heap block a POST needs; below it no try (`gc.collect()` and wait) |
-| `TLS_MIN_PY_KB` | 12 KB (frozen: 8 KB) | Free Python heap a POST needs after `gc.collect()`; below it the POST waits `LOWIDF_RETRY` |
+| `TLS_MIN_PY_KB` | 12 KB (frozen: 8 KB) | Free Python heap a POST over https needs after `gc.collect()`; below it the POST waits `LOWIDF_RETRY`, at home a clean reboot after `LOWIDF_WAIT` |
 | `LOWIDF_RETRY` / `LOWIDF_WAIT` | 30 s / 5 min | Checks while the IDF block is low (at home); how long it may stay low with tracks waiting before a clean reboot |
-| `LOWIDF_REBOOT_GAP` / `LOWIDF_MARK` | 30 min / `/lowidf` | At most one low-idf reboot this often; the file that tells the next boot |
-| `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err` |
+| `LOWIDF_REBOOT_GAP` / `LOWIDF_MARK` | 30 min / `/lowidf` | At most one low-idf or low-mem reboot this often; the file that tells the next boot |
+| `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err`; an unreadable `.pos` holds its track this many tries, then it is resent from 0 |
 | `MAX_BAD_BYTES` | 64 kB | Cap on a `.bad` file |
 | `MAX_GLOBAL_PAYLOAD` | 3 | Payload errors in a row that stop quarantining |
 

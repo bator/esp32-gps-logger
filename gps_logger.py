@@ -335,6 +335,8 @@ TLS_REBOOT_N = 5                         # TLS out of memory in a row (at
                                          # home): a clean reboot, the IDF heap
                                          # stays fragmented otherwise
 READ_ERR_MAX = 3                         # unreadable track: tries, then .err
+                                         # (unreadable .pos: then from 0)
+POS_READ = 40                            # bytes of a .pos read at most
 DEFAULT_DEVICE_ID = "Dawarich-GPS-tracker"
 DEFAULT_HOSTNAME = "Dawarich-GPS-tracker"
 DEVICE_ID = DEFAULT_DEVICE_ID            # Overland tracker id (overridable)
@@ -4953,8 +4955,9 @@ def up_reset():
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
               bad_try={}, skip=None, hold={}, bad_full={}, read_err={},
-              enomem=0, last_err=None, guard_hits=_guard["hits"],
-              lowidf_at=None, lowidf_seen=None, ok_at=None,
+              pos_err={}, enomem=0, last_err=None,
+              guard_hits=_guard["hits"], lowidf_at=None, lowidf_seen=None,
+              lowpy_at=None, lowpy_seen=None, ok_at=None,
               lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
@@ -4987,16 +4990,28 @@ def read_pos(path):
     to 0 (Dawarich dedup handles the resend). Never treat a bad .pos as
     EOF. A .trb offset without a keyframe "=" to start from is one too;
     key -1: none was read before off (its deltas up to the next keyframe
-    are dropped, as they were then)."""
+    are dropped, as they were then). A .pos that is there but cannot be
+    read raises OSError: resending from 0 sent the file (and a .trb's
+    history) twice. Read bounded: a .pos is under 24 bytes, a corrupt big
+    one raised MemoryError."""
     size = _file_size(path)
     if size is None:
         return 0, None
     try:
         with open(path + ".pos") as f:
-            v = f.read().split()
+            s = f.read(POS_READ)
+    except OSError as e:
+        if _enoent(e):
+            return 0, None
+        raise
+    if len(s) >= POS_READ:
+        print("pos corrupt", path, len(s))
+        return 0, None
+    try:
+        v = s.split()
         off = int(v[0]) if v else 0
         key = int(v[1]) if len(v) > 1 else None
-    except (OSError, ValueError):
+    except ValueError:
         return 0, None
     if off < 0 or off > size:
         print("pos corrupt", path, off, size)
@@ -5745,7 +5760,10 @@ def commit_offset(path, n, new_off, eof=False, key=None):
         write_offset(path, new_off)
     else:
         write_offset(path, new_off, key)
-    up["left"] = max(up["left"] - n, 0)
+    # a .bad's points left "left" when they moved there (count_points does
+    # not count a .bad): not again when they go up
+    if not path.endswith(".bad"):
+        up["left"] = max(up["left"] - n, 0)
 
 def _track_lines(src, path, off, end, key, fn):
     """fn(a, b) for each point line of the track file src (path) from off
@@ -5845,10 +5863,12 @@ def _hist_close(st):
         _hist_prune()
 
 def _append_bad(path, off, new_off, key=None):
-    """Copy consumed point lines to <path>.bad. False if not durable.
+    """Copy consumed point lines to <path>.bad. None once durable, else
+    why not: "full" (MAX_BAD_BYTES, the documented BAD FULL), "flash" (the
+    MIN_FREE reserve) or "err" (I/O, memory: not a full .bad either).
     A .trb's are decoded: the .bad has the text lines."""
     if path.endswith(".bad"):
-        return False
+        return "err"
     bad = path + ".bad"
     sz = _file_size(bad) or 0
     need = max(new_off - off, 0)
@@ -5856,11 +5876,11 @@ def _append_bad(path, off, new_off, key=None):
         need *= 8                        # (its text is ~6-8 times as long)
     if sz >= MAX_BAD_BYTES or sz + need > MAX_BAD_BYTES:
         print("bad file full", bad)
-        return False
+        return "full"
     room = free()
     if room is not None and room - need < MIN_FREE:
         print("bad file: flash reserve", bad)
-        return False
+        return "flash"
     cut = not _tail_nl(bad, sz)
     try:
         with open(path, "rb") as src, open(bad, "ab") as dst:
@@ -5871,8 +5891,8 @@ def _append_bad(path, off, new_off, key=None):
     except (OSError, MemoryError) as e:
         print("quarantine", repr(e))
         gc.collect()
-        return False
-    return True
+        return "err"
+    return None
 
 def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     """Park one rejected batch only if the copy landed on flash. key, key1:
@@ -5880,11 +5900,15 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     if path.endswith(".bad"):
         up["state"] = "err 422"
         return False
-    if not _append_bad(path, off, new_off, key):
+    why = _append_bad(path, off, new_off, key)
+    if why == "full":
         up["state"] = "bad full"
         bf = up.get("bad_full") or {}
-        bf[path] = True
+        bf[path + ".bad"] = True
         up["bad_full"] = bf
+        return False
+    if why:                              # a flash or memory problem: the
+        up["state"] = "fs err"           # .bad itself has room
         return False
     _hist_batch(path, off, new_off, key)
     try:
@@ -5938,21 +5962,25 @@ def _hold_file(path, now, ms):
     up["hold"] = h
 
 def _bad_full_left():
-    """True while a .bad that hit MAX_BAD_BYTES still exists on flash."""
+    """True while a .bad that hit MAX_BAD_BYTES still exists on flash and
+    its track still waits on it (keyed by the .bad: pulled, deleted or
+    uploaded, it no longer holds the track up)."""
     bf = up.get("bad_full") or {}
     if not bf:
         return False
     keep = {}
-    for p in bf:
-        if _file_size(p) is not None:
-            keep[p] = True
+    for b in bf:
+        if _file_size(b) is not None and _file_size(b[:-4]) is not None:
+            keep[b] = True
     up["bad_full"] = keep
     return bool(keep)
 
 def _clear_bad_full(path):
+    """path (a track, or its .bad) is done: no BAD FULL for it."""
     bf = up.get("bad_full") or {}
-    if path in bf:
-        bf.pop(path, None)
+    b = path if path.endswith(".bad") else path + ".bad"
+    if b in bf:
+        bf.pop(b, None)
         up["bad_full"] = bf
 
 class _Resp:
@@ -6161,6 +6189,13 @@ def _guard_stop():
 _post_phase = [None]                     # "connect", "tls", "http" in a POST,
                                          # "ctx" while the SSLContext is made
 
+def _host_hdr(proto, host, port):
+    """The Host header: host:port unless it is the scheme's default port
+    (RFC 7230 5.4; a proxy on :8443 routes by it)."""
+    if port == (443 if proto == "https" else 80):
+        return host
+    return "%s:%d" % (host, port)
+
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
     followed one as a GET with the old Content-Length (the server then
@@ -6187,7 +6222,8 @@ def _raw_post(url, data, headers, timeout):
             s = _tls_wrap(s, host)
             _heap_note("tls_wrap")
         _post_phase[0] = "http"
-        hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (path, host)
+        hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (
+            path, _host_hdr(proto, host, port))
         for k in headers:
             hdr += "%s: %s\r\n" % (k, headers[k])
         hdr += "Content-Length: %d\r\nConnection: close\r\n\r\n" % len(data)
@@ -6342,23 +6378,35 @@ def _tls_reboot():
     machine.reset()
     return True
 
-def _lowidf_reboot(big, low_ms):
-    """At home, the largest IDF heap block too small for TLS for
-    LOWIDF_WAIT with tracks waiting (gc.collect() did not bring it back):
-    write what is in RAM and restart. Its own reason, not the ENOMEM run;
-    at most one per LOWIDF_REBOOT_GAP (LOWIDF_MARK tells the next boot)."""
+def _low_ms(now, at, seen):
+    """ms a low-heap episode (up[at]: its start, up[seen]: its last
+    check) has lasted; a gap over LOWIDF_WAIT between checks starts a new
+    one."""
+    t0, last = up.get(at), up.get(seen)
+    if t0 is None or last is None or _age(now, last) > LOWIDF_WAIT:
+        t0 = up[at] = now
+    up[seen] = now
+    return _age(now, t0)
+
+def _low_reboot(fmt, n, low_ms):
+    """At home, the largest IDF heap block too small for TLS, or the free
+    Python heap under TLS_MIN_PY_KB, for LOWIDF_WAIT with tracks waiting
+    (gc.collect() did not bring it back): write what is in RAM and
+    restart. Its own reason, not the ENOMEM run; at most one per
+    LOWIDF_REBOOT_GAP for either (LOWIDF_MARK tells the next boot).
+    fmt % n: what is low ("idf %d KB", "mem %d B")."""
     if not at_home() or low_ms < LOWIDF_WAIT:
         return False
     if up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP:
         return False                     # rebooted for it a short while ago
-    print("upload: IDF heap block %d KB for %d s, reboot" % (
-        big, low_ms // 1000))
+    what = fmt % n
+    print("upload: low %s for %d s, reboot" % (what, low_ms // 1000))
     try:
         flush(_still_hold())
     except Exception:
         pass
     _diag_final()
-    _diag_write("reboot low idf %d KB %d s" % (big, low_ms // 1000))
+    _diag_write("reboot low %s %d s" % (what, low_ms // 1000))
     try:
         with open(LOWIDF_MARK, "w") as f:
             f.write("1")
@@ -6410,7 +6458,26 @@ def upload_tick():
         up["next_at"] = time.ticks_add(now, BACKOFF_START)
         return
     path = files[0]
-    off, key = read_pos(path)
+    try:
+        off, key = read_pos(path)
+    except OSError as e:
+        # the .pos is there but unreadable: hold the track (the newer ones
+        # go) and try again; only after READ_ERR_MAX tries from 0 after
+        # all (resent, Dawarich deduplicates) rather than never
+        pe = up.setdefault("pos_err", {})
+        pe[path] = pe.get(path, 0) + 1
+        print("upload pos read", path, repr(e))
+        if pe[path] < READ_ERR_MAX:
+            _hold_file(path, now, BACKOFF_MAX)
+            _fs_err(now)
+            return
+        off, key = 0, None
+    except MemoryError:
+        up["skip"] = path
+        _low_mem(now)
+        return
+    if up.get("pos_err"):
+        up["pos_err"].pop(path, None)
     try:
         _heap_mark()
         n, n_ok, size, new_off, eof = read_batch(path, off, key)
@@ -6467,7 +6534,10 @@ def upload_tick():
         up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
         return
     gc.collect()                         # frees an empty grown heap area
-    big = idf_heap()[1]
+    # both margins keep the IDF block free for TLS: not for plain http
+    # (there they stopped the uploads and rebooted the board for nothing)
+    tls = up["url"].startswith("https")
+    big = idf_heap()[1] if tls else None
     if big is not None and big < TLS_MIN_KB:
         # TLS cannot get its block: every try would time out or fail to
         # allocate (seen as "err net" until a reboot on 2026-10-30)
@@ -6476,31 +6546,32 @@ def upload_tick():
         if up.get("last_err") != "low idf":
             up["last_err"] = "low idf"
             _diag_write("upload low idf %d KB" % big)
-        t0, seen = up.get("lowidf_at"), up.get("lowidf_seen")
-        if t0 is None or seen is None or _age(now, seen) > LOWIDF_WAIT:
-            t0 = up["lowidf_at"] = now   # a new episode (checks had a gap)
-        up["lowidf_seen"] = now
-        if not _lowidf_reboot(big, _age(now, t0)):
+        if not _low_reboot("idf %d KB", big,
+                           _low_ms(now, "lowidf_at", "lowidf_seen")):
             if at_home():
                 _schedule(now, LOWIDF_RETRY)
             else:
                 _schedule(now)
         return
     up["lowidf_at"] = None
-    pf = py_heap()[0]
-    if pf < TLS_MIN_PY_KB * 1024:
+    pf = py_heap()[0] if tls else None
+    if pf is not None and pf < TLS_MIN_PY_KB * 1024:
         # an allocation that does not fit after a GC grows the heap by up
         # to its own size, out of the IDF block TLS needs: wait instead
         # (a fixed retry: the doubling backoff waited up to BACKOFF_MAX
-        # for a heap that is back after the next collect)
+        # for a heap that is back after the next collect). It retried for
+        # ever; at home, low for LOWIDF_WAIT, it reboots as low idf does
         up["err"] += 1
         up["state"] = "low mem"
         if up.get("last_err") != "low mem":
             up["last_err"] = "low mem"
             _diag_write("upload low mem %d B" % pf)
-        _schedule(now, LOWIDF_RETRY)
+        if not _low_reboot("mem %d B", pf,
+                           _low_ms(now, "lowpy_at", "lowpy_seen")):
+            _schedule(now, LOWIDF_RETRY)
         return
-    if up["url"].startswith("https"):
+    up["lowpy_at"] = None
+    if tls:
         _rtc_sync(now)                   # certificate dates need the time
         if not _tls_ready(now):
             return
@@ -6742,7 +6813,8 @@ def _raw_get(url, sink, limit):
         if proto == "https":
             s = _tls_wrap(s, host)
         _io_write(s, ("GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close"
-                      "\r\n\r\n" % (path, host)).encode())
+                      "\r\n\r\n" % (path, _host_hdr(proto, host, port)))
+                  .encode())
         code = int(s.readline(HTTP_LINE).split(None, 2)[1])
         clen = None
         bol = True

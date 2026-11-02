@@ -1809,7 +1809,7 @@ try:
     with open(qsrc + ".bad", "rb") as f:
         bad = f.read()
     check("TRK-7: quarantine copies only the point lines of a .trk",
-          ok_bad and bad.count(b"\n") == 3 and b"#" not in bad,
+          ok_bad is None and bad.count(b"\n") == 3 and b"#" not in bad,
           "ok=%s bad=%r" % (ok_bad, bad[:80]))
 
     # TRK-END: the footer ends a .trk. A failed longer flush, then a shorter
@@ -7260,7 +7260,7 @@ try:
 
     import inspect
     resets = {f: inspect.getsource(getattr(gl, f)) for f in (
-        "_tls_reboot", "_lowidf_reboot", "_ota_check", "_ota_health")}
+        "_tls_reboot", "_low_reboot", "_ota_check", "_ota_health")}
     gl._uptime_saved = gl.uptime_s
     diag_clear()
     gl.uptime_s = lambda now=None: 151
@@ -9717,6 +9717,244 @@ for n_ in os.listdir(up_td):
 online(up_td)
 gl.up["url"], gl.up["key"] = "https://d.example", "k"
 
+# POS-BIG: a corrupt, oversized .pos is read bounded (resent from 0), and a
+# MemoryError reading it is "low mem" like the other read errors, not an
+# exception out of upload_tick (a reset after every WiFi connect)
+pb_p = os.path.join(up_td, "20261004_130000.trk")
+
+
+class _PosSized(object):
+    """A .pos whose whole read() does not fit in the heap."""
+    def __init__(self, data):
+        self.data = data
+
+    def read(self, n=-1):
+        if n is None or n < 0 or n > 256:
+            raise MemoryError()
+        return self.data[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+pb_mode = ["big"]
+
+
+def _pb_open(name, mode="r", *a, **k):
+    if name == pb_p + ".pos" and mode == "r":
+        if pb_mode[0] == "oom":
+            raise MemoryError()
+        with builtins.open(name) as f_:
+            return _PosSized(f_.read())
+    return builtins.open(name, mode, *a, **k)
+
+
+pb_res = []
+gl.open = _pb_open
+try:
+    for mode_ in ("big", "oom"):
+        pb_mode[0] = mode_
+        make_trk(pb_p, 3)
+        with builtins.open(pb_p + ".pos", "w") as f:
+            f.write("1" * 100000)
+        _posts[:] = []
+        gl.up["hold"] = {}
+        try:
+            pump()
+            crash = None
+        except MemoryError as e:
+            crash = e
+        pb_res.append((crash is None, len(locations()), gl.up["state"],
+                       os.path.exists(pb_p)))
+        _clock[0] += 1000
+finally:
+    del gl.open
+check("POS-BIG: an oversized .pos is read bounded: resent from 0, no crash",
+      pb_res[0] == (True, 3, "ok", False), repr(pb_res))
+check("POS-BIG: a MemoryError reading the .pos is 'low mem', no crash",
+      pb_res[1] == (True, 0, "low mem", True), repr(pb_res))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+
+# POS-EIO: a .pos that is there but unreadable (EIO) is no offset 0: the
+# track waits (the newer ones go) instead of resending what is up (and a
+# .trb's history twice); after READ_ERR_MAX tries it resends from 0 after all
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+pe1 = os.path.join(up_td, "20261004_180000.trk")
+pe2 = os.path.join(up_td, "20261004_190000.trk")
+make_trk(pe1, gl.UPLOAD_BATCH * 2)
+make_trk(pe2, 3)
+pump()                                   # pe1's first batch up, .pos written
+
+
+def _pe_open(name, mode="r", *a, **k):
+    if name == pe1 + ".pos" and mode == "r":
+        raise OSError(5)
+    return builtins.open(name, mode, *a, **k)
+
+
+def _pe_sizes():
+    return [len(json.loads(p_["data"].decode())["locations"])
+            for p_ in _posts]
+
+
+_posts[:] = []
+gl.open = _pe_open
+try:
+    _clock[0] += 1000
+    pump()
+    pe_eio = (gl.up["state"], _pe_sizes())
+    _clock[0] += 1000
+    pump()                               # pe1 held: pe2 goes
+    pe_next = (_pe_sizes(), os.path.exists(pe2))
+finally:
+    del gl.open
+_posts[:] = []
+gl.up["hold"] = {}
+_clock[0] += 1000
+pump()                                   # readable again: resumes
+pe_back = (_pe_sizes(), locations()[0]["geometry"]["coordinates"][1])
+make_trk(pe1, gl.UPLOAD_BATCH * 2)
+gl.write_offset(pe1, os.path.getsize(pe1) // 2)
+_posts[:] = []
+gl.open = _pe_open
+try:
+    for _ in range(gl.READ_ERR_MAX):
+        gl.up["hold"] = {}
+        _clock[0] += 1000
+        pump()
+finally:
+    del gl.open
+pe_max = _pe_sizes()
+check("POS-EIO: an unreadable .pos holds the track, no resend from 0",
+      pe_eio == ("fs err", []) and pe_next == ([3], False)
+      and pe_back == ([gl.UPLOAD_BATCH],
+                      round(52.5 + gl.UPLOAD_BATCH * 0.0001, 6)),
+      "%r %r %r" % (pe_eio, pe_next, pe_back))
+check("POS-EIO: after READ_ERR_MAX unreadable .pos tries it resends from 0",
+      pe_max == [gl.UPLOAD_BATCH], repr(pe_max))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+
+# HTTP-NOGATE: the IDF block and Python heap margins guard TLS: a plain
+# http:// GEO_URL posts with both low, and never reboots for them
+online(up_td)
+gl.up["url"], gl.up["key"] = "http://192.168.1.139:3000", "k"
+hn_p = os.path.join(up_td, "20261004_140000.trk")
+make_trk(hn_p, gl.UPLOAD_BATCH * 2)
+hn_saved = (gl.idf_heap, gl._idf_info, gl.gc.mem_free)
+gl.idf_heap = lambda: (30, 20)
+gl._idf_info = lambda: (30 * 1024, 20 * 1024)
+gl.gc.mem_free = lambda: 20 * 1024 + 2000
+gl.wifi["home"] = True
+_resets[:] = []
+try:
+    for _ in range(3):
+        try:
+            pump()
+        except SystemExit:
+            break
+        _clock[0] += gl.LOWIDF_WAIT
+finally:
+    gl.idf_heap, gl._idf_info, gl.gc.mem_free = hn_saved
+    gl.wifi["home"] = False
+check("HTTP-NOGATE: plain http posts with low IDF and Python heaps, no reboot",
+      len(_posts) == 2 and not _resets and not os.path.exists(hn_p),
+      "posts %d resets %d state %s" % (len(_posts), len(_resets),
+                                       gl.up["state"]))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+
+# LEFT-BAD: points moved into a .bad leave "left" once; uploading the .bad
+# later does not take them off again (count_points never counts a .bad)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+lb1 = os.path.join(up_td, "20261004_150000.trk")
+lb2 = os.path.join(up_td, "20261004_160000.trk")
+make_trk(lb1, gl.UPLOAD_BATCH * 2)
+make_trk(lb2, gl.UPLOAD_BATCH * 2)
+gl.up["left"] = gl.count_points()
+pump()                                   # lb1's first batch up
+_post_code[0] = 422
+_clock[0] += 1000
+pump()                                   # its second to lb1.bad
+_post_code[0] = 201
+lb_q = (gl.up["left"], gl.count_points(), os.path.exists(lb1 + ".bad"))
+gl.up["hold"] = {lb2: _clock[0] + gl.BACKOFF_MAX // 2}   # the .bad first
+gl.up["allow_bad"] = True
+for _ in range(3):
+    _clock[0] += 1000
+    pump()
+lb_b = (os.path.exists(lb1 + ".bad"), dict(gl._web_rows())["left"],
+        gl.count_points())
+check("LEFT-BAD: a quarantined batch leaves 'left' once, not again when "
+      "its .bad goes up",
+      lb_q == (gl.UPLOAD_BATCH * 2, gl.UPLOAD_BATCH * 2, True)
+      and lb_b == (False, gl.UPLOAD_BATCH * 2, gl.UPLOAD_BATCH * 2),
+      "%r %r" % (lb_q, lb_b))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+
+# BAD-IO: a .bad copy that fails for another reason than a full .bad (an
+# I/O error, the flash reserve) is "fs err", not BAD FULL. BAD-FULL: a full
+# .bad is BAD FULL only while that .bad is on flash
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+bi_p = os.path.join(up_td, "20261004_170000.trk")
+make_trk(bi_p, 3)
+
+
+def _bi_open(name, mode="r", *a, **k):
+    if name == bi_p + ".bad" and "a" in mode:
+        raise OSError(5)
+    return builtins.open(name, mode, *a, **k)
+
+
+def _bi_state():
+    return (gl.up["state"], gl._bad_full_left(), gl._mode_line())
+
+
+_post_code[0] = 422
+bi_res = []
+gl.open = _bi_open
+try:
+    pump()
+    bi_res.append(_bi_state())
+finally:
+    del gl.open
+real_free_ = gl.free
+gl.free = lambda: gl.MIN_FREE            # the flash reserve, not the .bad
+try:
+    gl.up.update(hold={}, fail4=0)
+    _clock[0] += 1000
+    pump()
+    bi_res.append(_bi_state())
+finally:
+    gl.free = real_free_
+with builtins.open(bi_p + ".bad", "wb") as f:
+    f.write(b"x" * gl.MAX_BAD_BYTES)
+gl.up.update(hold={}, fail4=0)
+_clock[0] += 1000
+pump()
+bf_full = _bi_state()
+os.remove(bi_p + ".bad")                 # pulled: the track waits no more
+bf_gone = (gl._bad_full_left(), os.path.exists(bi_p))
+_post_code[0] = 201
+check("BAD-IO: an I/O error or the flash reserve copying to .bad is "
+      "'fs err', not BAD FULL",
+      bi_res == [("fs err", False, "Mode LOG+UP")] * 2, repr(bi_res))
+check("BAD-FULL: a full .bad is BAD FULL only while that .bad is on flash",
+      bf_full == ("bad full", True, "Mode BAD FULL")
+      and bf_gone == (False, True), "%r %r" % (bf_full, bf_gone))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+
 # U-16: at EOF the track goes without writing a .pos first (full flash)
 e_p = os.path.join(up_td, "20261005_100000.trk")
 make_trk(e_p, 3)
@@ -9823,7 +10061,8 @@ try:
                      {"Authorization": "Bearer k"}, 15)
     sent = rv_sock[0].out
     ok_post = (r.status_code == 201 and r.headers.get("Retry-After") == "7"
-               and sent.startswith(b"POST /sub HTTP/1.0\r\nHost: d.example\r\n")
+               and sent.startswith(b"POST /sub HTTP/1.0\r\n"
+                                   b"Host: d.example:8443\r\n")
                and b"Content-Length: %d\r\n" % len(body) in sent
                and sent.endswith(body) and rv_sock[0].closed
                and rv_sock[0].addr == ("d.example", 8443)
@@ -9946,6 +10185,30 @@ check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
       r_long.status_code == 429 and r_long.headers.get("Retry-After") == "9"
       and limits and all(0 < n_ <= 256 for n_ in limits),
       "%r %r" % (r_long.headers, limits[:4]))
+
+# HOST-PORT: the Host header names a port that is not the scheme's default
+# (RFC 7230 5.4: a proxy or virtual host on :8443 routes by it)
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+hp_hosts = []
+try:
+    for u_ in ("https://d.example:8443/sub", "https://d.example/sub",
+               "https://d.example:443/sub", "http://h.lan:3000/x",
+               "http://h.lan:80/x"):
+        rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+        gl._raw_post(u_, b"{}", {}, 15)
+        hp_hosts.append(rv_sock[0].out.split(b"\r\n")[1])
+finally:
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = real_mods[2]
+    tls_ctx_reset()
+check("HOST-PORT: POST Host header has a non-default port, not a default one",
+      hp_hosts == [b"Host: d.example:8443", b"Host: d.example",
+                   b"Host: d.example", b"Host: h.lan:3000", b"Host: h.lan"],
+      repr(hp_hosts))
 
 
 def ctx_now():
@@ -10794,6 +11057,72 @@ check("LOWPY: below TLS_MIN_PY_KB free Python heap the POST waits, then goes",
                                                                lp_diag))
 check("LOWPY-RETRY: low mem retries after LOWIDF_RETRY each time (no "
       "doubling backoff)", lp_waits == [gl.LOWIDF_RETRY] * 3, repr(lp_waits))
+
+# LOWPY-REBOOT: the Python heap low at home for LOWIDF_WAIT with tracks
+# waiting reboots cleanly as a low IDF heap does (LOWIDF_MARK, at most one
+# per LOWIDF_REBOOT_GAP); away it only waits
+
+
+def _lp_run(home_, limit):
+    """ms of low Python heap until the reboot, None if none in limit."""
+    gl.wifi["home"] = home_
+    t0 = _clock[0]
+    while _clock[0] - t0 <= limit:
+        try:
+            pump()
+        except SystemExit:
+            return _clock[0] - t0
+        _clock[0] += retry_ms
+    return None
+
+
+if os.path.exists(mark):
+    os.remove(mark)
+gl._idf_info = lambda: (157 * 1024, 126 * 1024)
+gl.idf_heap = lambda: (157, 126)
+gl.gc.mem_free = lambda: 126 * 1024 + 4000
+saved_up = list(gl._up)
+diag_clear()
+gl.DIAG = 60000
+_resets[:] = []
+try:
+    online(up_td)
+    gl.up["url"], gl.up["key"] = "https://d.example", "k"
+    make_trk(lp_p, 3)
+    lpr_away = _lp_run(False, wait_ms + 4 * retry_ms)
+    online(up_td)
+    gl.up["url"], gl.up["key"] = "https://d.example", "k"
+    make_trk(lp_p, 3)
+    lpr_home = _lp_run(True, wait_ms + 4 * retry_ms)
+    lpr_mark = os.path.exists(mark)
+    lpr_diag = [l for l in diag_lines() if l.startswith("reboot low")]
+    online(up_td)                        # the next boot takes the mark
+    gl.up["url"], gl.up["key"] = "https://d.example", "k"
+    make_trk(lp_p, 3)
+    gl._up[:] = [0, _clock[0], 0]       # just booted
+    lpr_gap = _lp_run(True, gap_ms + 4 * retry_ms)
+finally:
+    gl.gc.mem_free = real_mem_free
+    gl.idf_heap = real_idf
+    if real_idf_info is None:
+        del gl._idf_info
+    else:
+        gl._idf_info = real_idf_info
+    gl.DIAG = 0
+    gl.wifi["home"] = False
+    gl._up[:] = saved_up
+diag_clear()
+if os.path.exists(mark):
+    os.remove(mark)
+check("LOWPY-REBOOT: low Python heap at home reboots after LOWIDF_WAIT "
+      "(mark, diag line), away never",
+      lpr_away is None and lpr_home is not None
+      and wait_ms <= lpr_home <= wait_ms + retry_ms and lpr_mark
+      and lpr_diag == ["reboot low mem 4000 B %d s" % (lpr_home // 1000)],
+      "%r %r %r %r" % (lpr_away, lpr_home, lpr_mark, lpr_diag))
+check("LOWPY-REBOOT: at most one low-heap reboot per LOWIDF_REBOOT_GAP",
+      lpr_gap is not None and gap_ms <= lpr_gap <= gap_ms + retry_ms,
+      repr(lpr_gap))
 # LOWPY-FROZEN: with the logger frozen in (gps_frozen) the POST needs less
 import importlib.util
 sys.modules["gps_frozen"] = types.ModuleType("gps_frozen")
@@ -12709,12 +13038,22 @@ try:
         _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\n\r\nabc")
         out = bytearray()
         got.append((gl._raw_get("http://h/x", out.extend, 5000), bytes(out)))
+        # HOST-PORT: the GET's Host header too
+        get_hosts = []
+        for u_ in ("http://h:8080/m.json", "http://h/m.json"):
+            _gs[0] = _GetSock(b"HTTP/1.0 404 Not Found\r\n\r\n")
+            sent_ = []
+            _gs[0].write = lambda b, s_=sent_: s_.append(bytes(b)) or len(b)
+            gl._raw_get(u_, bytearray().extend, 5000)
+            get_hosts.append(b"".join(sent_).split(b"\r\n")[1])
     finally:
         gl.socket, gl.read_uart = _gsaved
     check("OTA-CLEN: reads exactly Content-Length (no EOF error), short or "
           "too long raises, no length reads to EOF",
           got == [(200, True), "ota body 10 ", "ota body 900", (200, b"abc")],
           repr(got))
+    check("HOST-PORT: OTA GET Host header has a non-default port",
+          get_hosts == [b"Host: h:8080", b"Host: h"], repr(get_hosts))
 
     # when it checks: connected at home with all uploaded, OTA_FIRST after
     # boot, then OTA_CHECK; never with points waiting or away
