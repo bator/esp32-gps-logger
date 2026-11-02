@@ -6850,6 +6850,17 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY-RESTART: every exit restarts the logger: a reset, or with "
           "an OTA pending a run without one; the pending check comes first",
           rs == [True] * len(rs), repr(rs))
+    # DEPLOY-FORCE-PENDING: FORCE=1 during an OTA validation got through
+    # the copy and then the last step's own reset aborted the pending image
+    # (rolled back, the build blamed): no reset then, the logger run again
+    rc, out, err, dev, calls = deploy_run({"FAKE_OTA_PENDING": "1",
+                                           "FORCE": "1"})
+    lg = dev_logger(dev)
+    check("DEPLOY-FORCE-PENDING: FORCE=1 with an OTA pending deploys without "
+          "a reset and runs the logger again",
+          rc == 0 and "Deployed" in out and "reset pending" not in lg
+          and lg[-1:] == [run_cmd] and dev_file(dev, "web.html") == new_page,
+          "rc=%d %r %r" % (rc, lg, err[-300:]))
 else:
     print("SKIP  DEPLOY: no bash/sha256sum")
 
@@ -10041,6 +10052,18 @@ check("POS-EIO: an unreadable .pos holds the track, no resend from 0",
       "%r %r %r" % (pe_eio, pe_next, pe_back))
 check("POS-EIO: after READ_ERR_MAX unreadable .pos tries it resends from 0",
       pe_max == [gl.UPLOAD_BATCH], repr(pe_max))
+# POS-EIO-COUNT: count_points with that .pos unreadable counted the track
+# as 0 waiting points (the OSError caught per file), while it still waits
+# and may go up from 0: count it whole
+make_trk(pe1, 30)
+gl.write_offset(pe1, os.path.getsize(pe1) // 2)
+gl.open = _pe_open
+try:
+    pc_n = gl.count_points()
+finally:
+    del gl.open
+check("POS-EIO-COUNT: an unreadable .pos counts the whole track, not 0",
+      pc_n == 30, repr(pc_n))
 for n_ in os.listdir(up_td):
     os.remove(os.path.join(up_td, n_))
 

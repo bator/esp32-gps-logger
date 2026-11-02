@@ -203,7 +203,8 @@ question to the board is whether an OTA install is being validated
 (`/ota.pending`, about 2 minutes): then it stops before anything else, as
 its reset would abort the pending firmware, the bootloader would roll back
 and the build would be blamed (`FORCE=1` deploys anyway, the staged page
-left alone). Then it
+left alone, and ends without a reset: the logger runs again, the new
+files count from the next boot). Then it
 removes a stray `gps_logger.py`, clears the boot-fail counter and resets
 the board. When it cannot tell whether the firmware has the logger frozen
 in (no clear answer from the board), it stops instead of guessing.
