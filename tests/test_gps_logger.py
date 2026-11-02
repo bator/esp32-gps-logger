@@ -13804,18 +13804,21 @@ else:
           and ev.get("last", {}).get("boot") == "12:59"
           and ev.get("last", {}).get("ota") == "12:11",
           repr((sp, ev.get("last"))))
-    evc = evw.get("evc", "")
-    evc_s = re.search(r'<path class="s" d="([^"]*)"', evc)
-    evc_u = re.search(r'<path class="u" d="([^"]*)"', evc)
-    check("PAGE-EV: satellites - seen and used as 5-minute means, a smooth "
-          "line broken at the 16 min gap, a grid every 4, local hour labels",
-          evc_s is not None and evc_u is not None
-          and evc_s.group(1).count("M") == 2 and " C" in evc_s.group(1)
-          and evc_u.group(1).count("M") == 2
-          and '<span class="y" style="top:0%">12</span>' in evc
-          and re.findall(r'class="x"[^>]*>(\d\d)<', evc) == ["10", "11",
-                                                              "12"],
-          evc[:600])
+    # PAGE-TELE: the satellites curve was there twice (the Signal panel);
+    # in its place GPS telemetry, after the "Orbital Systems" shot Bator
+    # picked: position accuracy as a dot matrix (a column a time slice,
+    # taller = smaller HDOP, red = no fix), the receiver link (sentences a
+    # second from each status line's NMEA count: a minute where it stood
+    # still is a drop-out) and an anomaly card while there was one
+    evt = evw.get("evt", "")
+    check("PAGE-TELE: accuracy share and matrix, link up time, broken "
+          "sentences, one 9 min drop-out in an anomaly card",
+          "GPS telemetry" in evt and evt.count('<i class="gt-c') == 36
+          and "<b>56%</b>" in evt and "typical 1.2" in evt
+          and ">9 min<" in evt and "Drop-outs<b>1</b>" in evt
+          and "Broken sentences</small><b>5</b>" in evt
+          and 'class="gt-chip a">Anomaly' in evt and "evc" not in evw,
+          evt[:900])
     evg = evw.get("evg", "")
     check("PAGE-EV: the grouped table - a header row, a row a kind with its "
           "icon chip, name, count, detail, sparkline and last seen",

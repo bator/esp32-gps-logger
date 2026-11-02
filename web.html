@@ -11,7 +11,7 @@
      and redraws the boxes. The map tiles come from OpenStreetMap and the
      fonts from Google Fonts when the phone is online. -->
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
 <style>
 :root{--b:#060b16;--l:#16233d;--t:#d6e2ff;--m:#7487ae;--a:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
 body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-serif}
@@ -135,8 +135,35 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sx-k td.warn{color:var(--wo)}
 .sx-chip{display:inline-block;border:1px solid rgba(127,227,154,.45);background:rgba(127,227,154,.08);color:var(--g);font:600 10.5px Inter,sans-serif;letter-spacing:.06em;padding:4px 7px;border-radius:3px;margin-left:8px;vertical-align:1px;text-transform:uppercase}
 /* log + satellite table */
-/* Event log, aggregated (Sentry / Loki patterns): KPI tiles, a satellites
-   chart, the events grouped by kind */
+/* GPS telemetry, after "Orbital Systems" (Orizon, dribbble 27639068): a
+   graphite panel with cut corners, a dot-matrix accuracy chart, amber anomaly */
+.gt{position:relative;margin-bottom:12px;background:radial-gradient(120% 140% at 50% 0%,#1d2622 0%,#121816 55%,#0d1110 100%);padding:18px 20px 20px;color:#e7efe9;font-family:Inter,sans-serif;
+ clip-path:polygon(16px 0,calc(100% - 16px) 0,100% 16px,100% calc(100% - 16px),calc(100% - 16px) 100%,16px 100%,0 calc(100% - 16px),0 16px)}
+.gt:before,.gt-b:before,.gt-an:before{content:"";position:absolute;inset:0;pointer-events:none;border:1px solid rgba(214,232,222,.16);clip-path:inherit}
+.gt-hd{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.gt-hd h3{font:400 21px Audiowide,"JetBrains Mono",monospace;margin:0;color:#e7efe9}.gt-hd h3 small{display:block;font:400 11px Inter,sans-serif;color:#8b9590;margin-top:6px}
+.gt-chip{font:400 11px Audiowide,monospace;padding:5px 10px;border:1px solid rgba(214,232,222,.16);color:#d7ece0;background:rgba(215,236,224,.06)}
+.gt-chip.a{color:#f5a524;border-color:rgba(245,165,36,.4);background:rgba(245,165,36,.08)}
+.gt-g{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}.gt-g>*{min-width:0}
+.gt-b{position:relative;background:rgba(255,255,255,.025);padding:14px 16px;clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px)}
+.gt-l{font:400 12px Audiowide,monospace}.gt-l em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590;margin-left:8px}
+.gt-big{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:4px 12px;margin:6px 0 10px}.gt-big b{font:400 30px Audiowide,monospace}
+.gt-big span{font:500 11px "JetBrains Mono",monospace;color:#d7ece0}
+.gt-dm{display:flex;gap:2px;align-items:flex-end;height:96px}.gt-c{flex:1;display:flex;flex-direction:column-reverse;gap:2px;height:100%;min-width:0}
+.gt-c s{display:block;flex:1;background:rgba(215,236,224,.07)}.gt-c s.on{background:#d7ece0}.gt-c s.am{background:#f5a524}.gt-c s.rd{background:#ef8a4c}.gt-c.x s:first-child{background:#ef5b4c}
+.gt-ax{display:flex;justify-content:space-between;font:500 10.5px "JetBrains Mono",monospace;color:#8b9590;margin-top:6px}
+.gt-lg{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#8b9590}.gt-lg b{display:inline-block;width:8px;height:8px;margin-right:6px;background:#d7ece0}
+.gt-lg b.am{background:#f5a524}.gt-lg b.rd{background:#ef8a4c}.gt-lg b.x{background:#ef5b4c}
+.gt-dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}.gt-dg svg{display:block;width:100%;height:40px}
+.gt-dg small{display:block;font-size:11px;color:#8b9590;margin-top:4px}.gt-dg b{font:500 14px "JetBrains Mono",monospace}.gt-dg b em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590}
+.gt-an{position:relative;margin-top:14px;background:linear-gradient(180deg,rgba(245,165,36,.16),rgba(245,165,36,.05));padding:12px 14px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.gt-an:before{border-color:rgba(245,165,36,.45)}
+.gt-an h4{margin:0 0 8px;font:400 13px Audiowide,monospace;color:#ffe2b0;display:flex;gap:10px;align-items:center}
+.gt-an h4 i{width:22px;height:22px;display:grid;place-items:center;border:1px solid rgba(245,165,36,.6);font-style:normal;color:#f5a524;font-size:12px}
+.gt-pr{margin-top:8px}.gt-pr p{display:flex;justify-content:space-between;margin:0 0 5px;font-size:11px;color:#d9c9a8}.gt-pr p b{font:500 11px "JetBrains Mono",monospace;color:#ffe2b0}
+.gt-pr u{display:block;height:3px;background:rgba(255,255,255,.1);text-decoration:none}.gt-pr u i{display:block;height:100%;background:#f5a524}
+/* Event log, aggregated (Sentry / Loki patterns): KPI tiles, GPS telemetry,
+   the events grouped by kind */
 .ev{--g:#7fe39a;--lab:#8a96ad;--ln:rgba(255,255,255,.07);margin-top:12px;padding:18px;font-family:"JetBrains Mono",ui-monospace,monospace}
 .ev-t{font:500 26px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}
 .ev-s{font:400 12px "JetBrains Mono",monospace;color:var(--lab);margin:0 0 16px}
@@ -205,7 +232,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
    squeezed, the uptime broke over 5 lines into the map); the uptime of the
    last answer is not shown offline */
 @media(max-width:760px){.hud{flex-wrap:wrap;row-gap:6px}.hud>*{white-space:nowrap}.off .hud .up{display:none}
-.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -243,8 +270,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
   <!-- the whole diag log on the board, aggregated: tiles, satellites, events by kind -->
   <div class="p ev"><p class="ev-t">Event log</p><p class="ev-s" id="evs">reading the diag log&hellip;</p>
     <div class="ev-k4" id="evk"></div>
-    <div class="ev-card"><h3>Satellites</h3><p>seen and used, 5-minute means over the whole window</p><div id="evc"></div>
-      <div class="ev-leg"><span><i></i>seen</span><span class="u"><i></i>used</span></div></div>
+    <div id="evt"></div>
     <div class="ev-card"><h3>Events, grouped</h3><p>what repeats, how often, when it was last seen</p><div id="evg"></div></div>
   </div>
   <details class="p"><summary id="svh">Satellite table</summary><table class="svt" id="svt"></table></details>
@@ -363,13 +389,15 @@ var EVI = {
   dot: '<circle cx="12" cy="12" r="2.5"/>'
 };
 var EV_STATUS = /^up \d+ utc (\S+) .*? sats (\d+)\/(\S+) fix (\S+)/, EV_PEND = 500;
+var EV_LINK = /^up (\d+) .*? nmea (\d+)\/(\d+) .*? hdop (\S+)/;
 function evKind(l) {
   if (/^up \d+ utc /.test(l)) return "status";
   for (var i = 0; i < EVK.length; i++) if (EVK[i][1].test(l)) return EVK[i][0];
   return "other";
 }
 function evNew() {                      // the aggregate of a diag log read so far
-  return {rest: "", n: 0, n3: 0, nno: 0, t0: null, t1: null, b5: {}, bk: [], g: {}, pend: []};
+  return {rest: "", n: 0, n3: 0, nno: 0, t0: null, t1: null, b5: {}, bk: [], g: {}, pend: [],
+    lk: null, drops: 0, run: 0, lng: 0, bad: 0, up: 0, dn: 0};
 }
 // UTC "20261102T091639Z" -> ms, or null
 function evUtc(u) {
@@ -403,8 +431,9 @@ function evLine(a, l) {
     if (a.t0 === null) a.t0 = t;
     a.t1 = t;
     var k = Math.floor(t / 300000), b = a.b5[k];
-    if (!b) { b = a.b5[k] = [t, 0, 0, 0]; a.bk.push(k); }
+    if (!b) { b = a.b5[k] = [t, 0, 0, 0, 0, 0, 0]; a.bk.push(k); }
     b[1] += +m[2] || 0; b[2] += +m[3] || 0; b[3]++;
+    evLink(a, l, b, /^(3D|2D|Fix)/.test(m[4]));
     for (var i = 0; i < a.pend.length; i++) evAdd(a.g, a.pend[i][0], a.pend[i][1], t);
     a.pend = [];
     return;
@@ -412,6 +441,26 @@ function evLine(a, l) {
   a.pend.push([evKind(l), l]);
   // (no utc for hours: the oldest at the last time known)
   if (a.pend.length > EV_PEND) { var p = a.pend.shift(); evAdd(a.g, p[0], p[1], a.t1); }
+}
+// the receiver link and accuracy from a status line: its NMEA count against
+// the line before (a boot starts it again: up or the count goes back, or a
+// gap over 3 min), a minute it stood still is a drop-out minute (the board
+// ran, the receiver sent nothing); HDOP while there was a fix. b: the
+// 5-minute bucket [.., hdop sum, its count, drop-out minutes]
+function evLink(a, l, b, fix) {
+  var m = EV_LINK.exec(l);
+  if (!m) return;
+  var up = +m[1], ok = +m[2], er = +m[3], h = parseFloat(m[4]), p = a.lk;
+  if (fix && h > 0) { b[4] += h; b[5]++; }
+  a.lk = [up, ok, er];
+  if (!p || up <= p[0] || ok < p[1] || er < p[2] || up - p[0] > 180) { a.run = 0; return; }
+  a.bad += er - p[2];
+  if (ok === p[1]) {
+    a.dn++; b[6]++;
+    if (!a.run) a.drops++;
+    a.run += Math.round((up - p[0]) / 60) || 1;
+    a.lng = Math.max(a.lng, a.run);
+  } else { a.up++; a.run = 0; }
 }
 function evHour(t) { return Math.floor((t - new Date(t).getTimezoneOffset() * 60000) / 3600000); }   // a local hour
 function evAdd(gs, k, l, t) {
@@ -530,7 +579,7 @@ function evDet(k, g) {                  // a group's detail line (HTML)
   if (k === "grx") return x + (g.n > 1 ? "<em>" + MD + "after each boot</em>" : "");
   return x;
 }
-// -> {evs: the window, evk: the tiles, evc: the satellites, evg: the groups}
+// -> {evs: the window, evk: the tiles, evt: GPS telemetry, evg: the groups}
 // (pure, for tests; st: the loader's busy / done)
 function evView(a, st) {
   var v = {}, nb = 0, gs = evGroups(a), ota = [0, 0, 0], boot = {};
@@ -546,7 +595,7 @@ function evView(a, st) {
     "<div><small>Boots</small><b>" + nb + "<em>" + (boot.pw || 0) + " power-on</em></b></div>" +
     '<div class="' + (ota[1] ? "t-warn" : "") + '"><small>Updates</small><b>' + ota[0] + "<em>" +
     (ota[1] ? ota[1] + " failed" : ota[0] ? (ota[2] ? "checking" : "all ok") : "none") + "</em></b></div>";
-  v.evc = evSats(a);
+  v.evt = evTele(a, st.cols || 72);
   if (!gs.length) {
     v.evg = '<p class="none">' + (!st.done ? "READING THE DIAG LOG&hellip;" : a.n ? "NO EVENTS IN THE WINDOW" :
       "THE DIAGNOSTIC LOG IS EMPTY") + "</p>";
@@ -568,43 +617,66 @@ function evView(a, st) {
   v.evg = h;
   return v;
 }
-// the satellites: 5-minute means of seen and used over the window, a curve
-// through them, broken where they are over 10 min apart; a line every 4,
-// local hours below (the SVG is stretched to its box, the labels are HTML)
-function evSats(a) {
-  var ks = a.bk.slice().sort(function (x, y) { return x - y; }), span = a.t1 - a.t0, top = 12, i, b;
-  if (ks.length < 2 || !(span > 0)) return '<p class="none">NOT ENOUGH STATUS LINES YET</p>';
-  for (i = 0; i < ks.length; i++) { b = a.b5[ks[i]]; top = Math.max(top, Math.ceil(b[1] / b[3] / 4) * 4); }
-  function X(t) { return ((t - a.t0) / span * 1000).toFixed(1); }
-  function Y(v) { return (100 - v / top * 100).toFixed(1); }
-  function line(j) {
-    var d = "", px, py, pk = null;
-    for (var i = 0; i < ks.length; i++) {
-      var b = a.b5[ks[i]], x = X(b[0]), y = Y(b[j] / b[3]);
-      if (pk !== null && ks[i] - pk <= 2) {
-        var mx = ((+px + +x) / 2).toFixed(1);
-        d += " C" + mx + " " + py + " " + mx + " " + y + " " + x + " " + y;
-      } else d += (d ? " " : "") + "M" + x + " " + y;
-      px = x; py = y; pk = ks[i];
-    }
-    return d;
+// GPS telemetry, after the "Orbital Systems" dashboard (Orizon, dribbble
+// shot 27639068): position accuracy as a dot matrix, a column a time slice
+// (cols of them over the window), 12 dots for HDOP 1, one for 6 and over,
+// coloured precise / moderate / poor, a red dot where there was no fix; the
+// receiver link (the share of minutes it sent, broken sentences, its
+// drop-outs as a dotted curve) and an amber anomaly card while it dropped out
+function evTele(a, cols) {
+  var ks = a.bk.slice().sort(function (x, y) { return x - y; });
+  if (ks.length < 2) return '<div class="ev-card"><p class="none">NOT ENOUGH STATUS LINES YET</p></div>';
+  var k0 = ks[0], nb = ks[ks.length - 1] - k0 + 1, per = Math.max(1, Math.ceil(nb / cols)), nc = Math.ceil(nb / per);
+  var cs = [], i, j, hs = [], fixn = 0, good = 0;
+  for (i = 0; i < nc; i++) cs.push([0, 0]);
+  for (i = 0; i < ks.length; i++) {
+    var b = a.b5[ks[i]], c = cs[Math.floor((ks[i] - k0) / per)];
+    c[0] += b[4]; c[1] += b[5];
+    if (b[5]) { var h5 = b[4] / b[5]; hs.push(h5); fixn++; if (h5 <= 2) good++; }
   }
-  var g = "", lab = "", hours = span / 3600000, step = 24, steps = [1, 2, 3, 4, 6, 12];
-  for (var v = 0; v <= top; v += 4) {
-    g += '<line x1="0" x2="1000" y1="' + Y(v) + '" y2="' + Y(v) + '"/>';
-    lab += '<span class="y" style="top:' + +Y(v) + '%">' + v + "</span>";
+  hs.sort(function (x, y) { return x - y; });
+  var dm = "";
+  for (i = 0; i < nc; i++) {
+    var h = cs[i][1] ? cs[i][0] / cs[i][1] : null, f = h === null ? 0 : Math.max(1, Math.min(12, Math.round((7 - h) / 6 * 12)));
+    var q = h === null ? "" : h <= 2 ? "on" : h <= 5 ? "am" : "rd";
+    dm += '<i class="gt-c' + (h === null ? " x" : "") + '">';
+    for (j = 0; j < 12; j++) dm += j < f ? '<s class="' + q + '"></s>' : "<s></s>";
+    dm += "</i>";
   }
-  for (i = steps.length - 1; i >= 0; i--) if (hours / steps[i] <= 8) step = steps[i];
-  var d0 = new Date(a.t0);
-  d0.setMinutes(0, 0, 0);
-  for (var t = d0.getTime(); t <= a.t1; t += 3600000) {
-    var hh = new Date(t).getHours();
-    if (t >= a.t0 && !(hh % step)) lab += '<span class="x" style="left:' + (+X(t) / 10).toFixed(1) + '%">' + two(hh) + "</span>";
+  var lm = a.up + a.dn, upc = lm ? Math.round(a.up * 100 / lm) : 100, an = a.drops > 0;
+  var mid = a.t0 + (a.t1 - a.t0) / 2, pts = "", W = 200, Hh = 40;
+  // the share of each 5 minutes the receiver sent, a dotted area curve
+  for (i = 0; i < ks.length; i++) {
+    var bb = a.b5[ks[i]];
+    pts += (pts ? "L" : "M") + ((ks[i] - k0) / Math.max(1, nb - 1) * W).toFixed(1) + " " + (4 + bb[6] / bb[3] * (Hh - 6)).toFixed(1);
   }
-  return '<div class="ev-pl"><svg viewBox="0 0 1000 100" preserveAspectRatio="none">' + g + '<path class="s" d="' + line(1) +
-    '"/><path class="u" d="' + line(2) + '"/></svg>' + lab + "</div>";
+  var spark = '<svg viewBox="0 0 ' + W + " " + Hh + '" preserveAspectRatio="none"><defs><pattern id="gtd" width="3" height="3" ' +
+    'patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".6" fill="#d7ece0" opacity=".55"/></pattern></defs>' +
+    '<path d="' + pts + "L" + W + " " + Hh + "L0 " + Hh + 'Z" fill="url(#gtd)"/><path d="' + pts +
+    '" fill="none" stroke="#d7ece0" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>';
+  function bar(lab, val, pct) {
+    return '<div class="gt-pr"><p>' + lab + "<b>" + val + '</b></p><u><i style="width:' + Math.min(100, Math.round(pct)) +
+      '%"></i></u></div>';
+  }
+  return '<div class="gt"><div class="gt-hd"><h3>GPS telemetry<small>accuracy and receiver link' + MD + when(a.t0) + "&ndash;" +
+    when(a.t1) + MD + "from the diag log</small></h3>" + '<span class="gt-chip' + (an ? " a" : "") + '">' +
+    (an ? "Anomaly" : "Nominal") + "</span></div>" +
+    '<div class="gt-g"><div class="gt-b"><div class="gt-l">Position accuracy<em>' + (per * 5) +
+    "-minute columns, taller = more precise</em></div>" +
+    '<div class="gt-big"><b>' + (fixn ? Math.round(good * 100 / fixn) : 0) + "%</b><span>precise (HDOP &le; 2)" +
+    (hs.length ? MD + "typical " + hs[Math.floor(hs.length / 2)].toFixed(1) : "") + "</span></div>" +
+    '<div class="gt-dm">' + dm + '</div><div class="gt-ax"><span>' + when(a.t0) + "</span><span>" + when(mid) +
+    "</span><span>NOW</span></div>" +
+    '<div class="gt-lg"><span><b class="on"></b>precise</span><span><b class="am"></b>moderate</span>' +
+    '<span><b class="rd"></b>poor</span><span><b class="x"></b>no fix</span></div></div>' +
+    '<div class="gt-b"><div class="gt-l">Receiver link</div><div class="gt-dg"><div>' + spark +
+    "<small>Data from the receiver</small><b>" + upc + "%<em> of minutes</em></b></div><div><small>Broken sentences</small><b>" +
+    num(a.bad) + "</b></div></div>" +
+    (an ? '<div class="gt-an"><h4><i>!</i>Link anomaly detected</h4>' +
+      bar("Time without data", a.dn + " min", lm ? a.dn * 100 / lm : 0) + bar("Drop-outs", a.drops, a.drops * 20) +
+      bar("Longest drop-out", a.lng + " min", a.lng * 100 / 60) + "</div>" : "") +
+    "</div></div></div>";
 }
-
 function bytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }
 // The GPS link: seconds since the last whole NMEA/UBX frame (good_age_s,
 // null: none since boot), the bytes a second between two polls (rx_bytes over
@@ -1031,7 +1103,11 @@ function diagNext() {
   x.onerror = x.ontimeout = fail;
   x.send();
 }
-function evPaint() { paint(evView(dg.a, dg)); }
+function evPaint() {                    // (a matrix column at least 8 px wide)
+  var e = document.getElementById("evt"), w = e && e.clientWidth ? e.clientWidth : 1000;
+  dg.cols = Math.max(12, Math.min(96, Math.floor(w * .58 / 8)));
+  paint(evView(dg.a, dg));
+}
 // world pixels (256 a tile at zoom 0) of a position at zoom z
 function wpx(lat, lon, z) {
   var k = 256 * Math.pow(2, z), r = lat * Math.PI / 180;

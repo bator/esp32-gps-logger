@@ -468,10 +468,15 @@ ft.wr2 = (() => {
 // status line a minute, 3D but 30 min waiting and a 16 min gap, two after
 // a boot without utc; events between them (no time of their own: the next
 // status line's)
+// (the receiver link: ~10 sentences a second, none in minutes 60-69 (a
+// drop-out: the counter stands), 5 broken ones at minute 30; HDOP 3.5 in
+// minutes 60-119, else 1.2)
+const evOk = (m) => m === null ? 0 : 600 * Math.min(m, 60) + 600 * Math.max(0, m - 69);
 const evS = (m, fix, sv) => {
   const t = m === null ? "-" : "20261102T" + two2(9 + Math.floor(m / 60)) + two2(m % 60) + "00Z";
-  return "up " + (m === null ? 30 : 100 + m * 60) + " utc " + t + " nmea 1/0 gpsboots 0 loops 0 sats " + sv +
-    " fix " + fix + " hdop 1.2 points 0 sent 0 wifi connected pulses 0 mem 17000 idf 221/208 heap 62";
+  return "up " + (m === null ? 30 : 100 + m * 60) + " utc " + t + " nmea " + evOk(m) + "/" + (m !== null && m >= 30 ? 5 : 0) +
+    " gpsboots 0 loops 0 sats " + sv + " fix " + fix + " hdop " + (m !== null && m >= 60 && m < 120 ? "3.5" : "1.2") +
+    " points 0 sent 0 wifi connected pulses 0 mem 17000 idf 221/208 heap 62";
 };
 function two2(n) { return (n < 10 ? "0" : "") + n; }
 const evAfter = {
@@ -511,7 +516,7 @@ try {
   Object.assign(EV, inTz("Europe/Budapest", () => new Date(2026, 10, 2, 13, 30, 0).getTime(), (c) => {
     const a = c.evNew();
     for (let i = 0; i < evText.length; i += 997) c.evFeed(a, evText.slice(i, i + 997));
-    const w = c.evView(a, {busy: false, done: true});
+    const w = c.evView(a, {busy: false, done: true, cols: 36});
     const cnt = {}, spark = {}, last = {};
     for (const k in a.g) cnt[k] = a.g[k].n;
     const gs = c.evGroups(a);
