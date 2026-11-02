@@ -149,19 +149,25 @@ circle.u{fill:none;filter:none;opacity:.7}
 .gt-l{font:400 12px Audiowide,monospace}.gt-l em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590;margin-left:8px}
 .gt-big{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:4px 12px;margin:6px 0 10px}.gt-big b{font:400 30px Audiowide,monospace}
 .gt-big span{font:500 11px "JetBrains Mono",monospace;color:#d7ece0}
-.gt-dm{display:flex;gap:2px;align-items:flex-end;height:96px}.gt-c{flex:1;display:flex;flex-direction:column-reverse;gap:2px;height:100%;min-width:0}
+.gt-dm{display:flex;gap:2px;align-items:flex-end;height:96px;margin-left:34px}.gt-c{flex:1;display:flex;flex-direction:column-reverse;gap:2px;height:100%;min-width:0}
 .gt-c s{display:block;flex:1;background:rgba(215,236,224,.07)}.gt-c s.on{background:#d7ece0}.gt-c s.am{background:#f5a524}.gt-c s.rd{background:#ef8a4c}.gt-c.x s:first-child{background:#ef5b4c}
 .gt-ax{display:flex;justify-content:space-between;font:500 10.5px "JetBrains Mono",monospace;color:#8b9590;margin-top:6px}
 .gt-lg{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#8b9590}.gt-lg b{display:inline-block;width:8px;height:8px;margin-right:6px;background:#d7ece0}
 .gt-lg b.am{background:#f5a524}.gt-lg b.rd{background:#ef8a4c}.gt-lg b.x{background:#ef5b4c}
 .gt-dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}.gt-dg svg{display:block;width:100%;height:40px}
 .gt-dg small{display:block;font-size:11px;color:#8b9590;margin-top:4px}.gt-dg b{font:500 14px "JetBrains Mono",monospace}.gt-dg b em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590}
+.gt-lk{display:flex;align-items:center;gap:8px;margin-top:6px}.gt-lk span{font:500 10px "JetBrains Mono",monospace;color:#8b9590;width:26px;flex:none}
+.gt-lk div{flex:1;display:flex;gap:2px;height:8px;min-width:0}.gt-k{flex:1;min-width:0;background:rgba(215,236,224,.07)}.gt-k.ok{background:#7fbf9a}.gt-k.am{background:#f5a524}.gt-k.rd{background:#ef5b4c}
+.gt-ax{padding-left:34px}.gt-lg .gt-sep{margin-left:6px;color:#d7ece0}.gt-lg b.ok{background:#7fbf9a}
+.gt-n{display:block;font:400 26px Audiowide,monospace!important}
+.gt-sum{font:500 11px "JetBrains Mono",monospace;color:#ffe2b0;margin:-2px 0 8px}
+.gt-an>p{display:flex;justify-content:space-between;margin:0;padding:6px 0;border-top:1px solid rgba(245,165,36,.18);font:500 12px "JetBrains Mono",monospace;color:#ffe2b0}
+.gt-an>p b{font-weight:500;color:#f5a524}.gt-an>p.gt-more{color:#b9a27a;font-size:11px}
+.gt-ok{margin:12px 0 0;font-size:12px;color:#8b9590}
 .gt-an{position:relative;margin-top:14px;background:linear-gradient(180deg,rgba(245,165,36,.16),rgba(245,165,36,.05));padding:12px 14px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
 .gt-an:before{border-color:rgba(245,165,36,.45)}
 .gt-an h4{margin:0 0 8px;font:400 13px Audiowide,monospace;color:#ffe2b0;display:flex;gap:10px;align-items:center}
 .gt-an h4 i{width:22px;height:22px;display:grid;place-items:center;border:1px solid rgba(245,165,36,.6);font-style:normal;color:#f5a524;font-size:12px}
-.gt-pr{margin-top:8px}.gt-pr p{display:flex;justify-content:space-between;margin:0 0 5px;font-size:11px;color:#d9c9a8}.gt-pr p b{font:500 11px "JetBrains Mono",monospace;color:#ffe2b0}
-.gt-pr u{display:block;height:3px;background:rgba(255,255,255,.1);text-decoration:none}.gt-pr u i{display:block;height:100%;background:#f5a524}
 /* Event log, aggregated (Sentry / Loki patterns): KPI tiles, GPS telemetry,
    the events grouped by kind */
 .ev{--g:#7fe39a;--lab:#8a96ad;--ln:rgba(255,255,255,.07);margin-top:12px;padding:18px;font-family:"JetBrains Mono",ui-monospace,monospace}
@@ -397,7 +403,7 @@ function evKind(l) {
 }
 function evNew() {                      // the aggregate of a diag log read so far
   return {rest: "", n: 0, n3: 0, nno: 0, t0: null, t1: null, b5: {}, bk: [], g: {}, pend: [],
-    lk: null, drops: 0, run: 0, lng: 0, bad: 0, up: 0, dn: 0};
+    lk: null, lt: null, tu: null, drops: 0, run: 0, lng: 0, bad: 0, up: 0, dn: 0, eps: []};
 }
 // UTC "20261102T091639Z" -> ms, or null
 function evUtc(u) {
@@ -426,14 +432,18 @@ function evLine(a, l) {
     a.n++;
     if (/^3D/.test(m[4])) a.n3++;
     else if (!/^2D/.test(m[4])) a.nno++;
-    var t = evUtc(m[1]);
+    var t = evUtc(m[1]), up = +/^up (\d+)/.exec(l)[1], r = t;
     if (t === null) return;
+    // a silent receiver: the line repeats the last GPS time (the board's
+    // clock), its time goes on with up
+    if (a.tu && t === a.tu[0] && up > a.tu[1]) t = a.tu[2] + (up - a.tu[1]) * 1000;
+    a.tu = [r, up, t];
     if (a.t0 === null) a.t0 = t;
     a.t1 = t;
     var k = Math.floor(t / 300000), b = a.b5[k];
     if (!b) { b = a.b5[k] = [t, 0, 0, 0, 0, 0, 0]; a.bk.push(k); }
     b[1] += +m[2] || 0; b[2] += +m[3] || 0; b[3]++;
-    evLink(a, l, b, /^(3D|2D|Fix)/.test(m[4]));
+    evLink(a, l, b, /^(3D|2D|Fix)/.test(m[4]), t);
     for (var i = 0; i < a.pend.length; i++) evAdd(a.g, a.pend[i][0], a.pend[i][1], t);
     a.pend = [];
     return;
@@ -447,19 +457,25 @@ function evLine(a, l) {
 // gap over 3 min), a minute it stood still is a drop-out minute (the board
 // ran, the receiver sent nothing); HDOP while there was a fix. b: the
 // 5-minute bucket [.., hdop sum, its count, drop-out minutes]
-function evLink(a, l, b, fix) {
+function evLink(a, l, b, fix, t) {
   var m = EV_LINK.exec(l);
   if (!m) return;
-  var up = +m[1], ok = +m[2], er = +m[3], h = parseFloat(m[4]), p = a.lk;
+  var up = +m[1], ok = +m[2], er = +m[3], h = parseFloat(m[4]), p = a.lk, pt = a.lt;
   if (fix && h > 0) { b[4] += h; b[5]++; }
-  a.lk = [up, ok, er];
+  a.lk = [up, ok, er]; a.lt = t;
   if (!p || up <= p[0] || ok < p[1] || er < p[2] || up - p[0] > 180) { a.run = 0; return; }
   a.bad += er - p[2];
-  if (ok === p[1]) {
+  if (ok === p[1]) {                     // a drop-out: from the line before to this one
     a.dn++; b[6]++;
-    if (!a.run) a.drops++;
+    if (!a.run) {
+      a.drops++;
+      a.eps.push([pt, t, 0]);
+      if (a.eps.length > 20) a.eps.shift();
+    }
     a.run += Math.round((up - p[0]) / 60) || 1;
     a.lng = Math.max(a.lng, a.run);
+    var e = a.eps[a.eps.length - 1];
+    e[1] = t; e[2] = a.run;
   } else { a.up++; a.run = 0; }
 }
 function evHour(t) { return Math.floor((t - new Date(t).getTimezoneOffset() * 60000) / 3600000); }   // a local hour
@@ -628,36 +644,30 @@ function evTele(a, cols) {
   if (ks.length < 2) return '<div class="ev-card"><p class="none">NOT ENOUGH STATUS LINES YET</p></div>';
   var k0 = ks[0], nb = ks[ks.length - 1] - k0 + 1, per = Math.max(1, Math.ceil(nb / cols)), nc = Math.ceil(nb / per);
   var cs = [], i, j, hs = [], fixn = 0, good = 0;
-  for (i = 0; i < nc; i++) cs.push([0, 0]);
+  for (i = 0; i < nc; i++) cs.push([0, 0, 0, 0]);   // hdop sum, its count, lines, drop-out minutes
   for (i = 0; i < ks.length; i++) {
     var b = a.b5[ks[i]], c = cs[Math.floor((ks[i] - k0) / per)];
-    c[0] += b[4]; c[1] += b[5];
+    c[0] += b[4]; c[1] += b[5]; c[2] += b[3]; c[3] += b[6];
     if (b[5]) { var h5 = b[4] / b[5]; hs.push(h5); fixn++; if (h5 <= 2) good++; }
   }
   hs.sort(function (x, y) { return x - y; });
-  var dm = "";
+  var dm = "", lk = "";
   for (i = 0; i < nc; i++) {
     var h = cs[i][1] ? cs[i][0] / cs[i][1] : null, f = h === null ? 0 : Math.max(1, Math.min(12, Math.round((7 - h) / 6 * 12)));
-    var q = h === null ? "" : h <= 2 ? "on" : h <= 5 ? "am" : "rd";
+    var q = h === null ? "" : h <= 2 ? "on" : h <= 5 ? "am" : "rd", dd = cs[i][2] ? cs[i][3] / cs[i][2] : null;
     dm += '<i class="gt-c' + (h === null ? " x" : "") + '">';
     for (j = 0; j < 12; j++) dm += j < f ? '<s class="' + q + '"></s>' : "<s></s>";
     dm += "</i>";
+    // the receiver link under it: data every minute, some, none (no line: the board was off)
+    lk += '<i class="gt-k' + (dd === null ? "" : !dd ? " ok" : dd < .5 ? " am" : " rd") + '"></i>';
   }
-  var lm = a.up + a.dn, upc = lm ? Math.round(a.up * 100 / lm) : 100, an = a.drops > 0;
-  var mid = a.t0 + (a.t1 - a.t0) / 2, pts = "", W = 200, Hh = 40;
-  // the share of each 5 minutes the receiver sent, a dotted area curve
-  for (i = 0; i < ks.length; i++) {
-    var bb = a.b5[ks[i]];
-    pts += (pts ? "L" : "M") + ((ks[i] - k0) / Math.max(1, nb - 1) * W).toFixed(1) + " " + (4 + bb[6] / bb[3] * (Hh - 6)).toFixed(1);
+  var lm = a.up + a.dn, upc = lm ? Math.round(a.up * 100 / lm) : 100, an = a.drops > 0, mid = a.t0 + (a.t1 - a.t0) / 2;
+  var ep = "";
+  for (i = a.eps.length - 1; i >= 0 && i >= a.eps.length - 5; i--) {
+    var e = a.eps[i];
+    ep += "<p><span>" + when(e[1] - e[2] * 60000) + "&ndash;" + when(e[1]) + "</span><b>" + e[2] + " min</b></p>";
   }
-  var spark = '<svg viewBox="0 0 ' + W + " " + Hh + '" preserveAspectRatio="none"><defs><pattern id="gtd" width="3" height="3" ' +
-    'patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".6" fill="#d7ece0" opacity=".55"/></pattern></defs>' +
-    '<path d="' + pts + "L" + W + " " + Hh + "L0 " + Hh + 'Z" fill="url(#gtd)"/><path d="' + pts +
-    '" fill="none" stroke="#d7ece0" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>';
-  function bar(lab, val, pct) {
-    return '<div class="gt-pr"><p>' + lab + "<b>" + val + '</b></p><u><i style="width:' + Math.min(100, Math.round(pct)) +
-      '%"></i></u></div>';
-  }
+  if (a.drops > 5) ep += '<p class="gt-more">' + (a.drops - 5) + " earlier</p>";
   return '<div class="gt"><div class="gt-hd"><h3>GPS telemetry<small>accuracy and receiver link' + MD + when(a.t0) + "&ndash;" +
     when(a.t1) + MD + "from the diag log</small></h3>" + '<span class="gt-chip' + (an ? " a" : "") + '">' +
     (an ? "Anomaly" : "Nominal") + "</span></div>" +
@@ -665,16 +675,18 @@ function evTele(a, cols) {
     "-minute columns, taller = more precise</em></div>" +
     '<div class="gt-big"><b>' + (fixn ? Math.round(good * 100 / fixn) : 0) + "%</b><span>precise (HDOP &le; 2)" +
     (hs.length ? MD + "typical " + hs[Math.floor(hs.length / 2)].toFixed(1) : "") + "</span></div>" +
-    '<div class="gt-dm">' + dm + '</div><div class="gt-ax"><span>' + when(a.t0) + "</span><span>" + when(mid) +
-    "</span><span>NOW</span></div>" +
+    '<div class="gt-dm">' + dm + '</div><div class="gt-lk"><span>link</span><div>' + lk + "</div></div>" +
+    '<div class="gt-ax"><span>' + when(a.t0) + "</span><span>" + when(mid) + "</span><span>NOW</span></div>" +
     '<div class="gt-lg"><span><b class="on"></b>precise</span><span><b class="am"></b>moderate</span>' +
-    '<span><b class="rd"></b>poor</span><span><b class="x"></b>no fix</span></div></div>' +
-    '<div class="gt-b"><div class="gt-l">Receiver link</div><div class="gt-dg"><div>' + spark +
-    "<small>Data from the receiver</small><b>" + upc + "%<em> of minutes</em></b></div><div><small>Broken sentences</small><b>" +
-    num(a.bad) + "</b></div></div>" +
+    '<span><b class="rd"></b>poor</span><span><b class="x"></b>no fix</span><span class="gt-sep">link:</span>' +
+    '<span><b class="ok"></b>data</span><span><b class="am"></b>gaps</span><span><b class="x"></b>none</span></div></div>' +
+    '<div class="gt-b"><div class="gt-l">Receiver link</div><div class="gt-dg"><div><b class="gt-n">' + upc +
+    "%</b><small>of minutes with data</small></div><div><b class=\"gt-n\">" + num(a.bad) +
+    "</b><small>Broken sentences</small></div></div>" +
     (an ? '<div class="gt-an"><h4><i>!</i>Link anomaly detected</h4>' +
-      bar("Time without data", a.dn + " min", lm ? a.dn * 100 / lm : 0) + bar("Drop-outs", a.drops, a.drops * 20) +
-      bar("Longest drop-out", a.lng + " min", a.lng * 100 / 60) + "</div>" : "") +
+      '<div class="gt-sum">' + a.dn + " min without data" + MD + a.drops + " drop-out" + (a.drops === 1 ? "" : "s") +
+      "</div>" + ep + "</div>" :
+      '<p class="gt-ok">No drop-out in the window: the receiver sent data every minute.</p>') +
     "</div></div></div>";
 }
 function bytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }

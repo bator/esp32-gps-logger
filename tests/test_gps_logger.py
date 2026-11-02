@@ -13815,10 +13815,20 @@ else:
           "sentences, one 9 min drop-out in an anomaly card",
           "GPS telemetry" in evt and evt.count('<i class="gt-c') == 36
           and "<b>56%</b>" in evt and "typical 1.2" in evt
-          and ">9 min<" in evt and "Drop-outs<b>1</b>" in evt
-          and "Broken sentences</small><b>5</b>" in evt
+          and '<b class="gt-n">5</b><small>Broken sentences' in evt
           and 'class="gt-chip a">Anomaly' in evt and "evc" not in evw,
           evt[:900])
+    # (Bator: "with no scale, how do I know when it happened?") the link
+    # is a strip under the accuracy matrix on its time axis, a cell a
+    # column (red where no data came), and the anomaly card lists each
+    # drop-out with its local time and length, newest first
+    check("PAGE-TELE: the link strip shares the matrix's columns and time "
+          "axis; each drop-out listed with its time and length",
+          evt.count('<i class="gt-k') == 36
+          and evt.count('<i class="gt-k rd"') >= 1
+          and "<span>11:00&ndash;11:09</span><b>9 min</b>" in evt
+          and "9 min without data &middot; 1 drop-out<" in evt
+          and "<svg" not in evt, evt[-1500:])
     evg = evw.get("evg", "")
     check("PAGE-EV: the grouped table - a header row, a row a kind with its "
           "icon chip, name, count, detail, sparkline and last seen",
@@ -14169,6 +14179,9 @@ else:
           ft.get("wr7") == [[], True], repr(ft.get("wr7")))
     check("WEBR-8: rssi, temp, cno, elev and azim from the JSON reach the "
           "HTML coerced or escaped", ft.get("wr8") == [], repr(ft.get("wr8")))
+    check("TELE-FROZEN: status lines that repeat a stale GPS time go on "
+          "with up: a 3 min drop-out spans 3 min", ft.get("frozen") ==
+          [300000, [[180000, 3]]], repr(ft.get("frozen")))
     check("WEBR-2: a 500 from the board shows its error, not NO ANSWER",
           ft.get("wr2") == ["off", "BOARD ERROR &middot; "
                                    "TypeError(&#39;row bug&#39;)"],

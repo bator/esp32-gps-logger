@@ -448,6 +448,16 @@ ft.wr7 = (() => {
   const again = ids.filter((id, k) => (els[id] ? els[id].writes : 0) !== w1[k]);
   return [again, w1.every((n) => n === 1)];
 })();
+// TELE-FROZEN: while the receiver is silent the status lines repeat the
+// last GPS time (the board's clock is the GPS); their time goes on with
+// "up", so a drop-out has its real start and end, not one minute twice
+ft.frozen = (() => {
+  const a = c0.evNew(), L = (up, u, ok) => "up " + up + " utc " + u + " nmea " + ok + "/0 gpsboots 0 loops 0 sats 8/6 fix " +
+    "3D_fix hdop 1.2 points 0 sent 0 wifi connected pulses 0 mem 17000 idf 221/208 heap 62";
+  c0.evFeed(a, [L(1000, "20261102T110000Z", 600), L(1060, "20261102T110100Z", 1200), L(1120, "20261102T110100Z", 1200),
+    L(1180, "20261102T110100Z", 1200), L(1240, "20261102T110100Z", 1200), L(1300, "20261102T110500Z", 1800)].join("\n") + "\n");
+  return [a.t1 - a.t0, a.eps.map((e) => [e[1] - e[0], e[2]])];
+})();
 // WR-8: numbers from the JSON go into the HTML coerced or escaped
 ft.wr8 = (() => {
   const w = c0.view({satellites: [{name: "G1", system: "GPS", svid: 1, cno: "<b>X1", elev: 45, azim: "<u>X2",
