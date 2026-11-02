@@ -676,13 +676,15 @@ midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
 header (a day stepped to in *Track*: that local day, read once, with its date
 in the header; it is drawn also without a fix), and zooms out (17 down to 13) until the track fits around the
 position. A gap of over 5 minutes breaks the line. Every point goes to
-`/hist/YYYYMMDD.trk` (its UTC date; the text line of the track file). A
-`.trb` point goes there once it is uploaded, when its batch is accepted (or
+`/hist/YYYYMMDD.trb` (its UTC date), a binary track like the track files
+(see *Binary tracks*): the header, then each append the records a flush
+writes, a keyframe first, and one `#END` footer at the end that the next
+append overwrites. A `.trb` point goes there once it is uploaded, when its batch is accepted (or
 parked as `.bad`), not when it is written: while it waits for WiFi it is on
 the flash once, in the track file. Each decoded line is written straight
-to its day's file, just before the batch is committed (a commit that then
-fails sends the batch again, and its points are drawn twice over the same
-line). So the map shows a trip from when it is
+to its day's file as its record again, just before the batch is
+committed (a commit that then fails sends the batch again, and its points
+are drawn twice over the same line). So the map shows a trip from when it is
 up: at home about a minute after the track closes, on a hotspot as it
 uploads; points still waiting are not drawn. A `.trk` (`TRK_BIN` off, or
 written by older firmware) goes there when written, as before. A track
@@ -691,12 +693,26 @@ file; the page puts the points in time order again. The newest 7 days are
 kept (`HIST_DAYS`). The history yields to the tracks: under 1 MB
 free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
 batch would be dropped on a full flash, and nothing is added under
-2 × `MIN_FREE`. The page asks
-`/hist?d=YYYYMMDD&o=<byte>`: a reply is at most 16 KB (`HIST_REPLY`, so a
-long day cannot outrun `WEB_DEADLINE`), the page asks again from where it
-got to, and after that only for what is new, once a minute. A day is ~50
-bytes a point: ~65 KB for 1300 points.
-The board sends the file in 1 KB reads and the JSON piece by piece (a
+2 × `MIN_FREE`. An append cut short (the flash full mid-write) leaves no
+footer: the next one starts with 32 `0xC0` bytes and a newline
+(`HIST_SEP`), which end a record cut there (no keyframe is lost to it, no
+point made up). The page asks `/hist?d=YYYYMMDD&o=<offset>` and gets the
+day's text lines (the line format of a `.trk`), decoded from the `.trb`
+record by record: a reply stops before the next keyframe once ~16 KB of
+text is out (`HIST_REPLY`, so a long day cannot outrun `WEB_DEADLINE`; it
+decodes the records twice, for the `Content-Length` first), with
+`X-Hist-Next: <offset>` (where to ask from next, a keyframe) and
+`X-Hist-End: <offset>` (where the day's records end now, the footer's
+start). The page asks again from `X-Hist-Next` while it is short of
+`X-Hist-End`, and after that only for what is new, once a minute, from
+there: the next append's keyframe starts there. A day is ~6-7 bytes a point
+(~50 as text): a 2 h drive at 1 Hz ~50 KB instead of ~370 KB, the 7 days
+of 2 h a day ~0.35 MB instead of ~2.6 MB. Days written as text by older
+firmware (`/hist/YYYYMMDD.trk`) are listed and drawn as before (sent as
+they are from byte `o`, no `X-Hist-Next`: the page counts the bytes), and
+a day that began as text stays text to its end (no conversion); they go
+after `HIST_DAYS`.
+The board sends a day's lines gathered into 1 KB sends and the JSON piece by piece (a
 diagnostic line a piece, gathered into 1 KB sends), so a page view needs
 ~2 KB of Python heap (building the whole page used to need ~20 KB, enough
 to double the Python heap into the IDF heap TLS needs). It is plain HTTP
@@ -1437,7 +1453,7 @@ with a NEO-6M; most never need changing.
 | `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
-| `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
+| `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |

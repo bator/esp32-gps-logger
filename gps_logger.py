@@ -200,9 +200,9 @@ GST_HOLD = 6000                          # ms a GST error estimate is used
                                          # GST only every 5th second)
 LOG_DIR = "/gpx"
 HIST_DIR = "/hist"                       # the day history the page draws:
-HIST_DAYS = 7                            # each written line, a file a UTC
+HIST_DAYS = 7                            # each written line, a .trb a UTC
                                          # day, the last HIST_DAYS kept
-HIST_REPLY = 16384                       # bytes at most per /hist reply
+HIST_REPLY = 16384                       # text bytes about per /hist reply
 MIN_FREE = 32768                         # bytes of flash kept free
 HIST_RESERVE = 1048576                   # bytes kept free from the day
                                          # history: older days go first
@@ -3806,12 +3806,12 @@ def _kb_uv(out, v):
         v >>= 7
     out.append(v)
 
-def _kb_delta(bl, s, out):
-    """Append the text line bl as a delta record from the state s to out
-    and move s on -> True; False (nothing written) when it must be a
-    keyframe."""
+def _kb_delta(bl, s, out, a=0, b=-1):
+    """Append the text line bl (bl[a:b], its newline last) as a delta
+    record from the state s to out and move s on -> True; False (nothing
+    written) when it must be a keyframe."""
     t = _kt
-    _kb_parse(bl, 0, len(bl) - 1, t)
+    _kb_parse(bl, a, (b if b >= 0 else len(bl)) - 1, t)
     if t[0] is None or s[0] is None or t[11] != s[11]:
         return False
     dt = t[0] - s[0]
@@ -4275,13 +4275,32 @@ def _cut_to_footer(path, good, sz):
         except OSError as e:
             _werr("cut", e)
 
+# The day history (/hist/YYYYMMDD.trb, a UTC day) is a .trb track: the
+# header, then each append (a .trk flush's _hist_add, an uploaded .trb
+# batch's _hist_batch) the records a flush writes, a keyframe first, so an
+# append's start is where a read can start (the page asks from one,
+# /hist?o=); one footer at the end, overwritten by the next append, as a
+# track flush overwrites it. ~7 bytes a point instead of ~50 as text. An
+# append cut short (ENOSPC mid-write, a write error) leaves no footer: the
+# next one starts with HIST_SEP. Its 0xC0 bytes are no record a delta
+# makes (bit 6: a field no line has, the state goes) and run past 31
+# bytes: a delta cut there is a damaged record, not one ended by the next
+# keyframe's "=" read as its varint (that keyframe's points lost); its
+# newline ends a cut keyframe (no point: a time field ending in 0xC0s). A
+# day older firmware began as text (.trk) stays text to its end (no
+# conversion of a day in the loop, no second file a day): it is served
+# as before, and goes after HIST_DAYS.
+HIST_SEP = b"\xc0" * 32 + b"\n"
+_kh = [None] * 12                        # the day history encoder's state
+_khn = [0]                               # its deltas since the keyframe
+
 def _hist_add(lines, k):
-    """Append lines[:k], the track lines just written, to the day history:
-    HIST_DIR/YYYYMMDD.trk by each line's own (UTC) date, the same text as
-    the track file, which is deleted once uploaded. The status page draws
-    the day from it (/hist). Best effort: a failed write costs only the
-    drawing, and it stops while the flash is nearly full. A new day's file
-    drops the oldest beyond HIST_DAYS."""
+    """Append lines[:k], the track lines just written, to the day history
+    by each line's own (UTC) date, the same lines as the track file, which
+    is deleted once uploaded. The status page draws the day from it
+    (/hist). Best effort: a failed write costs only the drawing, and it
+    stops while the flash is nearly full. A new day's file drops the oldest
+    beyond HIST_DAYS."""
     if not HIST_DAYS or not k:
         return
     room = free()
@@ -4296,33 +4315,104 @@ def _hist_add(lines, k):
         while j < k and lines[j][-17:-9] == day:
             j += 1
         if len(day) == 8 and day.isdigit():
-            path = HIST_DIR + "/" + day + ".trk"
-            size = _file_size(path)
-            new = size is None
-            f = None
+            st = [None, False, False, None]
+            ok = False
             try:
-                if new:
-                    try:
-                        os.mkdir(HIST_DIR)
-                    except OSError:
-                        pass             # (there already)
-                cut = not _tail_nl(path, size)
-                f = open(path, "ab")
-                if cut:
-                    f.write(b"\n")
+                _hist_begin(st, day)
                 while i < j:
-                    f.write(lines[i].encode())
+                    bl = lines[i].encode()
+                    _hist_line(st, bl, 0, len(bl))
                     i += 1
+                ok = True
             except (OSError, MemoryError):
                 log["herr"] = log.get("herr", 0) + 1
-            if f is not None:
-                try:
-                    f.close()
-                except OSError:
-                    pass
-            if new:
-                _hist_prune()
+            _hist_close(st, ok)
         i = j
+
+def _hist_begin(st, day):
+    """Open the day's file for an append into st ([file, made now, text,
+    the .trb records not yet written]): its .trb, a new one with the
+    header, an old one at its footer (HIST_SEP first without one); a .trk
+    older firmware began the day with at its end (a newline first after a
+    cut line, see _tail_nl). A .trb append begins with a keyframe."""
+    path = HIST_DIR + "/" + day
+    size = _file_size(path + TRB)
+    text = False
+    if size is None:
+        n = _file_size(path + ".trk")
+        if n is not None:
+            path, size, text = path + ".trk", n, True
+    if not text:
+        path += TRB
+    st[1], st[2] = size is None, text
+    if size is None:
+        try:
+            os.mkdir(HIST_DIR)
+        except OSError:
+            pass                         # (there already)
+    if text:
+        cut = not _tail_nl(path, size)
+        st[0] = open(path, "ab")
+        if cut:
+            st[0].write(b"\n")
+        return
+    _kh[0] = None                        # (a keyframe first)
+    _khn[0] = 0
+    st[3] = bytearray()
+    if not size:
+        st[0] = open(path, "wb")
+        st[0].write(HEADERB.encode())
+        return
+    f = st[0] = open(path, "r+b")
+    n = len(FOOTER)
+    if size >= n:
+        f.seek(size - n)
+        if f.read(n) == FOOTER.encode():
+            f.seek(size - n)
+            return
+    f.seek(size)
+    f.write(HIST_SEP)
+
+def _hist_line(st, buf, a, b):
+    """The text line buf[a:b] (its newline last) into the open day file:
+    a .trk's as it is; a .trb's as the next record (as _kb_part: a delta,
+    or a keyframe first and after KEY_EVERY deltas), written a KB_CHUNK at
+    a time."""
+    if st[2]:
+        st[0].write(memoryview(buf)[a:b])
+        return
+    out = st[3]
+    if _khn[0] < KEY_EVERY and _kb_delta(buf, _kh, out, a, b):
+        _khn[0] += 1
+    else:
+        out.append(61)                   # =
+        out += memoryview(buf)[a:b]
+        _kb_parse(buf, a, b - 1, _kh)
+        _khn[0] = 0
+    if len(out) >= KB_CHUNK:
+        st[0].write(out)
+        st[3] = bytearray()
+
+def _hist_close(st, ok=True):
+    """End the append in st: a .trb's last records and its footer, only if
+    every write before landed (after a failed one the next append's
+    HIST_SEP ends what it cut), then close. A new day's file drops the
+    days beyond HIST_DAYS."""
+    f, new, text, out = st
+    st[0], st[1], st[3] = None, False, None
+    if f is not None:
+        if ok and not text:
+            try:
+                out += FOOTER.encode()
+                f.write(out)
+            except (OSError, MemoryError):
+                log["herr"] = log.get("herr", 0) + 1
+        try:
+            f.close()
+        except OSError:
+            pass
+    if new:
+        _hist_prune()
 
 def _tail_nl(path, size):
     """False when a non-empty file does not end in a newline: an append
@@ -4346,14 +4436,19 @@ def _tail_nl(path, size):
             except OSError:
                 pass
 
+def _hist_names():
+    """The day history's files, the oldest first: YYYYMMDD.trb, and .trk
+    from older firmware. OSError without HIST_DIR."""
+    return sorted(n for n in os.listdir(HIST_DIR)
+                  if len(n) == 12 and n[8:] in (TRB, ".trk")
+                  and n[:8].isdigit())
+
 def _hist_trim(want):
     """Older day files go (the newest, today's, stays) until want bytes are
     free: the day history yields to the tracks. -> free bytes, or None."""
     room = free()
     try:
-        days = sorted(n for n in os.listdir(HIST_DIR)
-                      if len(n) == 12 and n.endswith(".trk")
-                      and n[:8].isdigit())
+        days = _hist_names()
     except OSError:
         return room
     while room is not None and room < want and len(days) > 1:
@@ -4364,9 +4459,7 @@ def _hist_trim(want):
 def _hist_prune():
     """Delete the day files beyond the newest HIST_DAYS."""
     try:
-        days = sorted(n for n in os.listdir(HIST_DIR)
-                      if len(n) == 12 and n.endswith(".trk")
-                      and n[:8].isdigit())
+        days = _hist_names()
     except OSError:
         return
     for n in days[:-HIST_DAYS]:
@@ -6367,12 +6460,12 @@ def _hist_batch(path, off, end, key):
     """A .trb batch about to be committed (from off to end) into the day
     history: a .trb's points go there once they are up, not while they
     wait (they were on the flash twice, the history and the track). Each
-    decoded line is written straight to its day's file (a list of the lines
-    was ~100 objects right after the POST). Before the commit: at the end
-    of the file the commit deletes it; one that then fails sends the batch
-    again, its points in the history twice (a line drawn over itself). Not
-    for other files: a .trk's went when written, a .bad's when they left
-    their track. Best effort, as _hist_add."""
+    decoded line goes straight to its day's file as its record again (a
+    list of the lines was ~100 objects right after the POST). Before the
+    commit: at the end of the file the commit deletes it; one that then
+    fails sends the batch again, its points in the history twice (a line
+    drawn over itself). Not for other files: a .trk's went when written, a
+    .bad's when they left their track. Best effort, as _hist_add."""
     if not HIST_DAYS or not path.endswith(TRB):
         return
     room = free()
@@ -6380,16 +6473,18 @@ def _hist_batch(path, off, end, key):
         room = _hist_trim(HIST_RESERVE)
     if room is not None and room < 2 * MIN_FREE:
         return
-    st = [None, False]                   # the open day file, made just now
+    st = [None, False, False, None]      # the open day file (_hist_begin)
+    ok = False
     try:
         with open(path, "rb") as src:
             _track_lines(src, path, off, end, key,
                          lambda a, b: _hist_put(st, a, b))
+        ok = True
     except Exception as e:               # (best effort: the commit after
         print("hist", repr(e))           # it is what matters)
         log["herr"] = log.get("herr", 0) + 1
     finally:
-        _hist_close(st)
+        _hist_close(st, ok)
 
 def _hist_put(st, a, b):
     """The line _rbuf[a:b] into the day file of its time (opened when the
@@ -6400,7 +6495,7 @@ def _hist_put(st, a, b):
         while k < 8 and _rbuf[d + k] == _hd8[k]:
             k += 1
         if k == 8:
-            st[0].write(_rmv[a:b])
+            _hist_line(st, _rbuf, a, b)
             return
         _hist_close(st)
     for k in range(8):
@@ -6408,30 +6503,8 @@ def _hist_put(st, a, b):
         if not 48 <= c <= 57:
             return                       # (no date: not in a day's file)
         _hd8[k] = c
-    path = HIST_DIR + "/" + bytes(_hd8).decode() + ".trk"
-    size = _file_size(path)
-    if size is None:
-        try:
-            os.mkdir(HIST_DIR)
-        except OSError:
-            pass                         # (there already)
-    cut = not _tail_nl(path, size)
-    f = open(path, "ab")
-    st[0], st[1] = f, size is None
-    if cut:
-        f.write(b"\n")
-    f.write(_rmv[a:b])
-
-def _hist_close(st):
-    f, new = st
-    st[0], st[1] = None, False
-    if f is not None:
-        try:
-            f.close()
-        except OSError:
-            pass
-    if new:
-        _hist_prune()
+    _hist_begin(st, bytes(_hd8).decode())
+    _hist_line(st, _rbuf, a, b)
 
 def _append_bad(path, off, new_off, key=None):
     """Copy consumed point lines to <path>.bad. None once durable, else
@@ -8212,15 +8285,14 @@ def _flash_kb():
 _hd = [[], None]                         # (day history days, ticks)
 
 def _hist_days():
-    """The UTC days (YYYYMMDD) of the day history, oldest first, listed
-    at most every 30 s (the page picks a day from them)."""
+    """The UTC days (YYYYMMDD) of the day history, oldest first, a day
+    once (.trb, or an older firmware's .trk), listed at most every 30 s
+    (the page picks a day from them)."""
     now = time.ticks_ms()
     if _hd[1] is not None and _age(now, _hd[1]) < 30000:
         return _hd[0]
     try:
-        _hd[0] = sorted(n[:8] for n in os.listdir(HIST_DIR)
-                        if len(n) == 12 and n.endswith(".trk")
-                        and n[:8].isdigit())
+        _hd[0] = sorted(set(n[:8] for n in _hist_names()))
     except OSError:
         _hd[0] = []
     _hd[1] = now
@@ -8533,9 +8605,14 @@ def _web_status(c):
     _web_send(c, "200 OK", "application/json", parts)
 
 def _web_hist(c, path):
-    """/hist?d=YYYYMMDD&o=N: the day's history file from byte N on, at most
-    HIST_REPLY bytes (the page asks again from where it got to: a whole day
-    in one reply could outrun WEB_DEADLINE). A missing day is a 404."""
+    """/hist?d=YYYYMMDD&o=N: the day's history from N on as its text lines,
+    about HIST_REPLY bytes (a whole day in one reply could outrun
+    WEB_DEADLINE; see _hist_lines): X-Hist-Next is where to ask from next,
+    X-Hist-End where the day's records end now (the page asks again while
+    short of it, then once a minute from there: an append starts there). A
+    .trk day (older firmware) is sent as it is, from byte N, HIST_REPLY
+    bytes at most, no X-Hist-Next (the page counts bytes). A missing day is
+    a 404."""
     d, o = "", 0
     try:
         for kv in path[6:].decode().split("&"):
@@ -8545,17 +8622,33 @@ def _web_hist(c, path):
                 o = int(kv[2:])
     except (UnicodeError, ValueError):
         d = ""
-    f = None
+    f = name = None
     if len(d) == 8 and d.isdigit() and o >= 0:
-        try:
-            f = open(HIST_DIR + "/" + d + ".trk", "rb")
-        except OSError:
-            pass
+        for name in (HIST_DIR + "/" + d + TRB, HIST_DIR + "/" + d + ".trk"):
+            try:
+                f = open(name, "rb")
+                break
+            except OSError:
+                pass
     if f is None:
         _web_send(c, "404 Not Found", "text/plain", ("no such day",))
         return
     try:
-        size = os.stat(HIST_DIR + "/" + d + ".trk")[6]
+        size = os.stat(name)[6]
+        if name.endswith(TRB):
+            n = len(FOOTER)
+            end = size
+            if size >= n:
+                f.seek(size - n)
+                if f.read(n) == FOOTER.encode():
+                    end = size - n       # (the next append's keyframe)
+            o = min(o, end)
+            k, nxt = _hist_lines(f, o, end, None)
+            _web_head(c, "200 OK", "text/plain",
+                      "Content-Length: %d\r\nX-Hist-Next: %d\r\n"
+                      "X-Hist-End: %d\r\n" % (k, nxt, end))
+            _hist_lines(f, o, nxt, c)
+            return
         o = min(o, size)
         n = min(size - o, HIST_REPLY)
         _web_head(c, "200 OK", "text/plain", "Content-Length: %d\r\n" % n)
@@ -8571,6 +8664,68 @@ def _web_hist(c, path):
             read_uart()
     finally:
         f.close()
+
+_kw = [None] * 12                        # the /hist reply's decoder state
+
+def _hist_lines(f, o, end, c):
+    """The text lines of the day history .trb f from o (a keyframe, or
+    where an earlier reply stopped) to end. c None: counted -> (their
+    bytes, the next o): once HIST_REPLY bytes of text (a 1 Hz drive's
+    ~2.3 KB of records) or a quarter of that of the file are read, before
+    the next keyframe (or any record while no keyframe holds: none decodes
+    there before one, so a stretch without keyframes, an erased block of
+    1-byte records, is read in steps too), else end. With c: sent to it,
+    gathered into WEB_CHUNK sends. A reply decodes its records twice, the
+    length first: the same lines, from the same bytes (a record ends where
+    its own bytes say, a keyframe resets the state). A decoded line (at
+    _rbuf[_SCR:]) is copied from a view of its length kept for the reply:
+    a new view a line was ~12 KB of garbage a reply. The WDT fed and the
+    UART read every 64 records."""
+    s = _kw
+    s[0] = None
+    _rd_open(o)
+    if c is not None:
+        mv = memoryview(bytearray(WEB_CHUNK))
+        sv = [None] * (len(_rbuf) - _SCR + 1)
+    n = i = q = 0
+    while _rd[0] + _rd[2] < end:
+        r = _rd[0] + _rd[2]
+        if not _rd_rec(f):
+            break
+        a, b = _rd[1], _rd[2]
+        if (c is None and r > o
+                and (n >= HIST_REPLY or r - o >= HIST_REPLY >> 2)
+                and (a == b or _rbuf[a] == 61 or s[0] is None)):
+            return n, r
+        i += 1
+        if not i & 63:
+            feed()
+            read_uart()
+        if a == b:                       # (an over-long line, drained)
+            s[0] = None
+            continue
+        if _kb_rec(a, b, s) <= 0:
+            continue
+        a, b = _kr
+        k = b - a
+        if c is None:
+            n += k
+            continue
+        if q + k > WEB_CHUNK:
+            _web_out(c, mv[:q])
+            q = 0
+            read_uart()
+        if a == _SCR:
+            v = sv[k]
+            if v is None:
+                v = sv[k] = _rmv[a:b]
+        else:
+            v = _rmv[a:b]                # (a keyframe's, where it was read)
+        mv[q:q + k] = v
+        q += k
+    if q:
+        _web_out(c, mv[:q])
+    return n, end
 
 _web_errs = [0]                          # page requests that raised a bug
 _bugs = []                               # the kinds of caught bugs in diag

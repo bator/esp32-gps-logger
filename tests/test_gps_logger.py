@@ -9120,8 +9120,9 @@ check("TRK2-RING: the way out is the line _sample_line writes (TRK2 and "
 gl.reset()
 
 # HIST: the day history the status page draws - each point once it is
-# uploaded, appended to HIST_DIR/<UTC day>.trk (the track file is deleted
-# then), the newest HIST_DAYS days kept, served by /hist?d=&o=
+# uploaded, appended to HIST_DIR/<UTC day>.trb (the track file is deleted
+# then), the newest HIST_DAYS days kept, served by /hist?d=&o= as its text
+# lines. A day begun as text (.trk, older firmware) stays text.
 import tempfile as _tf
 _hist_saved = (gl.HIST_DIR, gl.LOG_DIR, gl.HIST_REPLY)
 _hd = _tf.mkdtemp(prefix="hist-")
@@ -9133,12 +9134,118 @@ def _hl(day, hms, lat=47.185):
     return "%.6f,18.427300,100.0,2,1.4,%sT%sZ\n" % (lat, day, hms)
 
 
-def _hread(day):
+def _hraw(day, ext=".trb"):
     try:
-        with open(os.path.join(gl.HIST_DIR, day + ".trk")) as f:
+        with builtins.open(os.path.join(gl.HIST_DIR, day + ext), "rb") as f:
             return f.read()
     except OSError:
         return None
+
+
+def _hpts(data):
+    """The point lines a day file's bytes hold: a .trb decoded by trk2gpx
+    (apart from the logger's own decoder), a .trk as it is."""
+    if data is None:
+        return None
+    if not data.startswith(b"#TRKB\n"):
+        return data.decode()
+    return "".join(x for x in trk2gpx.trb_lines(data)
+                   if x[:1] != "#" and x != "-\n")
+
+
+def _hread(day):
+    return _hpts(_hraw(day))
+
+
+def _hkb(ls):
+    """The .trb records a flush writes for the text lines ls."""
+    return bytes(gl._kb_encode(ls, len(ls), None))
+
+
+def _drive(day, n, t0=36000, fmt=2, seed=1):
+    """n lines of a drive on the UTC day (YYYYMMDD) from t0 s into it, as
+    _sample_line writes them: 1 Hz (now and then a second skipped), ~45
+    km/h with turns and stops, ele/acc/speed changing as a receiver's do.
+    fmt 2: lat,lon,ele,acc,speed; 1: lat,lon,ele,hdop."""
+    import random
+    r = random.Random(seed)
+    t = (gl._days(int(day[:4]), int(day[4:6]), int(day[6:]))
+         - gl.EPOCH_DAYS) * 86400 + t0
+    la, lo, el, hd, v, acc = 471853560, 184269340, 1203, 0.6, 12.0, 21
+    out = []
+    for i in range(n):
+        v = min(max(v + r.uniform(-1.2, 1.2), 0.0), 25.0)
+        if i % 300 > 280:
+            v = max(v - 3, 0.0)          # (a stop at a light)
+        hd += r.uniform(-0.08, 0.08)
+        la += int(v * math.cos(hd) * 89.8)
+        lo += int(v * math.sin(hd) * 132.1)
+        el += r.choice((-1, 0, 0, 0, 1))
+        if r.random() < 0.2:
+            acc = min(max(acc + r.choice((-1, 1)), 9), 60)
+        s = gl._stamp_s(t)[1]
+        if fmt == 2:
+            out.append("%s,%s,%.1f,%.1f,%.1f,%s\n" % (
+                gl._i7(la), gl._i7(lo), el / 10, acc / 10, v * 3.6, s))
+        else:
+            out.append("%s,%s,%.1f,%.1f,%s\n" % (
+                gl._i7(la), gl._i7(lo), el / 10, acc / 10, s))
+        t += 2 if r.random() < 0.03 else 1
+    return out
+
+
+class _HConn:
+    def __init__(self):
+        self.sent = b""
+
+    def settimeout(self, t):
+        pass
+
+    def sendall(self, b):
+        self.sent += bytes(b)
+
+
+def _hget(q):
+    """-> (status line, {header: value}, body) of GET /hist?q."""
+    c = _HConn()
+    gl._web_reply(c, b"GET /hist?" + q + b" HTTP/1.1\r\n\r\n")
+    head, _, body = c.sent.partition(b"\r\n\r\n")
+    hs = head.split(b"\r\n")
+    hd = {}
+    for h in hs[1:]:
+        k, _, v = h.partition(b": ")
+        hd[k.decode()] = v.decode()
+    return hs[0], hd, body
+
+
+def _hpage(day, o=0, most=10000):
+    """Page through a day as the page does: from o, then from each reply's
+    X-Hist-Next while it is short of X-Hist-End -> (the text, the replies:
+    (o, next, end, body length, Content-Length))."""
+    text, reps = b"", []
+    for _ in range(most):
+        st_, hd, body = _hget(b"d=%s&o=%d" % (day.encode(), o))
+        if st_ != b"HTTP/1.0 200 OK" or "X-Hist-Next" not in hd:
+            reps.append((o, None, None, len(body), None))
+            break
+        nx, end = int(hd["X-Hist-Next"]), int(hd["X-Hist-End"])
+        reps.append((o, nx, end, len(body), int(hd["Content-Length"])))
+        text += body
+        if nx >= end or nx <= o:
+            break
+        o = nx
+    return text.decode("latin-1"), reps
+
+
+def _hok(line):
+    """A line the page draws (histParse): 5+ fields, a 16-char time last,
+    numbers first."""
+    f = line.rstrip("\n").split(",")
+    try:
+        return len(f) >= 5 and len(f[-1]) == 16 and f[0] != "" and (
+            float(f[0]) == float(f[0]) and float(f[1]) == float(f[1]))
+    except ValueError:
+        return False
 
 
 try:
@@ -9147,19 +9254,27 @@ try:
     gl._hist_add(lines + ["not written\n"], 4)
     gl._hist_add([_hl("20261031", "000002")], 1)
     h30, h31 = _hread("20261030"), _hread("20261031")
-    check("HIST: lines go to their own UTC day's file, appended, only "
+    check("HIST: lines go to their own UTC day's .trb, appended, only "
           "lines[:k]",
           h30 == "".join(lines[:2])
-          and h31 == "".join(lines[2:]) + _hl("20261031", "000002"),
-          repr((h30, h31)))
-    for d_ in range(1, 10):               # 9 old days, then a new one
+          and h31 == "".join(lines[2:]) + _hl("20261031", "000002")
+          and _hraw("20261031", ".trk") is None, repr((h30, h31)))
+    check("HIST: a day file is a .trb track: the header, each append the "
+          "records a flush writes (a keyframe first: any append start is a "
+          "decode start), one footer at the end (overwritten by the next)",
+          _hraw("20261031") == b"#TRKB\n" + _hkb(lines[2:4])
+          + _hkb([_hl("20261031", "000002")]) + b"#END\n",
+          repr(_hraw("20261031")))
+    for d_ in range(1, 10):               # 9 old (text) days, then a new one
         with open(os.path.join(gl.HIST_DIR, "202610%02d.trk" % d_), "w") as f:
             f.write(_hl("202610%02d" % d_, "120000"))
     gl._hist_add([_hl("20261101", "080000")], 1)
     kept = sorted(os.listdir(gl.HIST_DIR))
-    check("HIST: a new day's file drops the days beyond HIST_DAYS",
-          len(kept) == gl.HIST_DAYS and kept[-1] == "20261101.trk"
-          and kept[0] == "20261006.trk", repr(kept))
+    check("HIST: a new day's file drops the days beyond HIST_DAYS (.trk "
+          "and .trb alike)",
+          len(kept) == gl.HIST_DAYS and kept[-1] == "20261101.trb"
+          and kept[0] == "20261006.trk" and "20261030.trb" in kept,
+          repr(kept))
     free_saved = gl.free
     gl.free = lambda: gl.MIN_FREE
     try:
@@ -9196,53 +9311,229 @@ try:
         _post_code[0] = 201
         pump()
         check("HIST: a .trb's uploaded points go to the day history, once, "
-              "as text; a .trk's not again (%s)" % ext,
+              "as its records; a .trk's not again (%s)" % ext,
               _hread("20261101") == h0 + ("".join(fl) if tb_ else "")
               and not os.path.exists(os.path.join(_hd, "20261101_090000"
-                                                  + ext)),
-              repr(_hread("20261101")))
+                                                  + ext))
+              and _hraw("20261101").endswith(_hkb(fl) + b"#END\n"),
+              repr(_hraw("20261101")))
         pump()
         check("HIST: ... and not again (%s)" % ext,
               _hread("20261101") == h0 + ("".join(fl) if tb_ else ""))
-        with open(os.path.join(gl.HIST_DIR, "20261101.trk"), "w") as f:
-            f.write(_hl("20261101", "080000"))
+        os.remove(os.path.join(gl.HIST_DIR, "20261101.trb"))
+        gl._hist_add([_hl("20261101", "080000")], 1)
     gl.log_reset()
 
-    class _HConn:
-        def __init__(self):
-            self.sent = b""
-
-        def settimeout(self, t):
-            pass
-
-        def sendall(self, b):
-            self.sent += bytes(b)
-
-    def _hget(q):
-        c = _HConn()
-        gl._web_reply(c, b"GET /hist?" + q + b" HTTP/1.1\r\n\r\n")
-        head, _, body = c.sent.partition(b"\r\n\r\n")
-        return head.split(b"\r\n")[0], head, body
+    # an uploaded batch across midnight: each day's file gets its part,
+    # each part a keyframe first
+    mb = os.path.join(_hd, "mid.trb")
+    ml = _drive("20261102", 6, t0=86397)
+    with builtins.open(mb, "wb") as f:
+        f.write(b"#TRKB\n" + _hkb(ml) + b"#END\n")
+    gl._hist_batch(mb, 0, os.path.getsize(mb), None)
+    os.remove(mb)
+    ma = [x for x in ml if x[-17:-9] == "20261102"]
+    check("HIST: a batch across midnight goes to both days' files, each "
+          "part a keyframe first",
+          0 < len(ma) < len(ml)
+          and _hraw("20261102") == b"#TRKB\n" + _hkb(ma) + b"#END\n"
+          and _hraw("20261103") == b"#TRKB\n" + _hkb(ml[len(ma):])
+          + b"#END\n",
+          repr((_hraw("20261102"), _hraw("20261103"))))
 
     full = _hread("20261101").encode()
     a = _hget(b"d=20261101&o=0")
-    b = _hget(b"d=20261101&o=%d" % len(_hl("20261101", "080000")))
-    gl.HIST_REPLY = 50
-    cap = _hget(b"d=20261101&o=10")
-    gl.HIST_REPLY = _hist_saved[2]
     end = _hget(b"d=20261101&o=99999")
     bad = [_hget(q)[0] for q in (b"d=2026110&o=0", b"d=../../x&o=0",
                                  b"d=20261101&o=-1", b"d=20261101&o=x",
                                  b"d=20250101&o=0")]
-    check("HIST-WEB: /hist?d=&o= sends the day from byte o (Content-"
-          "Length), HIST_REPLY at most, nothing past the end",
+    rw = _hraw("20261101")
+    check("HIST-WEB: /hist?d=&o= sends the day's .trb as its text lines "
+          "(Content-Length), X-Hist-Next where to ask from next, X-Hist-End "
+          "where its records end (the footer's start); an o past it: none",
           a[0] == b"HTTP/1.0 200 OK" and a[2] == full
-          and b"Content-Length: %d" % len(full) in a[1]
-          and b[2] == full[len(_hl("20261101", "080000")):]
-          and cap[2] == full[10:60] and end[0] == b"HTTP/1.0 200 OK"
-          and end[2] == b"", repr((a[0], len(a[2]), len(cap[2]), end[2])))
+          and a[1].get("Content-Length") == str(len(full))
+          and a[1].get("X-Hist-Next") == a[1].get("X-Hist-End")
+          == str(len(rw) - 5) and end[0] == b"HTTP/1.0 200 OK"
+          and end[2] == b"" and end[1].get("X-Hist-Next") == str(len(rw) - 5),
+          repr((a, end)))
     check("HIST-WEB: a bad day, offset or a missing day is a 404",
           bad == [b"HTTP/1.0 404 Not Found"] * 5, repr(bad))
+
+    # a realistic day: 1 Hz drives uploaded in batches of UPLOAD_BATCH, a
+    # TRK1 track among them, and lines the encoder keeps as keyframes (no
+    # number as it prints, more than 9 digits): the replies together are
+    # exactly the text history, each line once
+    day = "20261104"
+    dl = (_drive(day, 1500, t0=25200) + _drive(day, 130, t0=40000, fmt=1)
+          + ["47.1850000,18.4273,100.00,2,1.4,20261104T120000Z\n",
+             "47.1234567891,18.4,1,2,3,20261104T120001Z\n",
+             "-0.000001,-0.000001,,1.2,20261104T120002Z\n"]
+          + _drive(day, 900, t0=61200, seed=2))
+    for i in range(0, len(dl), gl.UPLOAD_BATCH):
+        gl._hist_add(dl[i:i + gl.UPLOAD_BATCH],
+                     len(dl[i:i + gl.UPLOAD_BATCH]))
+    raw = _hraw(day)
+    txt, reps = _hpage(day)
+    gl.HIST_REPLY = 2000
+    try:
+        txt2, reps2 = _hpage(day)
+    finally:
+        gl.HIST_REPLY = _hist_saved[2]
+    big = 65 * max(len(x) for x in dl)
+    check("HIST-WEB: a day read reply by reply is exactly its text lines, "
+          "each once (16 KB replies and 2 KB ones)",
+          txt == txt2 == "".join(dl) == _hread(day) and len(reps) > 5
+          and len(reps2) > 40, repr((len(txt), len(txt2), len(reps))))
+    check("HIST-WEB: each reply stops before a keyframe once HIST_REPLY "
+          "bytes are out (the last one at X-Hist-End), its Content-Length "
+          "what it sent",
+          all(n_ == cl and (raw[nx:nx + 1] == b"=" or nx == e_)
+              and (nx == e_ or HIST_REPLY_ <= n_ <= HIST_REPLY_ + big)
+              for HIST_REPLY_, rr in ((16384, reps), (2000, reps2))
+              for o_, nx, e_, n_, cl in rr)
+          and reps[-1][1] == reps[-1][2] == len(raw) - 5,
+          repr((reps[:3], reps2[:3])))
+    # the page asks from where it got to while a batch is added; then a
+    # minute later only for what is new (from X-Hist-End: the new append's
+    # keyframe overwrote the footer there)
+    day = "20261105"
+    pl = _drive(day, 400, t0=30000)
+    gl._hist_add(pl[:200], 200)
+    gl.HIST_REPLY = 2000
+    try:
+        st1, h1, b1 = _hget(b"d=%s&o=0" % day.encode())
+        gl._hist_add(pl[200:300], 100)
+        t2, r2 = _hpage(day, int(h1["X-Hist-Next"]))
+        e2 = r2[-1][2]
+        st3, h3, b3 = _hget(b"d=%s&o=%d" % (day.encode(), e2))
+        gl._hist_add(pl[300:], 100)
+        t4, r4 = _hpage(day, e2)
+    finally:
+        gl.HIST_REPLY = _hist_saved[2]
+    check("HIST-WEB: an append while the page reads the day: no line lost "
+          "or twice; at the end only what is new",
+          b1.decode() + t2 + b3.decode() + t4 == "".join(pl)
+          and int(h1["X-Hist-Next"]) < int(h1["X-Hist-End"])
+          and b3 == b"" and h3["X-Hist-Next"] == str(e2)
+          and t4 == "".join(pl[300:]),
+          repr((len(b1), len(t2), len(b3), len(t4))))
+
+    # a cut last append (ENOSPC mid-write, power gone before the footer):
+    # the next append starts after HIST_SEP (it ends any record cut there:
+    # its first varint is no keyframe's "=") and is read whole; the cut
+    # record and the half keyframe are no points, none made up
+    day = "20261106"
+    ca = _drive(day, 130, t0=30000)
+    cb = _drive(day, 20, t0=40000, seed=3)
+    for i in range(0, 130, 50):
+        gl._hist_add(ca[i:i + 50], len(ca[i:i + 50]))
+    craw = _hraw(day)
+    last = len(b"#TRKB\n" + _hkb(ca[:50]) + _hkb(ca[50:100]))
+    cpath = os.path.join(gl.HIST_DIR, day + ".trb")
+    bad_cuts = []
+    for cut in range(last, len(craw)):
+        with builtins.open(cpath, "wb") as f:
+            f.write(craw[:cut])
+        pre = _hpts(craw[:cut])          # (trk2gpx: what the cut part holds)
+        k = pre.count("\n")
+        t0_, r0_ = _hpage(day)           # (the page, before the next append)
+        gl._hist_add(cb, len(cb))
+        t1_, r1_ = _hpage(day)
+        tn_, _ = _hpage(day, r0_[-1][1])
+        t1v = "".join(x for x in t1_.splitlines(True) if _hok(x))
+        tnv = "".join(x for x in tn_.splitlines(True) if _hok(x))
+        gl._hist_add(ca[:2], 2)          # (the next append: no HIST_SEP)
+        ok = (pre == "".join(ca[:k]) and k >= 100
+              and "".join(x for x in t0_.splitlines(True) if _hok(x)) == pre
+              and t1v == pre + "".join(cb) and tnv == "".join(cb)
+              and _hraw(day).endswith(_hkb(cb) + _hkb(ca[:2]) + b"#END\n")
+              and _hraw(day).count(gl.HIST_SEP) == (cut < len(craw)))
+        if not ok:
+            bad_cuts.append(cut)
+    with builtins.open(cpath, "wb") as f:
+        f.write(craw)
+    check("HIST-CUT: an append cut at any byte of the last one: the next "
+          "append and every point before the cut are read, nothing made up "
+          "(%d cuts)" % (len(craw) - last), not bad_cuts, repr(bad_cuts[:8]))
+
+    # an erased block (0xFF) in a day: no keyframe for 40 KB. A reply still
+    # stops after HIST_REPLY / 4 bytes of the file (anywhere while no
+    # keyframe holds: nothing decodes there) and the lines after it are read
+    day = "20261107"
+    el_ = _drive(day, 120, t0=30000)
+    gl._hist_add(el_[:60], 60)
+    with builtins.open(os.path.join(gl.HIST_DIR, day + ".trb"), "r+b") as f:
+        f.seek(-5, 2)
+        f.write(b"\xff" * 40000)         # (no footer: the next append's
+    gl._hist_add(el_[60:], 60)           # HIST_SEP ends the block)
+    te, re_ = _hpage(day)
+    check("HIST-WEB: an erased block of 40 KB in a day is read in "
+          "HIST_REPLY / 4 steps, the lines around it whole",
+          te == "".join(el_) and len(re_) >= 10
+          and all(nx - o_ <= gl.HIST_REPLY // 4 + 64
+                  for o_, nx, e_, n_, cl in re_),
+          repr(re_))
+
+    # a long day: one reply reads about HIST_REPLY of text whatever the
+    # day's length, feeding the WDT as it goes (a 6 h drive: 21600 points)
+    day = "20261108"
+    ll = _drive(day, 21600, t0=21600, seed=4)
+    for i in range(0, len(ll), 600):
+        gl._hist_add(ll[i:i + 600], 600)
+    dog = WDT(timeout=gl.WDT_TIMEOUT)
+    gl._wdt = dog
+    try:
+        import tracemalloc
+        tracemalloc.start()
+        rl = _hget(b"d=%s&o=0" % day.encode())
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        fed = dog.fed
+        tl_, rr_ = _hpage(day)
+    finally:
+        gl._wdt = None
+    check("HIST-WEB: a 6 h day: a reply is ~HIST_REPLY (the WDT fed as it "
+          "decodes, no list of the day in RAM), every point once over all",
+          16384 <= len(rl[2]) <= 16384 + big and fed >= 2 * 330 // 64
+          and peak < 64 * 1024 and tl_ == "".join(ll)
+          and len(_hraw(day)) < 9 * len(ll),
+          repr((len(rl[2]), fed, peak, len(_hraw(day)) / len(ll))))
+    # the flash it takes: an uploaded .trb's batches (UPLOAD_BATCH points)
+    # are the appends, a keyframe each
+    sz_t = sum(len(x) for x in ll)
+    sz_b = len(_hraw(day))
+    sz_u = 11 + sum(len(_hkb(ll[i:i + gl.UPLOAD_BATCH]))
+                    for i in range(0, len(ll), gl.UPLOAD_BATCH))
+    print("HIST-SIZE: a 1 Hz drive's day history: %.1f B a point as text, "
+          "%.1f as .trb in %d-point appends, %.1f in 600-point ones" % (
+              sz_t / len(ll), sz_u / len(ll), gl.UPLOAD_BATCH,
+              sz_b / len(ll)))
+    check("HIST-SIZE: a 1 Hz drive's day history is under a sixth of its "
+          "text as .trb (uploaded in UPLOAD_BATCH appends)",
+          sz_u * 6 < sz_t and sz_b < sz_u, repr((sz_t, sz_u, sz_b)))
+
+    # older firmware's text days: listed with the .trb ones, served as
+    # they are (no X-Hist-Next: the page counts bytes), and an append to
+    # such a day stays text (no second file for a day, no conversion)
+    gl._hd[1] = None
+    tday = "20261103"
+    with open(os.path.join(gl.HIST_DIR, "20261009.trk"), "w") as f:
+        f.write(_hl("20261009", "120000"))
+    ot = _hraw("20261009", ".trk")
+    gl._hist_add([_hl("20261009", "120001")], 1)
+    ta = _hget(b"d=20261009&o=0")
+    tb2 = _hget(b"d=20261009&o=10")
+    days_ = gl._hist_days()
+    check("HIST-MIGRATE: a .trk day (older firmware) is listed with the "
+          ".trb days, served as text from byte o without X-Hist-Next, and "
+          "appended to as text",
+          ta[2] == ot + _hl("20261009", "120001").encode()
+          and "X-Hist-Next" not in ta[1] and tb2[2] == ta[2][10:]
+          and ta[1].get("Content-Length") == str(len(ta[2]))
+          and _hraw("20261009") is None and _hraw(tday) is not None
+          and "20261009" in days_ and tday in days_
+          and days_ == sorted(set(days_)), repr((ta, days_)))
 finally:
     gl.HIST_DIR, gl.LOG_DIR, gl.HIST_REPLY = _hist_saved
     shutil.rmtree(_hd, ignore_errors=True)
@@ -13388,6 +13679,13 @@ else:
           "byte), so a non-ASCII byte neither shifts the next o= nor makes "
           "a full reply look short",
           ft.get("wr4") == [80, 80, True, 2], repr(ft.get("wr4")))
+    check("HIST-NEXT: a .trb day is asked again from X-Hist-Next (not "
+          "from o + the bytes received) while short of X-Hist-End, a minute "
+          "later from there; a reply that does not move on is not asked "
+          "again (no header: the bytes counted, WEBR-4)",
+          ft.get("hnext") == [["/hist?d=D&o=0", "/hist?d=D&o=500",
+                               "/hist?d=D&o=900", "/hist?d=D&o=900"],
+                              3, 4, False], repr(ft.get("hnext")))
     check("WEBR-7: a poll like the last one rewrites no box (innerHTML comes "
           "back normalised, &middot; as U+00B7) and builds no static-test "
           "scatter; a change is still drawn",
@@ -13662,16 +13960,18 @@ check("WEB-POS6: pos6 from lat_i/lon_i (PVT), %.6f (NMEA), None w/o fix",
 gl.reset()
 
 # WEB-DAYS: the day history's days for the page's picker, oldest first,
-# only YYYYMMDD.trk, listed at most every 30 s
+# only YYYYMMDD.trb and (older firmware's) YYYYMMDD.trk, a day once,
+# listed at most every 30 s
 _hd_dir = tempfile.mkdtemp()
 _hd_saved = gl.HIST_DIR
 gl.HIST_DIR = _hd_dir
 gl._hd[1] = None
-for n in ("20261031.trk", "20261029.trk", "x.trk", "2026103.trk",
-          "20261030.trk.tmp", "20261030.trk"):
+for n in ("20261031.trk", "20261029.trb", "x.trk", "2026103.trb",
+          "20261030.trk.tmp", "20261028.trb.tmp", "20261030.trk",
+          "20261030.trb"):
     open(os.path.join(_hd_dir, n), "w").close()
 days1 = gl._hist_days()
-open(os.path.join(_hd_dir, "20261101.trk"), "w").close()
+open(os.path.join(_hd_dir, "20261101.trb"), "w").close()
 _clock[0] += 10000
 days2 = gl._hist_days()
 _clock[0] += 25000
@@ -15643,8 +15943,8 @@ diag_clear()
 _hd2 = gl.HIST_DIR
 gl.HIST_DIR = os.path.join(_r2_dir, "hist")
 os.makedirs(gl.HIST_DIR, exist_ok=True)
-for d in ("20261029", "20261030", "20261031", "20261101"):
-    with open(os.path.join(gl.HIST_DIR, d + ".trk"), "w") as f:
+for d in ("20261029.trk", "20261030.trb", "20261031.trk", "20261101.trb"):
+    with open(os.path.join(gl.HIST_DIR, d), "w") as f:
         f.write("x" * 100)
 _fr = gl.free
 gl.free = lambda: 2000000 - 400000 * len(os.listdir(gl.HIST_DIR))
@@ -15657,9 +15957,10 @@ try:
 finally:
     gl.free = _fr
     gl.HIST_DIR = _hd2
-check("R2-HIST: oldest days go until enough is free, today's file stays",
-      left == ["20261031.trk", "20261101.trk"] and room == 1200000
-      and left2 == ["20261101.trk"], repr((left, room, left2)))
+check("R2-HIST: oldest days go until enough is free (.trk and .trb), "
+      "today's file stays",
+      left == ["20261031.trk", "20261101.trb"] and room == 1200000
+      and left2 == ["20261101.trb"], repr((left, room, left2)))
 
 # R2-RM: a file that cannot be deleted after its upload is parked as .err
 # after READ_ERR_MAX tries (its last batch went up each time)
@@ -16472,7 +16773,7 @@ try:
         btxt = f.read()
     hist_q = []
     for d in os.listdir(gl.HIST_DIR):
-        with builtins.open(os.path.join(gl.HIST_DIR, d)) as f:
+        with open(os.path.join(gl.HIST_DIR, d)) as f:   # (a .trb as text)
             hist_q.append(f.read())
     check("TRKB: a rejected batch is parked as text lines in .trb.bad "
           "(listed as a .bad, read as text)",
