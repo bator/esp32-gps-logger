@@ -997,6 +997,22 @@ try:
     gl.log_tick()
     check("full: log_tick clears full when space returns",
           gl.log["full"] is False)
+    # a fix lost while the flash is full is noted then, not when space
+    # returns: NEW_FILE_GAP counts from the loss
+    gl.free = lambda: 100
+    gl.reset()                               # (no fix)
+    gl.log.update(full=True, full_check=None, fix=True, lost_at=None)
+    _clock[0] += 1000
+    lost_t = _clock[0]
+    gl.log_tick()
+    _clock[0] += gl.NEW_FILE_GAP * 1000
+    gl.free = lambda: gl.MIN_FREE + 10
+    gl.log_tick()
+    check("full: a fix lost while full sets lost_at at the loss",
+          gl.log["full"] is False and gl.log["fix"] is False
+          and gl.log["lost_at"] == lost_t,
+          "fix=%s lost_at=%s want %s" % (gl.log["fix"], gl.log["lost_at"],
+                                        lost_t))
     gl.free = orig_free
 
     # --- http:// GEO_URL warning -------------------------------------------
@@ -4302,6 +4318,38 @@ try:
         sv_fix(130 + i * 6.0, 0, 22.0)
     check("STAY: driving on after the jam ends it", sv_active() is False)
 
+    # an out-and-back with the turn near a window boundary: the window out
+    # and the window back have the same centroid. That paired as a stay and
+    # dropped the held lines (a car lost 36 s / 360 m, a bike ~100 s).
+    # (Slower, a walk, it stays within indoor drift: that still pairs.)
+    uturn = []
+    for v in (10.0, 4.0, 3.0):
+        for delta in range(-10, 11, 2):
+            sv_reset()
+            for i in range(180):
+                sv_fix(i * v, 0, v * 3.6)
+            x0 = 179 * v
+            wa = gl.log["still"]["win_at"]
+            to_b = gl.STILL_WINDOW - (gl._age(_clock[0], wa) if wa is not None
+                                      else gl.STILL_WINDOW)
+            turn = to_b // 1000 + gl.STILL_WINDOW // 1000 + delta
+            stayed = False
+            for t in range(1, turn + 1):
+                sv_fix(x0, t * v, v * 3.6)
+                stayed = stayed or sv_active()
+            for t in range(1, 300):
+                sv_fix(x0, (turn - t) * v, v * 3.6)
+                stayed = stayed or sv_active()
+            gl.flush()
+            tcs = [l.strip().split(",")[4] for l in sv_lines()]
+            secs = sorted(int(tc[9:11]) * 3600 + int(tc[11:13]) * 60
+                          + int(tc[13:15]) for tc in tcs)
+            gap = max(b - a for a, b in zip(secs, secs[1:]))
+            if stayed or gap > 5:
+                uturn.append((v, delta, stayed, gap))
+    check("STAY: an out-and-back U-turn is no stay, nothing dropped",
+          uturn == [], repr(uturn))
+
     # home network: arrive, stay, leave
     sv_reset(home=True)
     for i in range(-20, 1):                          # arriving at 20 km/h
@@ -4959,6 +5007,23 @@ try:
     check("HOLD: ... and at most one window of the drift at the stop",
           len(at_stop) <= gl.STILL_WINDOW // 1000,
           "drift lines at the stop=%d" % len(at_stop))
+    # a fix that stays but is never usable (indoors, HDOP 9) closes no
+    # window and is no fix loss: the lines held at the door stayed in RAM
+    # for hours, and a reboot dropped them (88 lines). HOLD_RELEASE after
+    # the last usable fix they go to flash, as after a fix loss.
+    sv_reset()
+    for i in range(180):
+        sv_fix(i * 1.4, 0, 5.0)                     # a 3 min walk
+    for i in range(30):
+        sv_fix(252 + i % 3, 0, 0.0)                 # 30 s at the door
+    held0 = len(gl.log["batch"])
+    for _ in range((gl.HOLD_RELEASE + 2 * gl.FLUSH) // 1000):
+        hb_fix(252, 0, hdop=9.0, speed=0.0)         # inside: not usable
+    check("HOLD: a fix that stays unusable lets the held lines go after "
+          "HOLD_RELEASE", held0 > gl.FLUSH // 1000 and not sv_active()
+          and gl.log["batch"] == [] and len(sv_lines()) >= 200,
+          "held=%d ram=%d lines=%d" % (held0, len(gl.log["batch"]),
+                                       len(sv_lines())))
 
     # MIDNIGHT: a GGA past midnight whose RMC was lost is not dated a day back
     gl.reset()
@@ -11756,6 +11821,80 @@ check("REV-3: after WFAIL_SWITCH failed writes a new file takes the batch; "
       f3b != f3 and new3 == 3 and pts_in(f3) == 3
       and os.path.basename(f3) in pend3 and not gl.log["batch"],
       repr((f3, f3b, new3, pend3)))
+gl.LOG_DIR = _rev_dir
+gl.log_reset()
+shutil.rmtree(_r3, ignore_errors=True)
+
+# REV-3b: a failing append that partly landed (half the batch, no footer)
+# is cut back to the last good footer before the switch: the new file took
+# the whole batch again, its first half uploaded twice (67 points, 60 new)
+_r3 = tempfile.mkdtemp()
+gl.LOG_DIR = _r3
+gl.log_reset()
+gl.start_file("20261101_100000")
+gl.log["batch"].extend(trk_line(47.1, 18.4 + i * 1e-4,
+                                "2026-11-01T10:00:%02dZ" % i)
+                       for i in range(30))
+gl.flush()
+f3 = gl.log["file"]
+gl.log["batch"].extend(trk_line(47.1, 18.4 + i * 1e-4,
+                                "2026-11-01T10:01:%02dZ" % i)
+                       for i in range(30))
+
+
+class _HalfW(object):
+    """A file whose longer writes land half and fail (ENOSPC)."""
+    def __init__(self, f):
+        self.f = f
+
+    def seek(self, *a):
+        return self.f.seek(*a)
+
+    def tell(self):
+        return self.f.tell()
+
+    def read(self, *a):
+        return self.f.read(*a)
+
+    def write(self, data):
+        if len(data) > 20:
+            self.f.write(data[:len(data) // 2])
+            raise OSError(28)
+        return self.f.write(data)
+
+    def close(self):
+        self.f.close()
+
+
+def _half_open(name, mode="r", *a, **k):
+    f = _open3(name, mode, *a, **k)
+    return _HalfW(f) if name == f3 and "+" in mode else f
+
+
+def _trk_pts(path):
+    out = []
+    for line in open(path):
+        if line == gl.FOOTER:
+            break
+        if line.count(",") == 4:
+            out.append(line)
+    return out
+
+
+builtins.open = _half_open
+try:
+    for r in range(gl.WFAIL_SWITCH):
+        gl.flush()
+finally:
+    builtins.open = _open3
+f3b = gl.log["file"]
+gl.flush()
+p3 = [_trk_pts(f3), _trk_pts(f3b) if f3b != f3 else []]
+all3 = p3[0] + p3[1]
+check("REV-3b: a partly landed batch is not written twice across the "
+      "WFAIL_SWITCH file change", f3b != f3 and len(p3[0]) == 30
+      and len(all3) == 60 and len(set(all3)) == 60,
+      "old=%d new=%d unique=%d" % (len(p3[0]), len(p3[1]), len(set(all3))))
 gl.LOG_DIR = _rev_dir
 gl.log_reset()
 shutil.rmtree(_r3, ignore_errors=True)
