@@ -9668,6 +9668,239 @@ try:
          gl.free) = r2_saved
         if os.path.exists(r2_haf):
             os.remove(r2_haf)
+
+    # WR3: WiFi review 3 (WR3-n: the n-th finding of the WiFi section)
+    wf_saved = (gl.PB_KEEPALIVE, gl.HOME_APS_FILE, gl.DIAG, builtins.print,
+                builtins.open)
+    wf_said = []
+
+    def wf_print(*a, **k):
+        wf_said.append(" ".join(str(x) for x in a))
+
+    def wf_drop(w, secs, pulse=True):
+        """Beacon timeout, the AP gone for good: (rounds, last state)."""
+        WLAN.ok, WLAN.scan_aps = set(), []
+        w._status = 5
+        w._requested = True
+        real_br = gl._wifi_begin_round
+        n = [0]
+
+        def counted(w):
+            n[0] += 1
+            return real_br(w)
+        gl._wifi_begin_round = counted
+        try:
+            for _ in range(secs):
+                _clock[0] += 1000
+                gl.wifi_tick()
+                if pulse:
+                    gl.keepalive_tick(_clock[0])
+        finally:
+            gl._wifi_begin_round = real_br
+        return n[0], gl.wifi["state"]
+
+    try:
+        # WR3-1: a MemoryError in the learning scan's processing (bytes() of
+        # every BSSID, the lists; a dense scan at ~15 KB free) or in the
+        # HOME_APS_FILE write escaped wifi_tick: run() reset the board
+        gl.WEB = False
+        w = rv_connect(["home"], [("", -55, b"\x41" * 6), ("hot", -40)],
+                       nets=[dict(n) for n in hid_nets])
+        conn = gl.wifi["state"] == "connected" and gl.wifi["learn"]
+        wf_bytes0 = builtins.bytes
+
+        def wf_bytes(*a):
+            if a and isinstance(a[0], (bytes, bytearray)) and len(a[0]) == 6:
+                raise MemoryError("memory allocation failed")
+            return wf_bytes0(*a)
+        wf_err = []
+        gl.bytes = wf_bytes
+        try:
+            gl.wifi_tick()
+        except MemoryError as e:
+            wf_err.append(("learn", repr(e)))
+        finally:
+            del gl.bytes
+        learn_after = (gl.wifi["learn"], gl.wifi["state"])
+        gl.HOME_APS_FILE = os.path.join(rv_td, "wf_home_aps")
+        gl.wifi["home_aps"] = [b"\x41" * 6]
+
+        def wf_oom_open(*a, **k):
+            raise MemoryError("memory allocation failed")
+        builtins.open = wf_oom_open
+        try:
+            gl._home_aps_save()
+        except MemoryError as e:
+            wf_err.append(("save", repr(e)))
+        finally:
+            builtins.open = wf_saved[4]
+            gl.HOME_APS_FILE = None
+        check("WR3-1: a MemoryError while learning the hidden home's BSSID "
+              "(or saving it) is no reset", conn and not wf_err
+              and learn_after == (False, "connected"),
+              "%r %r %r" % (conn, wf_err, learn_after))
+
+        # WR3-2: on the home link "home in range" still asked for
+        # ROAM_MIN_RSSI (-75): at -78 dBm, associated, the veto did not
+        # hold and a multipath jump ended the home stay. On the link the
+        # bar is SEEN_MIN_RSSI (the one a keep-alive scan wakes it at)
+        w = rv_connect(["home"], [("home", -78)])
+        on78 = (gl.wifi["state"], gl.home_in_range(),
+                gl._home_veto(_clock[0], {}))
+        WLAN.scan_aps = [("home", -90)]
+        on90 = gl.home_in_range()
+        check("WR3-2: on the home link at -78 dBm home is in range (veto); "
+              "at -90 it is not", on78 == ("connected", True, True)
+              and on90 is False, "%r %r" % (on78, on90))
+
+        # WR3-3: the "no page off home" exit of _web_search was in the scan
+        # keep-alive branch only: in gpio / radio mode, or KEEPALIVE=0, a
+        # hotspot drop (WEB_AWAY off) searched WEB_SEARCH (30 min) on
+        gl.WEB, gl.WEB_AWAY = True, False
+        wf3 = {}
+        for mode, ka in (("gpio", 5000), ("radio", 5000), ("scan", 0)):
+            gl.PB_MODE, gl.PB_KEEPALIVE = mode, ka
+            w = rv_connect(["hot"], [("hot", -50)])
+            on_hot = gl.wifi["ssid"] == "hot"
+            wf3["%s/%d" % (mode, ka)] = (on_hot,) + wf_drop(w, 10 * 60)
+        gl.PB_MODE, gl.PB_KEEPALIVE = "gpio", 5000
+        w = rv_connect(["home"], [("home", -50)])
+        wf3_home = wf_drop(w, 10 * 60)
+        check("WR3-3: a hotspot drop without WEB_AWAY sleeps in every "
+              "keep-alive mode (a home drop still searches)",
+              all(v[0] and v[1] <= 1 and v[2] == "sleep"
+                  for v in wf3.values())
+              and wf3_home[0] >= 2 and wf3_home[1] == "not found",
+              "%r %r" % (wf3, wf3_home))
+
+        # WR3-4 / WR3-8: the same SSID twice in .env: the later entry took
+        # over the scan match (its password, its home flag). The first one
+        # wins, the later one is dropped with a warning; an SSIDn / WPA2_n
+        # key the logger does not read and an empty WPA2 next to an SSID
+        # are warned about too. Key names only, never a value
+        diag_clear()
+        gl.DIAG = 60000
+        builtins.print = wf_print
+        try:
+            dup = gl._load_nets({"SSID": "home", "WPA2": "pw-new",
+                                 "SSID3": "home", "WPA2_3": "pw-old"})
+            dup2 = gl._load_nets({"SSID": "home", "WPA2": "pw-a",
+                                  "SSID2": "hot", "WPA2_2": "pw-b",
+                                  "SSID3": "hot", "WPA2_3": "pw-c",
+                                  "HOME3": "1"})
+            said4 = list(wf_said)
+            del wf_said[:]
+            unk = gl._load_nets({"SSID": "home", "WPA2": "pw-1",
+                                 "SSID1": "cafe", "WPA2_1": "pw-secret",
+                                 "SSID4": "bar", "WPA2_4": "pw-4",
+                                 "SSID_HOME": "1", "SSID2_HIDDEN": "0"})
+            said_unk = list(wf_said)
+            del wf_said[:]
+            opn = gl._load_nets({"SSID": "home", "WPA2": "",
+                                 "SSID2": "open"})
+            said_open = list(wf_said)
+            del wf_said[:]
+            gl._load_nets({"SSID": "home", "WPA2": "pw-1", "SSID2": "hot",
+                           "WPA2_2": "pw-2", "HOME2": "0"})
+            said_ok = list(wf_said)
+        finally:
+            builtins.print = wf_saved[3]
+        wf_diag = "\n".join(diag_lines())
+        WLAN.connects = []
+        rv_connect([], [("home", -50)], nets=dup)
+        tried = [c[1] for c in WLAN.connects]
+        out4 = "\n".join(said4)
+        check("WR3-4: a duplicate SSID in .env: the first entry wins, the "
+              "later one is dropped with a warning (no password)",
+              [(n["ssid"], n["pw"], n["home"]) for n in dup]
+              == [("home", "pw-new", True)]
+              and [(n["ssid"], n["pw"], n["home"]) for n in dup2]
+              == [("home", "pw-a", True), ("hot", "pw-b", False)]
+              and tried and set(tried) == {"pw-new"}
+              and "SSID3" in out4 and "pw-" not in out4
+              and "SSID3" in wf_diag and "pw-" not in wf_diag,
+              "%r %r %r %r" % (dup, dup2, tried, said4))
+        out_unk, out_open = "\n".join(said_unk), "\n".join(said_open)
+        check("WR3-8: unknown SSIDn/WPA2_n keys and an empty WPA2 are "
+              "warned about by name (no values)",
+              len(unk) == 1 and len(opn) == 2
+              and all(k in out_unk for k in ("SSID1", "WPA2_1", "SSID4",
+                                             "WPA2_4"))
+              and "SSID_HOME" not in out_unk
+              and "SSID2_HIDDEN" not in out_unk
+              and "pw-" not in out_unk and "cafe" not in out_unk
+              and "bar" not in out_unk
+              and "WPA2 " in out_open + " " and "WPA2_2" not in out_open
+              and "home" not in out_open and said_ok == []
+              and "SSID4" in wf_diag and "pw-" not in wf_diag,
+              "%r %r %r" % (said_unk, said_open, said_ok))
+
+        # WR3-5: _home_seeable was global: a visible home in .env made a
+        # dropped hidden home whose BSSID is not learned "seeable", and
+        # _web_search stopped (page down 1 h) although no keep-alive scan
+        # sees that one come back. It is the dropped network's now
+        gl.WEB, gl.WEB_AWAY, gl.PB_MODE, gl.PB_KEEPALIVE = (True, False,
+                                                            "scan", 5000)
+        mix = [{"ssid": "home", "pw": "x", "home": True, "hidden": False,
+                "bssid": None, "ip": None},
+               {"ssid": "hid", "pw": "z", "home": True, "hidden": True,
+                "bssid": None, "ip": None}]
+        w = rv_connect(["hid"], [("", -50, b"\x43" * 6)],
+                       nets=[dict(n) for n in mix])
+        on_hid = gl.wifi["ssid"] == "hid" and gl.wifi["state"] == "connected"
+        gl.wifi["learn"] = False         # (several mesh nodes: none learned)
+        gl.wifi["home_aps"] = []
+        hid_drop = wf_drop(w, 120)
+        w = rv_connect(["home"], [("home", -50)], nets=[dict(n) for n in mix])
+        vis_drop = wf_drop(w, 120)
+        check("WR3-5: a dropped hidden home (BSSID unknown) searches on "
+              "though a visible home is configured",
+              on_hid and hid_drop[1] == "not found"
+              and gl.wifi["down_home"] is True and vis_drop[1] == "sleep",
+              "%r %r %r" % (on_hid, hid_drop, vis_drop))
+
+        # WR3-6: keep-alive scans stepped the rounds' empty-scan count: one
+        # empty pulse made a round's own first empty scan (taken as failed:
+        # every network tried) the second (a place without APs: nothing)
+        gl.WEB, gl.PB_MODE, gl.PB_KEEPALIVE = False, "scan", 5000
+        online(rv_td)
+        gl.wifi["nets"] = rv_nets()
+        gl.wifi["wlan"] = w = WLAN(0)
+        gl.wifi["state"] = "not found"
+        WLAN.scan_aps = []
+        gl.wifi["pb_at"] = _clock[0] - gl.PB_KEEPALIVE
+        gl.keepalive_tick(_clock[0])
+        pulsed = (gl.wifi["pb_scans"], gl.wifi["empty"])
+        gl.wifi["rounds"] = 1
+        w.active(True)
+        order = [c["ssid"] for c in gl._candidate_order(w)]
+        gl.PB_CONNECTED = True
+        gl.wifi.update(state="connected", empty=0,
+                       pb_at=_clock[0] - gl.PB_KEEPALIVE)
+        gl.keepalive_tick(_clock[0])
+        conn_pulse = (gl.wifi["pb_scans"], gl.wifi["empty"])
+        gl.PB_CONNECTED = False
+        check("WR3-6: an empty keep-alive scan does not count as the "
+              "round's empty scan", pulsed == (1, 0)
+              and order == ["home", "hot"] and conn_pulse == (2, 0),
+              "%r %r %r" % (pulsed, order, conn_pulse))
+
+        # WR3-7: dead state: wifi["pw"] (a second copy of the password in
+        # RAM, never read), saw_connecting, tries, pb_conn_at
+        w = rv_connect(["home"], [("home", -50)])
+        dead = [k for k in ("pw", "saw_connecting", "tries", "pb_conn_at")
+                if k in gl.wifi]
+        r2_boot("SSID=home\nWPA2=pw-x\n", [("home", -50)], ["home"])
+        r2_until(lambda: gl.wifi["state"] == "connected", 30)
+        dead += [k for k in ("pw", "saw_connecting", "tries", "pb_conn_at")
+                 if k in gl.wifi]
+        check("WR3-7: no dead WiFi state (no password copy outside nets)",
+              gl.wifi["state"] == "connected" and dead == [], repr(dead))
+    finally:
+        (gl.PB_KEEPALIVE, gl.HOME_APS_FILE, gl.DIAG, builtins.print,
+         builtins.open) = wf_saved
+        if hasattr(gl, "bytes"):
+            del gl.bytes
 finally:
     (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, WLAN.ok, gl.PB_MODE,
      gl.PB_CONNECTED) = saved_rv
@@ -13709,8 +13942,7 @@ fails = []
 _wf = gl._wifi_failed
 gl._wifi_failed = lambda w, s, el: fails.append((s, el)) or False
 try:
-    gl.wifi.update(state="connecting", try_at=_clock[0], prev_status=0,
-                   saw_connecting=False)
+    gl.wifi.update(state="connecting", try_at=_clock[0], prev_status=0)
     _clock[0] += 500
     gl._wifi_poll(_PollW(201))
     fast = list(fails)
