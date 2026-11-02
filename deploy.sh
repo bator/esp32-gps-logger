@@ -17,7 +17,12 @@
 # (Not <name>.new: an OTA stages the page it installs as /web.html.new.)
 # While an OTA install is being validated (/ota.pending) it stops: its
 # reset would abort the pending firmware (the bootloader rolls back and the
-# build is blamed). Wait the ~2 minutes, or FORCE=1.
+# build is blamed). Wait the ~2 minutes, or FORCE=1. That is the first
+# question to the board: each mpremote session stops the logger (raw REPL),
+# so every exit restarts it, by a reset, or with an OTA pending by running
+# the logger again without one (a soft reset does not run main.py from the
+# raw REPL; left stopped, the WDT reset the board: a boot failure, and an
+# aborted OTA).
 #
 # Usage: ./deploy.sh            (PORT=/dev/ttyUSB1 ./deploy.sh to override)
 set -euo pipefail
@@ -33,8 +38,39 @@ if ! $PY -c "import mpy_cross" 2>/dev/null; then
     .venv/bin/pip install -q "mpy-cross==1.29.*"
 fi
 
-# ESP32 is Xtensa, ESP32-C6 is RISC-V: ask the board which one it is
-MACHINE=$($MPREMOTE connect "$PORT" exec "import sys; print(sys.implementation._machine)" | tail -n 1)
+# The logger stopped by the sessions below runs again on every exit (the
+# last step's own reset clears this). Unknown whether an OTA is pending:
+# no reset either.
+restart_logger() {
+    local rc=$?
+    if [ "${OTAPEND:-}" = False ]; then
+        $MPREMOTE connect "$PORT" reset >/dev/null 2>&1 || true
+    else
+        echo "Running the logger again without a reset (OTA pending or unknown)" >&2
+        $MPREMOTE connect "$PORT" exec --no-follow \
+            "import gps_logger; gps_logger.run()" >/dev/null 2>&1 || true
+    fi
+    exit "$rc"
+}
+trap restart_logger EXIT
+
+# An OTA being validated? And ESP32 is Xtensa, ESP32-C6 is RISC-V: which one
+BOARD=$($MPREMOTE connect "$PORT" exec "
+import os, sys
+print('ota.pending', 'ota.pending' in os.listdir())
+print(sys.implementation._machine)" | tr -d '\r' || true)
+OTAPEND=$(grep -E '^ota.pending (True|False)$' <<< "$BOARD" | tail -n 1 | cut -d' ' -f2 || true)
+if [ "$OTAPEND" != False ]; then
+    if [ "$OTAPEND" = True ]; then
+        echo "An OTA install is being validated on the board (/ota.pending): its reset" >&2
+        echo "now would roll it back. Wait ~2 minutes (status page: ota ok), then deploy." >&2
+    else
+        echo "Could not tell whether an OTA install is pending: '$BOARD'" >&2
+    fi
+    [ "${FORCE:-0}" = 1 ] || exit 1
+    echo "FORCE=1: deploying during the OTA validation" >&2
+fi
+MACHINE=$(tail -n 1 <<< "$BOARD")
 case "$MACHINE" in
     *ESP32C6*) ARCH=rv32imc ;;
     *ESP32*)   ARCH=xtensawin ;;
@@ -84,22 +120,15 @@ gzip -9 -n -c web.html > web.html.gz
 
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
-# of metadata, while the old one still exists. Also: an OTA being validated?
+# of metadata, while the old one still exists
 FREE=$($MPREMOTE connect "$PORT" exec "
 import os
-names = os.listdir()
-for n in names:
+for n in os.listdir():
     if n.endswith('.dpl'):
         os.remove(n)
 s = os.statvfs('/')
-print('free', s[0], s[3], 'ota.pending' in names)" | tr -d '\r' | grep '^free ' | tail -n 1 || true)
-read -r _ BSIZE BFREE OTAPEND <<< "$FREE" || true
-if [ "${OTAPEND:-}" = True ]; then
-    echo "An OTA install is being validated on the board (/ota.pending): its reset" >&2
-    echo "now would roll it back. Wait ~2 minutes (status page: ota ok), then deploy." >&2
-    [ "${FORCE:-0}" = 1 ] || exit 1
-    echo "FORCE=1: deploying during the OTA validation" >&2
-fi
+print('free', s[0], s[3])" | tr -d '\r' | grep '^free ' | tail -n 1 || true)
+read -r _ BSIZE BFREE <<< "$FREE" || true
 case "${BSIZE:-x}${BFREE:-x}" in
     *[!0-9]*) echo "Could not read the free flash of the board: $FREE" >&2; exit 1 ;;
 esac
@@ -170,5 +199,6 @@ for n in '$FILES'.split():
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
     + reset
+trap - EXIT
 
 echo "Deployed to $PORT"

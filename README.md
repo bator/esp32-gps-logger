@@ -198,14 +198,21 @@ what browsers get) and copies `gps_logger.mpy`, `main.py`, the status page
 renames them over the old files; a failed check (`Copy check FAILED`)
 removes the `.dpl` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module (not
-`<name>.new`: that is how an OTA stages the page it installs). While an
-OTA install is being validated (`/ota.pending`, about 2 minutes) it stops
-before copying: its reset would abort the pending firmware, the bootloader
-would roll back and the build would be blamed (`FORCE=1` deploys anyway,
-the staged page left alone). Then it
+`<name>.new`: that is how an OTA stages the page it installs). Its first
+question to the board is whether an OTA install is being validated
+(`/ota.pending`, about 2 minutes): then it stops before anything else, as
+its reset would abort the pending firmware, the bootloader would roll back
+and the build would be blamed (`FORCE=1` deploys anyway, the staged page
+left alone). Then it
 removes a stray `gps_logger.py`, clears the boot-fail counter and resets
 the board. When it cannot tell whether the firmware has the logger frozen
 in (no clear answer from the board), it stops instead of guessing.
+Each `mpremote` session stops the logger (raw REPL), so every early exit
+(an OTA pending, too little flash, a failed copy check, a stale frozen
+logger, no clear answer) starts it again: by a reset, or, with an OTA
+pending (or no answer to that question), by running `gps_logger.run()`
+without one. Left in the REPL, the board waited for the watchdog's reset,
+counted as a boot failure, and that reset aborted a pending OTA.
 
 The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, and
@@ -312,20 +319,34 @@ than its own, whose HMAC checks and that has not failed before, goes into
 the other app slot 4 KB at a time, with the GPS read and the watchdog fed
 between (~1 min; the HTTP body ends at its Content-Length). It is read back
 against its SHA-256, the page files are staged as `<file>.new`, the slot is
-set to boot and the board resets. The new firmware runs pending: 2 minutes
-with WiFi connected (`OTA_VALID_AFTER`) mark it valid, and only then do the
+set to boot and the board resets. Before any of that the manifest's fields
+are checked (whole numbers, a 64-hex SHA-256, no `|` in a string, only
+`/web.html` and `/web.html.gz`, each once): the HMAC covers them joined by
+`|`, so a manifest with a `|` moved between fields would keep it (`bad
+manifest`; the format itself is unchanged). The new firmware runs pending:
+2 minutes with WiFi connected (`OTA_VALID_AFTER`), and the manifest read
+once more (HTTP 200, every minute until it is: `OTA_PROBE`; a build whose
+update path is broken would otherwise only get the next one over USB),
+mark it valid, and only then do the
 staged page files replace the old ones (on a file system that does not
 rename over a file, the old one is moved aside first and back if the new
 one still does not go up; a page that does not go up is a diag line,
 `ota <commit> page <path> not put up`). A crash or reset before that and
-the bootloader boots the old slot; no WiFi within 10 minutes (`OTA_HEALTH`)
-and it resets itself, with the same result (it never sets the old slot to
-boot itself: that left the old image pending, and the next reset fell back
-to `ota_0`). A download that fails its SHA-256 is tried again an hour later
-(`OTA_RETRY`), not every check; an error (server down) goes to the
-diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not tried again;
-one rolled back by a power-off (the cable pulled) is tried again. A boot
-without a pending note confirms the running image. Each step is in the
+the bootloader boots the old slot; no WiFi or no manifest within 10 minutes
+(`OTA_HEALTH`) and it resets itself, with the same result (it never sets
+the old slot to boot itself: that left the old image pending, and the next
+reset fell back to `ota_0`). A download that fails its SHA-256, or a page
+file that fails its SHA-256 or cannot be written, is tried again an hour
+later (`OTA_RETRY`), not every check; an error (server down) goes to the
+diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not tried again.
+A rollback that may not be the build's fault is a try instead, counted per
+build in `/ota.tries`: one at power-on (the cable pulled; MicroPython 1.29
+reports a brownout as a power-on too, and a build that browned out on a
+weak supply was reinstalled after every boot) and the no WiFi / no
+manifest reset (a router or server outage). The build is tried again an
+hour after the next boot (`OTA_RETRY`) and is bad after 2 tries
+(`OTA_TRIES_MAX`). A boot without a pending note confirms the running
+image. Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
 The status page shows the running build under *Systems*: the `FIRMWARE` row
 gives the build's date (the commit time, `fw_build` in the JSON, local
@@ -1301,7 +1322,8 @@ with a NEO-6M; most never need changing.
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
-| `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi; wall clock for one download |
+| `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
+| `OTA_PROBE` / `OTA_TRIES_MAX` | 1 min / 2 | How often a pending firmware reads the manifest until it did; rollbacks at power-on or without WiFi / manifest before a build is bad |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |

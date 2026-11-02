@@ -6504,7 +6504,8 @@ with open(a[-1], "rb") as f, open(out, "wb") as g:
 """
 FAKE_SHIM = r"""
 import sys, os, types
-sys.implementation._machine = "Generic ESP32C6 module with ESP32C6"
+sys.implementation._machine = os.environ.get(
+    "FAKE_MACHINE", "Generic ESP32C6 module with ESP32C6")
 m = types.ModuleType("machine")
 class RTC:
     def memory(self, b=None):
@@ -6529,9 +6530,18 @@ for x in a[2:]:
         cmds[-1].append(x)
 with open(log, "a") as f:
     f.write(json.dumps(cmds) + "\n")
+def logger(s):                  # what the logger does: a session's raw REPL
+    with open(os.environ["FAKE_LOGGER"], "a") as f:      # stops it
+        f.write(s + "\n")
+logger("stop")
 shim = open(os.environ["FAKE_SHIM"]).read()
 for c in cmds:
-    if c[0] == "exec":
+    if c[:2] == ["exec", "--no-follow"]:
+        logger("run " + c[2])   # (not run here: it would not return)
+    elif c[0] == "reset":       # main.py runs it again; an OTA being
+        logger("reset" + (" pending" if os.path.exists(    # validated aborts
+            os.path.join(dev, "ota.pending")) else ""))
+    elif c[0] == "exec":
         if os.environ.get("FAKE_GARBLE") and "gps_frozen" in c[1]:
             print("could not enter raw repl")    # no frozen/plain answer
             sys.exit(1)
@@ -6586,6 +6596,7 @@ def deploy_run(env_extra):
                 f.write('SHA = "%s"\n' % (sha if fz != "stale" else "0" * 64))
     env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
+               FAKE_LOGGER=os.path.join(work, "logger"),
                FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
     env.update(env_extra)
     r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
@@ -6596,6 +6607,15 @@ def deploy_run(env_extra):
     except OSError:
         calls = []
     return r.returncode, r.stdout, r.stderr, dev, calls
+
+
+def dev_logger(dev):
+    """What the fake board's logger went through: stop / reset / run ..."""
+    try:
+        with open(os.path.join(os.path.dirname(dev), "logger")) as f:
+            return f.read().split("\n")[:-1]
+    except OSError:
+        return []
 
 
 def dev_file(dev, n):
@@ -6711,6 +6731,34 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           == new_mpy and dev_file(dev, "gps_logger.py") is None
           and "WARNING: FORCE_MPY=1" in out and "Deployed" in out,
           "rc=%d %r %r" % (rc, out[-300:], err[-200:]))
+    # DEPLOY-RESTART: each mpremote session stops the logger (raw REPL);
+    # the early exits left it stopped until the WDT reset the board (a boot
+    # failure), and during an OTA validation that reset aborted the pending
+    # image, the build blamed: what the /ota.pending stop is for. Every exit
+    # restarts it: a reset, or with an OTA pending the logger run again
+    # without one; the pending check is the first session
+    run_cmd = "run import gps_logger; gps_logger.run()"
+    rs = []
+    for case, pend in ((({"FAKE_OTA_PENDING": "1"}), True),
+                       ({"FAKE_OTA_PENDING": "1", "FORCE": "1",
+                         "FAKE_FREE_BLOCKS": "3"}, True),
+                       ({"FAKE_FREE_BLOCKS": "3"}, False),
+                       ({"FAKE_TRUNC": "gps_logger.mpy"}, False),
+                       ({"FAKE_FROZEN": "stale"}, False),
+                       ({"FAKE_GARBLE": "1"}, False),
+                       ({"FAKE_MACHINE": "Raspberry Pi Pico with RP2040"},
+                        False),
+                       ({}, False)):
+        rc, out, err, dev, calls = deploy_run(case)
+        lg = dev_logger(dev)
+        ok = (lg[-1:] == ([run_cmd] if pend else ["reset"])
+              and "reset pending" not in lg and (rc == 0) == (case == {}))
+        if pend and not case.get("FORCE"):
+            ok = ok and len(calls) == 2 and "ota.pending" in calls[0][0][1]
+        rs.append(ok or (case, rc, lg, [[x[0] for x in c] for c in calls]))
+    check("DEPLOY-RESTART: every exit restarts the logger: a reset, or with "
+          "an OTA pending a run without one; the pending check comes first",
+          rs == [True] * len(rs), repr(rs))
 else:
     print("SKIP  DEPLOY: no bash/sha256sum")
 
@@ -11800,10 +11848,13 @@ _slots = [_FakePart("ota_0", 65536), _FakePart("ota_1", 65536)]
 _ota_dir = tempfile.mkdtemp()
 _ota_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
               gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
-              gl.DIAG)
+              gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES)
 gl.esp32 = _FakeEsp32
 gl.OTA_PENDING = os.path.join(_ota_dir, "ota.pending")
 gl.OTA_BAD = os.path.join(_ota_dir, "ota.bad")
+gl.OTA_TRIES = os.path.join(_ota_dir, "ota.tries")
+gl.OTA_PAGES = (os.path.join(_ota_dir, "web.html"),
+                os.path.join(_ota_dir, "web.html.gz"))
 gl.machine.reset = lambda: _ota_log.append(("reset",))
 gl.DIAG = 60000
 _img = bytes((i * 7) & 255 for i in range(10000))      # 2 blocks + a tail
@@ -11846,7 +11897,7 @@ def _ota_reset():
     for sl in _slots:
         sl.mem[:] = b"\0" * len(sl.mem)
         sl.boot = False
-    for f in (gl.OTA_PENDING, gl.OTA_BAD,
+    for f in (gl.OTA_PENDING, gl.OTA_BAD, gl.OTA_TRIES,
               os.path.join(_ota_dir, "web.html.gz"),
               os.path.join(_ota_dir, "web.html.gz.new")):
         try:
@@ -11920,14 +11971,16 @@ try:
           states == ["current", "bad hmac", "bad image", "too big", "current",
                      "no ota slot", "manifest 404"], repr(states))
 
-    # pending: valid after OTA_VALID_AFTER with WiFi (the staged page goes
-    # up); no WiFi in OTA_HEALTH: a reset (no set_boot: the bootloader
-    # aborts the pending image) and the build is bad; the old build at boot
-    # is a rollback, blamed unless the board was powered off
+    # pending: valid after OTA_VALID_AFTER with WiFi and the manifest read
+    # (the staged page goes up); no WiFi in OTA_HEALTH: a reset (no
+    # set_boot: the bootloader aborts the pending image), a try (OTA-NOWIFI);
+    # the old build at boot is a rollback, blamed unless the board was
+    # powered off
     page_p = os.path.join(_ota_dir, "web.html.gz")
     res = []
     for wifi_ok in (True, False):
         _ota_reset()
+        _serve(_manifest(200))
         gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
         with open(page_p, "wb") as f:
             f.write(b"old page")
@@ -11970,12 +12023,12 @@ try:
     plain = list(_ota_log)
     check("OTA-HEALTH: valid after OTA_VALID_AFTER with WiFi, the staged "
           "page goes up; no WiFi in OTA_HEALTH resets without set_boot "
-          "(bad, staged page dropped)",
+          "(a try, staged page dropped)",
           res[0][:2] == ([], ([("valid",)], "ok"))
           and res[0][3:] == ("ok", False, [], _page, False)
           and res[1][1] == ([], "pending")
           and res[1][2] == [("reset",)]
-          and res[1][4:] == (False, [200], b"old page", False),
+          and res[1][4:] == (False, [], b"old page", False),
           repr(res))
     check("OTA-ROLLBACK: the old build at boot after a hard reset is a "
           "bootloader rollback (bad); after a power-off tried again; the "
@@ -11994,6 +12047,7 @@ try:
     real_rename = os.rename
     for mode in ("exists", "broken"):
         _ota_reset()
+        _serve(_manifest(200))
         diag_clear()
         gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
         with open(page_p, "wb") as f:
@@ -12053,6 +12107,216 @@ try:
           sbf == "raised" and not os.path.exists(gl.OTA_PENDING)
           and not os.path.exists(page_p + ".new") and _ota_log == [],
           repr((sbf, _ota_log)))
+    # OTA-MANIFEST: the HMAC covers the fields joined by "|", unescaped: a
+    # manifest re-split at a "|" kept the HMAC (a page path swallowing the
+    # next file; a commit swallowing the firmware fields, the page then
+    # installed as the firmware). The format stays (boards in the field read
+    # the same manifests); its fields are checked instead: no "|", ints,
+    # 64 hex sha256, only the page paths, each once
+    def _resign(x):
+        try:
+            x["hmac"] = gl._hmac_hex(b"secret", gl._ota_signed(x))
+        except (TypeError, ValueError, KeyError):
+            pass
+        return x
+    page_h = os.path.join(_ota_dir, "web.html")
+    mm = _manifest(200)
+    mm["files"].append({"path": page_h, "size": len(_page),
+                        "sha256": _hl.sha256(_page).hexdigest(),
+                        "url": "web.html.gz"})
+    _resign(mm)
+    f1, f2 = mm["files"]
+    va = dict(mm, files=[{"path": "|".join([f1["path"], str(f1["size"]),
+                                            f1["sha256"], f1["url"],
+                                            f2["path"]]),
+                          "size": f2["size"], "sha256": f2["sha256"],
+                          "url": f2["url"]}])
+    vb = {"build": 200, "commit": "|".join([
+              mm["commit"], str(mm["size"]), mm["sha256"], mm["url"],
+              f1["path"], str(f1["size"]), f1["sha256"], f1["url"],
+              f2["path"]]),
+          "size": f2["size"], "sha256": f2["sha256"], "url": f2["url"],
+          "files": [], "hmac": mm["hmac"]}
+    collide = [gl._hmac_hex(b"secret", gl._ota_signed(x)) == mm["hmac"]
+               for x in (va, vb)]
+    odd = [va, vb]
+    for k, v in (("build", "200"), ("size", 10000.0), ("sha256", "ab" * 31),
+                 ("sha256", "AB" * 32), ("url", "a|b.bin"), ("commit", 7)):
+        odd.append(_resign(dict(mm, **{k: v})))
+    for fs in ([dict(f1, path="/main.py")], [f1, f1], [dict(f1, size="21")],
+               [dict(f1, sha256="0" * 63 + "|")], [dict(f1, url="a|b")],
+               ["/web.html"], {"path": f1["path"]}):
+        odd.append(_resign(dict(mm, files=fs)))
+    man = []
+    for x in odd:
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        _serve(x)
+        w0 = _slots[1].writes
+        try:
+            gl._ota_check()
+            man.append((gl.ota["state"], list(_ota_log),
+                        _slots[1].writes - w0))
+        except Exception as e:
+            man.append(("raised", repr(e)[:40]))
+    _ota_reset()
+    _serve(mm)
+    gl._ota_check()
+    good = list(_ota_log)
+    check("OTA-MANIFEST: a re-split manifest (same HMAC), a field with '|', "
+          "a non-int, a bad sha256, an unknown or repeated page is refused "
+          "before any download; the published shape installs",
+          collide == [True, True]
+          and man == [("bad manifest", [], 0)] * len(odd)
+          and good == [("boot", "ota_1"), ("reset",)],
+          repr((collide, man, good)))
+
+    # OTA-PAGEFAIL: a page that fails its sha256 (or cannot be written)
+    # raised past ota["failed"]: the 2 MB firmware came again every check;
+    # it waits OTA_RETRY like a bad firmware download
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    _serve(_manifest(200))
+    _files["http://ota.lan/gps/web.html.gz"] = b"<html>other page</html>"
+    fw = []
+    for k in range(4):
+        _clock[0] += gl.OTA_CHECK
+        w0 = _slots[1].writes
+        try:
+            gl._ota_check()
+        except Exception:
+            pass
+        fw.append(_slots[1].writes > w0)
+    _clock[0] += gl.OTA_RETRY
+    _files["http://ota.lan/gps/web.html.gz"] = _page
+    gl._ota_check()
+    check("OTA-PAGEFAIL: a page failing its sha256 is one firmware download "
+          "per OTA_RETRY, not one per check; nothing boots meanwhile",
+          fw == [True, False, False, False]
+          and _ota_log == [("boot", "ota_1"), ("reset",)],
+          repr((fw, _ota_log, gl.ota.get("failed"))))
+
+    # OTA-POWERON: MicroPython 1.29 reports a brownout as PWRON_RESET, so a
+    # build that browned out on a weak supply was rolled back, never blamed
+    # and installed again 2 min after every boot. A power-on rollback is a
+    # try (OTA_TRIES): the next install waits OTA_RETRY, the
+    # OTA_TRIES_MAX-th rollback marks the build bad
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    _serve(_manifest(200))
+    pw = []
+    for boot in range(5):
+        gl.ota.update(state="idle", pend=None, failed=None, at=None)
+        _reset_cause[0] = 1              # PWRON_RESET (a brownout too)
+        gl.ota_boot()
+        del _ota_log[:]
+        _clock[0] += gl.OTA_FIRST
+        gl._ota_check()
+        first = (gl.ota["state"], ("boot", "ota_1") in _ota_log)
+        if not first[1]:
+            _clock[0] += gl.OTA_RETRY
+            gl._ota_check()
+        pw.append(first + (("boot", "ota_1") in _ota_log,))
+    check("OTA-POWERON: a build rolled back at power-on (a brownout) waits "
+          "OTA_RETRY, and is bad after OTA_TRIES_MAX such rollbacks",
+          [p[1:] for p in pw] == [(True, True), (False, True), (False, False),
+                                  (False, False), (False, False)]
+          and pw[1][0] == "rolled back" and pw[2][0] == "current"
+          and gl._ota_bad() == [200],
+          repr((pw, gl._ota_bad())))
+
+    # OTA-NOWIFI: no WiFi in OTA_HEALTH rolled back and blamed the build
+    # for good: a router outage excluded a good build forever. It is a try
+    # too: the old firmware waits OTA_RETRY, the second one is bad
+    _ota_reset()
+    nw = []
+    for k in range(2):
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        with open(gl.OTA_PENDING, "w") as f:
+            f.write("200 abc0200\n")
+        gl.ota.update(state="idle", pend=None, failed=None, at=None)
+        del _ota_log[:]
+        gl.ota_boot()
+        gl.wifi_reset()
+        gl.wifi["state"] = "not found"
+        gl.ota_tick(_clock[0])
+        _clock[0] += gl.OTA_HEALTH + 1000
+        gl.ota_tick(_clock[0])
+        r = (list(_ota_log), gl._ota_bad())
+        # the bootloader boots the old image: no pending note left
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        gl.ota.update(state="idle", pend=None, failed=None, at=None)
+        _reset_cause[0] = 2
+        gl.ota_boot()
+        _serve(_manifest(200))
+        del _ota_log[:]
+        _clock[0] += gl.OTA_FIRST
+        gl._ota_check()
+        nw.append(r + (gl.ota["state"], list(_ota_log)))
+    gl.wifi_reset()
+    check("OTA-NOWIFI: no WiFi in OTA_HEALTH resets; the build waits "
+          "OTA_RETRY and is bad only after OTA_TRIES_MAX such rollbacks",
+          nw == [([("reset",)], [], "rolled back", []),
+                 ([("reset",)], [200], "current", [])],
+          repr(nw))
+
+    # OTA-PROBE: a pending firmware is valid only once it read the manifest
+    # too (HTTP 200, parsed): a build with a broken update path rolls back
+    # instead of leaving the board to USB updates. Read every OTA_PROBE,
+    # OTA_HEALTH as before; no OTA_URL: valid with WiFi as before
+    pr = []
+    gets = []
+    def _counting_get(url, sink, limit):
+        gets.append(url)
+        return _ota_get(url, sink, limit)
+    gl.HTTP_GET = _counting_get
+    try:
+        for mode in ("served", "404", "late", "no url"):
+            _ota_reset()
+            del gets[:]
+            gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+            with open(gl.OTA_PENDING, "w") as f:
+                f.write("200 abc0200\n")
+            if mode == "served":
+                _serve(_manifest(200))
+            else:
+                _files.clear()
+            url = gl.OTA_URL
+            if mode == "no url":
+                gl.OTA_URL = None
+            try:
+                gl.ota_boot()
+                gl.wifi_reset()
+                gl.wifi["state"] = "connected"
+                gl.ota_tick(_clock[0])
+                _clock[0] += gl.OTA_VALID_AFTER + 1000
+                gl.ota_tick(_clock[0])
+                mid = (list(_ota_log), gl.ota["state"])
+                if mode == "late":
+                    _serve(_manifest(200))
+                for i in range(gl.OTA_HEALTH // 5000):
+                    if gl.ota["pend"] is None:
+                        break            # (valid or reset: the probe's end)
+                    _clock[0] += 5000
+                    gl.ota_tick(_clock[0])
+            finally:
+                gl.OTA_URL = url
+            pr.append((mode, mid, list(_ota_log), gl._ota_bad(),
+                       os.path.exists(gl.OTA_PENDING), len(gets)))
+    finally:
+        gl.HTTP_GET = _ota_get
+        gl.wifi_reset()
+    check("OTA-PROBE: valid after OTA_VALID_AFTER with WiFi and a manifest "
+          "read; none read in OTA_HEALTH resets (a try, not bad); read "
+          "every OTA_PROBE; no OTA_URL as before",
+          [p[:5] for p in pr] == [
+              ("served", ([("valid",)], "ok"), [("valid",)], [], False),
+              ("404", ([], "pending"), [("reset",)], [], False),
+              ("late", ([], "pending"), [("valid",)], [], False),
+              ("no url", ([("valid",)], "ok"), [("valid",)], [], False)]
+          and pr[0][5] == 1 and pr[3][5] == 0
+          and 2 <= pr[1][5] <= gl.OTA_HEALTH // gl.OTA_PROBE + 2,
+          repr(pr))
     # a reset in between keeps the state: _ota_env leaves "pending" alone
     gl.ota["state"] = "pending"
     gl._ota_env({"OTA_URL": "http://ota.lan/m.json", "OTA_KEY": "k"})
@@ -12178,7 +12442,7 @@ try:
 finally:
     (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
      gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
-     gl.DIAG) = _ota_saved
+     gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES) = _ota_saved
     diag_clear()
     shutil.rmtree(_ota_dir, ignore_errors=True)
 
@@ -12425,13 +12689,15 @@ check("R2-UPTIME: _up starts at the ticks of the import (boot), not at 0",
 _ota_dir2 = tempfile.mkdtemp()
 _or_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
              gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
-             gl.DIAG)
+             gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES)
 _ota_dir = _ota_dir2
 gl.esp32, gl.HTTP_GET = _FakeEsp32, _ota_get
 gl.OTA_URL, gl.OTA_KEY = "http://ota.lan/gps/manifest.json", b"secret"
 gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
 gl.OTA_PENDING = os.path.join(_ota_dir2, "ota.pending")
 gl.OTA_BAD = os.path.join(_ota_dir2, "ota.bad")
+gl.OTA_TRIES = os.path.join(_ota_dir2, "ota.tries")
+gl.OTA_PAGES = (os.path.join(_ota_dir2, "web.html.gz"),)
 gl.machine.reset = lambda: _ota_log.append(("reset",))
 gl.DIAG = 60000
 try:
@@ -12469,7 +12735,7 @@ try:
 finally:
     (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
      gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
-     gl.DIAG) = _or_saved
+     gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES) = _or_saved
     gl.wifi_reset()
     gl.log_reset()
     diag_clear()
