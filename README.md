@@ -374,6 +374,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `gps pvt no NAV-PVT - NMEA` / `gps pvt refused - NMEA` | 10 s after an acknowledged NAV-PVT setup no NAV-PVT came, or the receiver NAKed its message frame: NMEA for the rest of the boot (also in the diagnostic log as `gps pvt …, NMEA this boot`) |
 | `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
 | `gps setup unverified: no fix` | 30 minutes after an acknowledged setup still no fix to check it by: no verdict |
+| `gps rate N ms refused` | The receiver answered the rate (CFG-RATE) with a NAK: it stays at 1 fix a second, the rest of the setup goes on acknowledged, and 1 fix/s is then no "not taken" verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
 | `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring. The diagnostic log gets the first one, then `gps reset loop N more windows` every 5 minutes and when it ends |
 | `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds. It counts as over after a quiet of twice its last gap between restarts (10-30 s) |
@@ -797,7 +798,9 @@ console line.
   (`PVT_MAX_HACC`); HDOP and GST apply only to NMEA seconds. 2D fixes omit
   altitude. A fix dated before 2020 or from 2088
   on is not used at all: a receiver past a GPS week rollover reports 1999
-  (read as 2099) or 2000.
+  (read as 2099) or 2000. An NMEA fix is a GGA quality of 1–5
+  (`GGA_FIX_MAX`) and an RMC mode other than `E`: an estimated (dead
+  reckoning) position is no fix, as on the NAV-PVT path.
 - **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
   line (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop
   empty when unknown), `-` for a new segment and an `#END` footer. Reading
@@ -948,8 +951,14 @@ tell a stay from a drive, so the stay filter works on positions.
   nor an open window that has spread out (its centroid over 100 m from both
   its first and its latest fix: a drive, which used to wait up to two
   minutes in RAM), and it is written 10 minutes after the fix was lost
-  (`HOLD_RELEASE`): the end of a trip into a garage or a house no longer
-  waits in RAM only. A fix back after 5 minutes more than 150 m away writes
+  (`HOLD_RELEASE`), or after no usable fix for as long (a receiver that
+  keeps a fix indoors at 30–100 m kept it in RAM for hours, and a reboot
+  dropped it): the end of a trip into a garage or a house no longer waits
+  in RAM only. A window that spread out on its own (its centroid over 75 m
+  from both its first and its last fix: an out-and-back turn at driving or
+  cycling speed) proves no stay, so a U-turn no longer drops part of the
+  trip. A walk turning back within ~80 m still can: indoor drift looks the
+  same. A fix back after 5 minutes more than 150 m away writes
   what was held to the old track before it closes.
 - **Leaving home** is accepted only once the home network is out of range
   (below −75 dBm: the RSSI when connected, else a ~2 s scan). While it is in
@@ -1038,10 +1047,15 @@ set up at all (no `.env`, no SSID). What the pulse is (`KEEPALIVE_MODE`):
   burst the bank cannot miss, ~5 mA on average, nothing blocked.
 
 With the status page on (`WEB`), a keep-alive scan that sees a home network
-(a hidden home: one of its learned BSSIDs) at ≥ −75 dBm while the radio
+(a hidden home: one of its learned BSSIDs) at ≥ −85 dBm (`SEEN_MIN_RSSI`:
+a home it connects to at −78 dBm used to wait an hour) while the radio
 sleeps or found nothing starts a round at once
 (`wifi home in range`): after a router restart the page used to stay down
-for an hour. At most once a minute, doubling while those rounds fail.
+for an hour. At most once a minute, doubling while those rounds fail. A
+link that dropped somewhere the scan cannot vouch for (a hotspot with
+`WEB_AWAY`, a home that dropped below −85 dBm) searches with the backoff
+for `WEB_SEARCH` instead of waiting for the scan; a round that fails after
+the radio slept on purpose does not count as a drop.
 
 **CPU clock:** the main loop runs at 80 MHz (`CPU_MHZ`), which saves
 15–25 mA on the original ESP32 against its 240 MHz default. A POST runs at
@@ -1234,6 +1248,7 @@ with a NEO-6M; most never need changing.
 | `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP (NMEA) |
+| `GGA_FIX_MAX` | 5 | Highest GGA quality that is a fix (6, estimated, is not) |
 | `GPS_MAX_STD` / `GST_HOLD` | 20 m / 6 s | Skip samples with a worse GST error estimate (NMEA); how long the last estimate covers seconds without one |
 | `GPS_PVT` | `True` (auto) | UBX-NAV-PVT instead of NMEA on a u-blox M8/M10 (`.env` `GPS_PVT`: `auto` / `0`) |
 | `PVT_MAX_HACC` | 20 m | Skip NAV-PVT seconds with a worse horizontal accuracy estimate; fixes above it count in a second's mean only when it has no better one |
@@ -1251,7 +1266,7 @@ with a NEO-6M; most never need changing.
 | `MIN_FREE` | 32 kB | Flash reserve |
 | `HIST_RESERVE` | 1 MB | Free flash the day history leaves to the tracks (older days go first) |
 | `MAX_BATCH` | 240 | Points kept in RAM while flash writes fail |
-| `WFAIL_SWITCH` | 3 | Failed writes in a row to a track file (a bad block) before it is left as it is (it uploads what it holds) and the points go on in a new file |
+| `WFAIL_SWITCH` | 3 | Failed writes in a row to a track file (a bad block) before it is left (cut back to its last good footer, so a partly landed batch is not sent twice) and the points go on in a new file |
 | `HOLD_MAX` | 150 | Lines a stay still being proven keeps in RAM |
 
 **Stays**
@@ -1289,6 +1304,7 @@ with a NEO-6M; most never need changing.
 | `WIFI_OFF_WAIT` | 60 s | An upload backoff at least this long turns the radio off until it is due |
 | `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
 | `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
+| `SEEN_MIN_RSSI` | −85 dBm | With `WEB`, a home a keep-alive scan sees at least this strong starts a round while the radio sleeps |
 | `UNLISTED_EVERY` | 4 | A network a good scan did not list is tried every Nth round (hidden ones always) |
 | `WEB_SEARCH` | 30 min | With `WEB` and no keep-alive scan that can see home (none, or a hidden home not learned yet), failed rounds keep searching this long before sleeping |
 | `BLANK_BAD_HOLD` / `HOME_AP_MAX` / `LEARN_RSSI` | 1 h / 4 / 8 dB | Hidden home: a blank AP whose try failed is skipped; learned BSSIDs kept; RSSI match for learning |
