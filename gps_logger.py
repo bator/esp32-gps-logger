@@ -396,7 +396,8 @@ def reset():
               storm_at=None, boot_at=None, boot_last=None, boot_gap=0,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
               gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0,
-              ack_id=None, ack=None, ack_n=0, checked=True, hz1=0, hz5=0,
+              ack_id=None, ack=None, ack_n=0, rate_nak=False, checked=True,
+              hz1=0, hz5=0,
               set_ok=0, gst_at=None, loop_more=0, loop_said=None,
               nt_said=None, nt_more=0, ver_said=None,
               # NAV-PVT (M8/M10): mode of the last setup ("pvt"/"nmea"),
@@ -448,12 +449,20 @@ def _acc(key, pos):
         a[3] += pos[1] - a[1]
         a[4] += 1
 
+_sec = [None, None]                      # HHMMSS last seen, its "HH:MM:SS"
+_day = [None, None]                      # DDMMYY last seen, its YYYY-MM-DD
+
 def _second(s):
     """Start the sentence's UTC second (HHMMSS.ss, the fraction ignored);
-    a new second publishes the one before."""
+    a new second publishes the one before. Its "HH:MM:SS" is made once a
+    second, not for each sentence of each epoch (5 allocations each)."""
     if len(s) < 6:
         return
-    _second_t("%s:%s:%s" % (s[0:2], s[2:4], s[4:6]))
+    c = _sec
+    if c[0] is None or not s.startswith(c[0]):
+        c[0] = s[0:6]
+        c[1] = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
+    _second_t(c[1])
 
 def _second_t(t):
     """Start UTC second t ("HH:MM:SS", from NMEA or NAV-PVT)."""
@@ -598,8 +607,8 @@ def _pvt(fr):
     """One NAV-PVT frame (a memoryview, whole, checksum good): starts its
     second, keeps the latest epoch's fix type, satellites, speed and
     accuracies in st, and adds a fix (gnssFixOK, a valid position, fixType
-    2D, 3D or GNSS+DR, as GGA's quality > 0 is today: 2D drops the
-    elevation) to the second's mean (_pvt_acc)."""
+    2D, 3D or GNSS+DR, as GGA's quality 1-5: 2D drops the elevation; DR
+    only is no fix) to the second's mean (_pvt_acc)."""
     (y, mo, d, h, mi, sec, valid, tacc, nano, fix, flags, nsv, lon, lat,
      hmsl, hacc, vacc, gspd, head, sacc, headacc, pdop,
      flags3) = struct.unpack_from(_PVT, fr, 6)
@@ -669,6 +678,11 @@ def _publish_pvt(p, now):
               hdop=None, hdop_at=now, std=None, std_at=now)
     _published(now)
 
+# GGA quality 6 / RMC mode E: an estimate (dead reckoning, the last fix
+# carried on), no fix, as NAV-PVT's DR-only one is none (_pvt). GGA 1-5 are
+# (GPS, DGPS, PPS, RTK fixed / float)
+GGA_FIX_MAX = 5
+
 def rmc(talker, f):
     _second(f[1])
     st["status"] = f[2]
@@ -679,9 +693,12 @@ def rmc(talker, f):
     st["course"] = _num(f[8])
     d = f[9]
     if len(d) == 6:
-        ep["date"] = "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
+        c = _day                         # (made once a day, as _second)
+        if d != c[0]:
+            c[0], c[1] = d, "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
+        ep["date"] = c[1]
     pos = _position(f, 3)
-    if f[2] == "A" and pos:
+    if f[2] == "A" and pos and (len(f) < 13 or f[12] != "E"):
         _acc("r", pos)
 
 def gga(talker, f):
@@ -689,7 +706,7 @@ def gga(talker, f):
     st["quality"] = _num(f[6], int)
     st["used"] = _num(f[7], int)
     pos = _position(f, 2)
-    if (st["quality"] or 0) > 0 and pos:
+    if 0 < (st["quality"] or 0) <= GGA_FIX_MAX and pos:
         _acc("g", pos)
         alt, hd = _num(f[9]), _num(f[8])
         if alt is not None:
@@ -1081,11 +1098,16 @@ def gps_setup():
     receiver still sends the sentences it turns off, and until then each
     second's average is that one fix. The whole setup blocks the loop
     GPS_SETUP_MAX at most (late ACKs took 10-30 s): what is not
-    acknowledged by then is sent once without waiting, as if silent."""
+    acknowledged by then is sent once without waiting, as if silent. A
+    CFG-RATE refused (NAK) is an answer, as NAV5's is: the rest goes on
+    acknowledged and the receiver keeps its rate (st["rate_nak"]: 1 fix/s
+    is then no "not taken" verdict). A NAV-PVT setup stops at a frame
+    refused or unanswered: the NMEA-off frames after it would leave the
+    receiver silent, no NMEA and no NAV-PVT, until the next setup."""
     read_uart()                          # a banner in it came before
     t0 = time.ticks_ms()
     boots = st["gps_boots"]
-    st["setup_at"], st["extra"] = t0, 0
+    st["setup_at"], st["extra"], st["rate_nak"] = t0, 0, False
     ok = False
     mode = "nmea"                        # (until MON-VER names an M8/M10:
                                          # then gps_check sets it up again)
@@ -1095,7 +1117,10 @@ def gps_setup():
         # unanswered the other message frames are sent without waiting (a
         # receiver that stops answering blocks the loop ~4 s, not ~4 s per
         # frame) and the receiver stays at 1 Hz until gps_check retries.
-        if _ubx_ack(_rate(1000), t0):
+        r = _ubx_ack(_rate(1000), t0)
+        if r is None:
+            _rate_nak(1000)
+        if r is not False:
             # NAV5 is a filter tuning, not part of the 5 Hz setup: a receiver
             # that refuses it (another model, a NAK) still gets the rest
             r = _ubx_ack(_nav5(), t0)
@@ -1105,16 +1130,27 @@ def gps_setup():
                 print("gps nav5 refused")
             mode = _gps_mode()
             for fr in _setup_msgs(mode):
-                if ok:
-                    r = _ubx_ack(fr, t0)
-                    ok = r is True or (r is None and fr is PVT_STOP)
-                    if r is None and mode == "pvt":
-                        _pvt_off("refused")   # a NAK: NMEA next time
-                else:
+                if not ok:
+                    if mode == "pvt":
+                        break            # (NAV5 unanswered: none blind)
                     uart.write(fr)
                     time.sleep_ms(30)
+                    continue
+                r = _ubx_ack(fr, t0)
+                ok = r is True or (r is None and fr is PVT_STOP)
+                if not ok and mode == "pvt":
+                    # no frame after it: NMEA off with NAV-PVT not on is a
+                    # silent receiver. A NAK: the NMEA setup, soon
+                    if r is None:
+                        _pvt_off("refused")
+                        st["setup_wait"] = GPS_RETRY
+                    break
             if ok:
-                ok = _ubx_ack(_rate(1000 // GPS_HZ), t0) is True
+                r = _ubx_ack(_rate(1000 // GPS_HZ), t0)
+                ok = r is not False
+                if r is None:
+                    st["rate_nak"] = True
+                    _rate_nak(1000 // GPS_HZ)
         else:
             # no answer: an overrun receiver ignores single frames but takes
             # a burst (measured): the message frames at once cut its output
@@ -1137,13 +1173,20 @@ def gps_setup():
         # and less often: the first retry after GPS_RETRY (that ACK may
         # have been a late one of another frame), then doubling. (A
         # restart read during the setup set its own wait: txt(), a storm's
-        # GPS_STORM_WAIT, kept.)
-        n = st["ack_n"]
+        # GPS_STORM_WAIT, kept.) ack_n counts on while it ignores (43200
+        # after a month): the shift stops at 4, past GPS_IGNORED_MAX
+        # already, not a long int a setup
+        n = min(st["ack_n"], 5)
         st["setup_wait"] = min(GPS_RETRY << (n - 1 if n > 1 else 0),
                                GPS_IGNORED_MAX)
         st["view"] = {}                  # GSV is off now: no frozen count
     print("gps setup" if mode == "nmea" else "gps setup pvt",
           "ok" if ok else "no ack")
+
+def _rate_nak(ms):
+    """A CFG-RATE refused (NAK): the receiver keeps the rate it has."""
+    print("gps rate", ms, "ms refused")
+    _diag_write("gps rate %d ms refused" % ms)
 
 def _pvt_off(why):
     """Give NAV-PVT up for this boot (a NAK, or no NAV-PVT after an
@@ -1187,7 +1230,7 @@ def _setup_check(now):
             print("gps setup unverified: no fix")
         return
     st["checked"] = True
-    slow = GPS_HZ > 1 and not hz5
+    slow = GPS_HZ > 1 and not hz5 and not st["rate_nak"]
     g = st["gst_at"]
     gst = g is not None and time.ticks_diff(g, st["setup_at"]) >= 0
     no_gst = not pvt and not gst and st["ok"] - st["set_ok"] >= 10
@@ -1196,7 +1239,8 @@ def _setup_check(now):
         why = "1 fix/s" if slow else "no GST"
         print("gps setup not taken:", why)
         _not_taken(now, why)
-    elif (gst or pvt) and (hz5 or GPS_HZ == 1) and not st["extra"]:
+    elif ((gst or pvt) and (hz5 or GPS_HZ == 1 or st["rate_nak"])
+          and not st["extra"]):
         st["ack_n"] = 0                  # it took this one
 
 def _not_taken(now, why):
@@ -1623,37 +1667,89 @@ def _diag_final():
     except Exception:
         pass
 
-def checksum_ok(line):
-    star = line.rfind(b"*")
-    if not line.startswith(b"$") or star < 0:
-        return False
-    c = 0
-    for b in memoryview(line)[1:star]:   # no copy of the line
-        c ^= b
-    try:
-        return c == int(line[star + 1:star + 3], 16)
-    except ValueError:
-        return False
+def _hex(c):
+    """An ASCII hex digit's value, or -1."""
+    if 48 <= c <= 57:
+        return c - 48
+    c |= 32
+    return c - 87 if 97 <= c <= 102 else -1
 
-def handle(line):
-    line = line.strip()
-    i = line.rfind(b"$")
-    if i > 0:
-        line = line[i:]                  # a binary UBX reply or a cut-off
-                                         # sentence ran into it
-    if not line:
+def _space(c):
+    return c == 32 or 9 <= c <= 13       # what bytes.strip() strips
+
+# the names in HANDLERS by their 3 bytes as one int (the type is looked up
+# in the bytes, not in a slice), and the talkers seen, as str, kept
+_HKEY = {ord(k[0]) << 16 | ord(k[1]) << 8 | ord(k[2]): k for k in HANDLERS}
+_TALK = {}
+TALK_MAX = 8                             # talkers kept (GP GN GL GA GB ...)
+
+def handle(line, s=0, e=None):
+    """One NMEA sentence: line[s:e] (read_uart hands over its buffer and
+    the line's bounds). The whitespace, the last "$" (a binary UBX reply
+    or a cut-off sentence ran into it), the checksum and the sentence type
+    are read from the bytes in place; only a type in HANDLERS is decoded
+    and split. That was ~20 allocations a sentence (a copy, slices,
+    decode, split, the type and talker), at up to 5 Hz x 2-3 sentences.
+    One with a byte over 0x7F goes the old way (decode, the type from the
+    text): it counts as it did."""
+    if e is None:
+        e = len(line)
+    v = _rxv if line is _rx else memoryview(line)
+    while s < e and _space(v[s]):
+        s += 1
+    while e > s and _space(v[e - 1]):
+        e -= 1
+    i = line.rfind(b"$", s, e)
+    if i > s:
+        s = i
+    if s >= e:
         return
-    if not checksum_ok(line):
+    star = line.rfind(b"*", s, e)
+    if i < 0 or star < 0:
+        st["err"] += 1
+        return
+    p = v[s + 1:star]                    # (one view: checksum and text)
+    c = hi = 0
+    for b in p:
+        c ^= b
+        hi |= b
+    h = _hex(v[star + 1]) if star + 1 < e else -1
+    g = _hex(v[star + 2]) if star + 2 < e else -1
+    if h < 0 or g < 0:
+        try:                             # (what int() makes of the rest)
+            h = int(bytes(line[star + 1:min(star + 3, e)]), 16)
+        except ValueError:
+            h = -1
+    else:
+        h = h << 4 | g
+    if c != h:
         st["err"] += 1
         return
     st["good"] = time.ticks_ms()         # the last whole frame (GPS link)
+    k = -1                               # a 5-character address: its type
+    if star - s == 6 or star - s > 6 and v[s + 6] == 44:
+        k = v[s + 3] << 16 | v[s + 4] << 8 | v[s + 5]
+    name = _HKEY.get(k)
+    if name is None and hi < 128:
+        st["ok"] += 1                    # one the logger does not read
+        return
     try:
-        f = line[1:line.rfind(b"*")].decode().split(",")
-        fn = HANDLERS.get(f[0][2:])
+        f = str(p, "utf-8").split(",")
+        if hi > 127:
+            name = f[0][2:]
+            talker = f[0][:2]
+        else:
+            t = v[s + 1] << 8 | v[s + 2]
+            talker = _TALK.get(t)
+            if talker is None:
+                talker = f[0][:2]
+                if len(_TALK) < TALK_MAX:
+                    _TALK[t] = talker
+        fn = HANDLERS.get(name)
         if fn:
-            fn(f[0][:2], f)
-            if st.get("mode") == "pvt" and f[0][2:] in _PVT_OFF:
-                _extra(f[0][:2], f)      # the PVT setup turned it off
+            fn(talker, f)
+            if st.get("mode") == "pvt" and name in _PVT_OFF:
+                _extra(talker, f)        # the PVT setup turned it off
         st["ok"] += 1
     except (ValueError, IndexError, UnicodeError):
         st["err"] += 1
@@ -1719,7 +1815,7 @@ def read_uart():
                 j = e
             if j == e:
                 e = j - 1 if j > r and b[j - 1] == 13 else j
-                handle(bytes(_rxv[r:e]))
+                handle(b, r, e)          # in place: no copy
                 r = s = j + 1
                 continue
             # a binary UBX answer: whole, by its length (it may hold 0x0A

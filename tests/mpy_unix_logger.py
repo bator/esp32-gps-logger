@@ -113,6 +113,73 @@ check("NMEA parsed (GN talker)", gl.st["ok"] == 2 and gl.st["err"] == 0)
 gl.handle(b"$GNGGA,1200" + nm("GNGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2,1"))
 check("cut-off sentence glued to a whole one", gl.st["fixtype"] == 3)
 
+
+# what a second of NMEA allocates, read as on the board (read_uart, then
+# handle): RMC + GGA at 5 Hz, GST, GSA and GSV; each sentence's garbage
+# brings the next collection (and its pause) closer
+class _Feed(_Uart):
+    def __init__(self):
+        _Uart.__init__(self)
+        self.feed(b"")
+
+    def feed(self, data):
+        self.data, self.o = memoryview(data), 0
+
+    def any(self):
+        return len(self.data) - self.o
+
+    def readinto(self, buf):
+        o = self.o
+        n = min(len(buf), len(self.data) - o)
+        buf[:n] = self.data[o:o + n]
+        self.o = o + n
+        return n
+
+
+# B a sentence on the unix port (64-bit: twice the board's object sizes):
+# 2655 when handle() got a copy of each line, sliced and decoded it all,
+# and _second / the RMC date formatted their strings every sentence; 1646
+# in place
+NMEA_BUDGET = 1800
+
+
+def nmea_second(k):
+    out = []
+    for f in range(5):
+        t = "1203%02d.%02d" % (k, f * 20)
+        out.append(nm("GPRMC,%s,A,4728.%04d,N,01900.0000,E,0.1,,291026,,,A"
+                      % (t, k * 10 + f)))
+        out.append(nm("GPGGA,%s,4728.%04d,N,01900.0000,E,1,12,0.9,100.0,M,"
+                      "40.0,M,," % (t, k * 10 + f)))
+    out.append(nm("GPGST,1203%02d.00,20,,,,3.0,2.5,6.0" % k))
+    out.append(nm("GPGSA,A,3,01,02,03,04,,,,,,,,,1.5,0.9,1.2,1"))
+    out.append(nm("GPGSV,3,1,12,01,40,083,46,02,17,308,41,03,07,344,39,04,"
+                  "22,228,45"))
+    return b"\r\n".join(out) + b"\r\n"
+
+
+saved_uart = gl.uart
+gl.uart = feed = _Feed()
+gl.reset()
+secs = [nmea_second(k) for k in range(10)]
+n_sent = 13 * len(secs)
+gc.collect()
+gc.disable()
+a0 = gc.mem_alloc()
+for s in secs:
+    feed.feed(s)
+    gl.read_uart()
+nmea_alloc = gc.mem_alloc() - a0
+gc.enable()
+gl.uart = saved_uart
+print("nmea alloc %d B for %d sentences, %d B each"
+      % (nmea_alloc, n_sent, nmea_alloc // n_sent))
+check("NMEA read: %d sentences parsed" % n_sent,
+      gl.st["ok"] == n_sent and gl.st["err"] == 0 and gl.st["seq"] == 9)
+check("NMEA read: under %d B allocated a sentence" % NMEA_BUDGET,
+      nmea_alloc <= NMEA_BUDGET * n_sent)
+gl.reset()
+
 pl = bytearray(8)
 pl[5] = 2
 for gnss, sv, cno, el, flags in ((0, 7, 41, 60, 0x1F), (2, 11, 0, -91, 0)):
