@@ -37,7 +37,10 @@
 # partition table, otadata and the app. Then put the files back and run
 # ./deploy.sh (see the README, "Firmware updates over WiFi").
 # --publish writes firmware/ota/ (micropython-<commit>.bin, the page as
-# web-<commit>.html[.gz], manifest.json naming them) and copies it to
+# web-<commit>.html.gz, manifest.json naming them: the board keeps the page
+# only gzipped, made with its WEB_GZ_WBITS window, and inflates it for a
+# client without gzip; an older firmware takes such a manifest too, and the
+# new one removes the old plain /web.html once valid) and copies it to
 # OTA_DEST (host:/path) with scp, each file as <name>.tmp moved over the
 # live one with ssh (a board reading a half-copied file got a mix), the
 # manifest last: a board reading the old manifest meanwhile still finds
@@ -211,8 +214,22 @@ case "$MODE" in
     mkdir -p "$OUT/ota"
     BINF=micropython-$COMMIT.bin
     cp "$OUT/micropython.bin" "$OUT/ota/$BINF"
-    cp web.html "$OUT/ota/web-$COMMIT.html"
-    gzip -9 -n -c web.html > "$OUT/ota/web-$COMMIT.html.gz"
+    # not gzip -9: its 32 KB window is what inflating it takes on the board,
+    # more than the heap has free; the firmware's own WEB_GZ_WBITS window
+    WBITS=$(sed -n 's/^WEB_GZ_WBITS = \([0-9][0-9]*\).*/\1/p' gps_logger.py)
+    case "$WBITS" in
+        9|1[0-5]) ;;
+        *) echo "No WEB_GZ_WBITS in gps_logger.py: '$WBITS'" >&2; exit 1 ;;
+    esac
+    python3 - "$WBITS" web.html "$OUT/ota/web-$COMMIT.html.gz" <<'EOF'
+import sys, zlib
+w, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+z = zlib.compressobj(9, zlib.DEFLATED, 16 + w)
+with open(src, "rb") as f:
+    gz = z.compress(f.read()) + z.flush()
+with open(dst, "wb") as f:
+    f.write(gz)
+EOF
     python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" <<'EOF'
 import hashlib, hmac, json, os, sys
 d, key_file, build, commit = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
@@ -224,8 +241,8 @@ binf = "micropython-%s.bin" % commit
 size, sha = meta(binf)
 m = {"build": build, "commit": commit, "size": size, "sha256": sha,
      "url": binf, "files": []}
-for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),
-                   ("/web.html", "web-%s.html" % commit)):
+# the page only gzipped (an older firmware after a rollback takes this too)
+for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),):
     n, h = meta(name)
     m["files"].append({"path": path, "size": n, "sha256": h, "url": name})
 # the bytes gps_logger._ota_signed covers
@@ -241,7 +258,7 @@ EOF
     # downloading it keeps reading the old file), the named files first,
     # the manifest naming them last
     MV=""
-    for f in "$BINF" "web-$COMMIT.html" "web-$COMMIT.html.gz" manifest.json; do
+    for f in "$BINF" "web-$COMMIT.html.gz" manifest.json; do
         scp -q "$OUT/ota/$f" "$DHOST:$DDIR/$f.tmp"
         MV+="mv -f $QDIR/$f.tmp $QDIR/$f && "
     done

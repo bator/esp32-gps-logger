@@ -18,10 +18,66 @@ import tempfile
 import time
 import stat
 import types
+import zlib
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+
+def _gz_small(data, wbits):
+    """A gzip of data with a 2**wbits window (as deploy.sh and
+    build_firmware.sh make the page now)."""
+    z = zlib.compressobj(9, zlib.DEFLATED, 16 + wbits)
+    return z.compress(data) + z.flush()
+
+
+def _gunzip_w(data, wbits):
+    """data inflated with a 2**wbits window, as the board does it (a gzip
+    made with a wider one fails: a distance too far back), or None."""
+    try:
+        z = zlib.decompressobj(16 + wbits)
+        out = z.decompress(data)
+        return out if z.eof and not z.unused_data else None
+    except (zlib.error, TypeError):
+        return None
+
+
+class _FakeDeflate:
+    """MicroPython 1.29's deflate module over zlib, for CPython: DeflateIO
+    reads a gzip stream with a 2**wbits window, as uzlib does (a stream
+    made with a wider one fails). made: the wbits each was opened with."""
+    GZIP = 3
+    made = []
+
+    class DeflateIO:
+        def __init__(self, f, fmt, wbits=0, close=False):
+            assert fmt == 3, fmt
+            _FakeDeflate.made.append(wbits)
+            self.f, self.left = f, b""
+            self.z = zlib.decompressobj(16 + (wbits or 8))
+
+        def readinto(self, b):
+            while len(self.left) < len(b) and not self.z.eof:
+                d = self.f.read(256)
+                if not d:
+                    break
+                self.left += self.z.decompress(d)
+            n = min(len(b), len(self.left))
+            b[:n] = self.left[:n]
+            self.left = self.left[n:]
+            return n
+
+        def close(self):
+            pass
+
+
+class _LowMemDeflate(_FakeDeflate):
+    """deflate whose window does not fit (MemoryError at the first read,
+    where uzlib allocates it)."""
+    class DeflateIO(_FakeDeflate.DeflateIO):
+        def readinto(self, b):
+            raise MemoryError("window")
 
 # New tracks are binary .trb files. The checks here read a track's text:
 # a .trb opened for reading by this file (not by the logger) comes back as
@@ -5723,6 +5779,8 @@ try:
           away_no_web == "sleep", away_no_web)
 
     # WEB server: GET / and /status.json answered from the main loop
+    inf_wbits = getattr(gl, "WEB_GZ_WBITS", 12)
+
     class FakeConn:
         def __init__(self, req, fail=False):
             self.req, self.fail, self.sent, self.closed = req, fail, b"", False
@@ -5741,6 +5799,16 @@ try:
 
         def close(self):
             self.closed = True
+
+    class SendLog(FakeConn):
+        """A FakeConn that keeps the size of each send."""
+        def __init__(self, req):
+            FakeConn.__init__(self, req)
+            self.lens = []
+
+        def sendall(self, b):
+            self.lens.append(len(b))
+            self.sent += bytes(b)
 
     class FakeListen:
         def __init__(self):
@@ -5836,6 +5904,38 @@ try:
         gz_none = FakeConn(b"GET / HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n")
         lst.waiting.append(gz_none)
         gl.web_tick()
+        # WEB-INFLATE: the board keeps only web.html.gz (deploy.sh and the
+        # OTA put no plain copy up): a client without gzip (curl, a test)
+        # gets it inflated with the small window it was made with, a piece
+        # per send; no deflate module is a 406, no RAM for it a 503; a
+        # board still holding the old plain page serves it as before
+        small_gz = _gz_small(page_file, inf_wbits)
+        with open(os.path.join(gz_td, "small.gz"), "wb") as f:
+            f.write(small_gz)
+        gl.WEB_PAGE_GZ = os.path.join(gz_td, "small.gz")
+        gl.WEB_PAGE = gl.WEB_PAGE + ".missing"
+        saved_deflate = sys.modules.get("deflate", "unset")
+        inf_res = {}
+        try:
+            for case, mod in (("plain", _FakeDeflate), ("gzip", _FakeDeflate),
+                              ("nodeflate", None), ("lowmem", _LowMemDeflate)):
+                sys.modules["deflate"] = mod
+                del _FakeDeflate.made[:]
+                c = SendLog(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n"
+                            + (b"Accept-Encoding: gzip\r\n"
+                               if case == "gzip" else b"") + b"\r\n")
+                lst.waiting.append(c)
+                gl.web_tick()
+                inf_res[case] = (c, list(_FakeDeflate.made))
+        finally:
+            if saved_deflate == "unset":
+                sys.modules.pop("deflate", None)
+            else:
+                sys.modules["deflate"] = saved_deflate
+            gl.WEB_PAGE = gl.WEB_PAGE[:-len(".missing")]
+        old_plain = SendLog(b"GET / HTTP/1.1\r\n\r\n")   # both on the board:
+        lst.waiting.append(old_plain)                    # the plain one as is
+        gl.web_tick()
         if saved_gz is None:
             del gl.WEB_PAGE_GZ
         else:
@@ -5893,6 +5993,37 @@ try:
               and (b"Content-Length: %d\r\n" % len(page_file)) in h
               for h, _, b in gz_got[2:]),
           repr([g[0][:200] for g in gz_got[2:]]))
+    ic, iw = inf_res["plain"]
+    ih, _, ib = ic.sent.partition(b"\r\n\r\n")
+    check("WEB-INFLATE: only web.html.gz on the board: a client without "
+          "gzip gets the page inflated (no Content-Length, no "
+          "Content-Encoding), WEB_CHUNK a send, window WEB_GZ_WBITS",
+          ih.startswith(b"HTTP/1.0 200 OK") and b"text/html" in ih
+          and b"Content-Length" not in ih and b"Content-Encoding" not in ih
+          and ib == page_file and iw == [inf_wbits]
+          and max(ic.lens) <= gl.WEB_CHUNK and len(ic.lens) > 10
+          and ic.closed, repr((ih[:200], len(ib), iw, ic.lens[:5])))
+    gc_, gw = inf_res["gzip"]
+    gh2, _, gb2 = gc_.sent.partition(b"\r\n\r\n")
+    check("WEB-INFLATE: a gzip client still gets web.html.gz as is, nothing "
+          "inflated", b"\r\nContent-Encoding: gzip\r\n" in gh2
+          and gb2 == small_gz and gw == [], repr((gh2[:200], gw)))
+    nd = inf_res["nodeflate"][0].sent
+    lm = inf_res["lowmem"][0].sent
+    check("WEB-INFLATE: no deflate module -> 406 naming curl --compressed; "
+          "no RAM for the window -> 503; neither sends a 200",
+          nd.startswith(b"HTTP/1.0 406") and b"--compressed" in nd
+          and lm.startswith(b"HTTP/1.0 503") and b"200 OK" not in nd + lm,
+          repr((nd[:200], lm[:200])))
+    oh, _, ob = old_plain.sent.partition(b"\r\n\r\n")
+    check("WEB-INFLATE: a board that still has the plain web.html (before "
+          "its next deploy or OTA) sends it as is to a client without gzip",
+          ob == page_file and (b"Content-Length: %d\r\n" % len(page_file))
+          in oh, repr(oh[:200]))
+    check("WEB-GZ-WBITS: the page's window is 2**9..2**12 bytes (the RAM "
+          "the inflate takes: ~15 KB of heap is free; gzip -9's 32 KB is "
+          "not)", 9 <= getattr(gl, "WEB_GZ_WBITS", 15) <= 12,
+          getattr(gl, "WEB_GZ_WBITS", None))
     check("WEB: no web.html on the board -> 404 naming deploy.sh and the JSON",
           nopage.sent.startswith(b"HTTP/1.0 404") and b"deploy.sh" in
           nopage.sent and b"/status.json" in nopage.sent,
@@ -6861,8 +6992,8 @@ lb_td = tempfile.mkdtemp(prefix="loopgz-")
 lb_gz = os.path.join(lb_td, "web.html.gz")
 with open(os.path.join(ROOT, "web.html"), "rb") as f:
     lb_page = f.read()
-with open(lb_gz, "wb") as f:
-    f.write(gzip.compress(lb_page, 9))
+with open(lb_gz, "wb") as f:              # (as deploy.sh makes it)
+    f.write(_gz_small(lb_page, getattr(gl, "WEB_GZ_WBITS", 12)))
 for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
     if not interp:
         print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
@@ -6881,6 +7012,14 @@ for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
     check("WEB-LOOPBACK-GZIP: a client accepting gzip gets web.html.gz on "
           + tag, "ok   GET / with Accept-Encoding gzip" in loop_out,
           loop_out[-600:])
+    check("WEB-LOOPBACK-INFLATE: a client without gzip gets web.html byte "
+          "for byte from web.html.gz alone on " + tag,
+          "ok   GET / without gzip, only web.html.gz" in loop_out,
+          loop_out[-600:])
+    if interp == mpy_bin:
+        check("WEB-LOOPBACK-HEAP: the inflate's live heap stays small on "
+              + tag, "ok   the inflate's live heap" in loop_out,
+              loop_out[-600:])
 shutil.rmtree(lb_td, ignore_errors=True)
 
 # DEPLOY: deploy.sh against a fake board (mpremote runs the board-side code
@@ -7037,18 +7176,22 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     cps = [c for call in calls for c in call if c[0] == "cp"]
     check("DEPLOY: copies to .dpl, checks, renames; old .dpl and stray .py go",
           rc == 0 and dev_file(dev, "gps_logger.mpy") == new_mpy
-          and dev_file(dev, "web.html") == new_page
           and dev_file(dev, "gps_logger.py") is None
           and not [n for n in os.listdir(dev) if n.endswith(".dpl")]
           and dev_file(dev, ".rtc") == b"0"
-          and len(cps) == 4 and all(c[2].endswith(".dpl") for c in cps)
+          and len(cps) == 3 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Generic ESP32C6" in out and "(rv32imc)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
-    check("DEPLOY-GZIP: web.html.gz (gzip -9 -n of web.html) goes up too",
-          gunzip(dev_file(dev, "web.html.gz") or b"") == new_page
+    dp_w = getattr(gl, "WEB_GZ_WBITS", 12)
+    check("DEPLOY-GZIP: only web.html.gz goes up, made with the board's "
+          "small window (WEB_GZ_WBITS: it inflates it for curl), no mtime; "
+          "the old plain web.html is removed in the same swap",
+          _gunzip_w(dev_file(dev, "web.html.gz") or b"", dp_w) == new_page
           and (dev_file(dev, "web.html.gz") or b"")[4:8] == b"\0\0\0\0"
-          and ["cp", "web.html.gz", ":web.html.gz.dpl"] in cps, repr(cps))
+          and ["cp", "web.html.gz", ":web.html.gz.dpl"] in cps
+          and not [c for c in cps if c[1] == "web.html"]
+          and dev_file(dev, "web.html") is None, repr(cps))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
     check("DEPLOY: too little free flash -> stops before copying, old kept",
           rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
@@ -7066,10 +7209,9 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY: frozen firmware -> main.py and the page only, the .mpy goes",
           rc == 0 and dev_file(dev, "gps_logger.mpy") is None
           and dev_file(dev, "gps_logger.py") is None
-          and dev_file(dev, "web.html") == new_page
-          and gunzip(dev_file(dev, "web.html.gz") or b"") == new_page
-          and sorted(c[1] for c in cps) == ["main.py", "web.html",
-                                            "web.html.gz"]
+          and dev_file(dev, "web.html") is None
+          and _gunzip_w(dev_file(dev, "web.html.gz") or b"", dp_w) == new_page
+          and sorted(c[1] for c in cps) == ["main.py", "web.html.gz"]
           and "frozen in (abc1234)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
@@ -7087,7 +7229,8 @@ if shutil.which("bash") and shutil.which("sha256sum"):
                                            "FORCE_PENDING": "1"})
     check("DEPLOY-OTA: an OTA being validated stops the deploy before "
           "copying; FORCE_PENDING=1 deploys and leaves the staged page",
-          ota_stop and rc == 0 and dev_file(dev, "web.html") == new_page
+          ota_stop and rc == 0
+          and gunzip(dev_file(dev, "web.html.gz") or b"") == new_page
           and dev_file(dev, "web.html.new") == b"page staged by the OTA",
           "%r rc=%d %r %r" % (ota_stop, rc, out[-200:], err[-300:]))
     # DEPLOY-STALE: the frozen logger is not this gps_logger.py (or a first
@@ -7163,7 +7306,8 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY-FORCE-PENDING: FORCE_PENDING=1 with an OTA pending deploys "
           "without a reset and runs the logger again",
           rc == 0 and "Deployed" in out and "reset pending" not in lg
-          and lg[-1:] == [run_cmd] and dev_file(dev, "web.html") == new_page,
+          and lg[-1:] == [run_cmd]
+          and gunzip(dev_file(dev, "web.html.gz") or b"") == new_page,
           "rc=%d %r %r" % (rc, lg, err[-300:]))
     # DEPLOY-FORCE-SPLIT: one FORCE=1 meant for a stale frozen logger also
     # walked past the pending-OTA guard; that one is FORCE_PENDING=1 now
@@ -7423,13 +7567,34 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           "(a board reading the old manifest still finds its files), the "
           "manifest copied last",
           rc_dirty != 0 and rc_nokey != 0 and rc_badkey != 0 and rc == 0
-          and good and [f["path"] for f in man.get("files", [])]
-          == ["/web.html.gz", "/web.html"]
-          and named == ["micropython-%s.bin" % man.get("commit"),
-                        "web-%s.html.gz" % man.get("commit"),
-                        "web-%s.html" % man.get("commit")]
+          and good and gl._ota_manifest_ok(man)
+          and named[:1] == ["micropython-%s.bin" % man.get("commit")]
           and all(os.path.exists(os.path.join(dest, n)) for n in named),
           repr((rc_dirty, rc_nokey, rc_badkey, rc, man, scp, err[-200:])))
+    # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
+    # names /web.html.gz alone, made with the board's small window (it
+    # inflates it for a client without gzip); an older firmware (after a
+    # rollback: OTA_PAGES of both pages, as on master) accepts it too
+    with open(os.path.join(work, "web.html"), "rb") as f:
+        pub_page = f.read()
+    pub_gz = dev_file(dest, "web-%s.html.gz" % man.get("commit")) or b""
+    saved_pages = gl.OTA_PAGES
+    gl.OTA_PAGES = ("/web.html", "/web.html.gz")
+    try:
+        old_ok = gl._ota_manifest_ok(man)
+    finally:
+        gl.OTA_PAGES = saved_pages
+    check("BUILD-PUBLISH-GZ: the manifest names only /web.html.gz "
+          "(web-<commit>.html.gz, the board's WEB_GZ_WBITS window); no "
+          "plain page published; an older firmware's check accepts it",
+          rc == 0 and [f["path"] for f in man.get("files", [])]
+          == ["/web.html.gz"]
+          and named == ["micropython-%s.bin" % man.get("commit"),
+                        "web-%s.html.gz" % man.get("commit")]
+          and _gunzip_w(pub_gz, getattr(gl, "WEB_GZ_WBITS", 12)) == pub_page
+          and not os.path.exists(os.path.join(
+              dest, "web-%s.html" % man.get("commit"))) and old_ok,
+          repr((man.get("files"), sorted(os.listdir(dest)), old_ok)))
     # BUILD-PUBLISH-ATOMIC: every file (the manifest last) goes up under a
     # .tmp name and is moved over the live one (a board mid-download of a
     # republished .bin, or reading a half-copied manifest, got a mix); a
@@ -7437,7 +7602,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     mvs = " ".join(" ".join(c[2:]) for c in ssh if "mv" in " ".join(c))
     order = [mvs.find(n + ".tmp") for n in named] + [
         mvs.find("manifest.json.tmp")]
-    atomic = (rc == 0 and len(scp) == 4
+    atomic = (rc == 0 and len(scp) == 3
               and all(c[-1].endswith(".tmp") for c in scp)
               and all(i >= 0 for i in order) and order[-1] == max(order)
               and not [n for n in os.listdir(dest) if n.endswith(".tmp")])
@@ -14601,6 +14766,57 @@ try:
           and prom[1][:2] == ("ok", b"old page") and prom[1][2]
           and "not put up" in prom[1][2][0] and page_p in prom[1][2][0],
           repr(prom))
+    # OTA-PROMOTE-PLAIN: the board keeps only the gzip page now: once the
+    # valid firmware has put a staged web.html.gz up, the old plain
+    # web.html (~70 KB of flash) goes. Not before (a rollback keeps the old
+    # firmware's files), not when the manifest names web.html itself, not
+    # when the gzip could not go up
+    plain_p = os.path.join(_ota_dir, "web.html")
+    pp = []
+    for mode in ("gz", "both", "broken", "rollback"):
+        _ota_reset()
+        _serve(_manifest(200))
+        gl.FW_BUILD, gl.FW_COMMIT = (100, "abc0100") if mode == "rollback" \
+            else (200, "abc0200")
+        for p, b in ((page_p, b"old gz"), (page_p + ".new", _page),
+                     (plain_p, b"old plain")):
+            with open(p, "wb") as f:
+                f.write(b)
+        staged = [page_p]
+        if mode == "both":
+            with open(plain_p + ".new", "wb") as f:
+                f.write(b"new plain")
+            staged.append(plain_p)
+        with open(gl.OTA_PENDING, "w") as f:
+            f.write("200 abc0200\n" + "\n".join(staged))
+
+        def _rename(a, b, mode=mode):
+            if mode == "broken" and a == page_p + ".new":
+                raise OSError(5)
+            return real_rename(a, b)
+
+        gl.os.rename = _rename
+        try:
+            gl.ota_boot()
+            if mode != "rollback":
+                gl.wifi_reset()
+                gl.wifi["state"] = "connected"
+                gl.ota_tick(_clock[0])
+                _clock[0] += gl.OTA_VALID_AFTER + 1000
+                gl.ota_tick(_clock[0])
+        finally:
+            gl.os.rename = real_rename
+        pp.append((gl.ota["state"], dev_file(_ota_dir, "web.html.gz"),
+                   dev_file(_ota_dir, "web.html")))
+        for p in (plain_p, plain_p + ".new"):
+            if os.path.exists(p):
+                os.remove(p)
+    check("OTA-PROMOTE-PLAIN: a promoted web.html.gz removes the old plain "
+          "web.html; kept when the manifest names it, when the gzip did not "
+          "go up, and after a rollback",
+          pp == [("ok", _page, None), ("ok", _page, b"new plain"),
+                 ("ok", b"old gz", b"old plain"),
+                 ("rolled back", b"old gz", b"old plain")], repr(pp))
     # set_boot failing: no pending note blames a build that never ran, the
     # staged page is dropped
     _ota_reset()

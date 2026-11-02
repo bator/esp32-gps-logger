@@ -89,10 +89,17 @@ WEB_HEAD_WAIT = 1                        # s the request head may take (a
 WEB_REQ_MAX = 2048                       # bytes of a request head read
 WEB_CHUNK = 1024                         # reply bytes per send
 WEB_REFRESH = 15                         # s between status.json polls of
-                                         # the page (WEB_PAGE)
-WEB_PAGE = "/web.html"                   # the status page, served as is
-WEB_PAGE_GZ = "/web.html.gz"             # its gzip (deploy.sh), sent instead
-                                         # to a client that accepts gzip
+                                         # the page (WEB_PAGE_GZ)
+WEB_PAGE_GZ = "/web.html.gz"             # the status page, kept only gzipped
+                                         # (deploy.sh, OTA): sent as is to a
+                                         # client that accepts gzip, inflated
+                                         # for one that does not (_web_page)
+WEB_GZ_WBITS = 12                        # its window: 2**12 = 4 KB of heap to
+                                         # inflate it (gzip -9's 32 KB do not
+                                         # fit; +11% size). deploy.sh and
+                                         # --publish read it from here
+WEB_PAGE = "/web.html"                   # the plain page of a board deployed
+                                         # before: served as is while there
 WEB_DIAG = 15                            # diag.log lines on the page
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
                                          # for the page on the other networks too
@@ -7370,7 +7377,10 @@ OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py")  # moved aside (.ota-old)
                                          # for a frozen logger to run
 OTA_STUCK = 86400000                     # ms an upload may have no 2xx and
                                          # still hold the update check back
-OTA_PAGES = ("/web.html", "/web.html.gz")  # the files a manifest may name
+OTA_PAGES = ("/web.html", "/web.html.gz")  # the files a manifest may name:
+                                         # build_firmware.sh names the gzip
+                                         # alone now (/web.html: the older
+                                         # manifests, still "current")
 try:
     from gps_frozen import BUILD as FW_BUILD, COMMIT as FW_COMMIT
 except ImportError:                      # (not frozen, or a firmware older
@@ -7666,23 +7676,32 @@ def _ota_promote(paths):
     file system that does not rename over an existing file: the old one is
     moved aside first (and back if the new one still does not go up). One
     that cannot go up is a diag line: it was silent, and the new firmware
-    served the old page until the next update."""
+    served the old page until the next update.
+    A gzip page that went up removes its plain twin (/web.html.gz:
+    /web.html, ~70 KB of flash) unless the manifest named that one too: the
+    board keeps the page only gzipped and inflates it for a client without
+    gzip (_web_page). Only here, with the firmware valid: a rollback keeps
+    the old firmware's files, and the gzip a manifest names is made with
+    WEB_GZ_WBITS (one from an older deploy.sh may have a window too wide
+    to inflate: its plain page stays until the next deploy)."""
     for p in paths:
         try:
             os.rename(p + ".new", p)
-            continue
         except OSError:
-            pass
-        try:
-            os.rename(p, p + ".old")
             try:
-                os.rename(p + ".new", p)
-            except OSError:
-                os.rename(p + ".old", p)
-                raise
-            _rm(p + ".old")
-        except OSError as e:
-            _diag_write("ota %s page %s not put up: %r" % (FW_COMMIT, p, e))
+                os.rename(p, p + ".old")
+                try:
+                    os.rename(p + ".new", p)
+                except OSError:
+                    os.rename(p + ".old", p)
+                    raise
+                _rm(p + ".old")
+            except OSError as e:
+                _diag_write("ota %s page %s not put up: %r" % (FW_COMMIT, p,
+                                                              e))
+                continue
+        if p.endswith(".gz") and p[:-3] not in paths:
+            _rm(p[:-3])
 
 def _ota_drop(paths):
     for p in paths:
@@ -8462,26 +8481,32 @@ def _web_gzip(req):
     return b"gzip" in r[i:j if j >= 0 else len(r)]
 
 def _web_page(c, gz=False):
-    """WEB_PAGE from flash in WEB_CHUNK reads into one buffer: its gzip
-    (WEB_PAGE_GZ, ~16 KB instead of ~46 KB: a third of the sends) when the
-    client accepts gzip and deploy.sh put it there, else the plain page.
-    The page itself polls /status.json and redraws its boxes."""
-    path, f = WEB_PAGE_GZ, None
-    if gz:
+    """The status page from flash in WEB_CHUNK reads into one buffer. The
+    board keeps it only gzipped (WEB_PAGE_GZ, ~26 KB instead of ~70 KB:
+    deploy.sh and the OTA put no plain copy up): sent as is, with its
+    Content-Length, to a client that accepts gzip (every browser),
+    inflated on the fly for one that does not (curl without --compressed:
+    _web_inflate). A plain WEB_PAGE still there (a board deployed before,
+    until its next deploy or OTA removes it) goes as is to a client
+    without gzip (its gzip may have gzip -9's 32 KB window, too big to
+    inflate here), and to one with gzip when there is no gzip. The page
+    itself polls /status.json and redraws its boxes."""
+    f = None
+    for path in (WEB_PAGE_GZ, WEB_PAGE) if gz else (WEB_PAGE, WEB_PAGE_GZ):
         try:
             f = open(path, "rb")
+            break
         except OSError:
             pass
     if f is None:
-        path = WEB_PAGE
-        try:
-            f = open(path, "rb")
-        except OSError:
-            _web_send(c, "404 Not Found", "text/plain",
-                      ("no %s on the board: run deploy.sh; data at "
-                       "/status.json" % WEB_PAGE,))
-            return
+        _web_send(c, "404 Not Found", "text/plain",
+                  ("no %s on the board: run deploy.sh; data at "
+                   "/status.json" % WEB_PAGE_GZ,))
+        return
     try:
+        if path == WEB_PAGE_GZ and not gz:
+            _web_inflate(c, f)
+            return
         _web_head(c, "200 OK", "text/html",
                   "Content-Length: %d\r\n%s" % (
                       os.stat(path)[6], "Content-Encoding: gzip\r\n"
@@ -8496,6 +8521,43 @@ def _web_page(c, gz=False):
             read_uart()
     finally:
         f.close()
+
+def _web_inflate(c, f):
+    """WEB_PAGE_GZ (open in f) inflated for a client without gzip:
+    deflate.DeflateIO with a 2**WEB_GZ_WBITS window, the RAM it takes (4 KB
+    and ~1 KB of state: gzip -9's 32 KB window would not fit the ~15 KB of
+    free heap, so deploy.sh and build_firmware.sh make the file with this
+    one; a wider one fails part way). WEB_CHUNK at a time into one buffer,
+    a send each, under the request's deadline like the plain page. No
+    Content-Length (the inflated size is not on flash): the closed
+    connection ends it (HTTP/1.0). The first piece is inflated before the
+    200 (uzlib allocates its window then): no RAM for it is a 503, a
+    firmware without the deflate module (MICROPY_PY_DEFLATE, on in the
+    ESP32 ports) a 406."""
+    try:
+        import deflate
+    except ImportError:
+        _web_send(c, "406 Not Acceptable", "text/plain",
+                  ("the page is kept gzipped and this firmware cannot "
+                   "inflate it: use a browser or curl --compressed",))
+        return
+    buf = bytearray(WEB_CHUNK)
+    mv = memoryview(buf)
+    try:
+        d = deflate.DeflateIO(f, deflate.GZIP, WEB_GZ_WBITS)
+        n = d.readinto(buf)
+    except MemoryError:
+        d = buf = mv = None              # (for the reply's own buffer)
+        gc.collect()
+        _web_send(c, "503 Service Unavailable", "text/plain",
+                  ("no RAM to inflate the page now: try again, or use "
+                   "curl --compressed",))
+        return
+    _web_head(c, "200 OK", "text/html")
+    while n:
+        _web_out(c, mv[:n])
+        read_uart()
+        n = d.readinto(buf)
 
 def _web_reply(c, req):
     """Only a GET is answered: an empty or cut-off request (a closed tab, a

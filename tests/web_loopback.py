@@ -339,6 +339,69 @@ tick()
 got = read_all(s)
 check("still answering after all that", got.endswith(page), len(got))
 
+# only web.html.gz on the board (deploy.sh and the OTA keep no plain copy):
+# a client without gzip gets it inflated, byte for byte web.html, and the
+# inflate's live heap stays small (its window is 2**WEB_GZ_WBITS bytes;
+# the board has ~15 KB free). Measured live: a gc.collect() before each
+# sample, in read_uart (it runs after every send)
+if gz_path:
+    try:
+        import deflate                  # noqa: F401 (the unix port has it)
+    except ImportError:                 # CPython: the same API over zlib
+        import zlib
+
+        class _DeflateIO:
+            def __init__(self, f, fmt, wbits=0, close=False):
+                self.f, self.left = f, b""
+                self.z = zlib.decompressobj(16 + (wbits or 8))
+
+            def readinto(self, b):
+                while len(self.left) < len(b) and not self.z.eof:
+                    d = self.f.read(256)
+                    if not d:
+                        break
+                    self.left += self.z.decompress(d)
+                n = min(len(b), len(self.left))
+                b[:n] = self.left[:n]
+                self.left = self.left[n:]
+                return n
+
+        deflate = _Obj()
+        deflate.GZIP = 3
+        deflate.DeflateIO = _DeflateIO
+        sys.modules["deflate"] = deflate
+    mpy = sys.implementation.name == "micropython"
+    low = [None]
+
+    def sample():
+        gc.collect()
+        f = gc.mem_free()
+        if low[0] is None or f < low[0]:
+            low[0] = f
+
+    plain_page = gl.WEB_PAGE
+    gl.WEB_PAGE = "/nonexistent-gps-logger-loopback/web.html"
+    gl.read_uart = sample
+    s = client(req)
+    gc.collect()
+    free0 = gc.mem_free()
+    tick()
+    gl.read_uart = real_uart
+    got = read_all(s)
+    ih, _, ib = got.partition(b"\r\n\r\n")
+    check("GET / without gzip, only web.html.gz on the board: web.html "
+          "inflated byte for byte, no Content-Length",
+          ih.startswith(b"HTTP/1.0 200 OK") and ib == page
+          and b"Content-Length" not in ih and b"Content-Encoding" not in ih
+          and max(outs) <= gl.WEB_CHUNK, (ih[:200], len(ib), len(page)))
+    if mpy:
+        need = free0 - (low[0] if low[0] is not None else free0)
+        print("info inflate live heap %d bytes (window %d)" % (
+            need, 1 << getattr(gl, "WEB_GZ_WBITS", 0)))
+        check("the inflate's live heap stays under 10 KB (window, buffer, "
+              "client)", ib == page and 0 < need <= 10240, need)
+    gl.WEB_PAGE = plain_page
+
 gl._web_close()
 if fails:
     raise SystemExit("web loopback FAILED: %s" % ", ".join(fails))

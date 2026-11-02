@@ -1,6 +1,6 @@
 #!/bin/bash
 # Compile gps_logger.py to .mpy and install it (with main.py and the status
-# page web.html, plain and gzipped) on the ESP32, then reboot.
+# page, only gzipped: web.html.gz) on the ESP32, then reboot.
 # It must run precompiled: compiling on the device grows the Python heap,
 # which leaves too little IDF heap for TLS uploads. main.py imports
 # gps_logger at boot (hold the boot-bypass pin during reset to skip it:
@@ -15,7 +15,7 @@
 # SHA-256 on the board) and only then renamed over them: a copy cut short
 # on a nearly full flash used to leave an unimportable gps_logger.mpy and
 # the board in the REPL. Any failure stops here, old files untouched.
-# (Not <name>.new: an OTA stages the page it installs as /web.html.new.)
+# (Not <name>.new: an OTA stages the page it installs as /web.html.gz.new.)
 # While an OTA install is being validated (/ota.pending) it stops: its
 # reset would abort the pending firmware (the bootloader rolls back and the
 # build is blamed). Wait the ~2 minutes, or FORCE_PENDING=1 (not FORCE=1:
@@ -34,7 +34,7 @@ cd "$(dirname "$0")"
 PORT=${PORT:-/dev/ttyUSB0}
 PY=.venv/bin/python
 MPREMOTE=.venv/bin/mpremote
-FILES="gps_logger.mpy main.py web.html web.html.gz"
+FILES="gps_logger.mpy main.py web.html.gz"
 
 # mpy-cross must match the firmware's .mpy version (MicroPython 1.29)
 if ! $PY -c "import mpy_cross" 2>/dev/null; then
@@ -112,7 +112,7 @@ case "$FROZEN" in
                 [ "${FORCE:-0}" = 1 ] || exit 1
                 echo "FORCE=1: deploying main.py and the page next to a stale frozen logger" >&2
             fi
-            FILES="main.py web.html web.html.gz"
+            FILES="main.py web.html.gz"
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
         fi ;;
@@ -120,9 +120,26 @@ case "$FROZEN" in
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
-# the status page also gzipped: sent to browsers (Accept-Encoding: gzip),
-# a third of the bytes; web.html stays for other clients (curl)
-gzip -9 -n -c web.html > web.html.gz
+# The status page goes up only gzipped (~26 KB; the plain web.html took
+# ~70 KB of flash): sent as is to browsers (Accept-Encoding: gzip), inflated
+# on the board for other clients (curl). Not gzip -9: its 32 KB window is
+# what inflating it takes, more than the Python heap has free; the
+# firmware's WEB_GZ_WBITS window (4 KB). No name or mtime in the header:
+# the same page gives the same bytes.
+WBITS=$(sed -n 's/^WEB_GZ_WBITS = \([0-9][0-9]*\).*/\1/p' gps_logger.py)
+case "$WBITS" in
+    9|1[0-5]) ;;
+    *) echo "No WEB_GZ_WBITS in gps_logger.py: '$WBITS'" >&2; exit 1 ;;
+esac
+python3 - "$WBITS" web.html web.html.gz <<'EOF2'
+import sys, zlib
+w, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+z = zlib.compressobj(9, zlib.DEFLATED, 16 + w)
+with open(src, "rb") as f:
+    gz = z.compress(f.read()) + z.flush()
+with open(dst, "wb") as f:
+    f.write(gz)
+EOF2
 
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
@@ -186,7 +203,9 @@ fi
 echo "Copied and checked: $FILES"
 
 # Swap them in (LittleFS renames over an existing file in one step; other
-# file systems need the old one removed first).
+# file systems need the old one removed first). The old plain web.html goes
+# in the same step: the board inflates web.html.gz for a client without
+# gzip now (a staged OTA page, /web.html.gz.new, is left alone).
 # A leftover gps_logger.py would be imported instead of the .mpy (or the
 # frozen module: '' comes first in sys.path).
 # Clear the RTC boot-fail counter so a previous crash lock (REPL after 5
@@ -205,6 +224,7 @@ for n in '$FILES'.split():
     except OSError:
         os.remove(n)
         os.rename(n + '.dpl', n)
+'web.html' in os.listdir() and os.remove('web.html')
 'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
 '$FROZEN'.startswith('frozen') and not $KEEP_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \

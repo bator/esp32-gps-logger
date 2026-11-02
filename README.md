@@ -191,11 +191,12 @@ PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 The script asks the board which chip it is, compiles `gps_logger.py` to
 `gps_logger.mpy` for it and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
-It makes `web.html.gz` (`gzip -9 -n web.html`: ~9 KB instead of ~24 KB,
-what browsers get) and copies `gps_logger.mpy`, `main.py`, the status page
-`web.html` and `web.html.gz` as
+It makes `web.html.gz` (~26 KB instead of the ~70 KB `web.html`, with
+the firmware's 4 KB window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
+`gps_logger.mpy`, `main.py` and the status page, only as `web.html.gz`, as
 `<name>.dpl`, checks their size and SHA-256 on the board, and only then
-renames them over the old files; a failed check (`Copy check FAILED`)
+renames them over the old files, removing an old plain `/web.html` in the
+same step (~70 KB of flash back); a failed check (`Copy check FAILED`)
 removes the `.dpl` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module (not
 `<name>.new`: that is how an OTA stages the page it installs). Its first
@@ -313,8 +314,9 @@ ignores `env.backup`, `hist/` and `*.env*`, for a copy made in the repo
 anyway.
 
 **Then:** `tools/build_firmware.sh --publish` writes `firmware/ota/`
-(`micropython-<commit>.bin`, the page as `web-<commit>.html[.gz]`,
-`manifest.json`) and copies it with `scp` to `OTA_DEST` (`host:/path`), a
+(`micropython-<commit>.bin`, the page as `web-<commit>.html.gz` with the
+firmware's small window, `manifest.json` naming only `/web.html.gz`; an
+older firmware takes such a manifest too) and copies it with `scp` to `OTA_DEST` (`host:/path`), a
 folder a web server on the LAN serves: each file as `<name>.tmp`, moved
 over the live one with `ssh` (one rename: a board downloading a
 republished `.bin` keeps reading the old one, and none reads a half-copied
@@ -347,7 +349,8 @@ against its SHA-256, the page files are staged as `<file>.new`, the slot is
 set to boot and the board resets. Before any of that the manifest's fields
 are checked (whole numbers, a 64-hex SHA-256, no `|` in a string, the
 commit 1–20 lowercase hex with an optional `-dirty`, only `/web.html` and
-`/web.html.gz`, each once): the HMAC covers them joined by `|`, so a
+`/web.html.gz`, each once; the published manifest names only the gzip,
+older ones both): the HMAC covers them joined by `|`, so a
 manifest with a `|` moved between fields would keep it (`bad manifest`;
 the format itself is unchanged). The HMAC is compared in constant time.
 A refused manifest is one diagnostic line until a good one comes, and no
@@ -370,7 +373,10 @@ longer makes it valid), mark it valid, and only then do the
 staged page files replace the old ones (on a file system that does not
 rename over a file, the old one is moved aside first and back if the new
 one still does not go up; a page that does not go up is a diag line,
-`ota <commit> page <path> not put up`). A crash or reset before that and
+`ota <commit> page <path> not put up`). A `/web.html.gz` that went up
+removes the old plain `/web.html` (unless the manifest named it too): the
+board keeps the page only gzipped. Not earlier: a rollback keeps the old
+firmware's files. A crash or reset before that and
 the bootloader boots the old slot; no WiFi or no manifest within 10 minutes
 (`OTA_HEALTH`) and it resets itself, with the same result (it never sets
 the old slot to boot itself: that left the old image pending, and the next
@@ -660,11 +666,22 @@ wire): useful while moving the wires with the page open.
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
 it the page shows the grid and the system font. The page is a file on the
-board (`/web.html`, copied by `deploy.sh`) and loads once; a browser
-(`Accept-Encoding: gzip`) gets `/web.html.gz` instead, ~16 KB instead of
-~45 KB, so it loads in a third of the sends; clients without gzip (curl
-without `--compressed`) and a board without the `.gz` get `web.html`. Copy
-both when you change the page by hand (or remove `/web.html.gz`); then it asks
+board, kept only gzipped (`/web.html.gz`, ~26 KB instead of the ~70 KB
+`web.html`; copied by `deploy.sh` or an OTA) and loads once: a browser
+(`Accept-Encoding: gzip`) gets the file as is; a client without gzip (curl
+without `--compressed`) gets it inflated on the board as it goes out
+(`deflate.DeflateIO`, no `Content-Length`; a firmware without the
+`deflate` module answers 406, one short of RAM for it 503). The file is
+made with a 4 KB window (`WEB_GZ_WBITS = 12`), not `gzip -9`'s 32 KB:
+inflating takes a buffer of the window's size, and the Python heap has
+~15 KB free (the 4 KB window and its state take ~7 KB while a page goes
+out, measured on the unix port). It costs ~11% (zlib level 9 on
+`web.html`: 23.5 KB with `gzip -9`, 34.0 / 30.3 / 27.9 / 26.2 KB with a
+0.5 / 1 / 2 / 4 KB window). A board deployed before this still has the
+plain `/web.html` (its `.gz` may have the 32 KB window, too wide to
+inflate here): it goes to clients without gzip until the next deploy or
+OTA removes it. When you change the page by hand, gzip it the way
+`deploy.sh` does and copy only `/web.html.gz`; then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
 only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
@@ -1435,7 +1452,7 @@ with a NEO-6M; most never need changing.
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
 | `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
-| `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
+| `WEB_PAGE_GZ` / `WEB_GZ_WBITS` / `WEB_PAGE` / `WEB_REFRESH` | `/web.html.gz` / 12 / `/web.html` / 15 s | The page on the board, kept only gzipped (as is to clients accepting gzip, inflated for the others); its window (2^12 = 4 KB of heap to inflate; `deploy.sh` and `--publish` use it); an older board's plain page, served while it is there; how often the page polls `/status.json` |
 | `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
@@ -1463,7 +1480,9 @@ every pull request:
     over real loopback sockets (a normal request, a foreign `Host`, an
     empty, an oversized, a stalled and a trickling request, a client
     resetting mid-reply, a reply past the request deadline, the gzipped
-    page for a client that accepts it);
+    page for a client that accepts it, and for one that does not the page
+    inflated from the `.gz` alone, byte for byte, its live heap under
+    10 KB on the unix build);
   - `node tests/web_page_test.js`: `web.html`'s view on generated
     `status.json`, and the whole page script (`tick`, `paint`, `placeMap`,
     `stale`) against a stub document. With `CI=true` (GitHub Actions) a
