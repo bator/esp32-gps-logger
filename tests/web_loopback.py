@@ -240,6 +240,53 @@ check("GET /status.json is valid JSON", jd is not None and "fix" in jd,
       got[:120])
 check("no send over WEB_CHUNK", max(outs) <= gl.WEB_CHUNK, outs)
 
+# /diag?f=&o=: the diag files paged over a real socket, byte for byte (a
+# UTF-8 SSID too), each reply HIST_REPLY at most with its Content-Length
+# and X-Diag-Size; no DIAG_OLD is a 404
+import os
+ddir = "/tmp/gps-logger-loopback-%d" % time.ticks_ms()
+os.mkdir(ddir)
+saved_diag = (gl.DIAG_FILE, gl.DIAG_OLD)
+gl.DIAG_FILE, gl.DIAG_OLD = ddir + "/diag.log", ddir + "/diag.1"
+dbody = b"wifi fail caf\xc3\xa9 status 201 after 12000 ms\n" + b"".join(
+    b"up %d utc 20261102T0930%02dZ nmea 1/0 gpsboots 0 loops 0 sats 9/6 "
+    b"fix 3D_fix hdop 1.2 points 0 sent 0 wifi connected pulses 0 mem "
+    b"17000 idf 221/208 heap 62\n" % (60 * k, k % 60) for k in range(260))
+f = open(gl.DIAG_FILE, "wb")
+f.write(dbody)
+f.close()
+try:
+    o, dgot, dok, dmax = 0, b"", True, 0
+    for _ in range(20):
+        s = client(b"GET /diag?f=0&o=%d HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                   % o)
+        tick()
+        dmax = max([dmax] + outs)
+        got = read_all(s)
+        dh, _, db = got.partition(b"\r\n\r\n")
+        dok = (dok and dh.startswith(b"HTTP/1.0 200 OK")
+               and (b"\r\nContent-Length: %d\r\n" % len(db)) in dh
+               and (b"\r\nX-Diag-Size: %d\r\n" % len(dbody)) in dh
+               and len(db) <= gl.HIST_REPLY)
+        dgot += db
+        o += len(db)
+        if not db or o >= len(dbody):
+            break
+    check("GET /diag?f=0 paged from o is diag.log byte for byte, "
+          "HIST_REPLY a reply, Content-Length and X-Diag-Size, no send "
+          "over WEB_CHUNK",
+          dok and dgot == dbody and len(dbody) > gl.HIST_REPLY
+          and dmax <= gl.WEB_CHUNK, (dok, len(dgot), len(dbody), dmax))
+    s = client(b"GET /diag?f=1&o=0 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    tick()
+    got = read_all(s)
+    check("GET /diag?f=1 without diag.1 is a 404",
+          got.startswith(b"HTTP/1.0 404"), got[:80])
+finally:
+    os.remove(gl.DIAG_FILE)
+    os.rmdir(ddir)
+    gl.DIAG_FILE, gl.DIAG_OLD = saved_diag
+
 # a bare-LF head and an HTTP/0.9 request line: answered at once (they
 # waited for a CRLF blank line until the timeout and got nothing)
 for r in (b"GET /status.json HTTP/1.0\n\n", b"GET /status.json\r\n"):

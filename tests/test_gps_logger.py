@@ -7017,6 +7017,11 @@ for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
           "for byte from web.html.gz alone on " + tag,
           "ok   GET / without gzip, only web.html.gz" in loop_out,
           loop_out[-600:])
+    check("WEB-LOOPBACK-DIAG: /diag?f=0 paged over a socket is diag.log "
+          "byte for byte, a missing diag.1 a 404, on " + tag,
+          "ok   GET /diag?f=0 paged from o is diag.log" in loop_out
+          and "ok   GET /diag?f=1 without diag.1 is a 404" in loop_out,
+          loop_out[-600:])
     if interp == mpy_bin:
         check("WEB-LOOPBACK-HEAP: the inflate's live heap stays small on "
               + tag, "ok   the inflate's live heap" in loop_out,
@@ -8456,6 +8461,108 @@ check("DIAG-TAIL-EDGE: a line starting right at the window is not dropped",
       len(edge) == 8 and edge[0].startswith("012") and t_bad == 0,
       "%d lines, first %r, %d of 300 random files differ" % (
           len(edge), edge[:1] and edge[0][:3], t_bad))
+diag_clear()
+
+# DIAG-24H: the two diag files hold a day of status lines (~220 B a minute
+# with ubx/hacc on NAV-PVT): the page's Event log aggregates all of it
+check("DIAG-24H: DIAG_FILE + DIAG_OLD hold 24 h of 220 B status lines",
+      2 * gl.DIAG_MAX >= 24 * 60 * 220 and gl.DIAG_MAX <= 256 * 1024,
+      repr(gl.DIAG_MAX))
+
+
+# DIAG-WEB: /diag?f=<0|1>&o=<n>: the raw bytes of DIAG_FILE (f=0) or
+# DIAG_OLD (f=1) from byte n, HIST_REPLY at most a reply, an exact
+# Content-Length and X-Diag-Size (the file's size: the page reloads both
+# once DIAG_FILE is smaller than where it got to); streamed in WEB_CHUNK
+# pieces, the UART read between them; a missing file, a bad f or o a 404,
+# a foreign Host a 403
+class _DConn(object):
+    def __init__(self):
+        self.sent, self.sends = b"", []
+
+    def settimeout(self, t):
+        pass
+
+    def sendall(self, b):
+        self.sends.append(len(b))
+        self.sent += bytes(b)
+
+
+def _dget(q, host=b""):
+    c = _DConn()
+    gl._web_reply(c, b"GET /diag?" + q + b" HTTP/1.1\r\n" + host + b"\r\n")
+    head, _, body = c.sent.partition(b"\r\n\r\n")
+    hs = head.split(b"\r\n")
+    hd = {}
+    for h in hs[1:]:
+        k, _, v = h.partition(b": ")
+        hd[k.decode()] = v.decode()
+    return hs[0], hd, body, c.sends
+
+
+diag_clear()
+dw_old = b"".join((st_line(k) + "\n").encode() for k in range(120))
+dw_cur = (b"wifi fail caf\xc3\xa9 status 201 after 12000 ms\n"
+          + b"".join((st_line(k) + "\n").encode() for k in range(120, 230)))
+with open(gl.DIAG_OLD, "wb") as f:
+    f.write(dw_old)
+with open(gl.DIAG_FILE, "wb") as f:
+    f.write(dw_cur)
+dw_uart = [0]
+dw_real_uart = gl.read_uart
+
+
+def _dw_uart():
+    dw_uart[0] += 1
+
+
+gl.read_uart = _dw_uart
+try:
+    dw_pages, dw_ok = {}, True
+    for fn, want in ((1, dw_old), (0, dw_cur)):
+        o, got = 0, b""
+        for _ in range(50):
+            st_, hd, body, sends = _dget(b"f=%d&o=%d" % (fn, o))
+            dw_ok = (dw_ok and st_ == b"HTTP/1.0 200 OK"
+                     and hd.get("Content-Length") == str(len(body))
+                     and hd.get("X-Diag-Size") == str(len(want))
+                     and len(body) <= gl.HIST_REPLY
+                     and max(sends) <= gl.WEB_CHUNK)
+            got += body
+            o += len(body)
+            if not body or o >= int(hd.get("X-Diag-Size", 0)):
+                break
+        dw_pages[fn] = (got == want, o)
+    dw_past = _dget(b"f=0&o=999999")
+    dw_mid = _dget(b"f=0&o=100")
+    uart_n = dw_uart[0]
+    dw_bad = [_dget(q)[0] for q in (b"f=2&o=0", b"f=x&o=0", b"f=0&o=-1",
+                                    b"f=0&o=x", b"o=0", b"f=0&o=1x")]
+    dw_host = _dget(b"f=0&o=0", b"Host: evil.example\r\n")[0]
+    os.remove(gl.DIAG_OLD)
+    dw_missing = _dget(b"f=1&o=0")[0]
+finally:
+    gl.read_uart = dw_real_uart
+check("DIAG-WEB: /diag?f=1 and f=0 paged from o are the files byte for "
+      "byte (a UTF-8 SSID too), HIST_REPLY a reply at most, exact "
+      "Content-Length, X-Diag-Size the file's size, WEB_CHUNK sends, the "
+      "UART read between them",
+      dw_ok and dw_pages == {1: (True, len(dw_old)), 0: (True, len(dw_cur))}
+      and len(dw_old) > gl.HIST_REPLY and uart_n > 0
+      and dw_mid[2] == dw_cur[100:100 + gl.HIST_REPLY],
+      repr((dw_ok, dw_pages, len(dw_old), uart_n)))
+check("DIAG-WEB: an o past the end is a 200 without bytes and the size "
+      "(the page sees a rotation by it)",
+      dw_past[0] == b"HTTP/1.0 200 OK" and dw_past[2] == b""
+      and dw_past[1].get("Content-Length") == "0"
+      and dw_past[1].get("X-Diag-Size") == str(len(dw_cur)),
+      repr(dw_past[:3]))
+check("DIAG-WEB: a bad f or o, or a missing file, is a 404; a foreign Host "
+      "a 403",
+      dw_bad == [b"HTTP/1.0 404 Not Found"] * 6
+      and dw_missing == b"HTTP/1.0 404 Not Found"
+      and dw_host == b"HTTP/1.0 403 Forbidden",
+      repr((dw_bad, dw_missing, dw_host)))
 diag_clear()
 
 # GPS-20: a cut-off sentence glued to a whole one keeps the whole one
@@ -13543,13 +13650,10 @@ else:
           repr((v3.get("dom", {}).get("acc"), v3.get("coord"),
                 v.get("coord"))))
     check("PAGE-PVT: on NAV-PVT the strip shows UBX BAD, not the frozen "
-          "NMEA count; the log row shows +-hAcc",
+          "NMEA count",
           "<small>UBX BAD</small><b>0.40<em>%</em>" in tm3
-          and "NMEA BAD" not in tm3 and "<small>NMEA BAD</small>" in tm
-          and '<span class="c sats">15<em>/22</em></span><span class="c hdop">'
-              '&plusmn;2.3<em> m</em></span>' in v3.get("log", "")
-          and "Avg acc</small><b>2.3 m" in v3.get("evd", ""),
-          tm3[-300:] + v3.get("log", "")[:400])
+          and "NMEA BAD" not in tm3 and "<small>NMEA BAD</small>" in tm,
+          tm3[-300:])
     # BOOT: when this run started (local time) and how long the one before
     # it lasted, until when; FIRMWARE: the build date, the commit after it
     jb = json.loads(page_json)
@@ -13627,57 +13731,229 @@ else:
               in sy,
           repr(v.get("unlabeled")) + sy[sy.find("Upload <em>") - 300:
                                          sy.find("Storage module")])
-    lg = v.get("log", "")
-    check("PAGE: Event log - newest first, a status row in columns (sats "
-          "used/seen, HDOP, points, IDF red under 48 KB), events with their "
-          "message, escaped",
-          lg.startswith('<div class="lr"><span class="ic info">')
-          and '<b class="info">UP</b><span class="ms">60 &lt;b&gt;</span>' in lg
-          and lg.index('<b class="boot">BOOT</b><span class="ms">watchdog '
-                       '&middot; previous run 10 min 00 s</span>')
-              < lg.index('<b class="ok">3D FIX</b>')
-          and '<span class="c sats">13<em>/21</em></span><span class="c hdop">'
-              '0.90</span><span class="c pts">4</span><span class="c idf err">'
-              '20<em> KB</em></span>' in lg and "<b>" not in lg, lg[:700])
-    check("PAGE: Event log - an unreadable CA_FILE ('upload ca err') is an "
-          "error row; the chips count all / status / events / errors",
-          '<span class="ic err">' in lg
-          and '<b class="err">UPLOAD</b><span class="ms">ca err OSError(5)'
-              in lg
-          and ">All<em>4</em>" in v.get("evf", "")
-          and ">Status<em>1</em>" in v.get("evf", "")
-          and ">Events<em>2</em>" in v.get("evf", "")
-          and ">Errors<em>1</em>" in v.get("evf", ""), v.get("evf", ""))
-    check("PAGE-EV: the Errors chip shows only the error rows",
-          v.get("evErr", "").count('<div class="lr">') == 1
-          and "UPLOAD" in v.get("evErr", "")
-          and '<button class="on" onclick="evPick(\'er\')">Errors'
-              in v.get("evErrChips", ""), v.get("evErr", "")[:300])
-    check("PAGE-EV: satellites chart (seen and used lines over the status "
-          "times, a grid every 4) and the fix donut (3D share, avg used, "
-          "avg HDOP, events); one status line is not a chart",
-          v.get("evChart", "").startswith('<svg class="ev-ch"')
-          and v.get("evChart", "").count('class="l1"') == 1
-          and v.get("evChart", "").count('class="l2"') == 1
-          and ">12</text>" in v.get("evChart", "")
-          and "50%</text>" in v.get("evDonut", "")
-          and "3D fix</small><b>1/2" in v.get("evDonut", "")
-          and "Avg used</small><b>8.0" in v.get("evDonut", "")
-          and "Avg HDOP</small><b>1.50" in v.get("evDonut", "")
-          and "Events</small><b>1" in v.get("evDonut", "")
-          and "TWO STATUS LINES" in v.get("evc", ""),
-          repr((v.get("evChart", "")[:200], v.get("evDonut", "")[-300:])))
-    evb = v.get("evBoot") or [[[], []]] * 3
-    check("PAGE-EV: after a boot (status lines without UTC among UTC ones, "
-          "or none with it) the chart has a point a line, evenly left to "
-          "right, labelled with the times there are",
-          [x for x, _ in evb] == [[34, 326, 618], [34, 326, 618], [34, 618]]
-          and evb[0][1][0] == v.get("evHm") and evb[0][1][2] == "+1m"
-          and evb[1][1][0] == "+1m" and evb[2][1] == ["+1m", "+2m"],
-          repr(evb))
-    check("PAGE-EV: Avg acc averages the hAcc lines only (no HDOP as "
-          "metres)", "Avg acc</small><b>2.0 m" in v.get("evDonutMix", ""),
-          v.get("evDonutMix", "")[-300:])
+    # PAGE-EV: the Event log aggregates the whole diag log on the board
+    # (tests/web_page_test.js feeds a canned 3 h log, Budapest time)
+    ev = v.get("ev", {})
+    evw = ev.get("view", {})
+    check("PAGE-EV: the harness ran the Event log (no error)",
+          "error" not in ev and evw, repr(ev.get("error", ""))[:600])
+    check("PAGE-EV: header - the window in local time and its length",
+          evw.get("evs") == "10:00&ndash;12:59 &middot; 2 h 59 min of the "
+                            "diag log", repr(evw.get("evs")))
+    evk = evw.get("evk", "")
+    check("PAGE-EV: KPI tiles - 3D fix % of the status lines (2 after a "
+          "boot without utc counted), no fix as a duration, boots with "
+          "power-on, updates once each with the failures",
+          ev.get("lines") == 166
+          and '<div class="t-ok"><small>3D fix</small><b>81<em>% of minutes'
+              '</em></b></div>' in evk
+          and '<div class="t-warn"><small>No fix / no data</small><b>32<em>'
+              'min</em></b></div>' in evk
+          and "<small>Boots</small><b>3<em>1 power-on</em></b>" in evk
+          and '<div class="t-warn"><small>Updates</small><b>2<em>1 failed'
+              '</em></b>' in evk, evk)
+    ev_n = {"crash": 1, "bug": 2, "gloop": 4, "gsil": 2, "track": 1,
+            "full": 1, "upl": 3, "ota": 2, "otax": 1, "reboot": 1,
+            "tback": 1, "wfail": 4, "wlost": 1, "low": 1, "setup": 4,
+            "pvt": 1, "env": 2, "boot": 2, "wback": 1, "stay": 1, "grx": 2,
+            "other": 2}
+    ev_order = ["gloop", "upl", "bug", "gsil", "ota", "crash", "track", "full",
+                "wfail", "setup", "env", "otax", "reboot", "tback", "wlost",
+                "low", "pvt", "boot", "wback", "grx", "stay", "other"]
+    check("PAGE-EV: groups - counts by kind ('(+N more)', '(N more)' and "
+          "'N more windows' counted, an update once however many lines), "
+          "the 2 lines after the last status line pending and shown, rows "
+          "by severity then count",
+          ev.get("n") == ev_n and ev.get("pend") == 2
+          and ev.get("order") == ev_order
+          and ev.get("viewN") == [ev_n[k] + (k in ("boot", "grx"))
+                                  for k in ev_order],
+          repr((ev.get("n"), ev.get("pend"), ev.get("order"),
+                ev.get("viewN"))))
+    det = ev.get("det", {})
+    check("PAGE-EV: details - silent time summed from 'gps back after N s', "
+          "the updates in order with the rolled back one, WiFi SSID, status "
+          "and mean time, boots, reset loop, Other",
+          "3 min 20 s in total" in det.get("gsil", "")
+          and "a3f2271 &rarr; 69f8c15" in det.get("ota", "")
+          and "1 rolled back" in det.get("ota", "")
+          and det.get("wfail", "").startswith(
+              "krumpli &middot; status 201<em> &middot; 12 s each")
+          and det.get("boot", "").startswith(
+              "1 power-on &middot; 2 reset<em> &middot; longest run 7 h 26 min")
+          and det.get("gloop", "").startswith("5 restarts in 6 s")
+          and det.get("other", "") == "clock set, heap grew"
+          and "3 points dropped" in det.get("full", ""), repr(det))
+    sp = ev.get("spark", {})
+    check("PAGE-EV: per-hour sparkline buckets over the window (local "
+          "10, 11, 12 h), each event at the next status line's time, the "
+          "pending ones at the last; last seen",
+          sp.get("wfail") == [4, 0, 0] and sp.get("gsil") == [0, 2, 0]
+          and sp.get("boot") == [1, 1, 1] and sp.get("ota") == [0, 1, 1]
+          and sp.get("gloop") == [4, 0, 0]
+          and ev.get("last", {}).get("wfail") == "10:31"
+          and ev.get("last", {}).get("boot") == "12:59"
+          and ev.get("last", {}).get("ota") == "12:11",
+          repr((sp, ev.get("last"))))
+    evc = evw.get("evc", "")
+    evc_s = re.search(r'<path class="s" d="([^"]*)"', evc)
+    evc_u = re.search(r'<path class="u" d="([^"]*)"', evc)
+    check("PAGE-EV: satellites - seen and used as 5-minute means, a smooth "
+          "line broken at the 16 min gap, a grid every 4, local hour labels",
+          evc_s is not None and evc_u is not None
+          and evc_s.group(1).count("M") == 2 and " C" in evc_s.group(1)
+          and evc_u.group(1).count("M") == 2
+          and '<span class="y" style="top:0%">12</span>' in evc
+          and re.findall(r'class="x"[^>]*>(\d\d)<', evc) == ["10", "11",
+                                                              "12"],
+          evc[:600])
+    evg = evw.get("evg", "")
+    check("PAGE-EV: the grouped table - a header row, a row a kind with its "
+          "icon chip, name, count, detail, sparkline and last seen",
+          evg.startswith('<div class="ev-grp ev-hd">')
+          and evg.count('<div class="ev-grp">') == 22
+          and '<div class="ev-grp"><span class="ev-ic t-bad"><svg' in evg
+          and '<span class="ev-nm t-bad">GPS reset loop</span><span '
+              'class="ev-n">4</span>' in evg
+          and '<span class="ev-lt">10:46</span>' in evg, evg[:900])
+    check("PAGE-EV: empty states - reading, and an empty log",
+          "reading the diag log" in ev.get("empty", {}).get("evs", "")
+          and "THE DIAGNOSTIC LOG IS EMPTY" in ev.get("none", {}).get(
+              "evg", ""), repr((ev.get("empty"), ev.get("none")))[:400])
+    ln = ev.get("lens") or [0, 0, 0]
+    check("PAGE-EV-LOAD: after the first status, /diag?f=1 page by page "
+          "(bytes counted, x-user-defined), then f=0; a minute later f=0 "
+          "from where it got to; a smaller f=0 (rotated) reads both again "
+          "from 0, the counts rebuilt, not added",
+          ev.get("urls") == [
+              "/diag?f=1&o=0", "/diag?f=1&o=5000", "/diag?f=0&o=0",
+              "/diag?f=0&o=%d" % ln[1], "/diag?f=0&o=%d" % (ln[1] + ln[2]),
+              "/diag?f=1&o=0", "/diag?f=1&o=16384", "/diag?f=0&o=0"]
+          and "x-user-defined" in (ev.get("mime") or "")
+          and ev.get("load1") == [False, True, 166, 0]
+          and ev.get("load2") == [2, [ln[1] + ln[2], ln[0]]]
+          and ev.get("rot") == [168, 2, True, False]
+          and "81<em>% of minutes" in ev.get("kpi1", "")
+          and "GPS reset loop" in ev.get("grp1", ""),
+          repr({k: ev.get(k) for k in ("urls", "load1", "load2", "rot",
+                                       "lens", "mime")}))
+    check("PAGE-EV-LOAD: no diag.1 (a 404) goes on to diag.log; a UTF-8 "
+          "SSID arrives one char a byte, is shown decoded, the offset in "
+          "bytes",
+          ev.get("no404") == ["/diag?f=1&o=0", "/diag?f=0&o=0"]
+          and (ev.get("utf") or [0, 1])[0] == (ev.get("utf") or [0, 1])[1]
+          and (ev.get("utf") or [0, 0, False])[2] is True,
+          repr((ev.get("no404"), ev.get("utf"))))
+    # PAGE-EV-KINDS: one line of every diag format gps_logger.py writes;
+    # the important ones in their own kind, Other only for the clock and
+    # the heap notes. Every format in the source must have a sample here
+    ev_samples = [
+        ("gps reset loop 5 restarts in 6 s", "gloop"),
+        ("gps reset loop 3 more windows", "gloop"),
+        ("gps reset loop 4 banners, no NMEA", "gloop"),
+        ("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10", "grx"),
+        ("gps rate 100 ms refused", "setup"),
+        ("gps pvt no NAV-PVT, NMEA this boot", "pvt"),
+        ("gps setup not taken: no NAV-PVT (2 more)", "setup"),
+        ("gps silent 60 s, no bytes from the receiver", "gsil"),
+        ("gps back after 75 s", "gsil"),
+        ("boot cause 1 prev_up 26731 mhz 160 mem 12912", "boot"),
+        ("heap grew in connect to 66 KB", "other"),
+        ("env SSID2: an SSID already set above, ignored", "env"),
+        ("env WPA2_2 empty: SSID2 is tried as an open network", "env"),
+        ("env FOO ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, WPA2_3 "
+         "only)", "env"),
+        ("wifi fail krumpli status 201 after 12000 ms (+2 more)", "wfail"),
+        ("wifi back krumpli after 2 min 05 s, 3 failed tries, rssi -60",
+         "wback"),
+        ("wifi lost krumpli rssi -62", "wlost"),
+        ("track write failing 20261102_100000.trk new 20261102_100100.trk",
+         "track"),
+        ("track create failing 20261102_100000.trk new x.trk", "track"),
+        ("track write error 3 OSError(28) 20261102_100000.trk", "track"),
+        ("time back 20261102T100500Z 20261102T100400Z", "tback"),
+        ("stay left wifi aps 3 scans 6", "stay"),
+        ("track full 20261102T1000-20261102T1005 drop 3", "full"),
+        ("upload: /gpx/20261102_100000.trk cannot be deleted, parked as "
+         ".err", "track"),
+        ("upload ca err OSError(5)", "upl"),
+        ("clock set 2026-11-02T11:38:31Z", "other"),
+        ("upload err html 403 (captive portal?)", "upl"),
+        ("upload aborted after 120 s", "upl"),
+        ("upload err OSError(113)", "upl"),
+        ("reboot tls memory 3", "reboot"),
+        ("reboot low idf 40 KB 300 s", "reboot"),
+        ("reboot guarded memory upload", "reboot"),
+        ("upload API_KEY in .env: a space, control or non-ASCII character",
+         "env"),
+        ("upload GEO_URL in .env: not http(s)://host[:port][/path]", "env"),
+        ("upload low idf 40 KB", "low"),
+        ("upload low mem 9000 B", "low"),
+        ("ota a3f2271 page /web.html.gz not put up: OSError(28)", "otax"),
+        ("ota: manifest fields refused", "otax"),
+        ("ota build 1793548800: manifest hmac does not match", "otax"),
+        ("ota a3f2271: download 404, sha256 mismatch", "otax"),
+        ("ota a3f2271 installed (was 2e8bc6e), rebooting", "ota"),
+        ("ota a3f2271 booted, checking", "ota"),
+        ("ota a3f2271 set to boot, not run yet: rebooting into it", "ota"),
+        ("ota a3f2271 crashed, rolled back by the bootloader: bad (running "
+         "2e8bc6e)", "ota"),
+        ("ota a3f2271 rolled back after no fix, 3 times: bad (running "
+         "2e8bc6e)", "ota"),
+        ("ota a3f2271 rolled back after no upload, tried again in 60 min "
+         "(running 2e8bc6e)", "ota"),
+        ("ota a3f2271 ok", "ota"),
+        ("ota a3f2271 no fix in 900 s, rolling back, bad", "ota"),
+        ("ota: uploads stuck 6 h (err 503), checking anyway", "otax"),
+        ("ota error OSError(-202)", "otax"),
+        ("web error KeyError('y')", "bug"),
+        ("bug upload ValueError('x')", "bug"),
+        ("crash up 3600 MemoryError()", "crash"),
+        ("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
+         "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
+         "idf None/None heap 124", "status")]
+    with open(os.path.join(ROOT, "gps_logger.py")) as f:
+        ev_src = f.read()
+    ev_fmts = re.findall(r'_wifi_diag\(\s*"\w+",\s*"([^"]*)"', ev_src)
+    for m_ in re.finditer(r'(_diag_write|_ota_say|_env_warn|_loop_diag|'
+                          r'_bug_once)\((\s*now,)?\s*"([^"]*)"', ev_src):
+        ev_fmts.append(m_.group(3))
+
+    def _ev_pat(fmt):
+        out = ""
+        for part in re.split(r"(%[-.\d]*[dsrf])", fmt):
+            if not part:
+                continue
+            if part.startswith("%"):
+                out += r"-?\d+" if part.endswith("d") else r".+?"
+            else:
+                out += re.escape(part)
+        return out
+
+    ev_nomatch = [f_ for f_ in ev_fmts if not any(
+        re.match(_ev_pat(f_), l_) for l_, _ in ev_samples)]
+    ev_lf = os.path.join(tempfile.mkdtemp(prefix="evk-"), "lines.json")
+    with open(ev_lf, "w") as f:
+        json.dump([l_ for l_, _ in ev_samples], f)
+    r_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
+                         os.path.join(here, "..", "web.html")],
+                        input=page_json, capture_output=True, text=True,
+                        env=dict(os.environ, EV_LINES=ev_lf))
+    try:
+        ev_kinds = json.loads(r_.stdout).get("kinds")
+    except ValueError:
+        ev_kinds = r_.stdout[-300:] + r_.stderr[-300:]
+    ev_bad = [(l_, k_, g_) for (l_, k_), g_ in zip(ev_samples, ev_kinds or [])
+              if k_ != g_]
+    check("PAGE-EV-KINDS: every diag format gps_logger.py writes has a "
+          "sample (%d formats), each sample in its kind: crashes, bugs, "
+          "upload errors, OTA, GPS silent / reset loop / setup / pvt, WiFi, "
+          "track and clock, reboots, boots, receiver; Other only the clock "
+          "set and heap notes" % len(ev_fmts),
+          len(ev_fmts) >= 45 and not ev_nomatch and isinstance(ev_kinds, list)
+          and len(ev_kinds) == len(ev_samples) and not ev_bad,
+          repr((len(ev_fmts), ev_nomatch, ev_bad,
+                ev_kinds if not isinstance(ev_kinds, list) else "")))
     # PAGE-WIFI: an arc icon (0-3 arcs lit) and the quality in per cent,
     # 2 x (RSSI + 100) clamped; amber below -67 dBm, red below -80; no words
     check("PAGE-WIFI: arcs, quality % and tone from RSSI",
@@ -13695,13 +13971,6 @@ else:
           v.get("coordSW", "").startswith("33.85678&deg; S  151.21530&deg; W")
           and v.get("coordNE", "") == "47.10000&deg; N  18.40000&deg; E",
           repr((v.get("coordSW"), v.get("coordNE"))))
-    check("PAGE-NULL: diag 'sats 0/None' reads -/0, 'idf None' and 'cause "
-          "None' read -",
-          '<span class="c sats">-<em>/0</em></span>' in v.get("logNone", "")
-          and '<span class="c idf">-<em> KB</em>' in v.get("logNone", "")
-          and "None" not in v.get("logNone", "") + v.get("bootNone", "")
-          and '<span class="ms">cause -</span>' in v.get("bootNone", ""),
-          repr((v.get("logNone"), v.get("bootNone"))))
     check("PAGE-NULL: an empty status.json shows - (no None/null/NaN)",
           "heap -/- KB" in v.get("nullSys", "")
           and '<small>Network</small><b class="">-</b>' in v.get("nullSys", "")
@@ -13849,8 +14118,6 @@ else:
           and ft.get("hlMap") == 2 and ft.get("hlLine") is True
           and ft.get("hlOff") == 1,
           repr((ft.get("kpis"), ft.get("kpisLong"), ft.get("hlMap"))))
-    check("REV-1: the static test skips a fix older than GPS_OK_S (or none)",
-          ft.get("statFresh") == [47.1], repr(ft.get("statFresh")))
     check("REV-4: today is the local date (Budapest 00:30 = Nov 2), Nov 1 "
           "a past day",
           ft.get("tz") == [-60, ["20261031", "20261101", "20261102"]],
@@ -13859,11 +14126,6 @@ else:
           ft.get("pruned") == [[False, False, True],
                                ["20261028", "20261030"]],
           repr(ft.get("pruned")))
-    st_t = ft.get("statTabs") or [None, None, None]
-    check("R2-STATIC: the static test keeps another tab's samples, is "
-          "capped at STAT_MAX, and a broken saved state is ignored",
-          st_t[0] == [47.1, 47.2, 47.3] and st_t[1] == 5000
-          and st_t[2] is True, repr(st_t))
     check("R2-PAGEERR: a bug drawing a box keeps LIVE and says so (not "
           "OFFLINE)",
           ft.get("pageErr", ["", ""])[0] == ""
@@ -13891,17 +14153,14 @@ else:
                                "/hist?d=D&o=900", "/hist?d=D&o=900"],
                               3, 4, False], repr(ft.get("hnext")))
     check("WEBR-7: a poll like the last one rewrites no box (innerHTML comes "
-          "back normalised, &middot; as U+00B7) and builds no static-test "
-          "scatter; a change is still drawn",
-          ft.get("wr7") == [[], 1, 1, 2, "STOP", True], repr(ft.get("wr7")))
+          "back normalised, &middot; as U+00B7)",
+          ft.get("wr7") == [[], True], repr(ft.get("wr7")))
     check("WEBR-8: rssi, temp, cno, elev and azim from the JSON reach the "
           "HTML coerced or escaped", ft.get("wr8") == [], repr(ft.get("wr8")))
-    check("WEBR-2: caught bugs ('bug <tick>', 'web error') are error rows; "
-          "a 500 from the board shows its error, not NO ANSWER",
-          ft.get("wrBug") == ["er", "er"]
-          and ft.get("wr2") == ["off", "BOARD ERROR &middot; "
-                                       "TypeError(&#39;row bug&#39;)"],
-          repr((ft.get("wrBug"), ft.get("wr2"))))
+    check("WEBR-2: a 500 from the board shows its error, not NO ANSWER",
+          ft.get("wr2") == ["off", "BOARD ERROR &middot; "
+                                   "TypeError(&#39;row bug&#39;)"],
+          repr(ft.get("wr2")))
     gx = ft.get("gpx", "")
     check("PAGE-GPX: GPX 1.1, a segment per 5 min gap, ele when known, "
           "escaped name",
@@ -13913,22 +14172,6 @@ else:
               '2026-10-30T08:00:00Z</time></trkpt>' in gx
           and '<trkpt lat="47.2" lon="18.5"><time>' in gx
           and gx.endswith("</trkseg>\n</trk>\n</gpx>\n"), gx[:400])
-    sv = ft.get("stat", {})
-    check("PAGE-STATIC: CEP50 / CEP95 / max around the mean, mean hAcc, "
-          "scatter with both circles; pos6 kept only while recording",
-          sv.get("btn") == "STOP"
-          and "<small>CEP50</small><b>0.67<em>m</em>" in sv.get("sstat", "")
-          and "<small>CEP95</small><b>0.74<em>m</em>" in sv.get("sstat", "")
-          and "<small>MAX</small><b>9.51<em>m</em>" in sv.get("sstat", "")
-          and "<small>MEAN HACC</small><b>2.00<em>m</em>" in sv.get("sstat", "")
-          and sv.get("scat", "").count('class="d"') == 20
-          and 'class="c50"' in sv.get("scat", "")
-          and 'class="c95"' in sv.get("scat", "")
-          and ft.get("statEmpty", {}).get("btn") == "START"
-          and "<small>CEP50</small><b>-" in ft.get("statEmpty", {}).get(
-              "sstat", "")
-          and ft.get("statAdd") == [[1000, 47.185361, 18.427305, 1.5]],
-          repr(sv)[:500])
     check("PAGE: satellite table and map tile maths",
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"
@@ -13937,6 +14180,11 @@ else:
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "web.html")) as f:
     page_src = f.read()
+check("PAGE-STATIC-GONE: no Static test panel, code, CSS or browser "
+      "storage on the page",
+      not any(w_ in page_src for w_ in (
+          "Static test", "statView", "statAdd", "sstat", "scat", "STAT_",
+          "gps-static", "localStorage", "CEP50")), "")
 check("PAGE: polls status.json at the board's refresh_s, no reload",
       "/status.json" in page_src and "refresh_s" in page_src
       and 'http-equiv="refresh"' not in page_src
@@ -13992,6 +14240,18 @@ else:
         f.write(page_src.replace("</body>", lay_probe))
     with open(os.path.join(lay_d, "status.json"), "w") as f:
         json.dump(lay_j, f)
+    # /diag?f=&o= (the server ignores the query: both files this one, no
+    # X-Diag-Size): a day of status lines and long events for the Event log
+    with open(os.path.join(lay_d, "diag"), "w") as f:
+        for k in range(1440):
+            f.write("up %d utc 20261102T%02d%02d00Z nmea 1/0 gpsboots 0 "
+                    "loops 0 sats %d/%d fix 3D_fix hdop 1.2 points 0 sent 0 "
+                    "wifi connected pulses 0 mem 17000 idf 221/208 heap 62\n"
+                    % (60 * k, k // 60, k % 60, 8 + k % 9, 4 + k % 5))
+            if k % 97 == 5:
+                f.write("wifi fail MyVeryLongHomeNetworkName_5G status 201 "
+                        "after 12000 ms (+5 more)\nupload err OSError 113 "
+                        "ECONNABORTED while posting the batch\n")
     # headless Chrome keeps a window 500 px wide at least: the page runs in
     # a frame of the width (its viewport, media queries included)
     for w in (375, 800):

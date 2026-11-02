@@ -547,11 +547,16 @@ Python heap grew during an upload step (`read_batch`, `connect`,
 reboot, and a `crash` line
 before a crash reset. A reset loop that goes on writes its first warning,
 then `gps reset loop N more windows` every 5 minutes (`GPS_LOOP_SAY`) and
-once when it ends, not a line every 10 s. Past 32 KB the file becomes
-`/diag.1` (the older one is dropped), so the two hold about 7 hours at one
-line a minute; below the 32 KB flash reserve nothing is written. The status
-page shows the last 15 lines (`WEB_DIAG`), right after the switch to
-`/diag.1` from both files. After a walk, plug the board in and read it:
+once when it ends, not a line every 10 s. Past 160 KB (`DIAG_MAX`) the
+file becomes `/diag.1` (the older one is dropped), so the two hold about
+26 hours of status lines at ~210 B a minute (~13 h right after the switch,
+when `/diag.1` is all there is; a board on NMEA writes ~170 B lines: 16-32
+h). They take up to 320 KB of the ~12 MB file system; below the 32 KB flash
+reserve nothing is written. Nothing reads a whole file into RAM: the
+rotation only looks at the size, the boot reads the last few lines, and the
+status page reads both files in 16 KB pieces (`/diag?f=1|0&o=<byte>`, see
+the *Event log* below; `/status.json` still carries the last 15 lines,
+`WEB_DIAG`). After a walk, plug the board in and read it:
 
 ```bash
 .venv/bin/mpremote resume fs cat :/diag.log
@@ -596,7 +601,8 @@ last accepted batch, `null` for none since boot), the day history's
 14 s`; seconds in the JSON, `prev_end` the time of its last line), boot
 cause, the build (`fw`, `fw_build`), chip temperature, free Python heap
 and flash,
-WiFi, keep-alive pulses; and the last lines of the diagnostic log. The
+WiFi, keep-alive pulses; and the last lines of the diagnostic log (the page
+itself no longer uses them: it reads the whole log, below). The
 page is a dark telemetry view. On top, a darkened OpenStreetMap map is
 centred on the position, with a glowing dot, an accuracy ring (NAV-PVT's
 accuracy as it is, else HDOP x 2.5 m) and the coordinates (N/S, E/W) with
@@ -607,7 +613,7 @@ for upload, WiFi signal and the share of bad NMEA sentences. The WiFi cell
 is an arc icon (0–3 arcs lit) and the link quality in per cent, 2 x (RSSI +
 100) capped at 0–100 (-63 dBm = 74 %), with the dBm beside it on a wide
 screen; amber below -67 dBm, red below -80 dBm. Below (on a wide screen in two
-columns: the sky plot, *Track* and *Static test* on the left, the plot growing
+columns: the sky plot and *Track* on the left, the plot growing
 to fill the column next to *Systems*; signal bars and *Systems* on the right):
 - a radar-style sky plot (centre = overhead, edge = horizon, north up;
   colour = system: GPS blue, Galileo green, BeiDou amber, GLONASS pink;
@@ -633,20 +639,35 @@ to fill the column next to *Systems*; signal bars and *Systems* on the right):
     cause, the run before it and until when, chip temperature and clock,
     GPS time.
   Counters that are 0 are left out of the rows;
-- the *Event log* (laid out after a server log monitoring design), from the
-  last 15 diagnostic lines (`WEB_DIAG`):
-  - *Satellites*: satellites seen (green) and used (cyan) over the status
-    lines' times, one point a minute;
-  - *Fix quality*: a donut of the minutes with a 3D fix (amber: 2D, red:
-    none), the 3D share, the average satellites used, the average HDOP (or
-    accuracy on NAV-PVT) and the number of events;
-  - *Logs*: newest on top, filtered by `All / Status / Events / Errors`
-    (with counts). A status line is a row of columns: fix, satellites
-    used/seen, HDOP (`±m` on NAV-PVT), points, the largest IDF block (red
-    below 48 KB), source and local time. Boots, OTA steps, receiver lines
-    and the rest are events, with their message across those columns.
-    Upload errors, crashes, reboots and a receiver reset loop count as
-    errors;
+- the *Event log*: the whole diagnostic log on the board (`/diag.1`, then
+  `/diag.log`: up to ~26 h), aggregated by kind rather than listed line by
+  line (laid out after Sentry / Loki "patterns"). The window on top (`10:16–
+  16:20 · 6 h 04 min of the diag log`), then:
+  - four tiles: the share of status lines (minutes) with a 3D fix, the time
+    without a fix or without data, the boots (how many were power-on) and
+    the firmware updates (each counted once, `all ok` or how many failed);
+  - *Satellites*: seen (green) and used (cyan) as 5-minute means over the
+    whole window, a smooth line broken where the log has a gap over 10 min,
+    local hours below;
+  - *Events, grouped*: a row a kind, the most severe first, then by count:
+    an icon by meaning (red: crash, caught bug, GPS reset loop, GPS silent,
+    track write error, flash full, upload error, a rolled back update;
+    amber: update check, memory reboot, clock back, WiFi failed / lost,
+    upload waiting for memory, GPS setup refused, NAV-PVT given up, `.env`;
+    cyan / green: boots, updates, WiFi back; grey: receiver start, stay
+    ended, other), the count (`(+N more)` and `N more windows` included),
+    a detail (e.g. `5 restarts in 3–24 s`, `krumpli · status 201 · 12 s
+    each`, the silent time summed from `gps back after N s`, the updates
+    `2e8bc6e → a3f2271 → 69f8c15`), a per-hour sparkline over the window and
+    when it was last seen. On a phone the detail and the sparkline are left
+    out. An event line has no time of its own: it takes the time of the next
+    status line with GPS time (lines after the last one: the last time).
+  The page reads `/diag?f=1&o=0`, then on from each reply's end, then
+  `f=0` the same way (`X-Diag-Size` is the file's size; ~16 KB a reply,
+  `HIST_REPLY`), parsing as it goes (only the totals are kept, not the
+  lines); after that once a minute `f=0` from where it got to. When
+  `/diag.log` is smaller than that, it became `/diag.1`: the page reads both
+  again;
 - *Track*: the day as a timeline (as in Maps Timeline), `‹ day ›` arrows
   step through today and the days the board keeps. On top the km, the
   moving time and the trips; below, a dot and a solid line per trip (start
@@ -656,13 +677,6 @@ to fill the column next to *Systems*; signal bars and *Systems* on the right):
   trip clicked is drawn white on the map, which zooms to it (clicked again:
   the whole day). `GPX` saves the shown day as GPX 1.1 (built in the
   browser, a segment per gap);
-- *Static test*: `START` keeps each poll's position (`pos6`; only one the
-  receiver sent in the last 3 s, so a frozen fix cannot shrink the CEP) and hAcc, saved
-  in the browser so a reload keeps them; it shows the samples, the span,
-  CEP50 / CEP95 (the radius around their mean that holds 50 / 95 % of the
-  fixes), the largest distance and the mean hAcc, with a scatter plot. Leave
-  the board still under open sky; one sample a poll (15 s), so an hour gives
-  ~240;
 - a folded satellite table (signal, elevation, azimuth, used).
 
 The `GPS LINK` row (bytes a second between two polls, the age of the last
@@ -1473,14 +1487,14 @@ with a NEO-6M; most never need changing.
 | `KEEPALIVE_MAX` | 10 min | How long a Ctrl-C timer feeds the watchdog |
 | `BOOT_OK_MS` | 60 s | Healthy loop time that clears the boot-fail counter |
 | `STATUS` | 10 min | Console `status` line interval |
-| `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
+| `DIAG` / `DIAG_MAX` | 60 s / 160 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` (the two: ~26 h of status lines, up to 320 KB of flash) |
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
 | `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
 | `WEB_PAGE_GZ` / `WEB_GZ_WBITS` / `WEB_PAGE` / `WEB_REFRESH` | `/web.html.gz` / 12 / `/web.html` / 15 s | The page on the board, kept only gzipped (as is to clients accepting gzip, inflated for the others); its window (2^12 = 4 KB of heap to inflate; `deploy.sh` and `--publish` use it); an older board's plain page, served while it is there; how often the page polls `/status.json` |
 | `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
-| `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply |
+| `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply (and bytes at most per `/diag` reply) |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
 | `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |

@@ -21,37 +21,7 @@ v.wq = [-40, -60, -63, -67, -68, -80, -81, -100, -110, null].map((r) => ctx.wifi
 v.esc = ctx.esc("<a href=\"x\" title='y'>&</a>");
 v.coordSW = ctx.view({position: "-33.85678, -151.21530", hdop: 1}).coord;
 v.coordNE = ctx.view({position: "47.10000, 18.40000"}).coord;
-v.logNone = ctx.logLine("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix No_data! hdop None " +
-  "points 0 sent 0 wifi off pulses 0 mem 27000 idf None/None heap 124");
-v.bootNone = ctx.logLine("boot cause None prev_up - mhz 80");
 v.nullSys = ctx.view({}).sys;
-// Event log: the chart from two status lines, the filter chips
-const evL = ["up 60 utc 20261031T053014Z nmea 9/1 gpsboots 0 loops 0 sats 10/7 fix 3D_fix hdop 1.2 points 0 sent 0 " +
-  "wifi connected pulses 0 mem 27000 idf 157/120 heap 124",
-  "up 120 utc 20261031T053114Z nmea 9/1 gpsboots 0 loops 0 sats 12/9 fix 2D_fix hdop 1.8 points 0 sent 0 " +
-  "wifi connected pulses 0 mem 27000 idf 157/120 heap 124", "ota abc ok"];
-v.evChart = ctx.evChart(ctx.evStatus(evL));
-v.evDonut = ctx.evDonut(ctx.evStatus(evL), 1);
-// a boot in the tail: lines without UTC (uptime only) among UTC ones, and
-// none with it; the chart's x of each point (its line's end points)
-const evS = (up, utc, seen) => evL[0].replace("up 60 utc 20261031T053014Z", "up " + up + " utc " + utc)
-  .replace("sats 10/7", "sats " + seen + "/7");
-const evX = (svg) => {
-  const d = (svg.match(/class="l1" d="([^"]+)"/) || [])[1] || "";
-  return d.split(/[MC]/).filter((s) => s.trim()).map((s) => { const n = s.trim().split(/\s+/); return +n[n.length - 2]; });
-};
-const evT = (svg) => (svg.match(/<g><text[^]*<\/g>/) || [""])[0].replace(/<[^>]+>/g, " ").trim().split(/\s+/);
-v.evBoot = [[evS(600, "20261102T070000Z", 12), evS(660, "20261102T070100Z", 13), "boot cause 1 prev_up 700 mhz 80", evS(60, "-", 3)],
-  [evS(60, "-", 3), evS(120, "20261102T070200Z", 9), evS(180, "20261102T070300Z", 11)],
-  [evS(60, "-", 3), evS(120, "-", 5)]].map((ls) => { const s = ctx.evChart(ctx.evStatus(ls)); return [evX(s), evT(s)]; });
-v.evHm = ctx.hm(Date.UTC(2026, 10, 2, 7, 0, 0));
-// Avg acc from the hAcc lines only (an HDOP is no metre)
-const evP = (ha) => evL[0].replace("hdop 1.2", ha ? "hdop None" : "hdop 1.2") + (ha ? " ubx 10/0 hacc " + ha : "");
-v.evDonutMix = ctx.evDonut(ctx.evStatus([evP("2.0"), evP(null), evP(null)]), 0);
-ctx.EVF = "er";
-v.evErr = ctx.view(d).log;
-v.evErrChips = ctx.view(d).evf;
-ctx.EVF = "all";
 
 // The page against a stub document (no browser in CI)
 function El(id) {
@@ -93,7 +63,7 @@ dom.transform = p.doc.getElementById("tiles").style.transform;
 dom.acc = p.doc.getElementById("acc").style.width;
 dom.live = p.doc.getElementById("live").innerHTML;
 dom.body = p.doc.body.className;
-dom.painted = p.doc.getElementById("tm").innerHTML === v.tm && p.doc.getElementById("log").innerHTML === v.log && p.doc.getElementById("sys").innerHTML === v.sys;
+dom.painted = p.doc.getElementById("tm").innerHTML === v.tm && p.doc.getElementById("sys").innerHTML === v.sys;
 dom.timer = p.timers[0];
 p.map.offsetWidth = 400;
 p.c.window.onresize();
@@ -183,7 +153,7 @@ hx = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
 hd.again = hx.length > 1 && hx[1].url === hx[0].url.replace("&o=0", "&o=16384");
 v.hist = hd;
 // The new boxes: GPS link, last upload, day picker, track parse (speed),
-// profile, GPX, static test, and picking a past day on the page
+// profile, GPX, and picking a past day on the page
 const ft = {};
 const c0 = page(1600).c;
 const base = {uptime: 600, rx_bytes: 50000, rx_age_s: 0, good_age_s: 0, left: 0, upload_age_s: 30};
@@ -250,22 +220,6 @@ ft.kpis = c0.kpis(trips);
 ft.kpisLong = c0.kpis([{t0: 0, t1: 4500000, km: 12.345}]);
 ft.gpx = c0.gpxText([[Date.UTC(2026, 9, 30, 8, 0, 0), 47.1, 18.4, 120.5, 5], [Date.UTC(2026, 9, 30, 8, 0, 1), 47.2, 18.5, null, null],
   [Date.UTC(2026, 9, 30, 9, 0, 0), 47.3, 18.6, 99, 0]], "GPS <day>");
-// static test: 20 fixes, 10 at the centre, 9 at 1 m, one at 10 m east
-const S = [];
-const ky = 110540, kx = 111320 * Math.cos(47 * Math.PI / 180);
-for (let k = 0; k < 10; k++) S.push([k * 15000, 47, 18, 2]);
-for (let k = 0; k < 9; k++) S.push([(10 + k) * 15000, 47 + 1 / ky, 18, 2]);
-S.push([19 * 15000, 47, 18 + 10 / kx, null]);
-ft.stat = c0.statView(S, true);
-ft.statEmpty = c0.statView([], false);
-ft.statAdd = (() => {
-  c0.stat = {on: true, s: []};
-  c0.statAdd({pos6: "47.185361, 18.427305", position: "47.18536, 18.42730", hacc: 1.5}, 1000);
-  c0.statAdd({position: null}, 2000);
-  c0.stat.on = false;
-  c0.statAdd({pos6: "1, 2"}, 3000);
-  return c0.stat.s;
-})();
 // the page: a poll fills the picker; picking a past day asks for its UTC
 // days once, draws the track without a fix, and does not poll it again
 p = page(1600);
@@ -301,14 +255,6 @@ p.c.hlTrip(0);
 ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
 for (let k = 0; k < 3 && p.c.hist.past; k++) p.c.step(1);   // (via 20261031 east of UTC)
 ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
-// REV-1: the static test keeps only a fix the receiver just sent
-ft.statFresh = (() => {
-  c0.stat = {on: true, s: []};
-  c0.statAdd({pos6: "47.1, 18.4", good_age_s: 1}, 1);
-  c0.statAdd({pos6: "47.2, 18.4", good_age_s: 8}, 2);
-  c0.statAdd({pos6: "47.3, 18.4", good_age_s: null}, 3);
-  return c0.stat.s.map((q) => q[1]);
-})();
 // REV-4: at 00:30 local on Nov 2 in Budapest (23:30 UTC on Nov 1) today
 // is Nov 2 and Nov 1 a past day (the UTC date made Nov 1 "today")
 ft.tz = (() => {
@@ -343,35 +289,11 @@ ft.pruned = (() => {
   nav.push(q.doc.getElementById("dprev").disabled);
   return [nav, back];
 })();
-// R2: the static test is capped at STAT_MAX and keeps another tab's
-// samples (it reloads the saved state before adding); a bug drawing a box
-// keeps LIVE (only a failed or unparsable answer is offline)
-ft.statTabs = (() => {
-  const store = {};
-  const ls = {getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }};
-  const c = {Date: Date, Math: Math, JSON: JSON, localStorage: ls};
-  vm.createContext(c);
-  vm.runInContext(src, c);
-  c.stat = {on: true, s: []};
-  c.statSave();
-  c.statAdd({pos6: "47.1, 18.4", good_age_s: 0}, 1);
-  // another tab adds one meanwhile
-  const other = JSON.parse(store["gps-static"]);
-  other.s.push([2, 47.2, 18.4, null]);
-  store["gps-static"] = JSON.stringify(other);
-  c.statAdd({pos6: "47.3, 18.4", good_age_s: 0}, 3);
-  const merged = c.stat.s.map((q) => q[1]);
-  c.stat = {on: true, s: []};
-  for (let k = 0; k < c.STAT_MAX + 7; k++) c.stat.s.push([k, 47, 18, null]);
-  c.statSave();
-  c.statAdd({pos6: "47.4, 18.4", good_age_s: 0}, 99999);
-  store["gps-static"] = "{\"on\":true,\"s\":5}";
-  c.statLoad();
-  return [merged, c.stat.s.length, Array.isArray(c.stat.s)];
-})();
+// R2: a bug drawing a box keeps LIVE (only a failed or unparsable answer
+// is offline)
 ft.pageErr = (() => {
   const q = page(1600);
-  q.c.statPaint = () => { throw new Error("boom"); };
+  q.c.navPaint = () => { throw new Error("boom"); };
   q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null});
   q.xhrs[0].onload();
   return [q.doc.body.className, q.doc.getElementById("live").innerHTML];
@@ -499,8 +421,7 @@ ft.hnext = (() => {
   return [urls, pts, q.c.hist.pts.length, again];
 })();
 // WR-7: a browser hands innerHTML back normalised (&middot; -> U+00B7):
-// a poll like the last one writes no box again, and the static test with
-// nothing new builds no scatter
+// a poll like the last one writes no box again
 ft.wr7 = (() => {
   const q = page(1600);
   const norm = (h) => String(h).replace(/&middot;/g, "·").replace(/&deg;/g, "°")
@@ -516,21 +437,16 @@ ft.wr7 = (() => {
     }
     return els[id];
   };
-  let sv = 0;
-  const realSv = q.c.statView;
-  q.c.statView = (s, on) => { sv++; return realSv(s, on); };
   q.xhrs[0].responseText = text;
   q.xhrs[0].onload();
-  const ids = ["tm", "sys", "log", "evf", "evc", "evd", "skyh", "bh", "svt", "coord", "sstat", "scat", "tkpi", "tline"];
-  const w1 = ids.map((id) => els[id] ? els[id].writes : 0), sv1 = sv;
+  const ids = ["tm", "sys", "skyh", "bh", "svt", "coord", "tkpi", "tline"];
+  const w1 = ids.map((id) => els[id] ? els[id].writes : 0);
   q.c.tick();
   const x2 = st(q)[1];
   x2.responseText = text;
   x2.onload();
   const again = ids.filter((id, k) => (els[id] ? els[id].writes : 0) !== w1[k]);
-  const sv2 = sv;
-  q.c.statToggle();                      // a change is drawn
-  return [again, sv1, sv2, sv, els.sbtn.innerHTML, w1.every((n) => n === 1)];
+  return [again, w1.every((n) => n === 1)];
 })();
 // WR-8: numbers from the JSON go into the HTML coerced or escaped
 ft.wr8 = (() => {
@@ -546,7 +462,134 @@ ft.wr2 = (() => {
   q.xhrs[0].onload();
   return [q.doc.body.className, q.doc.getElementById("live").innerHTML];
 })();
-// caught bugs (the loop's guard, the page server) are error rows
-ft.wrBug = [c0.logRow("bug upload ValueError('x')").k, c0.logRow("web error KeyError('y')").k];
+// EVENT LOG: the whole diag log on the board (/diag?f=1, then f=0),
+// aggregated: KPI tiles, 5-minute satellite means, events grouped by kind.
+// A canned log (UTC; Budapest is UTC+1 in November): 09:00Z-11:59Z, a
+// status line a minute, 3D but 30 min waiting and a 16 min gap, two after
+// a boot without utc; events between them (no time of their own: the next
+// status line's)
+const evS = (m, fix, sv) => {
+  const t = m === null ? "-" : "20261102T" + two2(9 + Math.floor(m / 60)) + two2(m % 60) + "00Z";
+  return "up " + (m === null ? 30 : 100 + m * 60) + " utc " + t + " nmea 1/0 gpsboots 0 loops 0 sats " + sv +
+    " fix " + fix + " hdop 1.2 points 0 sent 0 wifi connected pulses 0 mem 17000 idf 221/208 heap 62";
+};
+function two2(n) { return (n < 10 ? "0" : "") + n; }
+const evAfter = {
+  "-1": ["boot cause 1 prev_up 26731 mhz 160 mem 12912", "gps u-blox 6, 7.03 (45969)"],
+  30: ["wifi fail krumpli status 201 after 12000 ms", "wifi fail krumpli status 201 after 12010 ms (+2 more)"],
+  45: ["gps reset loop 5 restarts in 6 s", "gps reset loop 3 more windows"],
+  60: ["ota a3f2271 installed (was 2e8bc6e), rebooting", "boot cause 2 prev_up 3700 mhz 160 mem 9760",
+    "gps u-blox 6, 7.03 (45969)", evS(null, "Waiting_fix", "3/0"), evS(null, "Waiting_fix", "5/0"),
+    "ota a3f2271 booted, checking"],
+  70: ["ota a3f2271 ok"],
+  80: ["gps silent 60 s, no bytes from the receiver"], 82: ["gps back after 125 s"],
+  90: ["gps silent 60 s, no bytes from the receiver"], 91: ["gps back after 75 s"],
+  100: ["crash up 3600 MemoryError()", "bug upload ValueError('x')", "web error KeyError('y')",
+    "upload err OSError(113)", "upload aborted after 120 s", "upload ca err OSError(5)",
+    "track full 20261102T1000-20261102T1005 drop 3", "time back 20261102T100500Z 20261102T100400Z",
+    "track write failing 20261102_100000.trk new 20261102_100100.trk", "reboot tls memory 3",
+    "gps setup not taken: no NAV-PVT (2 more)", "gps rate 100 ms refused", "gps pvt no NAV-PVT, NMEA this boot",
+    "wifi lost krumpli rssi -62", "wifi back krumpli after 2 min 05 s, 3 failed tries, rssi -60",
+    "clock set 2026-11-02T11:38:31Z", "heap grew in connect to 66 KB", "ota error OSError(-202)",
+    "env SSID2: an SSID already set above, ignored", "upload API_KEY in .env: a space, control or non-ASCII character",
+    "stay left wifi aps 3 scans 6", "upload low idf 40 KB"],
+  130: ["ota 69f8c15 installed (was a3f2271), rebooting", "ota 69f8c15 no fix in 900 s, rolling back, bad"],
+  179: ["boot cause 2 prev_up 244 mhz 160 mem 10256", "gps u-blox 6, 7.03 (45969)"]
+};
+const evLog = [];
+for (const l of evAfter["-1"]) evLog.push(l);
+for (let m = 0; m < 180; m++) {
+  if (m >= 150 && m <= 165) continue;                  // the board off: a gap
+  evLog.push(evS(m, m >= 120 && m < 150 ? "Waiting_fix" : "3D_fix", m >= 120 && m < 150 ? "4/0" : "10/6"));
+  for (const l of evAfter[m] || []) evLog.push(l);
+}
+const evText = evLog.join("\n") + "\n";
+const EV = {};
+try {
+  // the aggregate and its boxes, fed in pieces cut anywhere (a reply ends
+  // mid-line), under Budapest time with "now" that afternoon
+  Object.assign(EV, inTz("Europe/Budapest", () => new Date(2026, 10, 2, 13, 30, 0).getTime(), (c) => {
+    const a = c.evNew();
+    for (let i = 0; i < evText.length; i += 997) c.evFeed(a, evText.slice(i, i + 997));
+    const w = c.evView(a, {busy: false, done: true});
+    const cnt = {}, spark = {}, last = {};
+    for (const k in a.g) cnt[k] = a.g[k].n;
+    const gs = c.evGroups(a);
+    for (const g of gs) { spark[g.k] = g.spark; last[g.k] = g.last === null ? null : c.hm(g.last); }
+    return {view: w, n: cnt, order: gs.map((g) => g.k), viewN: gs.map((g) => g.n), spark: spark, last: last,
+      det: Object.fromEntries(gs.map((g) => [g.k, g.det])), pend: a.pend.length,
+      lines: a.n, empty: c.evView(c.evNew(), {busy: true, done: false}),
+      none: c.evView(c.evNew(), {busy: false, done: true})};
+  }));
+  // the loader against a stub board: DIAG_OLD in two replies, DIAG_FILE,
+  // then a minute later DIAG_FILE from where it got to; a smaller
+  // DIAG_FILE (it rotated) reads both again; no DIAG_OLD (404) goes on
+  const q = page(1600), urls = [];
+  q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null});
+  q.xhrs[0].onload();
+  const dOpen = () => q.xhrs.filter((x) => x.url.indexOf("/diag?") === 0 && !x.done);
+  function dReply(status, body, size) {
+    const x = dOpen()[0];
+    if (!x) { urls.push(null); return; }
+    x.done = true;
+    urls.push(x.url);
+    x.status = status;
+    x.responseText = body;
+    x.headers = size === undefined ? {} : {"X-Diag-Size": String(size)};
+    EV.mime = x.mime;
+    x.onload();
+  }
+  const half = evLog.slice(0, 120).join("\n") + "\n", rest = evLog.slice(120).join("\n") + "\n";
+  dReply(200, half.slice(0, 5000), half.length);       // DIAG_OLD, first reply
+  dReply(200, half.slice(5000), half.length);          // the rest of it
+  dReply(200, rest, rest.length);                      // DIAG_FILE
+  EV.load1 = [q.c.dg.busy, q.c.dg.done, q.c.dg.a.n, dOpen().length];
+  EV.kpi1 = q.doc.getElementById("evk").innerHTML;
+  EV.grp1 = q.doc.getElementById("evg").innerHTML;
+  // a minute later (the next poll): DIAG_FILE from its offset
+  q.c.dg.at = 0;
+  q.c.tick();
+  st(q)[1].responseText = JSON.stringify({refresh_s: 15, position: null});
+  st(q)[1].onload();
+  const more = "wifi lost krumpli rssi -70\n" + evS(200, "3D_fix", "9/5") + "\n";
+  dReply(200, more, rest.length + more.length);
+  EV.load2 = [q.c.dg.a.g.wlost ? q.c.dg.a.g.wlost.n : 0, q.c.dg.off.slice()];
+  // it rotated: DIAG_FILE now one line, smaller than where the page got to
+  q.c.dg.at = 0;
+  q.c.tick();
+  st(q)[2].responseText = JSON.stringify({refresh_s: 15, position: null});
+  st(q)[2].onload();
+  const rot = "up 60 utc 20261102T130000Z nmea 1/0 gpsboots 0 loops 0 sats 7/4 fix 3D_fix hdop 1 points 0 sent 0 wifi connected pulses 0 mem 1 idf 1/1 heap 62\n";
+  dReply(200, "", rot.length);
+  const nOld = half + rest + more;
+  dReply(200, nOld.slice(0, 16384), nOld.length);
+  dReply(200, nOld.slice(16384), nOld.length);
+  dReply(200, rot, rot.length);
+  EV.rot = [q.c.dg.a.n, q.c.dg.a.g.wlost.n, q.c.dg.done, q.c.dg.busy];
+  // no DIAG_OLD: a 404 goes on to DIAG_FILE
+  const q2 = page(1600);
+  q2.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null});
+  q2.xhrs[0].onload();
+  const d2 = () => q2.xhrs.filter((x) => x.url.indexOf("/diag?") === 0 && !x.done);
+  const x404 = d2()[0];
+  x404.done = true; x404.status = 404; x404.responseText = "no such diag file"; x404.onload();
+  const x0 = d2()[0];
+  EV.no404 = [x404.url, x0 ? x0.url : null];
+  // a non-ASCII SSID: one char a byte (x-user-defined), decoded as UTF-8;
+  // the offset counts bytes
+  const buf = Buffer.from("wifi fail café status 201 after 12000 ms\n" + evS(0, "3D_fix", "9/5") + "\n", "utf8");
+  x0.done = true; x0.status = 200; x0.headers = {"X-Diag-Size": String(buf.length)};
+  x0.responseText = Array.from(buf, (b) => String.fromCharCode(b < 128 ? b : 0xF700 + b)).join("");
+  x0.onload();
+  EV.utf = [q2.c.dg.off[0], buf.length, q2.doc.getElementById("evg").innerHTML.indexOf("café") >= 0];
+  EV.urls = urls;
+  EV.lens = [half.length, rest.length, more.length];
+} catch (e) {
+  EV.error = String(e && e.stack || e);
+}
+v.ev = EV;
+// the kinds of diag lines (tests/test_gps_logger.py passes one of each
+// format gps_logger.py writes)
+if (process.env.EV_LINES) v.kinds = JSON.parse(fs.readFileSync(process.env.EV_LINES, "utf8")).map((l) => c0.evKind(l));
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));
