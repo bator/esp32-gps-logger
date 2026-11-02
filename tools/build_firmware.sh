@@ -70,8 +70,10 @@ case "$MODE" in
 esac
 
 mkdir -p "$OUT"
-# the frozen files: the logger and a marker deploy.sh looks for
+# the frozen files: the logger, main.py's boot helpers (gps_boot.py: OTA
+# and the boot-fail retry, out of the heap) and a marker deploy.sh looks for
 cp gps_logger.py "$OUT/gps_logger.py"
+cp gps_boot.py "$OUT/gps_boot.py"
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD=$(git log -1 --format=%ct 2>/dev/null || echo 0)
 DIRTY=
@@ -88,6 +90,7 @@ cat > "$OUT/manifest.py" <<EOF
 include("\$(PORT_DIR)/boards/manifest.py")
 module("gps_logger.py", base_path="$OUT")
 module("gps_frozen.py", base_path="$OUT")
+module("gps_boot.py", base_path="$OUT")
 EOF
 
 # shellcheck disable=SC1091

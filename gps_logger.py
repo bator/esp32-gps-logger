@@ -74,6 +74,8 @@ DIAG_FILE = "/diag.log"                  # survives power-off: what happened
 DIAG_OLD = "/diag.1"                     # on a walk, read it back over USB
 DIAG_MAX = 32768                         # bytes, then DIAG_FILE -> DIAG_OLD
 DIAG_LINE = 220                          # bytes read back per line wanted
+DIAG_CUT = 320                           # a longer diag line is cut (the
+                                         # status line runs to ~220 B)
                                          # (status lines are ~180)
 DIAG_BLOCK = 512                         # bytes per read of the tail
 WEB = True                               # status page on port WEB_PORT; the
@@ -1521,15 +1523,15 @@ def _diag_write(line):
     """Append one line to DIAG_FILE (closed again, so a power-off loses at
     most the line being written). Past DIAG_MAX the file becomes DIAG_OLD,
     so both together stay under 2 * DIAG_MAX. A line break in it becomes a
-    space and a line is cut at DIAG_LINE (a field from the network, the OTA
+    space and a line is cut at DIAG_CUT (a field from the network, the OTA
     manifest's commit, wrote forged lines and ~4 KB ones). Never raises."""
     if not DIAG:
         return
     try:
         if "\n" in line or "\r" in line:
             line = line.replace("\r", " ").replace("\n", " ")
-        if len(line) >= DIAG_LINE:
-            line = line[:DIAG_LINE - 4] + "..."
+        if len(line) > DIAG_CUT:
+            line = line[:DIAG_CUT - 3] + "..."
         room = free()
         if room is not None and room < MIN_FREE:
             return                       # the tracks keep the reserve
@@ -6383,8 +6385,8 @@ def _hist_batch(path, off, end, key):
         with open(path, "rb") as src:
             _track_lines(src, path, off, end, key,
                          lambda a, b: _hist_put(st, a, b))
-    except (OSError, MemoryError) as e:
-        print("hist", repr(e))
+    except Exception as e:               # (best effort: the commit after
+        print("hist", repr(e))           # it is what matters)
         log["herr"] = log.get("herr", 0) + 1
     finally:
         _hist_close(st)
@@ -7969,23 +7971,22 @@ def _ota_health(now):
         return
     build = ota["pend"]
     ota["pend"] = None
-    _ota_drop(ota.get("paths") or ())
-    _ota_shadow(False)
-    # the note first: a power cut between the two then loses the try; the
-    # other way round the old firmware found the note and counted it again
-    _rm(OTA_PENDING)
-    bad = _ota_try(build)
-    _diag_final()
-    what = "wifi"
-    if ota["wifi_seen"]:
-        what = "manifest (%s)" % ota.get("probe_err")
-    _diag_write("ota %s no %s in %d s, rolling back%s" % (
-        FW_COMMIT, what, OTA_HEALTH // 1000, ", bad" if bad else ""))
-    try:
+    try:                                 # (the reset whatever fails: the
+        _ota_drop(ota.get("paths") or ())   # image ran on unconfirmed)
+        _ota_shadow(False)
+        # the note first: a power cut between the two then loses the try;
+        # the other way round the old firmware found it and counted again
+        _rm(OTA_PENDING)
+        bad = _ota_try(build)
+        _diag_final()
+        what = "wifi"
+        if ota["wifi_seen"]:
+            what = "manifest (%s)" % ota.get("probe_err")
+        _diag_write("ota %s no %s in %d s, rolling back%s" % (
+            FW_COMMIT, what, OTA_HEALTH // 1000, ", bad" if bad else ""))
         flush(_still_hold())             # (as before the other reboots)
-    except Exception:
-        pass
-    machine.reset()
+    finally:
+        machine.reset()
 
 def ota_tick(now):
     if ota["pend"] is not None:
@@ -8299,20 +8300,30 @@ def _web_json_parts(rows=None, svs=None):
     for key, v in rows:
         yield ",%s:%s" % (json.dumps(key), json.dumps(v))
     rows = None
+    # after the 200: an error ends the list instead of the JSON (a cut one
+    # was OFFLINE on the page), counted as a web bug
     yield ',"diag":['
     sep = ""
-    for line in _web_diag():             # one piece a line (no ~3 KB string)
-        yield sep + json.dumps(line)
-        sep = ","
+    try:
+        for line in _web_diag():         # one piece a line (no ~3 KB string)
+            yield sep + json.dumps(line)
+            sep = ","
+    except Exception as e:
+        _web_bug(e)
     yield '],"satellites":['
     sep = ""
-    for v in svs:
-        yield sep + json.dumps({
-            "name": _sv_name(v), "system": GNSS.get(v[6]), "svid": v[0],
-            "cno": v[1], "elev": v[2], "azim": v[3], "used": v[4],
-            "unhealthy": v[5]})
-        sep = ","
-    yield '],"satellites_age_s":' + json.dumps(_sv_age()) + "}"
+    try:
+        for v in svs:
+            yield sep + json.dumps({
+                "name": _sv_name(v), "system": GNSS.get(v[6]), "svid": v[0],
+                "cno": v[1], "elev": v[2], "azim": v[3], "used": v[4],
+                "unhealthy": v[5]})
+            sep = ","
+        age = json.dumps(_sv_age())
+    except Exception as e:
+        _web_bug(e)
+        age = "null"
+    yield '],"satellites_age_s":' + age + "}"
 
 def _web_json():
     """The whole JSON as one string: the tests' view of status.json (the
@@ -8749,6 +8760,9 @@ def run():
 TICK_PAUSE = 5000                        # ms a side tick that raised sits out
 _tick_bug = {}                           # its name -> ticks of the bug
 
+GUARD_MEM_MAX = 10                       # guarded MemoryErrors in a row:
+_guard_mem = [0]                         # a memory reboot (_mem_reboot)
+
 def _guarded(name, fn, arg=None):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
     (once a kind), the tick skipped for TICK_PAUSE (no retry every 20 ms;
@@ -8764,17 +8778,30 @@ def _guarded(name, fn, arg=None):
         if _age(time.ticks_ms(), at) < TICK_PAUSE:
             return
         del _tick_bug[name]
-    try:
+    pend = ota["pend"]                   # (before: the OTA health path ends
+    try:                                 # the pending state, then resets)
         if arg is None:
             fn()
         else:
             fn(arg)
+        _guard_mem[0] = 0
     except Exception as e:
-        if ota["pend"] is not None:
+        if pend is not None or ota["pend"] is not None:
             raise
+        now = time.ticks_ms()
         if isinstance(e, MemoryError):
             gc.collect()
-        _tick_bug[name] = time.ticks_ms()
+            # the crash reset was a lasting MemoryError's recovery (the
+            # heap fragmented for good): GUARD_MEM_MAX in a row reboot
+            _guard_mem[0] += 1
+            if _guard_mem[0] >= GUARD_MEM_MAX and not _mem_reboot_soon():
+                _guard_mem[0] = 0
+                _mem_reboot("guarded memory " + name)
+        if name == "upload":
+            # (after the POST, before the commit: the same batch went up
+            # again every TICK_PAUSE for ever)
+            _schedule(now)
+        _tick_bug[name] = now
         print("bug", name, repr(e))
         _bug_once("bug %s %s" % (name, repr(e)[:60]))
 

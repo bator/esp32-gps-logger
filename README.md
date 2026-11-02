@@ -266,7 +266,10 @@ and runs as before) and any stray `gps_logger.py` (`''` comes first in
 the raw REPL may not answer for a while; if `deploy.sh` cannot reach the
 board, run it again.
 
-The firmware also carries a small `gps_frozen` module with the commit
+The firmware also freezes `gps_boot.py`: what `main.py` does around the
+logger's start for OTA and the boot-fail retry. Frozen, its code is not
+compiled into the heap at every boot; `main.py` runs without it on a
+plain firmware. And it carries a small `gps_frozen` module with the commit
 (`-dirty` when the tree had uncommitted changes) and the SHA-256 of the
 frozen `gps_logger.py`. When `deploy.sh` finds it, it copies only `main.py`
 and the page and removes a stray `gps_logger.mpy`, but first compares that
@@ -349,7 +352,8 @@ manifest with a `|` moved between fields would keep it (`bad manifest`;
 the format itself is unchanged). The HMAC is compared in constant time.
 A refused manifest is one diagnostic line until a good one comes, and no
 unverified field goes into it (a commit with newlines wrote forged lines);
-any diag line is one line, cut at 220 bytes. A `/gps_logger.mpy` or `.py`
+any diag line is one line, cut at 320 bytes (`DIAG_CUT`; a status line
+runs to ~220). A `/gps_logger.mpy` or `.py`
 on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
 (`''` comes first in `sys.path`): on a frozen firmware the install moves
 it aside as `<name>.ota-old`, the valid new firmware deletes it, and
@@ -466,11 +470,21 @@ boot cause 2 (hard reset), the same as the logger's own `machine.reset()`
 1 (power on). The counter is cleared after 60 s (`BOOT_OK_MS`) of a healthy
 main loop, by `deploy.sh` or by a power cycle. By hand:
 `mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
-In the REPL after 5 the board no longer waits for good: after 30 minutes
-(`BOOT_RETRY_MS`) a timer sets the count back to 4 and resets, one more
-start (a failure is another 30 minutes in the REPL). That timer can reset
-an `mpremote` session that runs past it: `_retry.deinit()` at the REPL
-stops it, and the boot bypass skips all of it.
+A bug in the WiFi, upload or OTA tick no longer resets the board: it is
+one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
+(`TICK_PAUSE`) and logging goes on; an upload bug also backs the upload
+off. Ten MemoryErrors in a row there (`GUARD_MEM_MAX`) are a memory reboot,
+as the crash reset used to be. A bug in the logging itself, and anything
+while an OTA image is pending, still goes to the crash branch.
+
+In the REPL after 5 a frozen firmware no longer waits for good: after 30
+minutes (`BOOT_RETRY_MS`) a timer sets the count back to 4 and resets, one
+more start (a failure is another 30 minutes in the REPL). That timer can
+reset an `mpremote` session that runs past it: `gps_boot._retry.deinit()`
+at the REPL stops it, and the boot bypass skips all of it. A plain firmware
+(the `.mpy` from `deploy.sh`) stays in the REPL. A failure that `main.py`
+catches while an OTA image is pending (it cannot even import) is marked
+as that build's crash, as the logger's own crash branch does.
 
 **Getting tracks:** they live in `/gpx/`. With the boot bypass held:
 

@@ -7244,6 +7244,7 @@ def build_run(args, env_extra, dirty=False):
     shutil.copy(os.path.join(ROOT, "tools", "build_firmware.sh"),
                 os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
     shutil.copy(os.path.join(ROOT, "web.html"), work)
     fake = os.path.join(work, "fake")
     for d in ("bin", "idf", "mpy/mpy-cross", "mpy/ports/esp32"):
@@ -15196,10 +15197,9 @@ try:
     # the one running (rolled back) or the note is gone (the health reset)
     def _t_shadow_main():
         mp = os.path.join(ROOT, "main.py")
-        ns = {"__name__": "boot_shadow"}
-        exec(compile(open(mp).read(), mp, "exec"), ns)
-        ns["OTA_SHADOW"] = gl.OTA_SHADOW
-        ns["OTA_PENDING"] = gl.OTA_PENDING
+        import gps_boot as gb
+        gb_saved = (gb.OTA_SHADOW, gb.OTA_PENDING)
+        gb.OTA_SHADOW, gb.OTA_PENDING = gl.OTA_SHADOW, gl.OTA_PENDING
         mpy = gl.OTA_SHADOW[0]
         fz = types.ModuleType("gps_frozen")
         prev = sys.modules.get("gps_frozen")
@@ -15220,18 +15220,19 @@ try:
                 if note:
                     _pend(note)
                 fz.BUILD = running
-                ns["_ota_unshadow"]()
+                gb.unshadow()
                 with open(mpy, "rb") if os.path.exists(mpy) else \
                         io.BytesIO(b"") as f:
                     body = f.read()
                 out.append((body, os.path.exists(mpy + ".ota-old")))
         finally:
+            gb.OTA_SHADOW, gb.OTA_PENDING = gb_saved
             if prev is None:
                 sys.modules.pop("gps_frozen", None)
             else:
                 sys.modules["gps_frozen"] = prev
         src = open(mp).read()
-        return out, src.index("_ota_unshadow()") < src.index(
+        return out, src.index("gps_boot.unshadow()") < src.index(
             "import gps_logger")
     shm = _guarded(_t_shadow_main)
     check("OTA-SHADOW-MAIN: main.py puts the moved-aside .mpy back before "
@@ -15287,6 +15288,32 @@ try:
     check("OTA-HEALTH-ORDER: a power cut in the health timeout counts one "
           "try, not two; the RAM batch is flushed before its reset",
           od == (((200, 1), []), [0], [("reset",)]), repr(od))
+    # OTA-HEALTH-RESET: an error between ending the pending state and the
+    # reset (a MemoryError formatting the diag line, in _ota_try) left the
+    # image running with no note and no health check; the reset is in a
+    # finally now
+    def _t_hreset():
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        _pend()
+        gl.ota_boot()
+        gl.wifi_reset()
+        gl.wifi["state"] = "not found"
+        real_try = gl._ota_try
+        gl._ota_try = lambda b: (_ for _ in ()).throw(MemoryError())
+        _clock[0] += gl.OTA_HEALTH + 1000
+        try:
+            gl.ota_tick(_clock[0])
+            r = "returned"
+        except MemoryError:
+            r = "raised"
+        finally:
+            gl._ota_try = real_try
+            gl.wifi_reset()
+        return r, list(_ota_log)
+    hr = _guarded(_t_hreset)
+    check("OTA-HEALTH-RESET: the health timeout resets even when a step "
+          "before the reset fails", hr[1] == [("reset",)], repr(hr))
 
     # OTA-PROBE-HMAC: the pending firmware's probe took any manifest with
     # the right fields: one signed with another key made it valid
@@ -15334,16 +15361,22 @@ try:
         _clock[0] += gl.OTA_CHECK
         gl._ota_check()
         hm = [ln for ln in diag_lines() if "hmac" in ln]
+        # (a PVT status line runs to ~220 B after weeks up: the cap is
+        # above it, or its last field, hacc, was cut off the page's donut)
+        diag_clear()
+        gl._diag_write("s" * 260)
+        keep = diag_lines() == ["s" * 260]
         diag_clear()
         gl._diag_write("a\nb\rc" + "x" * 500)
         dl = diag_lines()
         return (st, okd, len(hm), any("deadbee" in ln for ln in hm),
-                len(dl), max(len(ln) for ln in dl) <= gl.DIAG_LINE)
+                len(dl), max(len(ln) for ln in dl) <= gl.DIAG_CUT, keep)
     dg = _guarded(_t_diag)
     check("OTA-DIAG: a commit that is not one is refused (signed or not); "
           "an HMAC mismatch is one diag line without unverified fields; a "
           "diag line has no line breaks and is capped",
-          dg == (["bad manifest"] * 5, [True, True, True], 1, False, 1, True),
+          dg == (["bad manifest"] * 5, [True, True, True], 1, False, 1, True,
+                 True),
           repr(dg))
 
     # OTA-CTEQ: the HMAC compare is constant-time (XOR-accumulated), not !=
@@ -15417,6 +15450,8 @@ try:
                 out.append(ns["_boot_handle_error"]())
             t = [x for x in _timers if x.callback]
             per = t[0].period if t else None
+            if t and t[0].id != -1:
+                per = ("hardware timer", t[0].id)
             mem0 = RTC.mem
             if t:
                 t[0].callback(t[0])
@@ -15428,6 +15463,43 @@ try:
           "BOOT_RETRY_MS (count back to BOOT_FAIL_MAX - 1, a reset)",
           sf == ([(1800000, b"5", b"4", [("reset",)]), False,
                   (1800000, b"5", b"4", [("reset",)])], 1800000), repr(sf))
+    # MAIN-SLIM: main.py is compiled on the board at every boot (its code
+    # in the heap for the whole run, ~5 KB more while it compiles): the OTA
+    # and retry helpers live in the frozen gps_boot, the retry timer is a
+    # virtual one (hardware Timer(0) is the logger's Ctrl-C keep-alive)
+    with open(os.path.join(ROOT, "main.py")) as f:
+        msrc = f.read()
+    check("MAIN-SLIM: main.py leaves the OTA and retry code to gps_boot",
+          "import gps_boot" in msrc and "def _ota_unshadow" not in msrc
+          and "Timer(" not in msrc and len(msrc) < 4000, len(msrc))
+    # MAIN-CRASH: a pending image that fails in main.py (its import, or
+    # run() before its own crash branch) reset without OTA_MARK: the old
+    # firmware took it for an external reset, a try, and installed the bad
+    # build again OTA_TRIES_MAX times. main.py now marks it "crash"
+    def _t_main_crash():
+        import gps_boot as gb
+        mp = os.path.join(ROOT, "main.py")
+        ns = {"__name__": "boot_crash"}
+        exec(compile(open(mp).read(), mp, "exec"), ns)
+        saved = (gb.OTA_PENDING, gb.OTA_MARK, ns["time"].sleep)
+        gb.OTA_PENDING, gb.OTA_MARK = gl.OTA_PENDING, gl.OTA_MARK
+        ns["time"].sleep = lambda s: None
+        out = []
+        try:
+            for pend in (True, False):
+                _ota_reset()
+                if pend:
+                    _pend(200)
+                RTC.mem = b"0"
+                ns["_boot_handle_error"]()
+                out.append(gl._ota_mark_get())
+        finally:
+            gb.OTA_PENDING, gb.OTA_MARK, ns["time"].sleep = saved
+            RTC.mem = b""
+        return out
+    mc = _guarded(_t_main_crash)
+    check("MAIN-CRASH: a logger failing in main.py while an OTA is pending "
+          "marks the build's run as a crash", mc == ["crash", None], repr(mc))
     # OTA-DOC: the C6's boot-bypass pin is GPIO10, not GPIO25
     with open(os.path.join(ROOT, "tests", "device_bench.py")) as f:
         bench = f.read()
@@ -15900,6 +15972,86 @@ check("WEBR-9: a pending OTA image and a log_tick bug still crash (run()'s "
       "branch resets; the bootloader rolls the image back)",
       w9_pend == "ValueError('bad batch')"
       and w9_log == "RuntimeError('log bug')", repr((w9_pend, w9_log)))
+# GUARD-INT: the guard against the other fixes. (1) an upload bug after the
+# POST, before the commit: the guard swallowed it with nothing scheduled,
+# the same batch went up again every TICK_PAUSE, its points into the day
+# history each time; the upload is now backed off (_schedule) and the
+# history copy is best effort (any error). (2) a tick that ends the
+# pending state and then raises (the OTA health reset's own path): the
+# guard read ota["pend"] after the call, None, and swallowed it: no reset,
+# the image ran unconfirmed. (3) a MemoryError that keeps coming: the
+# crash reset was its recovery; GUARD_MEM_MAX in a row are a memory reboot
+gi_saved = (gl._mem_reboot, gl._mem_reboot_soon, gl._track_lines,
+            gl.HIST_DAYS)
+gi_reb = []
+gl._mem_reboot = lambda why: gi_reb.append(why)
+gl._mem_reboot_soon = lambda: False
+try:
+    gl._tick_bug.clear()
+    gl.ota["pend"] = None
+    gl.up["next_at"], gl.up["backoff"] = None, None
+    gl._guarded("upload", lambda: (_ for _ in ()).throw(ValueError("x")))
+    gi_sched = gl.up["next_at"] is not None and gl._waiting(
+        _clock[0], gl.up["next_at"], gl.UP_WAIT_MAX)
+    gl.HIST_DAYS = 7
+    gl._track_lines = lambda *a: (_ for _ in ()).throw(TypeError("y"))
+    gi_tr = os.path.join(tempfile.mkdtemp(prefix="gi-"), "20261102_100000.trb")
+    with open(gi_tr, "wb") as f:
+        f.write(b"x")
+    try:
+        gl._hist_batch(gi_tr, 0, 1, 0)
+        gi_hist = "ok"
+    except Exception as e:
+        gi_hist = repr(e)
+
+    def _gi_end():
+        gl.ota["pend"] = None            # (as _ota_health does)
+        raise MemoryError()
+    gl._tick_bug.clear()
+    gl.ota["pend"] = 123
+    try:
+        gl._guarded("ota", _gi_end)
+        gi_pend = "swallowed"
+    except MemoryError:
+        gi_pend = "raised"
+    gl.ota["pend"] = None
+    for _ in range(gl.GUARD_MEM_MAX):
+        gl._tick_bug.clear()
+        gl._guarded("wifi", lambda: (_ for _ in ()).throw(MemoryError()))
+    gi_mem = list(gi_reb)
+finally:
+    (gl._mem_reboot, gl._mem_reboot_soon, gl._track_lines,
+     gl.HIST_DAYS) = gi_saved
+    gl._tick_bug.clear()
+    gl.up["next_at"], gl.up["backoff"] = None, None
+check("GUARD-INT: an upload bug backs the upload off, the history copy "
+      "takes any error, a tick that ends the pending state still raises, "
+      "GUARD_MEM_MAX MemoryErrors in a row reboot",
+      gi_sched and gi_hist == "ok" and gi_pend == "raised"
+      and len(gi_mem) == 1, repr((gi_sched, gi_hist, gi_pend, gi_mem)))
+# WEB-JSON-TAIL: an error after the 200 (reading the diag tail, a
+# satellite) still cut the JSON (the page: OFFLINE). The parts after the
+# rows end the JSON instead, the error counted
+wj_saved = gl._web_diag
+
+
+def _wj_diag():
+    yield "first line"
+    raise OSError(5)
+
+
+gl._web_diag = _wj_diag
+try:
+    wj_text = "".join(gl._web_json_parts())
+    try:
+        wj = json.loads(wj_text)
+        wj_ok = (wj["diag"] == ["first line"] and "satellites" in wj)
+    except ValueError as e:
+        wj_ok = repr(e)
+finally:
+    gl._web_diag = wj_saved
+check("WEB-JSON-TAIL: an error while streaming the diag lines still ends "
+      "a valid JSON", wj_ok is True, repr((wj_ok, wj_text[-120:])))
 (gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl._web_rows, gl.WEB_PAGE) = _wr_saved
 shutil.rmtree(_wr_dir, ignore_errors=True)
 
