@@ -240,6 +240,15 @@ check("GET /status.json is valid JSON", jd is not None and "fix" in jd,
       got[:120])
 check("no send over WEB_CHUNK", max(outs) <= gl.WEB_CHUNK, outs)
 
+# a bare-LF head and an HTTP/0.9 request line: answered at once (they
+# waited for a CRLF blank line until the timeout and got nothing)
+for r in (b"GET /status.json HTTP/1.0\n\n", b"GET /status.json\r\n"):
+    s = client(r)
+    ms = tick()
+    got = read_all(s)
+    check("answered at once: %r" % r, got.startswith(b"HTTP/1.0 200 OK")
+          and b'"fix":' in got and ms < 1500, (got[:80], ms))
+
 # empty request: connect and close
 s = client()
 s.close()

@@ -20,20 +20,29 @@
 # (0x10000; bootloader, partition table and the file system are kept),
 # erases otadata so that slot boots (after an OTA the other one would) and
 # resets. Nothing on the file system is touched before or by the write: a
-# failed check or write leaves the board as it was. Then run ./deploy.sh: it
+# failed check leaves the board as it was. A failed write does not: it
+# always goes to the first slot (ota_0), the running one unless an OTA
+# switched to ota_1, so the board may not boot an app until --flash runs
+# again or the backup is written back (the ROM download mode over USB is
+# never touched; the commands are printed). With ota_1 running and otadata
+# not yet erased, the board still boots ota_1. Then run ./deploy.sh: it
 # removes the old /gps_logger.mpy (until then it shadows the frozen logger
 # and runs as before) and any /gps_logger.py, clears the boot-fail counter
 # and puts main.py and the page up. Right after esptool's reset the raw
 # REPL may not come for a while: if deploy.sh cannot reach it, run it again.
 # --migrate moves a board to the OTA partition table, once: it needs 16 MB
-# of flash, backs up the first 4 MB, erases the whole flash (the file
+# of flash, backs up the first 4 MB (mode 600: it holds the old file
+# system's start, /.env with its keys too), erases the whole flash (the file
 # system too: copy /.env and /hist off first) and writes bootloader,
 # partition table, otadata and the app. Then put the files back and run
 # ./deploy.sh (see the README, "Firmware updates over WiFi").
 # --publish writes firmware/ota/ (micropython-<commit>.bin, the page as
 # web-<commit>.html[.gz], manifest.json naming them) and copies it to
-# OTA_DEST with scp, the manifest last: a board reading the old manifest
-# meanwhile still finds the files it names. The manifest is signed with the
+# OTA_DEST (host:/path) with scp, each file as <name>.tmp moved over the
+# live one with ssh (a board reading a half-copied file got a mix), the
+# manifest last: a board reading the old manifest meanwhile still finds
+# the files it names. A build not newer than the published manifest's is
+# refused (FORCE=1 publishes it anyway). The manifest is signed with the
 # key in OTA_KEY_FILE (default ~/.config/gps-logger/ota.key, the board's
 # .env OTA_KEY: printable ASCII, e.g. openssl rand -hex 32); only a clean
 # tree is published (BUILD is the commit time).
@@ -61,8 +70,10 @@ case "$MODE" in
 esac
 
 mkdir -p "$OUT"
-# the frozen files: the logger and a marker deploy.sh looks for
+# the frozen files: the logger, main.py's boot helpers (gps_boot.py: OTA
+# and the boot-fail retry, out of the heap) and a marker deploy.sh looks for
 cp gps_logger.py "$OUT/gps_logger.py"
+cp gps_boot.py "$OUT/gps_boot.py"
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD=$(git log -1 --format=%ct 2>/dev/null || echo 0)
 DIRTY=
@@ -79,6 +90,7 @@ cat > "$OUT/manifest.py" <<EOF
 include("\$(PORT_DIR)/boards/manifest.py")
 module("gps_logger.py", base_path="$OUT")
 module("gps_frozen.py", base_path="$OUT")
+module("gps_boot.py", base_path="$OUT")
 EOF
 
 # shellcheck disable=SC1091
@@ -114,8 +126,16 @@ case "$MODE" in
     esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x10000 $APP_SIZE "$BACKUP" >/dev/null
     esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0x280000 $APP_SIZE "$BACKUP1" >/dev/null
     echo "App slots backed up to $BACKUP and $BACKUP1 (the second one runs after an OTA)"
-    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 --after no_reset write_flash \
-        --flash_mode dio --flash_freq 80m 0x10000 "$OUT/micropython.bin"
+    # always the first slot: when it is the running one, a failed write
+    # leaves no bootable app there (see the header)
+    if ! esptool.py --chip "$CHIP" --port "$PORT" -b 460800 --after no_reset write_flash \
+            --flash_mode dio --flash_freq 80m 0x10000 "$OUT/micropython.bin"; then
+        echo "The write failed: the first slot (0x10000) may not boot now. The ROM" >&2
+        echo "download mode is untouched: run --flash again, or write the backup:" >&2
+        echo "  esptool.py --chip $CHIP --port $PORT write_flash 0x10000 $BACKUP" >&2
+        echo "(if the board ran the second slot it still boots it until otadata is erased)" >&2
+        exit 1
+    fi
     # otadata gone: the bootloader boots the first slot, the one just written
     esptool.py --chip "$CHIP" --port "$PORT" -b 460800 --after hard_reset erase_region 0xd000 0x2000 >/dev/null
     echo "Flashed $PORT. Now run ./deploy.sh (again if the board's REPL does not answer yet):"
@@ -124,13 +144,19 @@ case "$MODE" in
     echo "(if the board ran the second slot: write_flash 0x10000 $BACKUP1)"
     ;;
 --migrate)
-    if ! esptool.py --chip "$CHIP" --port "$PORT" flash_id 2>/dev/null | grep -q "flash size: 16MB"; then
+    # (not "| grep -q" under pipefail: grep stops at the match, esptool's
+    # next write gets EPIPE and the pipe fails: a 16 MB board was refused)
+    FID=$(esptool.py --chip "$CHIP" --port "$PORT" flash_id 2>/dev/null || true)
+    if ! grep -q "flash size: 16MB" <<< "$FID"; then
         echo "--migrate needs a board with 16 MB of flash: not touching it" >&2
         exit 1
     fi
     BACKUP=$OUT/full-backup-$(date +%Y%m%d-%H%M%S).bin
-    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0 0x400000 "$BACKUP" >/dev/null
+    # the old file system's start, /.env (WiFi, API, OTA keys) too: 600
+    (umask 077 && esptool.py --chip "$CHIP" --port "$PORT" -b 460800 read_flash 0 0x400000 "$BACKUP" >/dev/null)
+    chmod 600 "$BACKUP"
     echo "First 4 MB (old bootloader, table, app, start of the file system) backed up to $BACKUP"
+    echo "It holds the old /.env and its secrets (mode 600): keep it off shared places, delete it when done"
     esptool.py --chip "$CHIP" --port "$PORT" erase_flash >/dev/null
     (cd "$BDIR" && esptool.py --chip "$CHIP" --port "$PORT" -b 460800 --after hard_reset write_flash @flash_args)
     echo "Migrated $PORT to the OTA table. The file system is new and empty: put /.env"
@@ -153,7 +179,34 @@ case "$MODE" in
         echo "without quotes or spaces (e.g. openssl rand -hex 32)" >&2
         exit 1
     fi
-    : "${OTA_DEST:?OTA_DEST: where to copy firmware/ota (an scp target)}"
+    : "${OTA_DEST:?OTA_DEST: where to copy firmware/ota (host:/path)}"
+    case "$OTA_DEST" in
+        *:*) DHOST=${OTA_DEST%%:*}; DDIR=${OTA_DEST#*:}; DDIR=${DDIR:-.} ;;
+        *) echo "OTA_DEST must be host:/path (scp and ssh)" >&2; exit 1 ;;
+    esac
+    QDIR=$(printf %q "$DDIR")
+    # the published build: only a newer one goes up (a board takes a
+    # manifest's build when it is newer than its own, so an older or equal
+    # one would not reach boards already updated, and republishing a commit
+    # rewrote the .bin boards may be downloading)
+    # (expanded here on purpose: QDIR is quoted for the remote shell)
+    # shellcheck disable=SC2029
+    if ! LIVE=$(ssh "$DHOST" "if [ -e $QDIR/manifest.json ]; then cat $QDIR/manifest.json; fi"); then
+        echo "Could not read the published manifest in $OTA_DEST" >&2
+        exit 1
+    fi
+    LIVE_BUILD=0
+    if [ -n "$LIVE" ]; then
+        LIVE_BUILD=$(python3 -c 'import json, sys; print(int(json.loads(sys.stdin.read())["build"]))' <<< "$LIVE" 2>/dev/null || echo x)
+    fi
+    if [ "$LIVE_BUILD" = x ]; then
+        echo "The published manifest in $OTA_DEST has no readable build" >&2
+        [ "${FORCE:-0}" = 1 ] || exit 1
+    elif [ "$BUILD" -le "$LIVE_BUILD" ]; then
+        echo "Build $BUILD ($COMMIT) is not newer than the published build $LIVE_BUILD" >&2
+        [ "${FORCE:-0}" = 1 ] || { echo "(FORCE=1 publishes it anyway)" >&2; exit 1; }
+        echo "FORCE=1: publishing it anyway" >&2
+    fi
     rm -rf "$OUT/ota"
     mkdir -p "$OUT/ota"
     BINF=micropython-$COMMIT.bin
@@ -184,9 +237,17 @@ with open(os.path.join(d, "manifest.json"), "w") as f:
     json.dump(m, f)
 print("manifest: build", build, "commit", commit, "size", size)
 EOF
-    # the named files first, the manifest naming them last
-    scp -q "$OUT/ota/$BINF" "$OUT/ota/web-$COMMIT.html" "$OUT/ota/web-$COMMIT.html.gz" "$OTA_DEST/"
-    scp -q "$OUT/ota/manifest.json" "$OTA_DEST/"
+    # each as <name>.tmp, then moved over the live one (one rename: a board
+    # downloading it keeps reading the old file), the named files first,
+    # the manifest naming them last
+    MV=""
+    for f in "$BINF" "web-$COMMIT.html" "web-$COMMIT.html.gz" manifest.json; do
+        scp -q "$OUT/ota/$f" "$DHOST:$DDIR/$f.tmp"
+        MV+="mv -f $QDIR/$f.tmp $QDIR/$f && "
+    done
+    # (MV built here, its paths %q-quoted)
+    # shellcheck disable=SC2029
+    ssh "$DHOST" "${MV}true"
     echo "Published $COMMIT (build $BUILD) to $OTA_DEST"
     ;;
 esac

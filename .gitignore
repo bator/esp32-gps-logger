@@ -227,3 +227,11 @@ firmware/
 
 # gzipped status page made by deploy.sh
 web.html.gz
+
+# Board files copied off for a migration or a backup (README, "Firmware
+# updates over WiFi"): /.env holds WiFi, API and OTA keys. The recipe keeps
+# them in ~/.config/gps-logger/; these catch a copy made in the repo anyway
+env.backup
+env.bak
+*.env*
+hist/

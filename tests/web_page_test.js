@@ -69,6 +69,7 @@ function page(width) {
   function XHR() { xhrs.push(this); }
   XHR.prototype.open = function (m, u) { this.method = m; this.url = u; };
   XHR.prototype.send = function () {};
+  XHR.prototype.overrideMimeType = function (m) { this.mime = m; };
   const c = {document: doc, window: {}, XMLHttpRequest: XHR,
     setTimeout: (f, ms) => timers.push(ms), Date: Date, Math: Math, JSON: JSON};
   vm.createContext(c);
@@ -275,6 +276,8 @@ ft.nav0 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev"
 ft.alert = p.doc.getElementById("gl").innerHTML;
 answer(p, null, "");
 p.c.step(-1);
+// (east of UTC the file 20261030 also offers 20261031: step on to 30)
+for (let k = 0; k < 3 && p.c.sel !== "20261030"; k++) { answer(p, null, ""); p.c.step(-1); }
 const ph = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done);
 ft.pickUrls = ph.map((x) => x.url);
 const pd = new Date(2026, 9, 30, 12, 0, 0).getTime();
@@ -295,7 +298,7 @@ ft.hlMap = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
 ft.hlLine = p.doc.getElementById("tline").innerHTML.indexOf('class="tr go on"') >= 0;
 p.c.hlTrip(0);
 ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path/g) || []).length;
-p.c.step(1);
+for (let k = 0; k < 3 && p.c.hist.past; k++) p.c.step(1);   // (via 20261031 east of UTC)
 ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
 // REV-1: the static test keeps only a fix the receiver just sent
 ft.statFresh = (() => {
@@ -372,5 +375,133 @@ ft.pageErr = (() => {
   q.xhrs[0].onload();
   return [q.doc.body.className, q.doc.getElementById("live").innerHTML];
 })();
+// WR: the page under a fixed time zone and "now" (TZ is read per call)
+function inTz(tz, nowMs, fn) {
+  const saved = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    const fake = typeof nowMs === "function" ? nowMs() : nowMs;
+    const RD = Date;
+    function D(...a) { return a.length ? new RD(...a) : new RD(fake); }
+    D.now = () => fake; D.UTC = RD.UTC; D.parse = RD.parse;
+    const c = {Date: D, Math: Math, JSON: JSON};
+    vm.createContext(c);
+    vm.runInContext(src, c);
+    return fn(c, RD);
+  } finally {
+    if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved;
+  }
+}
+// WR-1: an after-midnight drive in UTC+1 sits in the UTC file of the day
+// before; its local day is offered and picking it reads that file
+ft.wr1 = inTz("Europe/Budapest", () => new Date(2026, 10, 3, 10, 0, 0).getTime(), (c) => {
+  const ds = c.dayList(["20261031", "20261103"]);
+  c.hist = c.histNew("20261101");
+  const files = c.hist.days.slice();
+  c.histParse("20261031", "47.1,18.4,100,2,3,20261031T233000Z\n47.11,18.4,100,2,3,20261031T233100Z\n");
+  return [ds, files, c.hist.pts.length];
+});
+// west of UTC the UTC day's first hours are the local day before
+ft.wr1w = inTz("America/New_York", () => new Date(2026, 10, 3, 10, 0, 0).getTime(),
+  (c) => c.dayList(["20261031", "bad", "20261031"]));
+// WR-3: a past day with one point is centred on it, not on the live fix
+// (one.js: ~58 000 px off the map); today with one point keeps the fix
+ft.wr3 = (() => {
+  const c = page(1100).c;
+  c.hist = c.histNew("20261030");
+  c.hist.pts.push([new Date(2026, 9, 30, 12).getTime(), 47.5, 19.05, 100]);
+  const el = {offsetWidth: 1100, offsetHeight: 360};
+  const fv = c.fitView(47.18, 18.42, el, true), pt = c.wpx(47.5, 19.05, fv.z);
+  c.hist = c.histNew(null);
+  c.hist.pts.push([Date.now(), 47.5, 19.05, 100]);
+  const tv = c.fitView(47.18, 18.42, el, true), me = c.wpx(47.18, 18.42, tv.z);
+  return [Math.round((pt[0] - fv.X) * fv.sc), Math.round((pt[1] - fv.Y) * fv.sc),
+    Math.round(tv.X - me[0]), Math.round(tv.Y - me[1])];
+})();
+// WR-4: /hist offsets count bytes. A browser-like XHR: responseText is the
+// body decoded as the charset the page asked for (UTF-8 by default, an
+// invalid byte U+FFFD; x-user-defined: one char a byte)
+ft.wr4 = (() => {
+  function reply(x, buf) {
+    x.done = true;
+    x.status = 200;
+    Object.defineProperty(x, "responseText", {get: () => /x-user-defined/.test(x.mime || "") ?
+      Array.from(buf, (b) => String.fromCharCode(b < 128 ? b : 0xF700 + b)).join("") : buf.toString("utf8")});
+    x.onload();
+  }
+  function start() {
+    const q = page(1600);
+    q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: "47.18536, 18.42730"});
+    q.xhrs[0].onload();
+    return q;
+  }
+  const hx = (q) => q.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
+  const q = start(), first = hx(q)[0];
+  const t0 = new Date(Date.now() - 60000).toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+  const body = Buffer.concat([Buffer.from("#TRK2\n47.1,18.4,1é,2,3," + t0 + "\n"),
+    Buffer.from([0x34, 0x37, 0xff, 0x0a]), Buffer.from("47.2,18.4,100,2,3," + t0 + "\n")]);
+  reply(first, body);
+  answer(q, null, "");                   // the other UTC day (if any): 404
+  q.c.histLoad();                        // a minute later: from where it got to
+  const again = hx(q).filter((x) => !x.done && x.url.indexOf(first.url.replace(/&o=.*/, "&o=")) === 0);
+  // a full reply with a two-byte char is HIST_REPLY bytes: asked again
+  const q2 = start(), f2 = hx(q2)[0];
+  const full = Buffer.alloc(16384, 0x78);
+  full.write("é", 100, "utf8");
+  reply(f2, full);
+  const n2 = hx(q2).filter((x) => !x.done);
+  return [body.length, again.length ? +again[0].url.replace(/.*&o=/, "") : null,
+    n2.length ? n2[0].url === f2.url.replace("&o=0", "&o=16384") : null, q.c.hist.pts.length];
+})();
+// WR-7: a browser hands innerHTML back normalised (&middot; -> U+00B7):
+// a poll like the last one writes no box again, and the static test with
+// nothing new builds no scatter
+ft.wr7 = (() => {
+  const q = page(1600);
+  const norm = (h) => String(h).replace(/&middot;/g, "·").replace(/&deg;/g, "°")
+    .replace(/&plusmn;/g, "±").replace(/&#9679;/g, "●").replace(/&asymp;/g, "≈");
+  const real = q.doc.getElementById;
+  const els = {};
+  q.doc.getElementById = (id) => {
+    if (!els[id]) {
+      const e = real(id);
+      let h = "";
+      Object.defineProperty(e, "innerHTML", {get: () => h, set: (x) => { e.writes++; h = norm(x); }});
+      els[id] = e;
+    }
+    return els[id];
+  };
+  let sv = 0;
+  const realSv = q.c.statView;
+  q.c.statView = (s, on) => { sv++; return realSv(s, on); };
+  q.xhrs[0].responseText = text;
+  q.xhrs[0].onload();
+  const ids = ["tm", "sys", "log", "evf", "evc", "evd", "skyh", "bh", "svt", "coord", "sstat", "scat", "tkpi", "tline"];
+  const w1 = ids.map((id) => els[id] ? els[id].writes : 0), sv1 = sv;
+  q.c.tick();
+  const x2 = st(q)[1];
+  x2.responseText = text;
+  x2.onload();
+  const again = ids.filter((id, k) => (els[id] ? els[id].writes : 0) !== w1[k]);
+  const sv2 = sv;
+  q.c.statToggle();                      // a change is drawn
+  return [again, sv1, sv2, sv, els.sbtn.innerHTML, w1.every((n) => n === 1)];
+})();
+// WR-8: numbers from the JSON go into the HTML coerced or escaped
+ft.wr8 = (() => {
+  const w = c0.view({satellites: [{name: "G1", system: "GPS", svid: 1, cno: "<b>X1", elev: 45, azim: "<u>X2",
+    used: true}], rssi: "<s>X3", temp: "<t>X4"});
+  return Object.keys(w).filter((k) => /<[bust]>X\d/.test(w[k]));
+})();
+// WR-2: a 500 (a bug building status.json) shows the board's error
+ft.wr2 = (() => {
+  const q = page(1600);
+  q.xhrs[0].status = 500;
+  q.xhrs[0].responseText = "TypeError('row bug')";
+  q.xhrs[0].onload();
+  return [q.doc.body.className, q.doc.getElementById("live").innerHTML];
+})();
+// caught bugs (the loop's guard, the page server) are error rows
+ft.wrBug = [c0.logRow("bug upload ValueError('x')").k, c0.logRow("web error KeyError('y')").k];
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));

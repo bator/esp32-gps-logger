@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Optional on-device timing probes. Does not flash firmware.
 
-Run against a board that already has the logger stopped (GPIO25 boot-bypass):
+Run against a board that already has the logger stopped (the boot-bypass
+pin held at reset: GPIO10 on the ESP32-C6, see main.py SKIP_PIN):
 
     .venv/bin/mpremote run tests/device_bench.py
 
@@ -14,7 +15,7 @@ import time
 try:
     import gps_logger as gl
 except ImportError:
-    print("import gps_logger failed (need GPIO25 bypass so main.py did not run)")
+    print("import gps_logger failed (need the boot bypass so main.py did not run)")
     sys.exit(1)
 
 t0 = time.ticks_ms()

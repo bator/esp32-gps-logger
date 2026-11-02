@@ -6,6 +6,12 @@ import machine, sys, time
 SKIP_PIN = 10 if "ESP32C6" in getattr(sys.implementation, "_machine", "") else 25
 BOOT_FAIL_MAX = 5
 BOOT_FAIL_FILE = "/boot_fail"
+BOOT_RETRY_MS = 1800000                  # in the REPL after BOOT_FAIL_MAX:
+                                         # one more start after this
+try:
+    import gps_boot                      # frozen with the logger (OTA, the
+except ImportError:                      # retry): its code not in the heap
+    gps_boot = None
 
 def _parse_count(raw):
     if not raw:
@@ -50,12 +56,26 @@ def _boot_fail_delay(n):
         d = 30
     return d
 
+def _boot_retry():
+    _boot_fail_set(BOOT_FAIL_MAX - 1)
+    machine.reset()
+
+def _boot_safe(n):
+    """BOOT_FAIL_MAX failed starts: the REPL, and on a frozen firmware one
+    more start after BOOT_RETRY_MS (gps_boot.safe)."""
+    if gps_boot is None:
+        print("boot fail", n, "- REPL")
+    else:
+        gps_boot.safe(n, BOOT_RETRY_MS, _boot_retry)
+
 def _boot_handle_error():
     """Record a boot/import/run failure. True → sleep + caller should reset."""
     n = _boot_fail_get() + 1
     _boot_fail_set(n)
+    if gps_boot is not None:
+        gps_boot.crash()                 # (an OTA pending: the build's fault)
     if n >= BOOT_FAIL_MAX:
-        print("boot fail", n, "- REPL")
+        _boot_safe(n)
         return False
     time.sleep(_boot_fail_delay(n))
     return True
@@ -76,9 +96,11 @@ def _boot_start():
     _boot_note_wdt()
     n = _boot_fail_get()
     if n >= BOOT_FAIL_MAX:
-        print("boot fail", n, "- REPL")
+        _boot_safe(n)
         return
     try:
+        if gps_boot is not None:
+            gps_boot.unshadow()          # before the import
         import gps_logger
         # Do not clear the counter here: wifi_start / run() can still crash
         # (e.g. a missing str method). gps_logger clears it after BOOT_OK_MS
