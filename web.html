@@ -4,32 +4,33 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>GPS logger</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23060b16'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='.45'/%3E%3Ccircle cx='32' cy='32' r='10' fill='none' stroke='%2322d3ee' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='4.5' fill='%2322d3ee'/%3E%3Cpath d='M32 5v9M32 50v9M5 32h9M50 32h9' stroke='%2322d3ee' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
-<meta name="theme-color" content="#060b16">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2309090b'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%23e4e4e7' stroke-width='3' opacity='.45'/%3E%3Ccircle cx='32' cy='32' r='10' fill='none' stroke='%23e4e4e7' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='4.5' fill='%23e4e4e7'/%3E%3Cpath d='M32 5v9M32 50v9M5 32h9M50 32h9' stroke='%23e4e4e7' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#09090b">
 <!-- Status page of gps_logger.py, served from the board's flash as is.
      It loads once, then polls /status.json (every refresh_s from the JSON)
-     and redraws the boxes. The map tiles come from OpenStreetMap and the
+     and redraws the boxes. The map tiles (OSM-carto) come through the
+     homelab Atlas proxy and the
      fonts from Google Fonts when the phone is online. -->
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
 <style>
-:root{--b:#060b16;--l:#16233d;--t:#d6e2ff;--m:#7487ae;--a:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
+:root{--b:#09090b;--l:#26262b;--t:#ececee;--m:#8e8e96;--a:#e4e4e7;--ok:#4ade80;--warn:#f59e0b;--bad:#ef4444}
 body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-serif}
 .tm,.none,.p h2,.hud,.coord,.legend,.svt{font-family:"JetBrains Mono",ui-monospace,monospace}
 /* map */
-.map{position:relative;height:360px;overflow:hidden;background:#0a1222}
-.tiles{position:absolute;left:50%;top:42%;filter:invert(1) hue-rotate(195deg) saturate(.35) brightness(.62) contrast(1.15)}
+.map{position:relative;height:360px;overflow:hidden;background:#0f0f12}
+.tiles{position:absolute;left:50%;top:42%}  /* the Atlas map as it is, its own colours */
 .tiles img{position:absolute;width:256px;height:256px}
-.map:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(6,11,22,.55) 0,rgba(6,11,22,0) 22%,rgba(6,11,22,0) 55%,var(--b) 100%),radial-gradient(circle at 50% 42%,rgba(34,211,238,.1),transparent 45%)}
-.grid{position:absolute;inset:0;z-index:1;background-image:linear-gradient(rgba(34,211,238,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(34,211,238,.06) 1px,transparent 1px);background-size:40px 40px}
-.acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(34,211,238,.6);background:radial-gradient(circle,rgba(34,211,238,.18),rgba(34,211,238,.04) 70%);z-index:2}
-.pin{position:absolute;left:50%;top:42%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--a);box-shadow:0 0 0 4px rgba(34,211,238,.25),0 0 22px var(--a);z-index:3}
-.pin:after{content:"";position:absolute;inset:-14px;border-radius:50%;border:1px solid rgba(34,211,238,.5);animation:p 2s infinite}
+.map:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(9,9,11,0) 72%,var(--b) 100%)}
+.grid{display:none}
+.acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1.5px solid rgba(9,9,11,.7);background:rgba(9,9,11,.12);z-index:2}
+.pin{position:absolute;left:50%;top:42%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#09090b;border:3px solid #fff;box-sizing:border-box;box-shadow:0 1px 6px rgba(0,0,0,.5);z-index:3}
+.pin:after{content:"";position:absolute;inset:-14px;border-radius:50%;border:2px solid rgba(9,9,11,.6);animation:p 2s infinite}
 @keyframes p{from{transform:scale(.5);opacity:1}to{transform:scale(2.2);opacity:0}}
 .nofix .pin,.nofix .acc{display:none}
-.coord{position:absolute;left:50%;top:42%;transform:translate(16px,-34px);font-size:11px;font-weight:600;color:var(--a);z-index:4;white-space:nowrap;text-shadow:0 0 8px rgba(34,211,238,.6)}
+.coord{position:absolute;left:50%;top:42%;transform:translate(16px,-34px);font-size:11px;font-weight:600;color:#fff;background:rgba(9,9,11,.82);padding:3px 7px;border-radius:4px;z-index:4;white-space:nowrap}
 .nofix .coord{transform:translate(-50%,-50%);color:var(--warn);text-shadow:none;font-size:13px}
-.hud{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:12px;padding:14px 16px;z-index:4;max-width:1100px;margin:auto;box-sizing:border-box}
+.hud{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:12px;padding:10px 16px;z-index:4;max-width:1100px;margin:auto;box-sizing:border-box;background:rgba(9,9,11,.82);border-radius:0 0 12px 12px}
 .hud h1{font-size:14px;font-weight:700;letter-spacing:.18em;margin:0;color:#fff}
 .live{font-size:11px;font-weight:600;color:var(--ok);letter-spacing:.1em;display:flex;align-items:center;gap:6px}
 .live:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}
@@ -37,7 +38,7 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .hud .up{margin-left:auto;color:var(--m);font-size:12px}
 .trk{position:absolute;left:50%;top:42%;z-index:1;pointer-events:none}
 .trk svg{position:absolute;overflow:visible}
-.trk path{fill:none;stroke:#22d3ee;stroke-width:3;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round;opacity:.9;filter:drop-shadow(0 0 4px rgba(34,211,238,.7))}
+.trk path{fill:none;stroke:#09090b;stroke-width:3.5;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round;opacity:.85;filter:drop-shadow(0 0 1.5px #fff)}
 .hud .day{color:var(--a);font-size:11px;font-weight:600;letter-spacing:.1em;white-space:nowrap}.hud .day em{font-style:normal}
 .attr{position:absolute;right:8px;bottom:6px;font-size:10px;color:var(--m);z-index:4}
 .attr a{color:inherit}
@@ -45,29 +46,29 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .wrap{max-width:1100px;margin:-96px auto 0;padding:0 16px 18px;position:relative;z-index:5;transition:opacity .3s}
 .off .wrap{opacity:.5}
 .tm{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--l);border:1px solid var(--l);border-radius:14px;overflow:hidden}
-.tm div{background:rgba(10,19,38,.9);padding:11px 12px;min-width:0}
+.tm div{background:rgba(18,18,20,.9);padding:11px 12px;min-width:0}
 .tm small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}
 .tm b{display:block;font-size:22px;color:#fff;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tm b em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
 .wi{width:25px;height:19px;margin-right:8px;vertical-align:-1px;color:var(--a);fill:none;stroke-width:2.4;stroke-linecap:round;filter:drop-shadow(0 0 4px currentColor)}
-.wi path{stroke:rgba(116,135,174,.28)}.wi .on{stroke:currentColor}.wi circle{fill:currentColor;stroke:none}
+.wi path{stroke:rgba(142,142,150,.28)}.wi .on{stroke:currentColor}.wi circle{fill:currentColor;stroke:none}
 .tm b em.db{margin-left:10px}
 .tm .warn .wi,.tm .bad .wi{color:inherit}
-.tm .ok b{color:var(--ok);text-shadow:0 0 12px rgba(52,211,153,.5)}
+.tm .ok b{color:var(--ok);text-shadow:0 0 12px rgba(74,222,128,.5)}
 .tm .warn b{color:var(--warn)}.tm .bad b{color:var(--bad)}
 .g{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;margin-top:12px}
 .g>*,.sx-m>*,.sx-4>*{min-width:0}       /* (a 1fr column grows to its widest nowrap row) */
-.p{background:linear-gradient(180deg,rgba(18,32,60,.75),rgba(9,16,32,.85));border:1px solid var(--l);border-radius:14px;padding:14px}
+.p{background:linear-gradient(180deg,rgba(24,24,27,.75),rgba(12,12,14,.85));border:1px solid var(--l);border-radius:14px;padding:14px}
 .p h2{font-size:10.5px;font-weight:600;letter-spacing:.16em;color:var(--m);margin:0 0 10px;text-transform:uppercase}
 .col{display:flex;flex-direction:column;gap:12px}.col .p:last-child{flex:1}
 /* sky radar */
 .radar svg{display:block;width:100%;max-width:380px;margin:auto}
 .col.l .p{flex:none}.col.l .radar{flex:1;display:flex;flex-direction:column;contain:size;min-height:320px}  /* (its own size 0: it fills what Systems leaves, not its width) */
 .col.l .radar svg{flex:1;height:0;min-height:240px;max-width:none}
-.rg{fill:none;stroke:rgba(34,211,238,.18)}.rx{stroke:rgba(34,211,238,.12)}
+.rg{fill:none;stroke:rgba(228,228,231,.18)}.rx{stroke:rgba(228,228,231,.12)}
 .sweep{fill:url(#sw)}
 text{fill:var(--m);font:600 9px "JetBrains Mono",monospace;text-anchor:middle}
-[class^=g],[class*=" g"]{--s:#94a3b8}.g0{--s:#38bdf8}.g2{--s:#34d399}.g3{--s:#fbbf24}.g6{--s:#f472b6}
+[class^=g],[class*=" g"]{--s:#8e8e96}.g0{--s:#e4e4e7}.g2{--s:#4ade80}.g3{--s:#f59e0b}.g6{--s:#f472b6}
 circle[class^=g],circle[class*=" g"]{fill:var(--s);stroke:var(--s);stroke-width:1.2;filter:drop-shadow(0 0 4px var(--s))}
 circle.u{fill:none;filter:none;opacity:.7}
 .legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--m);margin-top:8px;justify-content:center}
@@ -75,10 +76,10 @@ circle.u{fill:none;filter:none;opacity:.7}
 .legend .u i{background:none;border:1.5px solid var(--m);box-shadow:none;box-sizing:border-box}
 /* signal */
 /* Signal: a bar a satellite, in words (strong / fair / weak), no dB-Hz */
-.sg-h{display:flex;gap:2px 22px;align-items:baseline;flex-wrap:wrap;margin:0 0 4px}.sg-h b{font:500 26px "JetBrains Mono",monospace;color:#fff}.sg-h .q-strong{color:#7fe39a}.sg-h .q-fair{color:#a3e635}.sg-h .q-weak{color:#fbbf24}.sg-h .q-none{color:#f87171}
-.sg-h b em{font:400 12px "JetBrains Mono",monospace;color:#8a96ad;font-style:normal;margin-left:6px}
-.sg-s{color:#8a96ad;font-size:12px;margin:0 0 10px}
-.q-strong{color:#7fe39a}.q-fair{color:#a3e635}.q-weak{color:#fbbf24}.q-none{color:#f87171}
+.sg-h{display:flex;gap:2px 22px;align-items:baseline;flex-wrap:wrap;margin:0 0 4px}.sg-h b{font:500 26px "JetBrains Mono",monospace;color:#fff}.sg-h .q-strong{color:#4ade80}.sg-h .q-fair{color:#a3e635}.sg-h .q-weak{color:#f59e0b}.sg-h .q-none{color:#ef4444}
+.sg-h b em{font:400 12px "JetBrains Mono",monospace;color:#8e8e96;font-style:normal;margin-left:6px}
+.sg-s{color:#8e8e96;font-size:12px;margin:0 0 10px}
+.q-strong{color:#4ade80}.q-fair{color:#a3e635}.q-weak{color:#f59e0b}.q-none{color:#ef4444}
 .sg-c{position:relative;height:150px;padding-right:58px}
 .sg-z{position:absolute;inset:0 0 18px 0;display:flex;flex-direction:column}.sg-z i{position:relative;display:block}
 .sg-z i:before{content:"";position:absolute;inset:0 58px 0 0;background:currentColor;opacity:.05}
@@ -86,28 +87,28 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sg-z em{position:absolute;right:0;top:50%;transform:translateY(-50%);font:10px "JetBrains Mono",monospace;font-style:normal}
 .sg-r{position:relative;display:flex;gap:4px;height:100%}
 .sg-k{flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-width:0}
-.sg-k span{height:18px;line-height:18px;text-align:center;font:10px "JetBrains Mono",monospace;color:#8a96ad;overflow:hidden}
+.sg-k span{height:18px;line-height:18px;text-align:center;font:10px "JetBrains Mono",monospace;color:#8e8e96;overflow:hidden}
 .sg-b{display:block;margin:0 18%;border-radius:3px 3px 1px 1px;background:currentColor}
-.sg-b.sg-u{background:none;border:1.5px solid #7487ae;box-sizing:border-box;color:#7487ae}.sg-b.sg-0{border-style:dashed;height:3px!important}
-.sg-l{font-size:11px;color:#8a96ad;margin-top:6px}.sg-l i{display:inline-block;width:9px;height:9px;border:1.5px solid #7487ae;border-radius:2px;margin:0 6px 0 14px;vertical-align:-1px}
+.sg-b.sg-u{background:none;border:1.5px solid #8e8e96;box-sizing:border-box;color:#8e8e96}.sg-b.sg-0{border-style:dashed;height:3px!important}
+.sg-l{font-size:11px;color:#8e8e96;margin-top:6px}.sg-l i{display:inline-block;width:9px;height:9px;border:1.5px solid #8e8e96;border-radius:2px;margin:0 6px 0 14px;vertical-align:-1px}
 .r .u{opacity:.25;box-shadow:none}
 /* systems */
 
 .none{font-size:12px;color:var(--m)}
 /* Systems, after the "Drone Airframe Diagnostics" layout: readiness rows,
    a storage module, uplink cells, a device table */
-.sx{--g:#7fe39a;--wo:#ff8a4c;--xr:#ff5d5d;--lab:#8a96ad;--ln:rgba(255,255,255,.07);padding:18px 18px 16px}
+.sx{--g:#4ade80;--wo:#f97316;--xr:#ef4444;--lab:#8e8e96;--ln:rgba(255,255,255,.07);padding:18px 18px 16px}
 .sx-t{font:500 19px Inter,sans-serif;letter-spacing:.04em;color:#fff;margin:0}
 .sx-s{font:500 11px Inter,sans-serif;letter-spacing:.08em;color:var(--lab);margin:4px 0 0;text-transform:uppercase}
-.sx-h{display:flex;align-items:center;justify-content:space-between;margin:20px 0 10px;font:500 12px Inter,sans-serif;letter-spacing:.07em;color:#dfe6f3;text-transform:uppercase}
+.sx-h{display:flex;align-items:center;justify-content:space-between;margin:20px 0 10px;font:500 12px Inter,sans-serif;letter-spacing:.07em;color:#ececee;text-transform:uppercase}
 .sx-h span{display:flex;align-items:center;gap:8px}
 .sx svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;flex:none}
 .sx-h b{font:500 19px Inter,sans-serif;color:#fff;letter-spacing:0}
 .sx-seg{display:flex;gap:4px;margin:2px 0 10px}
-.sx-seg i{flex:1;height:6px;border-radius:1px;background:var(--g);box-shadow:0 0 8px rgba(127,227,154,.7)}
-.sx-seg.warn i{background:var(--wo);box-shadow:0 0 8px rgba(255,138,76,.6)}.sx-seg.bad i{background:var(--xr);box-shadow:0 0 8px rgba(255,93,93,.6)}
-.sx-seg i.off{background:#3a4458;box-shadow:none}
-.sx-r{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--ln);font:500 12px Inter,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#dfe6f3}
+.sx-seg i{flex:1;height:6px;border-radius:1px;background:var(--g);box-shadow:0 0 8px rgba(74,222,128,.7)}
+.sx-seg.warn i{background:var(--wo);box-shadow:0 0 8px rgba(249,115,22,.6)}.sx-seg.bad i{background:var(--xr);box-shadow:0 0 8px rgba(239,68,68,.6)}
+.sx-seg i.off{background:#26262b;box-shadow:none}
+.sx-r{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--ln);font:500 12px Inter,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#ececee}
 .sx-r:last-of-type{border-bottom:0}
 .sx-r span{display:flex;align-items:center;gap:10px;min-width:0}
 .sx-r em{font-style:normal;color:var(--lab);letter-spacing:.03em;text-transform:none;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -116,7 +117,7 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sx .warn i,.sx-r.warn i{background:var(--wo);box-shadow:0 0 6px var(--wo)}.sx-r.bad i{background:var(--xr);box-shadow:0 0 6px var(--xr)}
 .sx-r.warn b,.sx .warn>b,.sx b.warn{color:var(--wo)}.sx-r.bad b,.sx .bad>b,.sx b.bad{color:var(--xr)}
 .sx-m{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;background:rgba(255,255,255,.035);border:1px solid var(--ln);border-radius:10px;padding:16px}
-.sx-big{font:500 40px Inter,sans-serif;color:var(--g);text-shadow:0 0 18px rgba(127,227,154,.35);line-height:1;white-space:nowrap}
+.sx-big{font:500 40px Inter,sans-serif;color:var(--g);text-shadow:0 0 18px rgba(74,222,128,.35);line-height:1;white-space:nowrap}
 .sx .sx-big small{display:inline;font:500 22px Inter,sans-serif;letter-spacing:0;color:inherit;text-transform:none}
 .sx-big.warn{color:var(--wo);text-shadow:none}.sx-big.bad{color:var(--xr);text-shadow:none}
 .sx-bl{font:500 11px Inter,sans-serif;letter-spacing:.08em;color:var(--lab);margin-top:8px;text-transform:uppercase}
@@ -133,48 +134,48 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sx-k td{padding:7px 0;font:500 12px Inter,sans-serif;letter-spacing:.06em;color:var(--lab);text-transform:uppercase}
 .sx-k td+td{text-align:right;color:#fff;letter-spacing:.02em;text-transform:none;font-size:14px}
 .sx-k td.warn{color:var(--wo)}
-.sx-chip{display:inline-block;border:1px solid rgba(127,227,154,.45);background:rgba(127,227,154,.08);color:var(--g);font:600 10.5px Inter,sans-serif;letter-spacing:.06em;padding:4px 7px;border-radius:3px;margin-left:8px;vertical-align:1px;text-transform:uppercase}
+.sx-chip{display:inline-block;border:1px solid rgba(74,222,128,.45);background:rgba(74,222,128,.08);color:var(--g);font:600 10.5px Inter,sans-serif;letter-spacing:.06em;padding:4px 7px;border-radius:3px;margin-left:8px;vertical-align:1px;text-transform:uppercase}
 /* log + satellite table */
 /* GPS telemetry, after "Orbital Systems" (Orizon, dribbble 27639068): a
    graphite panel with cut corners, a dot-matrix accuracy chart, amber anomaly */
-.gt{position:relative;margin-bottom:12px;background:radial-gradient(120% 140% at 50% 0%,#1d2622 0%,#121816 55%,#0d1110 100%);padding:18px 20px 20px;color:#e7efe9;font-family:Inter,sans-serif;
+.gt{position:relative;margin-bottom:12px;background:radial-gradient(120% 140% at 50% 0%,#18181b 0%,#121214 55%,#0c0c0e 100%);padding:18px 20px 20px;color:#ececee;font-family:Inter,sans-serif;
  clip-path:polygon(16px 0,calc(100% - 16px) 0,100% 16px,100% calc(100% - 16px),calc(100% - 16px) 100%,16px 100%,0 calc(100% - 16px),0 16px)}
-.gt:before,.gt-b:before,.gt-an:before{content:"";position:absolute;inset:0;pointer-events:none;border:1px solid rgba(214,232,222,.16);clip-path:inherit}
+.gt:before,.gt-b:before,.gt-an:before{content:"";position:absolute;inset:0;pointer-events:none;border:1px solid rgba(255,255,255,.16);clip-path:inherit}
 .gt-hd{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-.gt-hd h3{font:400 21px Audiowide,"JetBrains Mono",monospace;margin:0;color:#e7efe9}.gt-hd h3 small{display:block;font:400 11px Inter,sans-serif;color:#8b9590;margin-top:6px}
-.gt-chip{font:400 11px Audiowide,monospace;padding:5px 10px;border:1px solid rgba(214,232,222,.16);color:#d7ece0;background:rgba(215,236,224,.06)}
-.gt-chip.a{color:#f5a524;border-color:rgba(245,165,36,.4);background:rgba(245,165,36,.08)}
+.gt-hd h3{font:400 21px Audiowide,"JetBrains Mono",monospace;margin:0;color:#ececee}.gt-hd h3 small{display:block;font:400 11px Inter,sans-serif;color:#8e8e96;margin-top:6px}
+.gt-chip{font:400 11px Audiowide,monospace;padding:5px 10px;border:1px solid rgba(255,255,255,.16);color:#d4d4d8;background:rgba(212,212,216,.06)}
+.gt-chip.a{color:#f59e0b;border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.08)}
 .gt-g{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}.gt-g>*{min-width:0}
 .gt-b{position:relative;background:rgba(255,255,255,.025);padding:14px 16px;clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px)}
-.gt-l{font:400 12px Audiowide,monospace}.gt-l em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590;margin-left:8px}
+.gt-l{font:400 12px Audiowide,monospace}.gt-l em{font:400 11px Inter,sans-serif;font-style:normal;color:#8e8e96;margin-left:8px}
 .gt-big{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:4px 12px;margin:6px 0 10px}.gt-big b{font:400 30px Audiowide,monospace}
-.gt-big span{font:500 11px "JetBrains Mono",monospace;color:#d7ece0}
+.gt-big span{font:500 11px "JetBrains Mono",monospace;color:#d4d4d8}
 .gt-dm{display:flex;gap:2px;align-items:flex-end;height:96px;margin-left:34px}.gt-c{flex:1;display:flex;flex-direction:column-reverse;gap:2px;height:100%;min-width:0}
-.gt-c s{display:block;flex:1;background:rgba(215,236,224,.07)}.gt-c s.on{background:#d7ece0}.gt-c s.am{background:#f5a524}.gt-c s.rd{background:#ef8a4c}.gt-c.x s:first-child{background:#ef5b4c}
-.gt-ax{display:flex;justify-content:space-between;font:500 10.5px "JetBrains Mono",monospace;color:#8b9590;margin-top:6px}
-.gt-lg{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#8b9590}.gt-lg b{display:inline-block;width:8px;height:8px;margin-right:6px;background:#d7ece0}
-.gt-lg b.am{background:#f5a524}.gt-lg b.rd{background:#ef8a4c}.gt-lg b.x{background:#ef5b4c}
+.gt-c s{display:block;flex:1;background:rgba(212,212,216,.07)}.gt-c s.on{background:#d4d4d8}.gt-c s.am{background:#f59e0b}.gt-c s.rd{background:#f97316}.gt-c.x s:first-child{background:#ef4444}
+.gt-ax{display:flex;justify-content:space-between;font:500 10.5px "JetBrains Mono",monospace;color:#8e8e96;margin-top:6px}
+.gt-lg{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#8e8e96}.gt-lg b{display:inline-block;width:8px;height:8px;margin-right:6px;background:#d4d4d8}
+.gt-lg b.am{background:#f59e0b}.gt-lg b.rd{background:#f97316}.gt-lg b.x{background:#ef4444}
 .gt-dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}.gt-dg svg{display:block;width:100%;height:40px}
-.gt-dg small{display:block;font-size:11px;color:#8b9590;margin-top:4px}.gt-dg b{font:500 14px "JetBrains Mono",monospace}.gt-dg b em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590}
-.gt-lk{display:flex;align-items:center;gap:8px;margin-top:6px}.gt-lk span{font:500 10px "JetBrains Mono",monospace;color:#8b9590;width:26px;flex:none}
-.gt-lk div{flex:1;display:flex;gap:2px;height:8px;min-width:0}.gt-k{flex:1;min-width:0;background:rgba(215,236,224,.07)}.gt-k.ok{background:#7fbf9a}.gt-k.am{background:#f5a524}.gt-k.rd{background:#ef5b4c}
-.gt-mks{position:relative;height:22px;margin:2px 0 0 34px}.gt-mk{position:absolute;top:0;transform:translateX(-50%);font:500 10px "JetBrains Mono",monospace;color:#ef5b4c;white-space:nowrap;text-align:center}
-.gt-mk i{display:block;width:0;height:0;margin:0 auto 2px;border:4px solid transparent;border-bottom-color:#ef5b4c;border-top:0}
-.gt-ax{padding-left:34px}.gt-lg .gt-sep{margin-left:6px;color:#d7ece0}.gt-lg b.ok{background:#7fbf9a}
+.gt-dg small{display:block;font-size:11px;color:#8e8e96;margin-top:4px}.gt-dg b{font:500 14px "JetBrains Mono",monospace}.gt-dg b em{font:400 11px Inter,sans-serif;font-style:normal;color:#8e8e96}
+.gt-lk{display:flex;align-items:center;gap:8px;margin-top:6px}.gt-lk span{font:500 10px "JetBrains Mono",monospace;color:#8e8e96;width:26px;flex:none}
+.gt-lk div{flex:1;display:flex;gap:2px;height:8px;min-width:0}.gt-k{flex:1;min-width:0;background:rgba(212,212,216,.07)}.gt-k.ok{background:#4ade80}.gt-k.am{background:#f59e0b}.gt-k.rd{background:#ef4444}
+.gt-mks{position:relative;height:22px;margin:2px 0 0 34px}.gt-mk{position:absolute;top:0;transform:translateX(-50%);font:500 10px "JetBrains Mono",monospace;color:#ef4444;white-space:nowrap;text-align:center}
+.gt-mk i{display:block;width:0;height:0;margin:0 auto 2px;border:4px solid transparent;border-bottom-color:#ef4444;border-top:0}
+.gt-ax{padding-left:34px}.gt-lg .gt-sep{margin-left:6px;color:#d4d4d8}.gt-lg b.ok{background:#4ade80}
 .gt-n{display:block;font:400 26px Audiowide,monospace!important}
-.gt-an>p{display:flex;justify-content:space-between;margin:0;padding:6px 0;border-top:1px solid rgba(245,165,36,.18);font:500 12px "JetBrains Mono",monospace;color:#ffe2b0}
-.gt-an>p b{font-weight:500;color:#f5a524}.gt-an>p.gt-more{color:#b9a27a;font-size:11px}
-.gt-ok{margin:12px 0 0;font-size:12px;color:#8b9590}
-.gt-n.a{color:#f5a524}.gt-n em{font:400 12px Inter,sans-serif;font-style:normal;color:#8b9590;margin:0 2px}
-.gt-bad{margin:12px 0 0;font-size:12px;color:#8b9590}.gt-bad b{font:500 13px "JetBrains Mono",monospace;color:#e7efe9}
+.gt-an>p{display:flex;justify-content:space-between;margin:0;padding:6px 0;border-top:1px solid rgba(245,158,11,.18);font:500 12px "JetBrains Mono",monospace;color:#fcd34d}
+.gt-an>p b{font-weight:500;color:#f59e0b}.gt-an>p.gt-more{color:#a8a29e;font-size:11px}
+.gt-ok{margin:12px 0 0;font-size:12px;color:#8e8e96}
+.gt-n.a{color:#f59e0b}.gt-n em{font:400 12px Inter,sans-serif;font-style:normal;color:#8e8e96;margin:0 2px}
+.gt-bad{margin:12px 0 0;font-size:12px;color:#8e8e96}.gt-bad b{font:500 13px "JetBrains Mono",monospace;color:#ececee}
 
-.gt-an{position:relative;margin-top:14px;background:linear-gradient(180deg,rgba(245,165,36,.16),rgba(245,165,36,.05));padding:12px 14px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
-.gt-an:before{border-color:rgba(245,165,36,.45)}
-.gt-an h4{margin:0 0 8px;font:400 13px Audiowide,monospace;color:#ffe2b0;display:flex;gap:10px;align-items:center}
-.gt-an h4 i{width:22px;height:22px;display:grid;place-items:center;border:1px solid rgba(245,165,36,.6);font-style:normal;color:#f5a524;font-size:12px}
+.gt-an{position:relative;margin-top:14px;background:linear-gradient(180deg,rgba(245,158,11,.16),rgba(245,158,11,.05));padding:12px 14px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.gt-an:before{border-color:rgba(245,158,11,.45)}
+.gt-an h4{margin:0 0 8px;font:400 13px Audiowide,monospace;color:#fcd34d;display:flex;gap:10px;align-items:center}
+.gt-an h4 i{width:22px;height:22px;display:grid;place-items:center;border:1px solid rgba(245,158,11,.6);font-style:normal;color:#f59e0b;font-size:12px}
 /* Event log, aggregated (Sentry / Loki patterns): KPI tiles, GPS telemetry,
    the events grouped by kind */
-.ev{--g:#7fe39a;--lab:#8a96ad;--ln:rgba(255,255,255,.07);margin-top:12px;padding:18px;font-family:"JetBrains Mono",ui-monospace,monospace}
+.ev{--g:#4ade80;--lab:#8e8e96;--ln:rgba(255,255,255,.07);margin-top:12px;padding:18px;font-family:"JetBrains Mono",ui-monospace,monospace}
 .ev-t{font:500 26px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}
 .ev-s{font:400 12px "JetBrains Mono",monospace;color:var(--lab);margin:0 0 16px}
 .ev-k4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
@@ -207,7 +208,7 @@ circle.u{fill:none;filter:none;opacity:.7}
 .ev-nm{overflow:hidden;text-overflow:ellipsis}
 .ev-n{font:600 18px "JetBrains Mono",monospace;color:#fff;text-align:right;font-variant-numeric:tabular-nums}
 .ev-hd .ev-n{font:inherit;color:inherit}
-.ev-dt{color:#c9d3e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ev-dt em{color:var(--lab);font-style:normal}
+.ev-dt{color:#ececee;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ev-dt em{color:var(--lab);font-style:normal}
 .ev-sk{display:flex;gap:2px;align-items:flex-end;height:22px}.ev-sk i{flex:1;background:rgba(255,255,255,.06);border-radius:2px;min-height:2px}
 .ev-sk i.on{background:currentColor}
 .ev-lt{color:var(--lab);text-align:right;white-space:nowrap}
@@ -218,11 +219,11 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .svt td{padding:3px 6px;border-top:1px solid var(--l);text-align:right}
 .svt td:first-child{text-align:left}.svt .u td{color:var(--m)}
 /* GPS link alert and the track panel */
-.alert{margin-bottom:12px;padding:11px 14px;border:1px solid var(--bad);border-radius:14px;background:rgba(248,113,113,.12);color:var(--bad);font:600 12px "JetBrains Mono",monospace;letter-spacing:.08em}
+.alert{margin-bottom:12px;padding:11px 14px;border:1px solid var(--bad);border-radius:14px;background:rgba(239,68,68,.12);color:var(--bad);font:600 12px "JetBrains Mono",monospace;letter-spacing:.08em}
 .alert em{font-style:normal;color:var(--t);font-weight:400;margin-left:8px}
 .alert:empty{display:none}
 .ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}.ph h2{margin:0;margin-right:auto}
-.btn{font:600 11px "JetBrains Mono",monospace;letter-spacing:.08em;color:var(--a);background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.35);border-radius:8px;padding:5px 9px;cursor:pointer}
+.btn{font:600 11px "JetBrains Mono",monospace;letter-spacing:.08em;color:var(--a);background:rgba(228,228,231,.08);border:1px solid rgba(228,228,231,.35);border-radius:8px;padding:5px 9px;cursor:pointer}
 .btn:disabled{opacity:.4;cursor:default}
 .dn{font:600 12px "JetBrains Mono",monospace;letter-spacing:.08em;color:#fff;min-width:96px;text-align:center}
 .kpi{display:flex;gap:22px;font-family:"JetBrains Mono",monospace;margin-bottom:12px}.kpi b{font-size:22px;color:#fff}.kpi em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
@@ -230,13 +231,13 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .tr time{color:#fff;font-weight:600}.tr span{color:var(--m);padding-left:8px}
 .tr i{position:relative}
 .tr i:before{content:"";position:absolute;left:4px;top:3px;width:10px;height:10px;border-radius:50%;box-sizing:border-box;background:var(--b);border:2px solid var(--m)}
-.tr i:after{content:"";position:absolute;left:8px;top:13px;bottom:-3px;border-left:2px dashed rgba(116,135,174,.45)}
+.tr i:after{content:"";position:absolute;left:8px;top:13px;bottom:-3px;border-left:2px dashed rgba(142,142,150,.45)}
 .tr.go i:before{background:var(--a);border-color:var(--a);box-shadow:0 0 8px var(--a)}
-.tr.go i:after{border-left:3px solid var(--a);left:7.5px;box-shadow:0 0 6px rgba(34,211,238,.5)}
+.tr.go i:after{border-left:3px solid var(--a);left:7.5px;box-shadow:0 0 6px rgba(228,228,231,.5)}
 .tr.go{cursor:pointer}.tr.go span{color:var(--t)}.tr.go span b{color:#fff}
 .tr.go:hover span,.tr.go.on span,.tr.go.on span b{color:var(--a)}.tr.go.on i:after{border-left-color:#fff}
 .tr.end i:after{display:none}
-.trk path.hl{stroke:#fff;stroke-width:5;filter:drop-shadow(0 0 6px rgba(255,255,255,.8))}
+.trk path.hl{stroke:#09090b;stroke-width:5.5;opacity:1;filter:drop-shadow(0 0 2px #fff)}
 .hint{font-size:11px;color:var(--m);margin-top:8px}
 /* a narrow HUD wraps whole items (offline with a day's km it needs ~490 px;
    squeezed, the uptime broke over 5 lines into the map); the uptime of the
@@ -250,7 +251,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
   <div class="tiles" id="tiles"></div><div class="grid"></div><div class="trk" id="trk"></div>
   <div class="acc" id="acc"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
   <div class="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
-  <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></div>
+  <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &middot; <a href="https://www.geoapify.com/">Geoapify</a></div>
 </div>
 <div class="wrap">
   <div class="alert" id="gl"></div>
@@ -260,7 +261,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
     <div class="col l">
       <div class="p radar"><h2 id="skyh">Sky</h2>
         <svg viewBox="-104 -104 208 208">
-          <defs><radialGradient id="sw" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="scale(90)"><stop offset="0" stop-color="rgba(34,211,238,.18)"/><stop offset="1" stop-color="rgba(34,211,238,0)"/></radialGradient></defs>
+          <defs><radialGradient id="sw" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="scale(90)"><stop offset="0" stop-color="rgba(228,228,231,.18)"/><stop offset="1" stop-color="rgba(228,228,231,0)"/></radialGradient></defs>
           <path class="sweep" d="M0 0L0-90A90 90 0 0 1 77.9-45Z"/>
           <circle class="rg" r="90"/><circle class="rg" r="60"/><circle class="rg" r="30"/>
           <path class="rx" d="M0-90V90M-90 0H90M-63.6-63.6L63.6 63.6M63.6-63.6L-63.6 63.6"/>
@@ -295,6 +296,10 @@ var POINT_B = 7;                        // bytes per .trb point (7.0-7.3 on a 1 
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
 var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
+// the map tiles: OSM-carto through the homelab Atlas proxy (CT 146 adds the
+// Geoapify key; Cloudflare caches the tiles); it answers pages on a
+// private-network address, as the board's is
+var TILES = "https://atlas.crusand.org/tiles/geoapify/";
 // every status.json key the page shows (tests check none is missing)
 var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
@@ -1237,7 +1242,7 @@ function placeMap(d) {
   if (key !== mapKey) {
     var h = "";
     for (var dx = -nx; dx <= nx; dx++) for (var dy = -ny; dy <= ny; dy++)
-      h += '<img alt="" src="https://tile.openstreetmap.org/' + z + "/" + (t.x + dx) + "/" + (t.y + dy) +
+      h += '<img alt="" src="' + TILES + z + "/" + (t.x + dx) + "/" + (t.y + dy) +
         '.png" style="left:' + dx * 256 + "px;top:" + dy * 256 + 'px">';
     box.innerHTML = h;
     mapKey = key;

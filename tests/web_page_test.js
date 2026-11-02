@@ -139,7 +139,7 @@ hd.km = p.c.tripsOf(p.c.hist.pts).reduce((a, t) => a + t.km, 0);
 hd.kmField = "km" in p.c.hist;          // (the HUD sums the trips)
 hd.path = p.doc.getElementById("trk").innerHTML;
 hd.day = p.doc.getElementById("day").innerHTML;
-hd.zoom = +(p.doc.getElementById("tiles").innerHTML.match(/openstreetmap\.org\/(\d+)\//) || [])[1];
+hd.zoom = +(p.doc.getElementById("tiles").innerHTML.match(/tiles\/geoapify\/(\d+)\//) || [])[1];
 hd.trkT = p.doc.getElementById("trk").style.transform === p.doc.getElementById("tiles").style.transform;
 // a full reply (HIST_REPLY bytes) is asked again from its end
 p = page(1600);

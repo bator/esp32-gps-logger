@@ -7792,6 +7792,23 @@ check("UPL-6: trk2gpx drops times out of range and a point with a field "
           "2026-11-01T10:00:02Z", "2026-11-01T10:00:03Z"],
       repr((t6_times, t6_fw)))
 
+# PAGE-THEME: one colour world (Bator picked "carbon"): every colour on
+# the page is one of the theme's roles (no navy, cyan or graphite left
+# from the panels' separate origins: 34 colours before); the map is the
+# Atlas map as it is, in its own colours (Bator: "the Atlas map, not this
+# black"), no filter on the tiles
+with open(os.path.join(ROOT, "web.html")) as f:
+    th_src = f.read()
+th_hex = sorted(set(c.lower() for c in re.findall(r"#[0-9a-fA-F]{6}\b", th_src)))
+check("PAGE-THEME: the carbon palette only, no navy / cyan / graphite left, "
+      "the Atlas map unfiltered", len(th_hex) <= 20
+      and not any(c in th_src for c in ("#22d3ee", "#060b16", "#16233d",
+                                        "rgba(34,211,238", "#1d2622",
+                                        "#d6e2ff"))
+      and "hue-rotate" not in th_src and "invert(1)" not in th_src
+      and re.search(r"\.tiles\{[^}]*filter", th_src) is None,
+      repr(th_hex))
+
 # DIAG: persistent diagnostic log (what happened on a walk)
 def diag_lines(path=None):
     try:
@@ -14216,10 +14233,16 @@ check("PAGE-STATIC-GONE: no Static test panel, code, CSS or browser "
       not any(w_ in page_src for w_ in (
           "Static test", "statView", "statAdd", "sstat", "scat", "STAT_",
           "gps-static", "localStorage", "CEP50")), "")
-check("PAGE: polls status.json at the board's refresh_s, no reload",
+# (the map: OSM-carto tiles through the homelab Atlas proxy, as Dawarich
+# uses: one cache, Geoapify's key stays on CT 146; OSM's own tile servers
+# ask apps not to use them for this)
+check("PAGE: polls status.json at the board's refresh_s, no reload; Atlas "
+      "map tiles, credited",
       "/status.json" in page_src and "refresh_s" in page_src
       and 'http-equiv="refresh"' not in page_src
-      and "tile.openstreetmap.org" in page_src and "OpenStreetMap</a>" in page_src
+      and "tile.openstreetmap.org" not in page_src
+      and "https://atlas.crusand.org/tiles/geoapify/" in page_src
+      and "OpenStreetMap</a>" in page_src and "Geoapify</a>" in page_src
       and '<link rel="icon" href="data:image/svg+xml,' in page_src
       and "el.offsetWidth / 512" in page_src and "window.onresize" in page_src
       and 'name="viewport"' in page_src)
