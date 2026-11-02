@@ -4665,7 +4665,6 @@ try:
 
     # HB: the stay's heartbeat needs no fix; GAP: windows across a fix gap;
     # ORDER: the way out stays in time order
-    import calendar
 
     def hb_fix(east, north, hdop=1.0, nofix=False, speed=NOISE):
         """Like sv_fix; nofix leaves pos/time stale (no new GPS epoch)."""
