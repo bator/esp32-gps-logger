@@ -7360,6 +7360,33 @@ def diag_clear():
             pass
 
 
+# GPS-SILENT: a receiver that sends nothing (the M10 with its RX held low
+# goes silent until a power cycle) was only "No data!" on the screen and a
+# banner on the page: the diag log, read after a walk, said nothing. Its
+# start and its end are diag lines now, once each
+diag_clear()
+gl.reset()
+_gs_t0 = _clock[0]
+gl.st["start"] = _gs_t0
+gl.gps_check(_clock[0] + gl.GPS_SILENT - 1000)
+_gs_early = [l for l in diag_lines() if "gps silent" in l]
+_clock[0] = _gs_t0 + gl.GPS_SILENT
+gl.gps_check(_clock[0])
+_clock[0] += 30000
+gl.gps_check(_clock[0])
+_gs_mute = [l for l in diag_lines() if "gps silent" in l]
+gl.st["rx"] = _clock[0]                  # bytes again
+gl.gps_check(_clock[0])
+gl.gps_check(_clock[0] + 1000)
+_gs_back = [l for l in diag_lines() if "gps back" in l]
+check("GPS-SILENT: no bytes for GPS_SILENT is one diag line, their return "
+      "one more", _gs_early == [] and len(_gs_mute) == 1
+      and len(_gs_back) == 1 and "90 s" in _gs_back[0]
+      and gl.st["mute_at"] is None, repr((_gs_early, _gs_mute, _gs_back)))
+diag_clear()
+gl.reset()
+
+
 saved_diag = (gl.DIAG, gl.DIAG_MAX)
 try:
     vals = []

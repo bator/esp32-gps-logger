@@ -140,6 +140,7 @@ uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX, rxbuf=4096)   # rides
 
 REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"
+GPS_SILENT = 60000                       # ms without a byte: a diag line
 
 SAMPLE = 1000                            # ms between sampled positions
 MIN_MOVE = 1                             # m from the last recorded point (.env
@@ -395,7 +396,7 @@ def reset():
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, used=None, view={},
               hdop=None, ttff=None, pos_at=None, hdop_at=None,
-              seq=0, epochs=0, extra=0, setup_at=None,
+              seq=0, epochs=0, extra=0, setup_at=None, mute_at=None,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
@@ -1328,6 +1329,23 @@ def _stamps_old(now):
     if t is not None and _age(now, t) > TICKS_CAP:
         st["setup_at"] = time.ticks_add(now, -TICKS_CAP)
 
+def _gps_mute(now):
+    """No byte from the receiver for GPS_SILENT (the M10 with its RX held
+    low stays silent until a power cycle): one diag line when it starts,
+    one when bytes come again, with how long it lasted. mute_at: the last
+    byte (the boot when none came)."""
+    rx = st["rx"]
+    at = st["start"] if rx is None else rx
+    m = st["mute_at"]
+    if m is None:
+        if _age(now, at) >= GPS_SILENT:
+            st["mute_at"] = at
+            _diag_write("gps silent %d s, no bytes from the receiver"
+                        % (_age(now, at) // 1000))
+    elif rx is not None and _age(now, rx) < GPS_SILENT:
+        st["mute_at"] = None
+        _diag_write("gps back after %d s" % (_age(rx, m) // 1000))
+
 def gps_check(now):
     """Send the setup again while the receiver still sends the sentences it
     turns off: a receiver powered up with the board is still booting when
@@ -1336,6 +1354,7 @@ def gps_check(now):
     if _age(now, st["loop_at"]) >= GPS_LOOP_WINDOW:
         _stamps_old(now)
         _gps_loop_check(now)
+    _gps_mute(now)
     _setup_check(now)
     # also when the setup went out but was not acknowledged (an ACK lost,
     # a silent receiver that took the blind burst): it may sit at 1 Hz

@@ -503,7 +503,9 @@ stay ends without a fix (see [Stays](#stays)), `gps reset loop …` lines
 were), `gps setup not taken: …` (at most one per 10 minutes,
 `GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `gps pvt no
 NAV-PVT, NMEA this boot` / `gps pvt refused, NMEA this boot` (NAV-PVT given
-up, see [GPS](#gps)), `upload err …`
+up, see [GPS](#gps)), `gps silent N s, no bytes from the receiver` and
+`gps back after N s` (no byte from the receiver for a minute, `GPS_SILENT`;
+an M10 with its RX held low stays silent until a power cycle), `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
 used, `clock set <UTC>` once a boot when the board clock is set from the
