@@ -616,8 +616,9 @@ function view(d, prev) {
   return v;
 }
 
-// The day's track from the board's day history (/hist?d=<UTC day>&o=<byte>):
-// HIST_REPLY bytes a reply at most. Today (since local midnight) asks again
+// The day's track from the board's day history (/hist?d=<UTC day>&o=<offset>):
+// ~HIST_REPLY bytes a reply, the next o its X-Hist-Next (a text day of older
+// firmware: the bytes received). Today (since local midnight) asks again
 // once a minute for what is new; a past local day (the day picker, from the
 // JSON's days) is read once. Lines as in a .trk: lat,lon,ele first, the time
 // (YYYYMMDDTHHMMSSZ) last; a gap over 5 min breaks the line. A point:
@@ -681,8 +682,13 @@ function histNext(i) {
   x.timeout = 10000;
   x.onload = function () {
     if (h !== hist) return;             // another day was picked meanwhile
-    var t = x.status === 200 ? x.responseText : "";
-    if (t) { h.off[day] = o + t.length; histParse(day, t); }
+    var ok = x.status === 200, t = ok ? x.responseText : "",
+      nx = ok ? x.getResponseHeader("X-Hist-Next") : null, end = ok ? x.getResponseHeader("X-Hist-End") : null;
+    if (t) histParse(day, t);
+    // a .trb day: its decoded lines, X-Hist-Next where to ask from next,
+    // again while short of X-Hist-End; a .trk day (older firmware): bytes
+    if (nx !== null && end !== null) { h.off[day] = +nx; histNext(+nx > o && +nx < +end ? i : i + 1); return; }
+    if (t) h.off[day] = o + t.length;
     histNext(t.length >= HIST_REPLY ? i : i + 1);
   };
   x.onerror = x.ontimeout = function () { if (h === hist) { h.busy = false; h.at = Date.now(); } };

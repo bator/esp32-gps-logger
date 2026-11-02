@@ -70,6 +70,7 @@ function page(width) {
   XHR.prototype.open = function (m, u) { this.method = m; this.url = u; };
   XHR.prototype.send = function () {};
   XHR.prototype.overrideMimeType = function (m) { this.mime = m; };
+  XHR.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };
   const c = {document: doc, window: {}, XMLHttpRequest: XHR,
     setTimeout: (f, ms) => timers.push(ms), Date: Date, Math: Math, JSON: JSON};
   vm.createContext(c);
@@ -452,6 +453,50 @@ ft.wr4 = (() => {
   const n2 = hx(q2).filter((x) => !x.done);
   return [body.length, again.length ? +again[0].url.replace(/.*&o=/, "") : null,
     n2.length ? n2[0].url === f2.url.replace("&o=0", "&o=16384") : null, q.c.hist.pts.length];
+})();
+// HIST-NEXT: a .trb day's reply is its decoded text: X-Hist-Next is where
+// to ask from next (not o + the bytes received), again while short of
+// X-Hist-End, a minute later from there; a reply that does not move on is
+// not asked again
+ft.hnext = (() => {
+  const q = page(1600);
+  q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: "47.18536, 18.42730"});
+  q.xhrs[0].onload();
+  const D = q.c.utcDay(Date.now()), urls = [], t0 = Date.now() - 120000;
+  const ln = (k) => trkLine(t0 + k * 1000, 47.18 + k * 0.0001, 18.42);
+  function nextFor(day) {               // the open request for day, the others a 404
+    for (let n = 0; n < 8; n++) {
+      const o = q.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done);
+      if (!o.length) return null;
+      if (o[0].url.indexOf("d=" + day + "&") >= 0) return o[0];
+      o[0].done = true;
+      o[0].status = 404;
+      o[0].responseText = "no such day";
+      o[0].onload();
+    }
+    return null;
+  }
+  function reply(body, nx, end) {
+    const x = nextFor(D);
+    if (!x) return;
+    x.done = true;
+    x.status = 200;
+    x.responseText = body;
+    x.headers = {"X-Hist-Next": String(nx), "X-Hist-End": String(end)};
+    urls.push(x.url.replace(/d=\d{8}/, "d=D"));
+    x.onload();
+  }
+  reply(ln(0) + ln(1), 500, 900);       // short of the end: again from 500
+  reply(ln(2), 900, 900);               // at the end
+  nextFor("none");
+  const pts = q.c.hist.pts.length;
+  q.c.histLoad();                       // a minute later: from 900
+  reply("", 900, 900);
+  nextFor("none");
+  q.c.histLoad();
+  reply(ln(3), 900, 1400);              // no step on (a bad reply): not again
+  const again = nextFor(D) !== null;
+  return [urls, pts, q.c.hist.pts.length, again];
 })();
 // WR-7: a browser hands innerHTML back normalised (&middot; -> U+00B7):
 // a poll like the last one writes no box again, and the static test with

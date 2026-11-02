@@ -468,6 +468,40 @@ if hasattr(gc, "mem_alloc"):
     check("trb: read_batch allocates at most 1.25 x the .trk read",
           used[".trb"] <= used[".trk"] * 1.25)
 
+# the day history as the page reads it: /hist from each reply's
+# X-Hist-Next until X-Hist-End
+class _Sink:
+    def __init__(self, keep=True):
+        self.keep = keep
+        self.out = []
+
+    def settimeout(self, t):
+        pass
+
+    def sendall(self, b):
+        if self.keep:
+            self.out.append(bytes(b))
+
+
+def hist_day(day):
+    txt, o = b"", 0
+    for _ in range(1000):
+        c = _Sink()
+        gl._web_hist(c, ("/hist?d=%s&o=%d" % (day, o)).encode())
+        head, body = b"".join(c.out).split(b"\r\n\r\n", 1)
+        nx = en = None
+        for h in head.split(b"\r\n"):
+            if h.startswith(b"X-Hist-Next: "):
+                nx = int(h[13:])
+            elif h.startswith(b"X-Hist-End: "):
+                en = int(h[12:])
+        txt += body
+        if nx is None or nx >= en:
+            break
+        o = nx
+    return txt.decode()
+
+
 # an uploaded .trb batch goes to the day history without a list of its
 # lines (it built ~100 objects right after the POST): what a batch of 50
 # allocates beyond one of 10 is under 40 bytes a point
@@ -490,19 +524,43 @@ if hasattr(gc, "mem_alloc"):
             gl._hist_batch(base + ".trb", 0, 1 << 20, None)
             hist_alloc[k] = gc.mem_alloc() - a0
             gc.enable()
-        for n in sorted(os.listdir(gl.HIST_DIR)):
-            with open(gl.HIST_DIR + "/" + n) as f:
-                hist_txt += f.read()
+        hist_txt = hist_day(tl[0][-17:-9])
+        # a /hist reply allocates about what a text day's did (its send
+        # buffer, the head), whatever the day's length (no list of lines)
+        tl4 = []
+        for i in range(2000):
+            tl4.append("%s,%s,%.1f,%d,%.1f,%s\n" % (
+                gl._i7(471853560 + i * 1311), gl._i7(184269340 - i * 977),
+                120.0 + (i % 9) * 0.3, 2 + i % 3, 12.0 + (i % 11) * 0.4,
+                gl._stamp_s(215697600 + i + i // 500)[1]))
+        for i in range(0, 2000, 50):
+            gl._hist_add(tl4[i:i + 50], 50)
+        day4 = tl4[0][-17:-9]
+        with open(gl.HIST_DIR + "/20261001.trk", "w") as f:
+            f.write("".join(tl4[:400]))
+        web_alloc = []
+        for q in ("20261001&o=0", day4 + "&o=0", day4 + "&o=6000"):
+            gc.collect()
+            gc.disable()
+            a0 = gc.mem_alloc()
+            gl._web_hist(_Sink(False), ("/hist?d=" + q).encode())
+            web_alloc.append(gc.mem_alloc() - a0)
+            gc.enable()
+        hist4 = hist_day(day4)
     finally:
         os.remove(base + ".trb")
         for n in os.listdir(gl.HIST_DIR):
             os.remove(gl.HIST_DIR + "/" + n)
         os.rmdir(gl.HIST_DIR)
-    print("hist alloc", hist_alloc)
-    check("trb: an uploaded batch goes to the day history as its text, "
-          "under 40 bytes allocated a point",
+    print("hist alloc", hist_alloc, "web", web_alloc)
+    check("trb: an uploaded batch goes to the day history as its records, "
+          "read back as its text, under 40 bytes allocated a point",
           hist_txt == "".join(tl[:10]) * 2 + "".join(tl[:50]) * 2
           and (hist_alloc[50] - hist_alloc[10]) < 40 * 40)
+    check("trb: a /hist reply of a 2000-point .trb day decodes it whole, "
+          "a reply allocating at most 1.5 KB more than a text day's",
+          hist4 == "".join(tl4) and web_alloc[1] == web_alloc[2]
+          and web_alloc[1] <= web_alloc[0] + 1536)
 
 # the hidden home's learned BSSIDs survive a reboot (/home_aps: hex lines,
 # bytes.find and a bytearray parse, no binascii); garbage lines are skipped
