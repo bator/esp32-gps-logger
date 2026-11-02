@@ -1017,6 +1017,80 @@ try:
                                         lost_t))
     gl.free = orig_free
 
+    # FULL: a full flash drops the batch and records nothing until space
+    # returns. The track then goes on in a new segment (before, a 1221 s
+    # gap had no "-" and the next line measured MIN_MOVE from a stale
+    # prev), or in a new file after NEW_FILE_GAP, as after a fix loss. The
+    # dropped lines are counted and the full spell noted in the diag log.
+    full_dir = os.path.join(tmpdir, "full")
+    os.mkdir(full_dir)
+    saved_ht = gl._hist_trim
+    full_room = [10 << 20]
+    gl.free = lambda: full_room[0]
+    gl._hist_trim = lambda want: full_room[0]
+    full_r = []
+    try:
+        for full_s in (60, 1200):
+            gl.LOG_DIR = full_dir
+            for n in os.listdir(full_dir):
+                os.remove(os.path.join(full_dir, n))
+            try:
+                os.remove(gl.DIAG_FILE)
+            except OSError:
+                pass
+            gl.reset()
+            gl.log_reset()
+            gl.wifi_reset()
+            gl.wifi.update(state="offline", home=False)
+            k = 0
+            for part in (200, full_s, 200):
+                full_room[0] = 1000 if part == full_s else 10 << 20
+                for _ in range(part):
+                    _clock[0] += 1000
+                    gl.st.update(valid=True, date="2026-10-18",
+                                 time="%02d:%02d:%02d" % (
+                                     8 + k // 3600, k // 60 % 60, k % 60),
+                                 lat=47.5, lon=19.0 + k * 10.0 / 75000,
+                                 alt=100.0, pos_at=_clock[0], hdop=1.0,
+                                 hdop_at=_clock[0], status="A", quality=1,
+                                 fixtype=3, speed=36.0)
+                    gl.log_tick()
+                    k += 1
+            gl.flush()
+            unbroken = 0
+            files = sorted(n for n in os.listdir(full_dir)
+                           if n.endswith((".trk", ".trb")))
+            for n in files:
+                prev_s = None
+                with open(os.path.join(full_dir, n)) as f:
+                    for l in f:
+                        if l == gl.NEW_SEG:
+                            prev_s = None
+                        elif l.count(",") == 4:
+                            tc = l.strip().split(",")[4]
+                            s = (int(tc[9:11]) * 3600 + int(tc[11:13]) * 60
+                                 + int(tc[13:15]))
+                            if prev_s is not None and s - prev_s > 5:
+                                unbroken += 1
+                            prev_s = s
+            dl = []
+            try:
+                with open(gl.DIAG_FILE) as f:
+                    dl = [l for l in f if l.startswith("track full")]
+            except OSError:
+                pass
+            full_r.append((full_s, len(files), unbroken,
+                           gl.log.get("drop", 0) > 0, len(dl)))
+    finally:
+        gl.free = orig_free
+        gl._hist_trim = saved_ht
+        gl.LOG_DIR = tmpdir
+        gl.log_reset()
+    check("FULL: after a full flash the track goes on in a new segment (a "
+          "new file past NEW_FILE_GAP), the drop counted and in the diag log",
+          full_r == [(60, 1, 0, True, 1), (1200, 2, 0, True, 1)],
+          repr(full_r))
+
     # --- http:// GEO_URL warning -------------------------------------------
     write_env(tmpdir, "SSID=x\nWPA2=y\nGEO_URL=http://dawarich.lan\nAPI_KEY=k\n")
     gl.wifi_reset()
@@ -4298,6 +4372,42 @@ try:
     bad = [(w, g) for w, g in zip(want, got) if w != g]
     check("RING: ... also across the prime meridian (-0.0 m, HDOP 2.35)",
           len(got) == len(want) and not bad, repr(bad[:2]))
+    # ANTIMERID: across 180° the longitude difference wraps (the distance
+    # was 38000 km, the window sums mixed +180 and -180): 10 min sitting
+    # in Fiji is a stay, its drift dropped, its anchor a longitude there
+    am_d = gl._dist(-17.0, 179.9999, -17.0, -179.9999)
+    sv_reset()
+    am_sec = rv_sec[0]                    # (later tests keep their times)
+    arnd = random.Random(180)
+    for i in range(600):
+        lon = 179.9999 + arnd.uniform(-0.0002, 0.0002)
+        if lon > 180:
+            lon -= 360
+        _clock[0] += gl.SAMPLE
+        sec = rv_sec[0]
+        rv_sec[0] += 1
+        gl.st.update(valid=True, date="2026-10-18",
+                     time="%02d:%02d:%02d" % (8 + sec // 3600,
+                                              (sec // 60) % 60, sec % 60),
+                     lat=-17.0 + arnd.uniform(-0.0001, 0.0001), lon=lon,
+                     alt=10.0, pos_at=_clock[0], hdop=1.0,
+                     hdop_at=_clock[0], status="A", quality=1, fixtype=3,
+                     speed=0.5)
+        gl.log_tick()
+    gl.flush()
+    am_l = sv_lines()
+    am_a = gl.log["still"]["anchor"]
+    am_lon = [float(l.split(",")[1]) for l in am_l]
+    check("ANTIMERID: 21 m across 180°; a stay there, its anchor within "
+          "+-180° and near the drift",
+          20 < am_d < 22 and sv_active() and am_a is not None
+          and -180 <= am_a[1] <= 180
+          and gl._dist(am_a[0], am_a[1], -17.0, 179.9999) < 15
+          and len(am_l) <= 2 * gl.STILL_WINDOW // 1000 + 10
+          and all(-180 <= x <= 180 for x in am_lon),
+          "d=%.0f active=%s anchor=%r lines=%d" % (
+              am_d, sv_active(), am_a, len(am_l)))
+    rv_sec[0] = am_sec
     # times in the ring count from its first sample: from 2088 on seconds
     # since 2020 overflowed its 32-bit array (CPython raised, the board
     # stamped the way out 1951)
@@ -4406,7 +4516,7 @@ try:
     # an out-and-back with the turn near a window boundary: the window out
     # and the window back have the same centroid. That paired as a stay and
     # dropped the held lines (a car lost 36 s / 360 m, a bike ~100 s).
-    # (Slower, a walk, it stays within indoor drift: that still pairs.)
+    # (A walk: STAY-WALK below.)
     uturn = []
     for v in (10.0, 4.0, 3.0):
         for delta in range(-10, 11, 2):
@@ -4434,6 +4544,72 @@ try:
                 uturn.append((v, delta, stayed, gap))
     check("STAY: an out-and-back U-turn is no stay, nothing dropped",
           uturn == [], repr(uturn))
+    # STAY-WALK: ... at walking pace too. Two windows of an out and back
+    # (or a walk and the stop after it) have centroids within STILL_RADIUS
+    # there: a 1.4 m/s walk 70-98 m out and back kept only 6-55 m of it,
+    # at 2 m/s a 100-140 m detour went. A steady window (_walking) pairs
+    # with nothing. (Own random numbers and times: later tests keep rnd's
+    # sequence and rv_sec's hours.)
+    def ws_secs(line, t0):
+        tc = line.strip().split(",")[4]
+        return (int(tc[9:11]) * 3600 + int(tc[11:13]) * 60 + int(tc[13:15])
+                - 8 * 3600 - t0)
+
+    ws_sec0 = rv_sec[0]
+    wrnd = random.Random(1402)
+    ws_bad = []
+    for v, leg, lead in ((1.4, 50, 0), (1.4, 50, 40), (1.4, 60, 30),
+                         (1.4, 70, 20), (1.2, 60, 10), (2.0, 50, 0),
+                         (2.0, 60, 40), (2.0, 70, 30)):
+        sv_reset()
+        rv_sec[0] = 0
+        stayed = False
+        for i in range(200 + lead):
+            sv_fix(-v * (200 + lead) + i * v, wrnd.gauss(0, 1.5), v * 3.6)
+        for i in range(1, leg + 1):
+            sv_fix(i * v, wrnd.gauss(0, 1.5), v * 3.6)
+            stayed = stayed or sv_active()
+        for i in range(1, 300):
+            sv_fix((leg - i) * v, wrnd.gauss(0, 1.5), v * 3.6)
+            stayed = stayed or sv_active()
+        gl.flush()
+        ws_l = sv_lines()
+        far = max((float(l.split(",")[1]) - 19.0) / M_LON for l in ws_l)
+        secs = sorted(ws_secs(l, 0) for l in ws_l)
+        gap = max(b - a for a, b in zip(secs, secs[1:]))
+        if stayed or far < 0.9 * leg * v or gap > 5:
+            ws_bad.append((v, leg, lead, stayed, round(far), gap))
+    check("STAY-WALK: a walking out and back (1.2-2 m/s) is no stay, its "
+          "turn kept", ws_bad == [], repr(ws_bad))
+    # ... and a walk, a stop of 2.5-10 min, a walk on: the arrival was cut
+    # at STILL_NEAR from an anchor pulled back along the way in (~50 s /
+    # 69 m lost), and the departure ring held the last STILL_DEP_MAX
+    # samples of a walk out past STILL_EXIT, ~120 s (lost: ~25 s / 37 m)
+    ws_bad = []
+    for pause, off in ((150, 0), (150, 20), (150, 40), (300, 10),
+                       (300, 30), (600, 50)):
+        sv_reset()
+        rv_sec[0] = 0
+        stayed = False
+        t_in = 300 + off
+        for i in range(t_in):
+            sv_fix((i - t_in) * 1.4, wrnd.gauss(0, 0.7), 5.0)
+        for i in range(pause):
+            sv_fix(wrnd.gauss(0, 3), wrnd.gauss(0, 3), 0.3)
+            stayed = stayed or sv_active()
+        for i in range(1, 300):
+            sv_fix(i * 1.4 + wrnd.gauss(0, 0.7), wrnd.gauss(0, 0.7), 5.0)
+        gl.flush()
+        ws_l = [l for l in sv_lines() if l.split(",")[2] != ""]
+        arr = t_in - max([ws_secs(l, 0) for l in ws_l
+                          if ws_secs(l, 0) < t_in] or [0])
+        dep = min([ws_secs(l, 0) for l in ws_l
+                   if ws_secs(l, 0) > t_in + pause] or [9999]) - t_in - pause
+        if not stayed or arr > 8 or dep > 8:
+            ws_bad.append((pause, off, stayed, arr, dep))
+    check("STAY-WALK: walking in to a stop and on, at most a few seconds of "
+          "the walk are lost on either side", ws_bad == [], repr(ws_bad))
+    rv_sec[0] = ws_sec0
 
     # home network: arrive, stay, leave
     sv_reset(home=True)
@@ -4570,6 +4746,67 @@ try:
           ok0 and not errs and sv_active() and len(sv_lines()) == n0,
           "errs=%r active=%s new=%s" % (errs[:1], sv_active(),
                                         sv_lines()[n0:n0 + 1]))
+
+    # TIME-BACK: one plausible but false time (a receiver glitch, 3 h on)
+    # became last_t, and every later line, heartbeats too, was older:
+    # nothing was written until a reboot. Usable fixes that stay over an
+    # hour behind it for TIME_BACK_N seconds let it go: a new segment, the
+    # false line still in RAM dropped, a diag line.
+    def tb_walk(k0, n, hh=8):
+        for k in range(k0, k0 + n):
+            _clock[0] += gl.SAMPLE
+            gl.st.update(valid=True, date="2026-10-18",
+                         time="%02d:%02d:%02d" % (hh, k // 60, k % 60),
+                         lat=47.5, lon=19.0 + k * 1.4 * M_LON, alt=100.0,
+                         pos_at=_clock[0], hdop=1.0, hdop_at=_clock[0],
+                         status="A", quality=1, fixtype=3, speed=1.4)
+            gl.log_tick()
+
+    tb_saved = rnd.getstate(), rv_sec[0]     # (later tests keep theirs)
+    sv_reset()
+    try:
+        os.remove(gl.DIAG_FILE)
+    except OSError:
+        pass
+    tb_walk(0, 30)
+    tb_walk(30, 1, hh=11)                    # the glitch: 3 h on
+    tb_walk(31, 89)
+    gl.flush()
+    tb_l = sv_lines()
+    tb_t = [l.strip().split(",")[4] for l in tb_l]
+    tb_after = [x for x in tb_t if "T080031Z" <= x[8:] <= "T080159Z"]
+    tb_txt = ""
+    for n in sorted(os.listdir(rv_dir)):
+        if n.endswith((".trk", ".trb")):
+            with open(os.path.join(rv_dir, n)) as f:
+                tb_txt += f.read()
+    tb_d = []
+    try:
+        with open(gl.DIAG_FILE) as f:
+            tb_d = [x for x in f if x.startswith("time back")]
+    except OSError:
+        pass
+    check("TIME-BACK: a false future time lets go after TIME_BACK_N fixes "
+          "an hour behind it: the walk goes on in a new segment",
+          len(tb_after) >= 89 - getattr(gl, "TIME_BACK_N", 10) - 2
+          and not any(x[9:11] == "11" for x in tb_t)
+          and "\n-\n" in tb_txt and len(tb_d) == 1,
+          "after=%d glitch=%s diag=%r" % (
+              len(tb_after), [x for x in tb_t if x[9:11] == "11"], tb_d))
+    # ... in a stay too, where no track line is sampled: the anchor
+    # points come again
+    sv_reset()
+    sv_drift(150)
+    tb_b0 = len([l for l in sv_lines() if l.split(",")[2] == ""])
+    gl.log["last_t"] = "2026-10-18T23:00:00Z"
+    sv_drift(400)
+    tb_b1 = len([l for l in sv_lines() if l.split(",")[2] == ""])
+    check("TIME-BACK: ... in a stay too, the anchor points come again",
+          sv_active() and tb_b1 > tb_b0 and gl.log["last_t"] is not None
+          and gl.log["last_t"] < "2026-10-18T23",
+          "beats %d -> %d last_t=%s" % (tb_b0, tb_b1, gl.log["last_t"]))
+    rnd.setstate(tb_saved[0])
+    rv_sec[0] = tb_saved[1]
 
     # HDOP too dilute for 30 min after entering: anchor points keep coming
     sv_reset()
@@ -5270,6 +5507,10 @@ try:
           and len(marks) == gl.MAX_BATCH - 1 and body[0] != "-\n"
           and top <= gl.MAX_BATCH + 1, "lines=%d marks=%d top=%d" % (
               len(body) - len(marks), len(marks), top))
+    # DROP: lines the batch cap drops are counted (log["drop"], with the
+    # full flash's): they went silently while writes failed
+    check("DROP: the 61 lines the MAX_BATCH cap dropped are counted",
+          gl.log.get("drop") == 61, "drop=%r" % gl.log.get("drop"))
 
     # FIXGAP: a fix back after a long gap closes the track; what a stay
     # still being proven holds moves on, nothing of it is written
@@ -13635,6 +13876,164 @@ gl.LOG_DIR = _rev_dir
 gl.log_reset()
 shutil.rmtree(_r3, ignore_errors=True)
 
+# FLUSH-ATOMIC: nothing allocates between a write that landed and the
+# batch letting go of its lines: a MemoryError there (the last line's time
+# sliced for the segment queue) left the k lines in the batch, and the
+# crash handler's flush appended them a second time
+_r6 = tempfile.mkdtemp()
+gl.LOG_DIR = _r6
+gl.log_reset()
+gl.start_file("20261101_100000")
+_arm6 = [False, True]
+
+
+class _ArmStr(str):
+    """A track line whose slices fail once armed (a heap that is gone)."""
+    def __getitem__(self, i):
+        if _arm6[0] and isinstance(i, slice):
+            raise MemoryError("heap")
+        return str.__getitem__(self, i)
+
+
+class _ArmW(object):
+    """A file that arms _ArmStr when it closes: the write landed."""
+    def __init__(self, f):
+        self.f = f
+
+    def seek(self, *a):
+        return self.f.seek(*a)
+
+    def tell(self):
+        return self.f.tell()
+
+    def read(self, *a):
+        return self.f.read(*a)
+
+    def write(self, data):
+        return self.f.write(data)
+
+    def close(self):
+        self.f.close()
+        _arm6[0] = _arm6[1]                # (the first write only)
+        _arm6[1] = False
+
+
+l6 = [trk_line(47.1, 18.4 + i * 1e-4, "2026-11-01T10:00:%02dZ" % i)
+      for i in range(10)]
+gl.log["batch"].extend(l6[:5])
+gl.flush()
+f6 = gl.log["file"]
+gl._seg_break()
+gl._record(("2026-11-01T10:00:05Z", _ArmStr(l6[5])), (47.1, 18.4))
+gl.log["batch"].extend(_ArmStr(x) for x in l6[6:])
+
+
+def _arm_open(name, mode="r", *a, **k):
+    f = _open3(name, mode, *a, **k)
+    return _ArmW(f) if name == f6 and "+" in mode else f
+
+
+r6 = "ok"
+builtins.open = _arm_open
+try:
+    try:
+        gl.flush()
+    except MemoryError:
+        r6 = "MemoryError"
+        _arm6[0] = False
+        gl.flush()                         # (the crash handler's)
+finally:
+    builtins.open = _open3
+    _arm6[0] = False
+p6 = _trk_pts(f6)
+check("FLUSH-ATOMIC: a MemoryError after a write landed does not write "
+      "its lines twice", r6 == "ok" and len(p6) == 10
+      and len(set(p6)) == 10 and not gl.log["batch"]
+      and gl.log["new_seg"] is False,
+      repr((r6, len(p6), len(set(p6)), len(gl.log["batch"]))))
+gl.LOG_DIR = _rev_dir
+gl.log_reset()
+shutil.rmtree(_r6, ignore_errors=True)
+
+# WFAIL-NAME: a create that keeps failing ("wb" refused for that name)
+# goes on under a new name, one second on, after WFAIL_SWITCH tries (it
+# retried the same name every FLUSH, nothing written ever); a diag line
+_r7 = tempfile.mkdtemp()
+gl.LOG_DIR = _r7
+gl.log_reset()
+diag_clear()
+gl.start_file("20261101_100000")
+f7 = gl.log["file"]
+gl.log["batch"].extend(trk_line(47.1, 18.4 + i * 1e-4,
+                                "2026-11-01T10:00:%02dZ" % i)
+                       for i in range(3))
+
+
+def _nowb_open(name, mode="r", *a, **k):
+    if name == f7 and "w" in mode:
+        raise OSError(5)
+    return _open3(name, mode, *a, **k)
+
+
+builtins.open = _nowb_open
+try:
+    for r in range(gl.WFAIL_SWITCH):
+        gl.flush()
+finally:
+    builtins.open = _open3
+f7b = gl.log["file"]
+gl.flush()
+d7 = [x for x in diag_lines() if x.startswith("track create failing")]
+check("WFAIL-NAME: a create that keeps failing goes on one second on "
+      "(20261101_100001), noted in the diag log",
+      f7b != f7 and f7b.endswith("20261101_100001" + os.path.splitext(f7)[1])
+      and os.path.exists(f7b) and pts_in(f7b) == 3 and not gl.log["batch"]
+      and len(d7) == 1, repr((f7, f7b, d7)))
+gl.LOG_DIR = _rev_dir
+gl.log_reset()
+diag_clear()
+shutil.rmtree(_r7, ignore_errors=True)
+
+# WERR-DIAG: track write errors (log["err"]) are in the diag log, the
+# first at once, then one per WERR_EVERY (10 min): the count was shown
+# nowhere
+_r8w = tempfile.mkdtemp()
+gl.LOG_DIR = _r8w
+gl.log_reset()
+diag_clear()
+gl.start_file("20261101_120000")
+f8w = gl.log["file"]
+
+
+def _eio_open(name, mode="r", *a, **k):
+    if name == f8w and mode != "rb":
+        raise OSError(5)
+    return _open3(name, mode, *a, **k)
+
+
+n8w = []
+builtins.open = _eio_open
+try:
+    for r in range(3):
+        if r == 2:
+            _clock[0] += 600000
+        gl.log["wfails"] = 0               # (no WFAIL_SWITCH here)
+        gl.log["batch"].append(trk_line(47.1, 18.4,
+                                        "2026-11-01T12:00:%02dZ" % r))
+        gl.flush()
+        _clock[0] += gl.FLUSH
+        n8w.append(len([x for x in diag_lines()
+                        if x.startswith("track write error")]))
+finally:
+    builtins.open = _open3
+check("WERR-DIAG: the first track write error goes to the diag log, then "
+      "one per 10 min", n8w == [1, 1, 2] and gl.log["err"] == 3,
+      repr((n8w, gl.log["err"], diag_lines()[-3:])))
+gl.LOG_DIR = _rev_dir
+gl.log_reset()
+diag_clear()
+shutil.rmtree(_r8w, ignore_errors=True)
+
 # REV-6/7: a scan that raises MemoryError, or returns [] (v1.29 does on a
 # failed esp_wifi_scan_start), is a failed scan: no crash, None
 class _ScanW(object):
@@ -16231,23 +16630,74 @@ try:
     gl.log["file"] = os.path.join(_tb, "20261101_130000.trb")
     gl.log["fmt"] = 2
     gl.log["batch"] = list(rl[:10])
-    enc_ = gl._kb_encode
+    enc_ = gl._kb_part                     # (flush encodes a chunk at a time)
 
     def _enc_oom(*a):
         raise MemoryError
 
-    gl._kb_encode = _enc_oom
+    gl._kb_part = _enc_oom
     try:
         for _ in range(4):
             gl.flush()
     finally:
-        gl._kb_encode = enc_
+        gl._kb_part = enc_
     st_ = (gl.log["wfails"], gl.log["file"], len(gl.log["batch"]))
     gl.flush()
     check("TRKB: MemoryError while encoding keeps the batch and the file "
           "(no WFAIL_SWITCH); the next flush writes it",
           st_ == (0, os.path.join(_tb, "20261101_130000.trb"), 10)
           and gl.log["batch"] == [] and gl.log["points"] == 10, repr(st_))
+    gl.log_reset()
+
+    # TRKB-CHUNK: a flush encodes and writes its body KB_CHUNK bytes at a
+    # time. One body of the whole batch needed a contiguous block that
+    # grew with every MemoryError (the batch waited and grew) until the
+    # MAX_BATCH cap dropped its oldest lines.
+    online(_tb)
+    gl.LOG_DIR = _tb
+    pc_ = os.path.join(_tb, "20261101_140000.trb")
+    cl_ = _tb_drive(240, 2, seed=11)
+    gl.log["file"] = pc_
+    gl.log["fmt"] = 2
+    gl.log["batch"] = list(cl_)
+    wmax_ = [0, 0]
+    bo_ = builtins.open
+
+    class _WSize(object):
+        def __init__(self, f):
+            self.f = f
+
+        def seek(self, *a):
+            return self.f.seek(*a)
+
+        def tell(self):
+            return self.f.tell()
+
+        def read(self, *a):
+            return self.f.read(*a)
+
+        def write(self, data):
+            wmax_[0] = max(wmax_[0], len(data))
+            wmax_[1] += len(data)
+            return self.f.write(data)
+
+        def close(self):
+            self.f.close()
+
+    def _wsize_open(name, mode="r", *a, **k):
+        f = bo_(name, mode, *a, **k)
+        return _WSize(f) if name == pc_ and mode != "rb" else f
+
+    builtins.open = _wsize_open
+    try:
+        gl.flush()
+    finally:
+        builtins.open = bo_
+    dc_ = list(trk2gpx.trb_lines(_tb_raw(pc_)))
+    check("TRKB-CHUNK: a flush of 240 lines writes at most ~KB_CHUNK bytes "
+          "at a time, the same lines", wmax_[0] <= 256 + 64
+          and wmax_[1] > 1000 and dc_[1:-1] == cl_ and not gl.log["batch"],
+          repr((wmax_, len(dc_))))
     gl.log_reset()
 
     # the open file's name, and firmware from before TRK_BIN

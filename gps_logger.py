@@ -3830,14 +3830,23 @@ def _kb_delta(bl, s, out):
         i += 1
     return True
 
-def _kb_encode(lines, k, seg):
-    """lines[:k] (text lines) as the bytes of a .trb flush: a keyframe
-    first, the segment breaks before the indexes in seg."""
+KB_CHUNK = 256                           # bytes a flush encodes at a time
+WERR_EVERY = 600000                      # ms between write errors in the diag
+_kq = [0, 0, 0]                          # the encoder's place: line, segment
+                                         # break, deltas since the keyframe
+
+def _kb_start():
+    """A new .trb flush body (see _kb_part): a keyframe first."""
+    _ke[0] = None
+    _kq[0] = _kq[1] = _kq[2] = 0
+
+def _kb_part(lines, k, seg):
+    """The next KB_CHUNK bytes or so of the .trb flush body of lines[:k]
+    (_kb_encode), from where _kq left off, and _kq moved on."""
     out = bytearray()
     s = _ke
-    s[0] = None
-    n = j = i = 0
-    while i < k:
+    i, j, n = _kq
+    while i < k and len(out) < KB_CHUNK:
         if seg is not None and j < len(seg) and seg[j] == i:
             out += NEW_SEG.encode()
             j += 1
@@ -3850,6 +3859,17 @@ def _kb_encode(lines, k, seg):
             _kb_parse(bl, 0, len(bl) - 1, s)
             n = 0
         i += 1
+    _kq[0], _kq[1], _kq[2] = i, j, n
+    return out
+
+def _kb_encode(lines, k, seg):
+    """lines[:k] (text lines) as the bytes of a .trb flush: a keyframe
+    first, the segment breaks before the indexes in seg. (flush writes it
+    a _kb_part at a time.)"""
+    _kb_start()
+    out = bytearray()
+    while _kq[0] < k:
+        out += _kb_part(lines, k, seg)
     return out
 
 log = {}
@@ -3888,14 +3908,14 @@ def log_reset():
                still=_still_state(), clock=None, seq=0,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=None, file_at=None, good_size=None,
-               fmt=None)
+               fmt=None, drop=0, full_tc=None, err_at=None, back=0)
 
 def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
             "ref": None, "sum": [0.0, 0.0, 0], "prev": None, "anchor": None,
             "aref": None, "aoff": (0.0, 0.0), "n": 0, "hb_at": None,
             "rn": 0, "ri": 0, "rt0": 0, "gap_n": 0, "gap_at": None,
-            "gap_ref": None, "gap_seen": None, "pos": None,
+            "gap_ref": None, "gap_seen": None, "pos": None, "qs": None,
             "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
             "last_at": None, "last_d": 0, "file_at": None, "veto_at": None,
             "move_c": None, "wins": 0, "hold_tc": None, "aps": {},
@@ -3951,8 +3971,9 @@ def _still_mean(sl, pos):
     latitude plus a centimetre-sized step is the same latitude."""
     r, o = sl["aref"], sl["aoff"]
     n = min(sl["n"] + 1, STILL_MEAN_N)
-    o = (o[0] + (pos[0] - r[0] - o[0]) / n, o[1] + (pos[1] - r[1] - o[1]) / n)
-    sl.update(aoff=o, n=n, anchor=(r[0] + o[0], r[1] + o[1]))
+    o = (o[0] + (pos[0] - r[0] - o[0]) / n,
+         o[1] + (_dlon(pos[1] - r[1]) - o[1]) / n)
+    sl.update(aoff=o, n=n, anchor=(r[0] + o[0], _lon(r[1] + o[1])))
 
 def free():
     try:
@@ -4012,8 +4033,21 @@ def flush(hold=None):
     if room is not None and room < MIN_FREE:
         room = _hist_trim(MIN_FREE + HIST_RESERVE)   # the drawing goes
     if room is not None and room < MIN_FREE:         # before the points
+        # Nothing is recorded until space returns (log_tick): the track
+        # goes on as after a fix loss, in a new segment (a new file past
+        # NEW_FILE_GAP), not joined to the last line written. The dropped
+        # lines are counted ("drop"); the diag line waits for the space
+        # (_diag_write keeps MIN_FREE for the tracks).
+        if not log["full"]:
+            print("track full, dropped", len(batch))
+            log["full_tc"] = _diag_utc() if st.get("date") else "-"
         log["full"] = True
+        log["drop"] += len(batch)
         del batch[:]
+        _seg_break()
+        log["prev"] = None
+        if log["fix"]:
+            log["fix"], log["lost_at"] = False, time.ticks_ms()
         return
     creating = not log["created"]
     old = log.get("good_size")
@@ -4046,15 +4080,37 @@ def flush(hold=None):
             i += 1
     tb = path.endswith(TRB)
     if tb:
+        # encoded and written KB_CHUNK bytes at a time: one body of the
+        # whole batch needed a contiguous block that grew with every
+        # MemoryError (the batch waited and grew), until MAX_BATCH dropped
+        # its oldest lines. The first chunk is encoded before the file is
+        # opened: out of memory there is no write failure.
+        _kb_start()
         try:
-            body = _kb_encode(batch, k, seg)   # (the segment breaks in it)
-        except MemoryError:              # not the flash: the batch waits
-            gc.collect()                 # for the next flush
-            log["err"] += 1
+            body = _kb_part(batch, k, seg)     # (the segment breaks in it)
+        except MemoryError as e:         # not the flash: the batch waits
+            body = None                  # for the next flush
+            gc.collect()
+            _werr("encode", e)
             return
+    # What is left to do once the write landed is worked out first: a
+    # MemoryError after it (the last line's time sliced) left the k lines
+    # in the batch, and the crash handler's flush wrote them again.
+    nq = 0
+    q = log["seg_tc"]
+    if log["new_seg"] and q:
+        last = batch[k - 1][-17:-1]
+        while nq < len(q) and q[nq] is not None and q[nq] <= last:
+            nq += 1
+    hl = None
+    if not tb and HIST_DAYS:
+        try:
+            hl = batch[:k]               # (for _hist_add, after the del)
+        except MemoryError:
+            pass                         # (the drawing is best effort)
     try:
         if tb:
-            extra, pts = 0, len(body)
+            extra = pts = 0
         else:
             extra = len(NEW_SEG) * len(seg) if seg is not None else 0
             pts = 0
@@ -4065,7 +4121,9 @@ def flush(hold=None):
         if creating:
             head = (HEADERB if tb else HEADER2 if log["fmt"] == 2
                     else HEADER)
-            expected = len(head) + extra + pts + len(FOOTER)
+            start = len(head)
+            if not tb:
+                expected = len(head) + extra + pts + len(FOOTER)
             f = open(path, "wb")
             f.write(head.encode())
         else:
@@ -4082,9 +4140,18 @@ def flush(hold=None):
                 start = (old or 0) - len(FOOTER)
                 if start < 0:
                     start = 0
-            expected = start + extra + pts + len(FOOTER)
+            if not tb:
+                expected = start + extra + pts + len(FOOTER)
         if tb:
-            f.write(body)
+            while True:
+                f.write(body)
+                pts += len(body)
+                if _kq[0] >= k:
+                    break
+                body = None
+                body = _kb_part(batch, k, seg)
+            body = None
+            expected = start + pts + len(FOOTER)
         i = j = 0
         while i < k and not tb:
             if seg is not None and j < len(seg) and seg[j] == i:
@@ -4094,14 +4161,15 @@ def flush(hold=None):
             i += 1
         f.write(FOOTER.encode())
         wrote = True
-    except (OSError, MemoryError):
-        log["err"] += 1
+    except (OSError, MemoryError) as e:
+        body = None
+        _werr("write", e)
     if f is not None:
         try:
             f.close()
             close_ok = True
-        except OSError:
-            log["err"] += 1
+        except OSError as e:
+            _werr("close", e)
     landed = wrote and close_ok
     if not landed:
         sz, gone = _stat_size(path)
@@ -4120,33 +4188,57 @@ def flush(hold=None):
                 log["good_size"] = None
             # a file that keeps failing (a bad block) is left as it is,
             # its points up to the last good footer upload; the batch goes
-            # on in a new file named after its first line
+            # on in a new file named after its first line. A create that
+            # keeps failing goes on under another name too (one second
+            # on when that is the same: the name itself may be what
+            # fails); all it held is in the batch.
             log["wfails"] = log.get("wfails", 0) + 1
-            if not creating and log["wfails"] >= WFAIL_SWITCH and batch:
-                print("track file failing, new file", path)
-                _cut_to_footer(path, log.get("good_size"), sz)
+            if log["wfails"] >= WFAIL_SWITCH and batch:
                 tc = batch[0][-17:-1]
+                name = tc[:8] + "_" + tc[9:15]
+                if creating:
+                    if path[-19:-4] == name:
+                        s = _kb_time(tc.encode(), 0)
+                        if s is not None:
+                            tc = _stamp_s(s + 1)[1]
+                            name = tc[:8] + "_" + tc[9:15]
+                    _rm(path)
+                else:
+                    _cut_to_footer(path, log.get("good_size"), sz)
+                print("track file failing, new file", path, name)
+                _diag_write("track %s failing %s new %s" % (
+                    "create" if creating else "write", path[-19:], name))
                 seg = log["new_seg"], log["seg_tc"]
-                start_file(tc[:8] + "_" + tc[9:15])
+                start_file(name)
                 log["new_seg"], log["seg_tc"] = seg   # (a fix loss in
             return                                    # the batch stays one)
+    del batch[:k]                        # first: nothing allocated before it
     log["created"] = True
     log["good_size"] = expected
     log["wfail"] = False
     log["wfails"] = 0
     log["points"] += k
     up["left"] += k
-    if not tb:
-        _hist_add(batch, k)              # (a .trb's go when uploaded)
-    q = log["seg_tc"]
     if log["new_seg"] and q:
-        last = batch[k - 1][-17:-1]
-        i = 0
-        while i < len(q) and q[i] is not None and q[i] <= last:
-            i += 1
-        del q[:i]                        # the breaks written
+        del q[:nq]                       # the breaks written
         log["new_seg"] = bool(q)
-    del batch[:k]
+    if hl is not None:
+        _hist_add(hl, k)                 # (a .trb's go when uploaded)
+
+def _werr(what, e=None):
+    """Count a track write error (log["err"]). The first one, then one per
+    WERR_EVERY, also goes to the diag log: the count alone was shown
+    nowhere. Never raises (it runs when heap is short too)."""
+    log["err"] += 1
+    try:
+        now = time.ticks_ms()
+        at = log["err_at"]
+        if at is None or _age(now, at) >= WERR_EVERY:
+            log["err_at"] = now
+            _diag_write("track %s error %d %r %s" % (
+                what, log["err"], e, (log["file"] or "-")[-19:]))
+    except MemoryError:
+        pass
 
 def _cut_to_footer(path, good, sz):
     """Before a failing file is left: a failed append that partly landed
@@ -4162,13 +4254,13 @@ def _cut_to_footer(path, good, sz):
         f = open(path, "r+b")
         f.seek(good - n, 0)
         f.write(FOOTER.encode())
-    except (OSError, MemoryError):       # (it runs when heap is short too)
-        log["err"] += 1
+    except (OSError, MemoryError) as e:  # (it runs when heap is short too)
+        _werr("cut", e)
     if f is not None:
         try:
             f.close()
-        except OSError:
-            log["err"] += 1
+        except OSError as e:
+            _werr("cut", e)
 
 def _hist_add(lines, k):
     """Append lines[:k], the track lines just written, to the day history:
@@ -4267,9 +4359,28 @@ def _hist_prune():
     for n in days[:-HIST_DAYS]:
         _rm(HIST_DIR + "/" + n)
 
+def _dlon(d):
+    """A longitude difference across 180° the short way round. (Not the
+    modulo: on the board's single floats 19.000123 + 180 keeps 1.5 m.)"""
+    if d > 180:
+        return d - 360
+    if d < -180:
+        return d + 360
+    return d
+
+def _lon(x):
+    """A longitude made of a reference plus an offset back within 180°."""
+    if x > 180:
+        return x - 360
+    if x < -180:
+        return x + 360
+    return x
+
 def _dist(lat1, lon1, lat2, lon2):
-    """Metres between two nearby positions (equirectangular approximation)."""
-    x = math.radians(lon2 - lon1) * math.cos(math.radians((lat1 + lat2) / 2))
+    """Metres between two nearby positions (equirectangular approximation),
+    across 180° too."""
+    x = (math.radians(_dlon(lon2 - lon1))
+         * math.cos(math.radians((lat1 + lat2) / 2)))
     y = math.radians(lat2 - lat1)
     return 6371000 * math.sqrt(x * x + y * y)
 
@@ -4323,6 +4434,46 @@ def _sample_line(now, prev, last_t):
     else:
         c = _i7(li) + "," + _i7(st["lon_i"])
     return t, _line(c, _fields(now), _tc(), _trk_fmt())
+
+TIME_BACK = 3600                         # s a fix behind the last line ...
+TIME_BACK_N = 10                         # ... in a row that drop last_t
+
+def _iso_s(t):
+    """Seconds since 2020 of an ISO time YYYY-MM-DDTHH:MM:SSZ, or None."""
+    try:
+        return ((_days(int(t[0:4]), int(t[5:7]), int(t[8:10])) - EPOCH_DAYS)
+                * 86400 + int(t[11:13]) * 3600 + int(t[14:16]) * 60
+                + int(t[17:19]))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+def _time_back(t, lt):
+    """A usable fix at t (ISO), older than the last line written, lt.
+    TIME_BACK_N of them in a row over TIME_BACK behind it: lt was a false
+    time (a receiver glitch, plausible but ahead), and no line, no anchor
+    point either, could ever follow it until a reboot. It goes: the lines
+    stamped after t still in RAM with it, a new segment starts, a diag
+    line notes it. (One fix that far behind is a glitch itself: skipped
+    as before.)"""
+    a, b = _iso_s(t), _iso_s(lt)
+    if a is None or b is None or b - a <= TIME_BACK:
+        log["back"] = 0
+        return
+    log["back"] += 1
+    if log["back"] < TIME_BACK_N:
+        return
+    tc = _tc()
+    bt = log["batch"]
+    while bt and bt[-1][-17:-1] > tc:
+        bt.pop()
+        log["drop"] += 1
+    q = log["seg_tc"]
+    while q and (q[-1] is None or q[-1] > tc):
+        q.pop()
+    print("time back", lt, t)
+    _diag_write("time back %s %s" % (lt, t))
+    log.update(last_t=None, prev=None, back=0)
+    _seg_break()
 
 def _line(c, fl, tc, fmt):
     """A track line: c "lat,lon", fl from _fields, tc compact time."""
@@ -4395,6 +4546,7 @@ def _record(s, pos):
     log["batch"].append(s[1])
     if len(log["batch"]) > MAX_BATCH:
         log["batch"].pop(0)
+        log["drop"] += 1                 # (it went silently)
 
 def _tc():
     """Compact UTC time of the current fix, as in a track line."""
@@ -4509,10 +4661,17 @@ def _still_window(now, pos):
     _still_gap(now, pos)
     sl["last_at"], sl["pos"] = now, pos
     if sl["win_at"] is None:
-        sl.update(win_at=now, win_tc=_tc(), ref=pos, sum=[0.0, 0.0, 0])
-    r, sm = sl["ref"], sl["sum"]
+        sl.update(win_at=now, win_tc=_tc(), ref=pos, sum=[0.0, 0.0, 0],
+                  qs=[])
+    r, sm, qs = sl["ref"], sl["sum"], sl["qs"]
+    if qs is None:                       # (a window opened without them)
+        qs = sl["qs"] = []
+    while len(qs) < 3 and (_age(now, sl["win_at"])
+                           >= (len(qs) + 1) * (STILL_WINDOW // 4)):
+        qs.append((sm[0], sm[1], sm[2]))   # the sums up to each quarter's
+                                           # end (see _walking)
     sm[0] += pos[0] - r[0]
-    sm[1] += pos[1] - r[1]
+    sm[1] += _dlon(pos[1] - r[1])        # (across 180° too)
     sm[2] += 1
     if _age(now, sl["win_at"]) < STILL_WINDOW:
         return None
@@ -4520,13 +4679,16 @@ def _still_window(now, pos):
         return None                      # sparse fixes: collect more first
     c = None
     if sm[2] >= STILL_MIN_FIXES:
-        c = (r[0] + sm[0] / sm[2], r[1] + sm[1] / sm[2])
-        if _spread(r, c, pos, STILL_EXIT // 2):
+        c = (r[0] + sm[0] / sm[2], _lon(r[1] + sm[1] / sm[2]))
+        if _spread(r, c, pos, STILL_EXIT // 2) or _walking(r, sm, qs):
             # its ends STILL_EXIT apart through the centroid: a drive (a
             # bike from ~10 km/h) pairs with nothing. Out and back with the
             # turn near a window boundary, the way out and the way back had
             # the same centroid, and the pair dropped the held lines as
-            # drift. (Indoor drift that strays 80 m still pairs.)
+            # drift. (Indoor drift that strays 80 m still pairs.) A walk
+            # spreads less: its quarters advance steadily (_walking), and
+            # one such window of a pair is enough to tell. A walk on, a
+            # walk in before a stop: the pair waits for two calm windows.
             c = None
             sl["hold_tc"] = None
     prev = sl["prev"]
@@ -4540,8 +4702,42 @@ def _still_window(now, pos):
         return None
     w = prev[2] + sm[2]
     a = (prev[0][0] + (c[0] - prev[0][0]) * sm[2] / w,
-         prev[0][1] + (c[1] - prev[0][1]) * sm[2] / w)
-    return a, prev[1], w
+         _lon(prev[0][1] + _dlon(c[1] - prev[0][1]) * sm[2] / w))
+    return a, prev[1], w, c
+
+STILL_TREND = 35                         # m a walking window's quarters
+                                         # advance at least (_walking)
+
+def _walking(r, sm, qs):
+    """True when a window (first fix r, sums sm, qs the sums at the end of
+    its first three quarters) is a walk: its four quarter centroids
+    advance steadily, the first to the last at least STILL_TREND (a walk
+    from ~0.8 m/s), nearly straight (at least 9/10 of the path through the
+    four) and no step under 7/10 of an even third. It pairs with nothing:
+    at walking pace two windows of an out and back, or a walk and the stop
+    after it, have centroids within STILL_RADIUS. Indoor drift wanders to
+    and fro (in the tests' energetic drift a window in ~40 looks like
+    this: the stay comes a window later); a window with the turn inside
+    is not steady either (its neighbours are). A quarter with fewer than
+    two fixes (sparse fixes) tells nothing."""
+    if len(qs) < 3:
+        return False
+    q = []
+    p0 = p1 = 0.0
+    pn = 0
+    for x in (qs[0], qs[1], qs[2], sm):
+        n = x[2] - pn
+        if n < 2:
+            return False
+        q.append((r[0] + (x[0] - p0) / n, r[1] + (x[1] - p1) / n))
+        p0, p1, pn = x[0], x[1], x[2]
+    d = _dist(q[0][0], q[0][1], q[3][0], q[3][1])
+    if d < STILL_TREND:
+        return False
+    a = _dist(q[0][0], q[0][1], q[1][0], q[1][1])
+    b = _dist(q[1][0], q[1][1], q[2][0], q[2][1])
+    c = _dist(q[2][0], q[2][1], q[3][0], q[3][1])
+    return 10 * d >= 9 * (a + b + c) and 30 * min(a, b, c) >= 7 * d
 
 def _still_heartbeat(now):
     """Write the anchor as a point. It is stamped with the last fix's GPS
@@ -4632,12 +4828,36 @@ def _close_file():
         return True
     return False
 
-def _still_enter(now, anchor, since_tc, n):
+STILL_RUN = 15                           # m a way in or out held among the
+                                         # drift came closer or receded
+
+def _still_run(g, n):
+    """A way in or out of g m over n lines is a walk, not drift: at least
+    STILL_RUN over STILL_RUN // 2 lines, 0.7 m a line on average (drift
+    that creeps closer for minutes is no way in)."""
+    return g >= STILL_RUN and n >= STILL_RUN // 2 and 10 * g >= 7 * n
+
+def _line_m(c, line):
+    """Metres from c to the position of a track line."""
+    f = line.split(",", 2)
+    return _dist(c[0], c[1], float(f[0]), float(f[1]))
+
+def _still_enter(now, anchor, since_tc, n, c=None):
     """Become stationary at anchor. The stay's drift (lines from since_tc
-    on, all still in RAM: see _still_hold) is dropped, except the way in
-    up to where it first comes within STILL_NEAR of the anchor, and the
-    track is closed, so the arrival uploads during the stay. Away from
-    home the anchor opens a new file, now and then every STILL_HEARTBEAT."""
+    on, all still in RAM: see _still_hold) is dropped, and the track is
+    closed, so the arrival uploads during the stay. Away from home the
+    anchor opens a new file, now and then every STILL_HEARTBEAT.
+    Kept: the way in up to where it first comes within STILL_NEAR of c,
+    the later window's centroid (the anchor, the mean of both, lies back
+    along a way in that the earlier window still held), and on while it
+    kept coming closer steadily (each line at most STILL_TOL farther and
+    2 * STILL_TOL closer than the one before; drift jumps), when that took
+    it STILL_RUN closer over STILL_RUN // 2 lines at least. At walking
+    pace the last 50 m were dropped as drift (~36 s). Likewise the newest
+    lines when they recede from c that way: the walk on already began in
+    the later window (a stop of ~90 s), its start no drift either. Then
+    no anchor point is written now: it would come after them, back at the
+    stop."""
     log["still"] = sl = _still_state()
     # last_at: the fix that proved it. None read as "no usable fix for
     # STILL_GAP" in _still_beat, so home WiFi coming up just after arriving
@@ -4648,24 +4868,74 @@ def _still_enter(now, anchor, since_tc, n):
     i = 0
     while i < len(b) and b[i][-17:-1] < since_tc:
         i += 1
+    if c is None:
+        c = anchor
+    x = None
     while i < len(b):
-        f = b[i].split(",", 2)
-        if _dist(anchor[0], anchor[1], float(f[0]), float(f[1])) <= STILL_NEAR:
+        x = _line_m(c, b[i])
+        if x <= STILL_NEAR:
             break
         i += 1
-    del b[i:]
+    k = len(b)
+    if i < k:                            # the way in, on while closing in
+        j = i
+        y = lo = x
+        while j + 1 < k:
+            z = _line_m(c, b[j + 1])
+            if z > y + STILL_TOL or z < y - 2 * STILL_TOL:
+                break
+            j += 1
+            y = z
+            if z < lo:
+                lo = z
+        m = i                            # (arrived: the first line within
+        while m < j and _line_m(c, b[m]) > lo + STILL_TOL:   # STILL_TOL of
+            m += 1                                           # the closest)
+        j = i                            # (where it began: before since_tc
+        y = x                            # maybe, in the way in kept)
+        while j > 0 and i - j < 2 * STILL_RUN and x - lo < STILL_RUN:
+            z = _line_m(c, b[j - 1])
+            if y > z + STILL_TOL or y < z - 2 * STILL_TOL:
+                break
+            j -= 1
+            y = z
+            if z > x:
+                x = z
+        if _still_run(x - lo, m - j):
+            i = m + 1
+    if i < k:                            # the way out, already begun
+        j = k - 1
+        y = hi = lo = _line_m(c, b[j])
+        while j > i:
+            z = _line_m(c, b[j - 1])
+            if z > y + STILL_TOL or z < y - 2 * STILL_TOL:
+                break
+            j -= 1
+            y = z
+            if z < lo:
+                lo = z
+        m = k - 1                        # (where it left: the last line
+        while m > j and _line_m(c, b[m]) > lo + STILL_TOL:   # within
+            m -= 1                                           # STILL_TOL of
+        if _still_run(hi - lo, k - 1 - m):                   # the closest)
+            k = m
+    out = len(b) - k
+    del b[i:k]
     _still_close()                       # the arrival uploads during the stay
     if log["file"] is not None:
         sl["file_at"] = now              # close failed: rotate it later
     if at_home():
         sl["home"] = True
+    elif out:
+        sl["hb_at"] = now                # (the way out goes on: no anchor
+                                         # point after it)
     elif wifi_wake():
         # the radio slept: the first anchor point waits for the round, so
         # a home stay is not stamped with one
         sl["hb_at"] = time.ticks_add(now, WIFI_WAKE_WAIT - STILL_HEARTBEAT)
     else:
         _still_heartbeat(now)
-    print("stay", "home" if sl["home"] else "away", "kept", i)
+    print("stay", "home" if sl["home"] else "away", "kept", i, out)
 
 def _stay_scan(aps):
     """One WiFi scan during an away stay. The first STAY_WIFI_LEARN scans
@@ -4720,18 +4990,28 @@ def _stay_scan(aps):
         keep = sorted(known.items(), key=lambda x: -x[1])
         sl["aps"] = dict(keep[:STAY_WIFI_MAX])
 
+STILL_DEP_STEP = 2                       # m between departure-ring samples
+
 def _ring_add(sl, now, pos, d):
     """Keep a usable sample of the stay in the departure ring (see _RT),
     the oldest overwritten when it is full. A sample that falls back from
     the one before by more than STILL_TOL starts it over: the ring is
-    always a run that kept receding, the way out (_still_leave)."""
+    always a run that kept receding, the way out (_still_leave). One
+    within STILL_DEP_STEP of the one before is left out: at walking pace
+    the way out to STILL_EXIT and the samples that prove it took ~120 s,
+    and the ring kept the last STILL_DEP_MAX (lost: the first ~30 m)."""
     s = _fix_s()
     if s is None:
         return
     cap = len(_RT)
     n, i = sl["rn"], sl["ri"]
-    if n and d + STILL_TOL < _RF[_RW * ((i + n - 1) % cap) + _RW - 1]:
-        n = 0
+    if n:
+        k = _RW * ((i + n - 1) % cap)
+        if d + STILL_TOL < _RF[k + _RW - 1]:
+            n = 0
+        elif _dist(_ring_deg(k), _ring_deg(k + _NP),
+                   pos[0], pos[1]) <= STILL_DEP_STEP:
+            return
     if not n:
         sl["rt0"], i = s, 0
     if n < cap:
@@ -4954,6 +5234,9 @@ def log_tick():
         if room is None or room < MIN_FREE:
             return
         log["full"] = False
+        _diag_write("track full %s-%s drop %d" % (
+            log["full_tc"] or "-", _diag_utc() if st.get("date") else "-",
+            log["drop"]))
     if not has_fix(now):
         if log["fix"]:
             _drain_q()                   # valid seconds just before the loss
@@ -5032,6 +5315,13 @@ def _sample(now):
     if not st["date"] or not _usable(now):
         return                           # (a second with GGA only, e.g. the
                                          # first one after a warm boot)
+    lt = log["last_t"]
+    if lt is not None:                   # (in a stay too: see _time_back)
+        t = st["date"] + "T" + st["time"] + "Z"
+        if t < lt:
+            _time_back(t, lt)
+        else:
+            log["back"] = 0
     pos = (st["lat"], st["lon"])
     if log["still"]["active"]:
         _still_active(now, pos)
@@ -5043,7 +5333,7 @@ def _sample(now):
     hit = _still_window(now, pos)
     if hit:
         since = hit[1] if held is None or hit[1] < held else held
-        _still_enter(now, hit[0], since, hit[2])
+        _still_enter(now, hit[0], since, hit[2], hit[3])
 
 # --- Upload ---------------------------------------------------------------
 # Finished track files (never the one being recorded) are sent to Dawarich's
