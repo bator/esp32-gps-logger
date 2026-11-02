@@ -189,6 +189,8 @@ case "$MODE" in
     # manifest's build when it is newer than its own, so an older or equal
     # one would not reach boards already updated, and republishing a commit
     # rewrote the .bin boards may be downloading)
+    # (expanded here on purpose: QDIR is quoted for the remote shell)
+    # shellcheck disable=SC2029
     if ! LIVE=$(ssh "$DHOST" "if [ -e $QDIR/manifest.json ]; then cat $QDIR/manifest.json; fi"); then
         echo "Could not read the published manifest in $OTA_DEST" >&2
         exit 1
@@ -243,6 +245,8 @@ EOF
         scp -q "$OUT/ota/$f" "$DHOST:$DDIR/$f.tmp"
         MV+="mv -f $QDIR/$f.tmp $QDIR/$f && "
     done
+    # (MV built here, its paths %q-quoted)
+    # shellcheck disable=SC2029
     ssh "$DHOST" "${MV}true"
     echo "Published $COMMIT (build $BUILD) to $OTA_DEST"
     ;;
