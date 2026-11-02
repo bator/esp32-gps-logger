@@ -32,6 +32,22 @@ const evL = ["up 60 utc 20261031T053014Z nmea 9/1 gpsboots 0 loops 0 sats 10/7 f
   "wifi connected pulses 0 mem 27000 idf 157/120 heap 124", "ota abc ok"];
 v.evChart = ctx.evChart(ctx.evStatus(evL));
 v.evDonut = ctx.evDonut(ctx.evStatus(evL), 1);
+// a boot in the tail: lines without UTC (uptime only) among UTC ones, and
+// none with it; the chart's x of each point (its line's end points)
+const evS = (up, utc, seen) => evL[0].replace("up 60 utc 20261031T053014Z", "up " + up + " utc " + utc)
+  .replace("sats 10/7", "sats " + seen + "/7");
+const evX = (svg) => {
+  const d = (svg.match(/class="l1" d="([^"]+)"/) || [])[1] || "";
+  return d.split(/[MC]/).filter((s) => s.trim()).map((s) => { const n = s.trim().split(/\s+/); return +n[n.length - 2]; });
+};
+const evT = (svg) => (svg.match(/<g><text[^]*<\/g>/) || [""])[0].replace(/<[^>]+>/g, " ").trim().split(/\s+/);
+v.evBoot = [[evS(600, "20261102T070000Z", 12), evS(660, "20261102T070100Z", 13), "boot cause 1 prev_up 700 mhz 80", evS(60, "-", 3)],
+  [evS(60, "-", 3), evS(120, "20261102T070200Z", 9), evS(180, "20261102T070300Z", 11)],
+  [evS(60, "-", 3), evS(120, "-", 5)]].map((ls) => { const s = ctx.evChart(ctx.evStatus(ls)); return [evX(s), evT(s)]; });
+v.evHm = ctx.hm(Date.UTC(2026, 10, 2, 7, 0, 0));
+// Avg acc from the hAcc lines only (an HDOP is no metre)
+const evP = (ha) => evL[0].replace("hdop 1.2", ha ? "hdop None" : "hdop 1.2") + (ha ? " ubx 10/0 hacc " + ha : "");
+v.evDonutMix = ctx.evDonut(ctx.evStatus([evP("2.0"), evP(null), evP(null)]), 0);
 ctx.EVF = "er";
 v.evErr = ctx.view(d).log;
 v.evErrChips = ctx.view(d).evf;
@@ -147,7 +163,8 @@ p.c.histLoad();                         // a minute later: only what is new
 hd.urls2 = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done).map((x) => x.url.replace(/d=\d{8}/, "d=D"));
 answer(p, new RegExp("&o=" + cut + "$"), body.slice(cut));
 hd.pts = p.c.hist.pts.length;
-hd.km = p.c.hist.km;
+hd.km = p.c.tripsOf(p.c.hist.pts).reduce((a, t) => a + t.km, 0);
+hd.kmField = "km" in p.c.hist;          // (the HUD sums the trips)
 hd.path = p.doc.getElementById("trk").innerHTML;
 hd.day = p.doc.getElementById("day").innerHTML;
 hd.zoom = +(p.doc.getElementById("tiles").innerHTML.match(/openstreetmap\.org\/(\d+)\//) || [])[1];
@@ -199,7 +216,24 @@ c0.hist = c0.histNew("20261030");
 const dl = (ms, la) => la + ",18.0,100.0,2,1.0," + iso(d0 + ms) + "\n";
 c0.histParse(c0.hist.days[0], dl(7200000, "47.0") + dl(7201000, "47.001"));
 c0.histParse(c0.hist.days[0], dl(3600000, "47.01") + dl(3601000, "47.011"));
-ft.late = [c0.hist.pts.map((q) => q[0] - d0), Math.round(c0.hist.km * 1000)];
+ft.late = [c0.hist.pts.map((q) => q[0] - d0), Math.round(c0.tripsOf(c0.hist.pts).reduce((a, t) => a + t.km, 0) * 1000)];
+// a drive wider than zoom 13 shows (~20 km), the live position at its
+// end: the pin stays on the map (it was off it, the view on the track's
+// centre); without a fix, a past day or a picked trip the track decides
+ft.fitLive = (() => {
+  c0.hist = c0.histNew(null);
+  for (let k = 0; k < 1200; k++) c0.hist.pts.push([Date.now() - (1200 - k) * 1000, 47.18, 18.30 + k * 0.00022, 120]);
+  const out = [];
+  for (const [w, h] of [[1100, 360], [375, 300]]) {
+    const lat = 47.18, lon = 18.30 + 1199 * 0.00022, el = {offsetWidth: w, offsetHeight: h};
+    const fv = c0.fitView(lat, lon, el, true), me = c0.wpx(lat, lon, fv.z);
+    const x = w / 2 + (me[0] - fv.X) * fv.sc, y = h * .42 + (me[1] - fv.Y) * fv.sc;
+    const nf = c0.fitView(lat, lon, el, false);
+    out.push([fv.z, x >= 24 && x <= w - 24 && y >= 44 && y <= h - 90,
+      Math.abs(nf.X - c0.wpx(lat, 18.30 + 1199 * 0.00022 / 2, nf.z)[0]) < 1]);
+  }
+  return out;
+})();
 // trips and stops: a 1.2 km walk (20 min), a stop, a few fixes standing
 // (folded into the stop), a 0.5 km walk (10 min)
 const tp = [], dLat = 1 / 110.54;

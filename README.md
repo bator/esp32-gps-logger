@@ -198,14 +198,21 @@ what browsers get) and copies `gps_logger.mpy`, `main.py`, the status page
 renames them over the old files; a failed check (`Copy check FAILED`)
 removes the `.dpl` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module (not
-`<name>.new`: that is how an OTA stages the page it installs). While an
-OTA install is being validated (`/ota.pending`, about 2 minutes) it stops
-before copying: its reset would abort the pending firmware, the bootloader
-would roll back and the build would be blamed (`FORCE=1` deploys anyway,
-the staged page left alone). Then it
+`<name>.new`: that is how an OTA stages the page it installs). Its first
+question to the board is whether an OTA install is being validated
+(`/ota.pending`, about 2 minutes): then it stops before anything else, as
+its reset would abort the pending firmware, the bootloader would roll back
+and the build would be blamed (`FORCE=1` deploys anyway, the staged page
+left alone). Then it
 removes a stray `gps_logger.py`, clears the boot-fail counter and resets
 the board. When it cannot tell whether the firmware has the logger frozen
 in (no clear answer from the board), it stops instead of guessing.
+Each `mpremote` session stops the logger (raw REPL), so every early exit
+(an OTA pending, too little flash, a failed copy check, a stale frozen
+logger, no clear answer) starts it again: by a reset, or, with an OTA
+pending (or no answer to that question), by running `gps_logger.run()`
+without one. Left in the REPL, the board waited for the watchdog's reset,
+counted as a boot failure, and that reset aborted a pending OTA.
 
 The module must run precompiled: compiling on the device grows the Python
 heap and leaves too little ESP-IDF heap (~40 kB contiguous) for mbedTLS, and
@@ -312,20 +319,34 @@ than its own, whose HMAC checks and that has not failed before, goes into
 the other app slot 4 KB at a time, with the GPS read and the watchdog fed
 between (~1 min; the HTTP body ends at its Content-Length). It is read back
 against its SHA-256, the page files are staged as `<file>.new`, the slot is
-set to boot and the board resets. The new firmware runs pending: 2 minutes
-with WiFi connected (`OTA_VALID_AFTER`) mark it valid, and only then do the
+set to boot and the board resets. Before any of that the manifest's fields
+are checked (whole numbers, a 64-hex SHA-256, no `|` in a string, only
+`/web.html` and `/web.html.gz`, each once): the HMAC covers them joined by
+`|`, so a manifest with a `|` moved between fields would keep it (`bad
+manifest`; the format itself is unchanged). The new firmware runs pending:
+2 minutes with WiFi connected (`OTA_VALID_AFTER`), and the manifest read
+once more (HTTP 200, every minute until it is: `OTA_PROBE`; a build whose
+update path is broken would otherwise only get the next one over USB),
+mark it valid, and only then do the
 staged page files replace the old ones (on a file system that does not
 rename over a file, the old one is moved aside first and back if the new
 one still does not go up; a page that does not go up is a diag line,
 `ota <commit> page <path> not put up`). A crash or reset before that and
-the bootloader boots the old slot; no WiFi within 10 minutes (`OTA_HEALTH`)
-and it resets itself, with the same result (it never sets the old slot to
-boot itself: that left the old image pending, and the next reset fell back
-to `ota_0`). A download that fails its SHA-256 is tried again an hour later
-(`OTA_RETRY`), not every check; an error (server down) goes to the
-diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not tried again;
-one rolled back by a power-off (the cable pulled) is tried again. A boot
-without a pending note confirms the running image. Each step is in the
+the bootloader boots the old slot; no WiFi or no manifest within 10 minutes
+(`OTA_HEALTH`) and it resets itself, with the same result (it never sets
+the old slot to boot itself: that left the old image pending, and the next
+reset fell back to `ota_0`). A download that fails its SHA-256, or a page
+file that fails its SHA-256 or cannot be written, is tried again an hour
+later (`OTA_RETRY`), not every check; an error (server down) goes to the
+diagnostic log once per kind. A build that failed is noted in `/ota.bad` and not tried again.
+A rollback that may not be the build's fault is a try instead, counted per
+build in `/ota.tries`: one at power-on (the cable pulled; MicroPython 1.29
+reports a brownout as a power-on too, and a build that browned out on a
+weak supply was reinstalled after every boot) and the no WiFi / no
+manifest reset (a router or server outage). The build is tried again an
+hour after the next boot (`OTA_RETRY`) and is bad after 2 tries
+(`OTA_TRIES_MAX`). A boot without a pending note confirms the running
+image. Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
 The status page shows the running build under *Systems*: the `FIRMWARE` row
 gives the build's date (the commit time, `fw_build` in the JSON, local
@@ -353,6 +374,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `gps pvt no NAV-PVT - NMEA` / `gps pvt refused - NMEA` | 10 s after an acknowledged NAV-PVT setup no NAV-PVT came, or the receiver NAKed its message frame: NMEA for the rest of the boot (also in the diagnostic log as `gps pvt …, NMEA this boot`) |
 | `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
 | `gps setup unverified: no fix` | 30 minutes after an acknowledged setup still no fix to check it by: no verdict |
+| `gps rate N ms refused` | The receiver answered the rate (CFG-RATE) with a NAK: it stays at 1 fix a second, the rest of the setup goes on acknowledged, and 1 fix/s is then no "not taken" verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
 | `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring. The diagnostic log gets the first one, then `gps reset loop N more windows` every 5 minutes and when it ends |
 | `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds. It counts as over after a quiet of twice its last gap between restarts (10-30 s) |
@@ -437,7 +459,8 @@ GPS, `heap grew in <step> to N KB` when the
 Python heap grew during an upload step (`read_batch`, `connect`,
 `tls_wrap`, `post`, the whole POST: the step that took IDF heap), a
 `reboot tls memory` or
-`reboot low idf N KB S s` line before such a reboot, and a `crash` line
+`reboot low idf N KB S s` / `reboot low mem N B S s` line before such a
+reboot, and a `crash` line
 before a crash reset. A reset loop that goes on writes its first warning,
 then `gps reset loop N more windows` every 5 minutes (`GPS_LOOP_SAY`) and
 once when it ends, not a line every 10 s. Past 32 KB the file becomes
@@ -775,7 +798,9 @@ console line.
   (`PVT_MAX_HACC`); HDOP and GST apply only to NMEA seconds. 2D fixes omit
   altitude. A fix dated before 2020 or from 2088
   on is not used at all: a receiver past a GPS week rollover reports 1999
-  (read as 2099) or 2000.
+  (read as 2099) or 2000. An NMEA fix is a GGA quality of 1–5
+  (`GGA_FIX_MAX`) and an RMC mode other than `E`: an estimated (dead
+  reckoning) position is no fix, as on the NAV-PVT path.
 - **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
   line (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop
   empty when unknown), `-` for a new segment and an `#END` footer. Reading
@@ -926,8 +951,14 @@ tell a stay from a drive, so the stay filter works on positions.
   nor an open window that has spread out (its centroid over 100 m from both
   its first and its latest fix: a drive, which used to wait up to two
   minutes in RAM), and it is written 10 minutes after the fix was lost
-  (`HOLD_RELEASE`): the end of a trip into a garage or a house no longer
-  waits in RAM only. A fix back after 5 minutes more than 150 m away writes
+  (`HOLD_RELEASE`), or after no usable fix for as long (a receiver that
+  keeps a fix indoors at 30–100 m kept it in RAM for hours, and a reboot
+  dropped it): the end of a trip into a garage or a house no longer waits
+  in RAM only. A window that spread out on its own (its centroid over 75 m
+  from both its first and its last fix: an out-and-back turn at driving or
+  cycling speed) proves no stay, so a U-turn no longer drops part of the
+  trip. A walk turning back within ~80 m still can: indoor drift looks the
+  same. A fix back after 5 minutes more than 150 m away writes
   what was held to the old track before it closes.
 - **Leaving home** is accepted only once the home network is out of range
   (below −75 dBm: the RSSI when connected, else a ~2 s scan). While it is in
@@ -1016,10 +1047,15 @@ set up at all (no `.env`, no SSID). What the pulse is (`KEEPALIVE_MODE`):
   burst the bank cannot miss, ~5 mA on average, nothing blocked.
 
 With the status page on (`WEB`), a keep-alive scan that sees a home network
-(a hidden home: one of its learned BSSIDs) at ≥ −75 dBm while the radio
+(a hidden home: one of its learned BSSIDs) at ≥ −85 dBm (`SEEN_MIN_RSSI`:
+a home it connects to at −78 dBm used to wait an hour) while the radio
 sleeps or found nothing starts a round at once
 (`wifi home in range`): after a router restart the page used to stay down
-for an hour. At most once a minute, doubling while those rounds fail.
+for an hour. At most once a minute, doubling while those rounds fail. A
+link that dropped somewhere the scan cannot vouch for (a hotspot with
+`WEB_AWAY`, a home that dropped below −85 dBm) searches with the backoff
+for `WEB_SEARCH` instead of waiting for the scan; a round that fails after
+the radio slept on purpose does not count as a drop.
 
 **CPU clock:** the main loop runs at 80 MHz (`CPU_MHZ`), which saves
 15–25 mA on the original ESP32 against its 240 MHz default. A POST runs at
@@ -1085,7 +1121,10 @@ home.
   without a success count as a server problem: backoff, no more quarantine
   (rejections of a `.bad` itself do not count here).
   A full `.bad` (64 kB) pauses that file (`BAD FULL`) instead of dropping
-  points; pull or delete it, then reset.
+  points; pull or delete it, then reset. `BAD FULL` lasts while that `.bad`
+  is on flash and its track waits; a copy that fails for another reason
+  (the flash reserve, an I/O error) is `fs err` and is tried again.
+  Points moved to a `.bad` leave `left` once (a `.bad` is not counted).
 - Other errors back off from 15 s up to 30 minutes (`Retry-After` is
   honoured); 401 waits 30 minutes. Between POSTs it pauses 5 s at home, 30 s
   elsewhere. Flash and memory errors back off too, and with every waiting
@@ -1146,7 +1185,9 @@ home.
   cert")`, which is how a failed allocation parsing `/ca.der` arrives, only
   while the `SSLContext` is made with the IDF heap's largest block under
   `TLS_MIN_KB` (else the file is bad: `ca err`).
-- **Low IDF heap:** below `TLS_MIN_KB` no POST is tried; the upload runs
+- **Low IDF heap:** below `TLS_MIN_KB` no POST over https is tried (a
+  plain `http://` `GEO_URL` needs no TLS block: neither this nor the
+  Python heap margin below applies to it); the upload runs
   `gc.collect()` and checks again every 30 s at home (`LOWIDF_RETRY`). Only
   if it stays low for 5 minutes (`LOWIDF_WAIT`) with tracks waiting does
   the board reboot (`reboot low idf` in the diagnostic log), and at most
@@ -1163,7 +1204,9 @@ home.
   which returns an empty grown area, and measures again. It also wants
   12 KB of free Python heap then, 8 KB on the frozen firmware
   (`TLS_MIN_PY_KB`; else `low mem` and a retry every 30 s,
-  `LOWIDF_RETRY`): the socket and TLS objects must fit without growing the
+  `LOWIDF_RETRY`; at home, low for 5 minutes, the same clean reboot as a
+  low IDF heap, `reboot low mem` in the diagnostic log, within the same
+  once per 30 minutes): the socket and TLS objects must fit without growing the
   heap. A POST itself takes a few KB (sockets, header lines; the
   `SSLContext`, ~3 KB, is made at boot); frozen, no module bytecode
   fragments the heap, so 8 KB leaves room.
@@ -1205,6 +1248,7 @@ with a NEO-6M; most never need changing.
 | `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
 | `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP (NMEA) |
+| `GGA_FIX_MAX` | 5 | Highest GGA quality that is a fix (6, estimated, is not) |
 | `GPS_MAX_STD` / `GST_HOLD` | 20 m / 6 s | Skip samples with a worse GST error estimate (NMEA); how long the last estimate covers seconds without one |
 | `GPS_PVT` | `True` (auto) | UBX-NAV-PVT instead of NMEA on a u-blox M8/M10 (`.env` `GPS_PVT`: `auto` / `0`) |
 | `PVT_MAX_HACC` | 20 m | Skip NAV-PVT seconds with a worse horizontal accuracy estimate; fixes above it count in a second's mean only when it has no better one |
@@ -1222,7 +1266,7 @@ with a NEO-6M; most never need changing.
 | `MIN_FREE` | 32 kB | Flash reserve |
 | `HIST_RESERVE` | 1 MB | Free flash the day history leaves to the tracks (older days go first) |
 | `MAX_BATCH` | 240 | Points kept in RAM while flash writes fail |
-| `WFAIL_SWITCH` | 3 | Failed writes in a row to a track file (a bad block) before it is left as it is (it uploads what it holds) and the points go on in a new file |
+| `WFAIL_SWITCH` | 3 | Failed writes in a row to a track file (a bad block) before it is left (cut back to its last good footer, so a partly landed batch is not sent twice) and the points go on in a new file |
 | `HOLD_MAX` | 150 | Lines a stay still being proven keeps in RAM |
 
 **Stays**
@@ -1260,6 +1304,7 @@ with a NEO-6M; most never need changing.
 | `WIFI_OFF_WAIT` | 60 s | An upload backoff at least this long turns the radio off until it is due |
 | `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
 | `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
+| `SEEN_MIN_RSSI` | −85 dBm | With `WEB`, a home a keep-alive scan sees at least this strong starts a round while the radio sleeps |
 | `UNLISTED_EVERY` | 4 | A network a good scan did not list is tried every Nth round (hidden ones always) |
 | `WEB_SEARCH` | 30 min | With `WEB` and no keep-alive scan that can see home (none, or a hidden home not learned yet), failed rounds keep searching this long before sleeping |
 | `BLANK_BAD_HOLD` / `HOME_AP_MAX` / `LEARN_RSSI` | 1 h / 4 / 8 dB | Hidden home: a blank AP whose try failed is skipped; learned BSSIDs kept; RSSI match for learning |
@@ -1281,10 +1326,10 @@ with a NEO-6M; most never need changing.
 | `RTC_DRIFT` | 5 s | Board clock vs GPS time before the clock is set again (certificate dates) |
 | `TLS_REBOOT_N` | 5 | TLS allocation failures in a row (at home) before a clean reboot |
 | `TLS_MIN_KB` | 48 KB | Largest IDF heap block a POST needs; below it no try (`gc.collect()` and wait) |
-| `TLS_MIN_PY_KB` | 12 KB (frozen: 8 KB) | Free Python heap a POST needs after `gc.collect()`; below it the POST waits `LOWIDF_RETRY` |
+| `TLS_MIN_PY_KB` | 12 KB (frozen: 8 KB) | Free Python heap a POST over https needs after `gc.collect()`; below it the POST waits `LOWIDF_RETRY`, at home a clean reboot after `LOWIDF_WAIT` |
 | `LOWIDF_RETRY` / `LOWIDF_WAIT` | 30 s / 5 min | Checks while the IDF block is low (at home); how long it may stay low with tracks waiting before a clean reboot |
-| `LOWIDF_REBOOT_GAP` / `LOWIDF_MARK` | 30 min / `/lowidf` | At most one low-idf reboot this often; the file that tells the next boot |
-| `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err` |
+| `LOWIDF_REBOOT_GAP` / `LOWIDF_MARK` | 30 min / `/lowidf` | At most one low-idf or low-mem reboot this often; the file that tells the next boot |
+| `READ_ERR_MAX` | 3 | Read errors before a track is parked as `.err`; an unreadable `.pos` holds its track this many tries, then it is resent from 0 |
 | `MAX_BAD_BYTES` | 64 kB | Cap on a `.bad` file |
 | `MAX_GLOBAL_PAYLOAD` | 3 | Payload errors in a row that stop quarantining |
 
@@ -1301,7 +1346,8 @@ with a NEO-6M; most never need changing.
 | `DIAG` / `DIAG_MAX` | 60 s / 32 KB | Diagnostic log interval (`.env` `DIAG`) and size before `/diag.log` becomes `/diag.1` |
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
-| `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi; wall clock for one download |
+| `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
+| `OTA_PROBE` / `OTA_TRIES_MAX` | 1 min / 2 | How often a pending firmware reads the manifest until it did; rollbacks at power-on or without WiFi / manifest before a build is bad |
 | `WEB_PAGE` / `WEB_PAGE_GZ` / `WEB_REFRESH` | `/web.html` / `/web.html.gz` / 15 s | The page file on the board, its gzip (sent to clients accepting gzip); how often it polls `/status.json` |
 | `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a file per UTC day), days kept, bytes per `/hist` reply |
