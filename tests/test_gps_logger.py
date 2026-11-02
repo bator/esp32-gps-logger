@@ -14053,6 +14053,9 @@ else:
           and hd.get("pts") == 11 and p2.count("M") == 2
           and p2.startswith('<svg width="1" height="1"><path d="M'),
           repr((hd.get("pts1"), hd.get("pts"), p1[:80], p2[-80:])))
+    check("PAGE-HIST: the shown track's start and end marked on the map",
+          p2.count('<circle class="s"') == 1 and p2.count('<circle class="e"') == 1,
+          repr(p2[-160:]))
     check("PAGE-HIST: zoom fitted to the track (15-17), layer moves with the "
           "tiles, TODAY km in the HUD",
           15 <= (hd.get("zoom") or 0) <= 16 and hd.get("trkT")
@@ -14062,10 +14065,18 @@ else:
     check("PAGE-HIST: no running hist.km (nothing reads it: the HUD and "
           "the timeline sum the trips)", hd.get("kmField") is False,
           repr(hd.get("kmField")))
-    check("PAGE-HIST: a drive wider than zoom 13 shows keeps the live "
-          "position on the map; without a fix the track's centre",
-          v.get("feat", {}).get("fitLive") == [[13, True, True]] * 2,
+    check("PAGE-HIST: a 20 km drive fits whole between the header and the "
+          "telemetry strip (below zoom 13); without a fix the track's centre",
+          v.get("feat", {}).get("fitLive") == [[True, True, True]] * 2,
           repr(v.get("feat", {}).get("fitLive")))
+    check("PAGE-MAP: the coordinates go above the pin in the band's lower "
+          "half (on a phone they were under the telemetry strip)",
+          v.get("feat", {}).get("coordUp") == ["coord up", "coord"],
+          repr(v.get("feat", {}).get("coordUp")))
+    check("PAGE-MAP: the free band is measured (header bottom, strip top), "
+          "defaults without a layout",
+          v.get("feat", {}).get("band") == [[44, 204], [70, 250]],
+          repr(v.get("feat", {}).get("band")))
     ft = v.get("feat", {})
     check("PAGE-LINK: GPS link tone by seconds since the last frame, B/s "
           "between polls, junk vs nothing, none on an old firmware",

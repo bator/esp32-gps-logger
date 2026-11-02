@@ -189,22 +189,49 @@ const dl = (ms, la) => la + ",18.0,100.0,2,1.0," + iso(d0 + ms) + "\n";
 c0.histParse(c0.hist.days[0], dl(7200000, "47.0") + dl(7201000, "47.001"));
 c0.histParse(c0.hist.days[0], dl(3600000, "47.01") + dl(3601000, "47.011"));
 ft.late = [c0.hist.pts.map((q) => q[0] - d0), Math.round(c0.tripsOf(c0.hist.pts).reduce((a, t) => a + t.km, 0) * 1000)];
-// a drive wider than zoom 13 shows (~20 km), the live position at its
-// end: the pin stays on the map (it was off it, the view on the track's
-// centre); without a fix, a past day or a picked trip the track decides
+// a 20 km drive, the live position at its end: the whole track between
+// the header and the telemetry strip (zoom 13 at least cut both ends off
+// under them); without a fix, a past day or a picked trip the track decides
 ft.fitLive = (() => {
   c0.hist = c0.histNew(null);
-  for (let k = 0; k < 1200; k++) c0.hist.pts.push([Date.now() - (1200 - k) * 1000, 47.18, 18.30 + k * 0.00022, 120]);
+  for (let k = 0; k < 1200; k++) c0.hist.pts.push([Date.now() - (1200 - k) * 1000, 47.18 + k * 0.00002, 18.30 + k * 0.00022, 120]);
   const out = [];
   for (const [w, h] of [[1100, 360], [375, 300]]) {
-    const lat = 47.18, lon = 18.30 + 1199 * 0.00022, el = {offsetWidth: w, offsetHeight: h};
-    const fv = c0.fitView(lat, lon, el, true), me = c0.wpx(lat, lon, fv.z);
-    const x = w / 2 + (me[0] - fv.X) * fv.sc, y = h * .42 + (me[1] - fv.Y) * fv.sc;
-    const nf = c0.fitView(lat, lon, el, false);
-    out.push([fv.z, x >= 24 && x <= w - 24 && y >= 44 && y <= h - 90,
-      Math.abs(nf.X - c0.wpx(lat, 18.30 + 1199 * 0.00022 / 2, nf.z)[0]) < 1]);
+    const el = {offsetWidth: w, offsetHeight: h}, b = c0.mapBand(el);
+    const ends = [c0.hist.pts[0], c0.hist.pts[1199]], lat = ends[1][1], lon = ends[1][2];
+    const fv = c0.fitView(lat, lon, el, true, b);
+    const inBand = (q) => {
+      const m = c0.wpx(q[1], q[2], fv.z), x = w / 2 + (m[0] - fv.X) * fv.sc, y = h * .42 + (m[1] - fv.Y) * fv.sc;
+      return x >= 16 && x <= w - 16 && y >= b.top + 12 && y <= b.bot - 12;
+    };
+    const nf = c0.fitView(lat, lon, el, false, b);
+    out.push([fv.z + Math.log2(fv.sc) < 13, inBand(ends[0]) && inBand(ends[1]),
+      Math.abs(nf.X - c0.wpx(47.18, 18.30 + 1199 * 0.00022 / 2, nf.z)[0]) < 1]);
   }
   return out;
+})();
+// the coordinates above the pin in the band's lower half (a phone shows
+// them under it: under the strip there)
+ft.coordUp = (() => {
+  const q = page(375), m = q.doc.getElementById("map");
+  m.offsetHeight = 300;
+  q.c.hist = q.c.histNew(null);
+  q.c.hist.pts.push([Date.now() - 60000, 47.20, 18.42, 100], [Date.now(), 47.18, 18.42, 100]);
+  q.c.placeMap({position: "47.18, 18.42"});
+  const low = q.doc.getElementById("coord").className;
+  q.c.hist.pts.reverse();
+  q.c.placeMap({position: "47.20, 18.42"});
+  return [low, q.doc.getElementById("coord").className];
+})();
+// the bands measured on the page: a two-line header on a phone (70 px)
+// and an alert pushing the strip down; without a layout the defaults
+ft.band = (() => {
+  const c = page(375), rect = (t, b) => () => ({top: t, bottom: b});
+  const m = c.doc.getElementById("map"), hud = c.doc.getElementById("hud"), wr = c.doc.getElementById("wrap");
+  m.offsetHeight = 300;
+  const d = c.c.mapBand(m);
+  m.getBoundingClientRect = rect(0, 300); hud.getBoundingClientRect = rect(0, 70); wr.getBoundingClientRect = rect(250, 900);
+  return [[d.top, d.bot], [c.c.mapBand(m).top, c.c.mapBand(m).bot]];
 })();
 // trips and stops: a 1.2 km walk (20 min), a stop, a few fixes standing
 // (folded into the stop), a 0.5 km walk (10 min)
