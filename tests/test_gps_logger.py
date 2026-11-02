@@ -11042,6 +11042,17 @@ else:
           and "Events</small><b>1" in v.get("evDonut", "")
           and "TWO STATUS LINES" in v.get("evc", ""),
           repr((v.get("evChart", "")[:200], v.get("evDonut", "")[-300:])))
+    evb = v.get("evBoot") or [[[], []]] * 3
+    check("PAGE-EV: after a boot (status lines without UTC among UTC ones, "
+          "or none with it) the chart has a point a line, evenly left to "
+          "right, labelled with the times there are",
+          [x for x, _ in evb] == [[34, 326, 618], [34, 326, 618], [34, 618]]
+          and evb[0][1][0] == v.get("evHm") and evb[0][1][2] == "+1m"
+          and evb[1][1][0] == "+1m" and evb[2][1] == ["+1m", "+2m"],
+          repr(evb))
+    check("PAGE-EV: Avg acc averages the hAcc lines only (no HDOP as "
+          "metres)", "Avg acc</small><b>2.0 m" in v.get("evDonutMix", ""),
+          v.get("evDonutMix", "")[-300:])
     # PAGE-WIFI: an arc icon (0-3 arcs lit) and the quality in per cent,
     # 2 x (RSSI + 100) clamped; amber below -67 dBm, red below -80; no words
     check("PAGE-WIFI: arcs, quality % and tone from RSSI",
@@ -11109,6 +11120,13 @@ else:
           and hd.get("day") == "<em>TODAY </em>%.2f KM" % hd.get("km", -1)
           and 0.28 < hd.get("km", 0) < 0.32, repr((hd.get("zoom"),
                                                     hd.get("day"))))
+    check("PAGE-HIST: no running hist.km (nothing reads it: the HUD and "
+          "the timeline sum the trips)", hd.get("kmField") is False,
+          repr(hd.get("kmField")))
+    check("PAGE-HIST: a drive wider than zoom 13 shows keeps the live "
+          "position on the map; without a fix the track's centre",
+          v.get("feat", {}).get("fitLive") == [[13, True, True]] * 2,
+          repr(v.get("feat", {}).get("fitLive")))
     ft = v.get("feat", {})
     check("PAGE-LINK: GPS link tone by seconds since the last frame, B/s "
           "between polls, junk vs nothing, none on an old firmware",
@@ -11254,6 +11272,112 @@ check("PAGE: polls status.json at the board's refresh_s, no reload",
       and '<link rel="icon" href="data:image/svg+xml,' in page_src
       and "el.offsetWidth / 512" in page_src and "window.onresize" in page_src
       and 'name="viewport"' in page_src)
+
+# PAGE-LAYOUT: the page in headless Chrome at phone and tablet width, a
+# status.json with long values, offline with a day's km (the HUD's longest
+# state): no horizontal scrolling, the HUD items inside the screen and not
+# over each other. Not in CI (no Chrome there): SKIP.
+chrome = shutil.which("google-chrome") or shutil.which("chromium")
+if chrome is None:
+    print("SKIP  PAGE-LAYOUT: google-chrome not installed")
+else:
+    import functools
+    import http.server
+    import threading
+    lay_d = tempfile.mkdtemp(prefix="page-")
+    lay_j = dict(jd3)
+    lay_j.update(
+        diag=["up 600 utc 20261102T070000Z nmea 9/1 gpsboots 0 loops 0 sats "
+              "14/9 fix 3D_fix hdop None points 512 sent 400 wifi connected "
+              "pulses 3 mem 27000 idf 157/120 heap 124 ubx 900/0 hacc 2.1",
+              "boot cause 1 prev_up 700 mhz 80",
+              "upload err OSError 113 ECONNABORTED while posting the batch"],
+        satellites=[{"name": "G12", "system": "GPS", "svid": 12, "cno": 38,
+                     "elev": 45, "azim": 120, "used": True,
+                     "unhealthy": False}],
+        receiver="u-blox M10, ROM SPG 5.10", rx_bytes=123456, rx_age_s=0,
+        good_age_s=0, gps_boots=2, points=123456, left=12345, files=12,
+        sent=98765, upload="err OSError 113", upload_err=3,
+        upload_age_s=4000, uptime=93784, prev_run="11 min 40 s",
+        prev_end="2026-11-01T18:00:00", wifi="connected "
+        "MyVeryLongHomeNetworkName_5G", rssi=-71, pulses=3, fw="d2c6db9",
+        fw_build=1793520000, ota="current", ubx="900 / 0", flash_kb=2600,
+        days=["20261030", "20261031"])
+    # the probe: offline 12 min with a day's km, as stale() and trackPaint()
+    # write them, then the page's and the HUD items' boxes
+    lay_probe = (
+        '<script>setTimeout(function () {'
+        'last = Date.now() - 725000; stale();'
+        'document.getElementById("day").innerHTML = "<em>TODAY </em>23.45 KM";'
+        'var r = [], hs = document.querySelector(".hud").children;'
+        'for (var i = 0; i < hs.length; i++) { var b = hs[i].getBoundingClientRect();'
+        '  if (b.width) r.push([b.left, b.right, b.top, b.bottom]); }'
+        'var o = document.createElement("pre"); o.id = "probe";'
+        'o.textContent = JSON.stringify({sw: document.scrollingElement.scrollWidth,'
+        '  iw: innerWidth, hud: r});'
+        'document.body.appendChild(o); }, 3000)</script></body>')
+    with open(os.path.join(lay_d, "index.html"), "w") as f:
+        f.write(page_src.replace("</body>", lay_probe))
+    with open(os.path.join(lay_d, "status.json"), "w") as f:
+        json.dump(lay_j, f)
+    # headless Chrome keeps a window 500 px wide at least: the page runs in
+    # a frame of the width (its viewport, media queries included)
+    for w in (375, 800):
+        with open(os.path.join(lay_d, "w%d.html" % w), "w") as f:
+            f.write('<!doctype html><body style="margin:0"><iframe src="/" '
+                    'style="width:%dpx;height:900px;border:0"></iframe>'
+                    '<script>setTimeout(function () {'
+                    'var p = document.querySelector("iframe").contentDocument'
+                    '.getElementById("probe"), o = document.createElement("pre");'
+                    'o.id = "probe"; o.textContent = p ? p.textContent : "none";'
+                    'document.body.appendChild(o); }, 4000)</script></body>'
+                    % w)
+
+    class _LayH(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+    lay_srv = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(_LayH, directory=lay_d))
+    threading.Thread(target=lay_srv.serve_forever, daemon=True).start()
+    lay = {}
+    try:
+        for w in (375, 800):
+            r = subprocess.run(
+                [chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+                 # no fonts or tiles from the internet: the same in any lab
+                 "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+                 "--window-size=1000,1000", "--virtual-time-budget=6000",
+                 "--dump-dom", "http://127.0.0.1:%d/w%d.html"
+                 % (lay_srv.server_port, w)],
+                capture_output=True, text=True, timeout=90)
+            i = r.stdout.find('<pre id="probe">')
+            try:
+                lay[w] = json.loads(r.stdout[i + 16:r.stdout.index("</pre>", i)]
+                                    .replace("&quot;", '"'))
+            except ValueError:
+                lay[w] = {"error": r.stdout[-300:] + r.stderr[-300:]}
+    finally:
+        lay_srv.shutdown()
+        shutil.rmtree(lay_d, ignore_errors=True)
+
+    def _lay_ok(m):
+        h = m.get("hud", [])
+        # (one line each: a squeezed item breaks its words over lines)
+        return (m.get("iw") and m.get("sw", 1e9) <= m["iw"] and len(h) >= 3
+                and all(b[1] <= m["iw"] + 0.5 and b[3] - b[2] <= 24
+                        for b in h)
+                and not any(a[0] < b[1] - 0.5 and b[0] < a[1] - 0.5
+                            and a[2] < b[3] - 0.5 and b[2] < a[3] - 0.5
+                            for k, a in enumerate(h) for b in h[k + 1:]))
+
+    check("PAGE-LAYOUT: no horizontal scroll at 375 and 800 px "
+          "(scrollWidth <= innerWidth), long Systems values included",
+          all(lay.get(w, {}).get("iw") and lay[w].get("sw", 1e9)
+              <= lay[w]["iw"] for w in (375, 800)), repr(lay)[:600])
+    check("PAGE-LAYOUT: offline with a day's km the HUD fits the screen, "
+          "each item on one line, none over another (375 and 800 px)",
+          all(_lay_ok(lay.get(w, {})) for w in (375, 800)), repr(lay)[:600])
 
 
 # MINMOVE-ENV: .env MIN_MOVE 0-50 m (decimals, comment), anything else keeps
@@ -12966,6 +13090,108 @@ try:
           and res[3] == (0, 0) and res[2][1] and res[4:] == [(0, 0)] * 4
           and r_over == (0, 0) and s_[0] is None,
           repr((res[:5], r_over)))
+
+    # trk2gpx is the second decoder (the checks read .trb files through
+    # it): the point lines it decodes from damaged bytes are the logger's
+    # (_track_lines), and neither raises
+    def _tb_pt(x):
+        return x.endswith("\n") and x[:1] != "#" and 4 <= x.count(",") <= 5
+
+    def _tb_fw(data):
+        out = []
+        gl._track_lines(io.BytesIO(data), "x.trb", 0, len(data), None,
+                        lambda a, b: out.append(bytes(gl._rbuf[a:b]).decode(
+                            "utf-8", "replace")))
+        return [x for x in out if _tb_pt(x)]
+
+    def _tb_py(data):
+        try:
+            return [x for x in trk2gpx.trb_lines(data) if _tb_pt(x)]
+        except Exception as e:
+            return repr(e)
+
+    # an unknown text record (not "=", "-" or "#": a damaged one) makes the
+    # state not valid, as _kb_rec: the deltas after it are no points
+    ul = _tb_drive(40, 2, seed=11)
+    ub = bytearray(gl.HEADERB.encode() + gl._kb_encode(ul, len(ul), None)
+                   + gl.FOOTER.encode())
+    gl._rd_open(0)
+    uo = []
+    with io.BytesIO(bytes(ub)) as f:
+        while gl._rd_rec(f):
+            uo.append((gl._rd[0] + gl._rd[1], gl._rd[0] + gl._rd[2]))
+    a_, b_ = uo[6]                       # a delta read as a text line
+    ub[a_:b_] = b"0" * (b_ - a_ - 1) + b"\n"
+    up_, uf_ = _tb_py(bytes(ub)), _tb_fw(bytes(ub))
+    check("TRKB: trk2gpx drops the deltas after an unknown text record "
+          "(no points from a stale state), as the logger",
+          up_ == uf_ == ul[:5], repr((len(up_), len(uf_),
+                                      [x for x in up_ if x not in ul][:2])))
+
+    # the logger's bounds on a delta: a varint over 5 bytes, a value over
+    # 2 * _KB_MAX, a field past 9 digits, a time from FIX_S_END on; a
+    # keyframe dated past it or with second 60 starts no deltas
+    def _tb_case(kf, recs):
+        return (gl.HEADERB + "=" + kf + "\n").encode() + bytes(recs) \
+            + gl.FOOTER.encode()
+
+    k0 = "1.000000,1.000000,1.0,1.0,1.0,20261101T000000Z"
+    v29 = [0x80, 0x80, 0x80, 0x80, 0x02]           # 2^29 = 2 * _KB_MAX
+    bnd = [_tb_case(k0, [0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),
+           _tb_case(k0, [0x81] + [0xFF] * 9 + [0x01]),
+           _tb_case(k0, [0x81] + v29 + [0x81] + v29 + [0x81] + v29
+                    + [0x81] + v29),
+           _tb_case(k0, [0x82, 0x81, 0x80, 0x80, 0x80, 0x02, 0x80]),
+           _tb_case(k0, [0x82] + v29 + [0x82] + v29 + [0x82] + v29
+                    + [0x82] + v29 + [0x80]),
+           _tb_case("1.000000,1.000000,1.0,1.0,1.0,20871231T235959Z",
+                    [0x80, 0x80]),
+           _tb_case("1.000000,1.000000,1.0,1.0,1.0,20900101T000000Z",
+                    [0x80, 0x80]),
+           _tb_case("1.000000,1.000000,1.0,1.0,1.0,20261101T000060Z",
+                    [0x80, 0x80]),
+           _tb_case(k0, list(b"#" + b"x" * gl.LINE_MAX + b"\n") + [0x80])]
+    bp = [_tb_py(x) for x in bnd]
+    bf = [_tb_fw(x) for x in bnd]
+    check("TRKB: trk2gpx applies the logger's bounds (varint length, value, "
+          "9 digits, FIX_S_END, a keyframe's time, a line over LINE_MAX): "
+          "the same points, no error",
+          bp == bf and [len(x) for x in bf] == [1, 1, 4, 1, 4, 1, 1, 1, 1],
+          repr([(len(a), len(b)) if a == b else (a, b)
+                for a, b in zip(bp, bf)])[:600])
+
+    # fuzz: single damaged bytes (a flipped bit, a random byte, a flag
+    # byte's top bit cleared) in a TRK1 and a TRK2 drive, a fixed seed
+    fr = _rnd.Random(7)
+    fz = {}
+    for fmt in (1, 2):
+        fl = _tb_drive(100, fmt, seed=20 + fmt)
+        fz[fmt] = (gl.HEADERB.encode() + gl._kb_encode(fl, len(fl), None)
+                   + gl.FOOTER.encode())
+    fbad = []
+    for it in range(400):
+        d_ = bytearray(fz[1 + it % 2])
+        kind = fr.choice(("flip", "byte", "clear7"))
+        p_ = fr.randrange(len(gl.HEADERB), len(d_) - len(gl.FOOTER))
+        if kind == "flip":
+            d_[p_] ^= 1 << fr.randrange(8)
+        elif kind == "byte":
+            d_[p_] = fr.randrange(256)
+        else:
+            while p_ < len(d_) - len(gl.FOOTER) - 1 and d_[p_] < 0x80:
+                p_ += 1
+            d_[p_] &= 0x7F
+        try:
+            fw_ = _tb_fw(bytes(d_))
+        except Exception as e:
+            fw_ = repr(e)
+        py_ = _tb_py(bytes(d_))
+        if fw_ != py_:
+            fbad.append((it, kind, p_, fw_ if isinstance(fw_, str) else
+                         len(fw_), py_ if isinstance(py_, str) else len(py_)))
+    check("TRKB: fuzz - 400 single damaged bytes: trk2gpx decodes the very "
+          "point lines of the logger, neither raises",
+          not fbad, "%d differ: %r" % (len(fbad), fbad[:4]))
 
     # out of memory while encoding is no write failure: the batch waits
     online(_tb)

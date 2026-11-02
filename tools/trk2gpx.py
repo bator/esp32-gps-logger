@@ -86,6 +86,11 @@ def read_points(lines):
 
 
 EPOCH = 1577836800                         # 2020-01-01 UTC, the .trb seconds
+# the logger's decoder bounds (gps_logger.py _kb_dec, _kb_time, _rd_line):
+# past them a record is damaged, as there
+KB_MAX = 1 << 28                           # _KB_MAX: no varint over 2 * it
+FIX_S_END = 2145916800                     # 2088-01-01 in s since 2020
+LINE_MAX = 512                             # a longer text line is skipped
 _NUM = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?")
 
 
@@ -109,17 +114,19 @@ def _state(text):
         return None
     tc = f[-1]
     try:
-        if len(tc) != 16 or not _iso(tc):
+        if len(tc) != 16 or not tc.isascii() or not _iso(tc):
             return None
         tm = time.strptime(tc, "%Y%m%dT%H%M%SZ")
-        if not 2020 <= tm.tm_year <= 2099:
+        # (strptime takes second 60 and 61; the logger's _kb_time does not)
+        if not 2020 <= tm.tm_year <= 2099 or tm.tm_sec > 59:
             return None
         fields = [_field(x) for x in f[:-1]]
     except ValueError:
         return None
-    if fields[0] is None or fields[1] is None:
+    t = calendar.timegm(tm) - EPOCH
+    if fields[0] is None or fields[1] is None or t >= FIX_S_END:
         return None
-    return [calendar.timegm(tm) - EPOCH] + fields
+    return [t] + fields
 
 
 def _text(st):
@@ -144,7 +151,8 @@ def trb_lines(data):
     flag byte (0x80 | bit 0: a time step other than 1 s follows, bit i:
     the change of field i follows) and LEB128 varints (the step, zigzag
     changes in the field's last decimal). A damaged record, and the deltas
-    after it up to the next keyframe, are left out."""
+    after it up to the next keyframe, are left out: the same records as the
+    logger's decoder (_kb_rec), so both read the same points."""
     st = None
     i, n = 0, len(data)
     while i < n:
@@ -167,9 +175,13 @@ def trb_lines(data):
                     sh += 7
                     if c < 0x80:
                         break
+                # over 5 bytes or more than the encoder writes: damaged
+                # (the record still ends where its varints do)
+                if sh > 35 or v > 2 * KB_MAX:
+                    ok = False
                 vals.append(v)
             i = j
-            if st is None or m & 0x40 or (m & 0x3F) >> len(st):
+            if not ok or st is None or m & 0x40 or (m & 0x3F) >> len(st):
                 st = None
                 continue
             dt = 1 if vals[0] is None else vals[0]
@@ -180,7 +192,10 @@ def trb_lines(data):
                         break
                     z = vals[k]
                     st[k] = (st[k][0] + ((z >> 1) ^ -(z & 1)), st[k][1])
-            if not ok or dt < 1:
+                    if not -10 ** 9 < st[k][0] < 10 ** 9:
+                        ok = False       # (9 digits, as the logger)
+                        break
+            if not ok or dt < 1 or st[0] + dt >= FIX_S_END:
                 st = None
                 continue
             st[0] += dt
@@ -190,7 +205,11 @@ def trb_lines(data):
         if j < 0:
             return                       # a line cut off at the end
         line = data[i:j + 1].decode("utf-8", "replace")
+        ln = j + 1 - i
         i = j + 1
+        if ln > LINE_MAX:                # the logger skips it (_rd_line)
+            st = None
+            continue
         if line == "#END\n":
             yield line
             return
@@ -199,6 +218,11 @@ def trb_lines(data):
             yield line[1:]
         elif line == "-\n" or line.startswith("#"):
             yield line
+        else:
+            # a damaged record (a flag byte below 0x80 read as text): the
+            # next records may be read from inside one, none until a
+            # keyframe (as _kb_rec)
+            st = None
 
 
 def convert(lines, name):
