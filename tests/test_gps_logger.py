@@ -1941,6 +1941,60 @@ try:
           and new_off == os.path.getsize(lm_p), "n=%s n_ok=%s eof=%s %s" % (
               n, n_ok, eof, new_off))
 
+    def _strict_json(b):
+        """Parsed JSON, or the error: no inf / nan (invalid JSON, a 400 and
+        the whole batch quarantined)."""
+        def bad(c):
+            raise ValueError(c)
+        try:
+            return json.loads(b.decode(), parse_constant=bad)
+        except ValueError as e:
+            return repr(e)
+
+    # UPL-5: a finite hdop whose horizontal accuracy (* HDOP_M) is not
+    # finite is left out, as an inf hdop is (it went into the JSON as inf)
+    inf_p = os.path.join(end_dir, "20261005_170000.trk")
+    with open(inf_p, "wb") as f:
+        f.write((gl.HEADER + "47.100000,19.100000,100.0,1e308,"
+                 "20261101T100000Z\n" + gl.FOOTER).encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(inf_p, 0)
+    j_trk = _strict_json(bytes(gl._body[:size]))
+    inf_g = os.path.join(end_dir, "20261005_170000.gpx")
+    make_gpx(inf_g, 1, extras=["<ele>1.0</ele><hdop>1e308</hdop>"])
+    n, n_ok, size, new_off, eof = gl.read_batch(inf_g, 0)
+    j_gpx = _strict_json(bytes(gl._body[:size]))
+    check("UPL-5: hdop * HDOP_M not finite: no accuracy, valid JSON, the "
+          "point kept (.trk and .gpx)",
+          all(isinstance(j_, dict) and len(j_["locations"]) == 1
+              and "horizontal_accuracy" not in j_["locations"][0]
+              ["properties"] for j_ in (j_trk, j_gpx)),
+          repr((j_trk, j_gpx))[:300])
+
+    # UPL-6: a point time that is no UTC time (month 13, day 32, Feb 30,
+    # hour 24, minute 60, second 60) is no point, as _kb_time has it
+    bad_t = ("20261301T100000Z", "20261032T100000Z", "20260230T100000Z",
+             "20261101T240000Z", "20261101T106000Z", "20261101T100060Z",
+             "20261100T100000Z", "20240229T100000Z", "20990101T000000Z")
+    tm_p = os.path.join(end_dir, "20261005_180000.trk")
+    with open(tm_p, "wb") as f:
+        f.write((gl.HEADER + "".join("47.1,19.1,1.0,1.0,%s\n" % t_
+                                     for t_ in bad_t) + gl.FOOTER).encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(tm_p, 0)
+    j_tm = _strict_json(bytes(gl._body[:size]))
+    tg_p = os.path.join(end_dir, "20261005_180000.gpx")
+    iso_t = ["%s-%s-%sT%s:%s:%sZ" % (t_[0:4], t_[4:6], t_[6:8], t_[9:11],
+                                     t_[11:13], t_[13:15]) for t_ in bad_t]
+    make_gpx(tg_p, len(iso_t), times=iso_t)
+    n2, n2_ok, size2, new_off, eof = gl.read_batch(tg_p, 0)
+    j_tg = _strict_json(bytes(gl._body[:size2]))
+    want_t = ["2024-02-29T10:00:00Z", "2099-01-01T00:00:00Z"]
+    got_t = [[x["properties"]["timestamp"] for x in j_["locations"]]
+             if isinstance(j_, dict) else j_ for j_ in (j_tm, j_tg)]
+    check("UPL-6: a point time out of range (month, day, hour, minute, "
+          "second) is skipped in a .trk and a .gpx",
+          (n, n_ok, n2, n2_ok) == (9, 2, 9, 2) and got_t == [want_t] * 2,
+          repr((n, n_ok, n2, n2_ok, got_t)))
+
     gl.LOG_DIR = saved_dir
 
     # --- K1: keepalive deinit + deadline -----------------------------------
@@ -7131,6 +7185,43 @@ if order_root is not None:
     check("REVIEW-5: track name is escaped",
           order_root.find(".//%sname" % ns).text == "a&b")
 
+# UPL-6: trk2gpx keeps the points the logger uploads: a time out of range
+# (year outside 2020-2099, month, day, hour, minute, second) is no point,
+# and a field that is no number and not UTF-8 either (a damaged block)
+# drops the point, a UTF-8 one only the field (it was read as U+FFFD and
+# the point kept)
+t6_dir = tempfile.mkdtemp(prefix="t2g6-")
+t6_p = os.path.join(t6_dir, "20261101_100000.trk")
+t6_rows = [b"47.1,19.1,1.0,1.0,%s\n" % t_ for t_ in (
+    b"20261301T100000Z", b"20261032T100000Z", b"20260230T100000Z",
+    b"20261101T240000Z", b"20261101T106000Z", b"20261101T100060Z",
+    b"20191231T235959Z", b"21000101T000000Z", b"20240229T100000Z",
+    b"20990101T000000Z")]
+t6_rows += [b"47.2,19.2,\xff\xfe,1.0,20261101T100001Z\n",
+            b"47.3,19.3,\xc3\xa9,1.0,20261101T100002Z\n",
+            b"47.4,19.4,abc,,20261101T100003Z\n"]
+with builtins.open(t6_p, "wb") as f:
+    f.write(b"#TRK1\n" + b"".join(t6_rows) + b"#END\n")
+t6_out = io.StringIO()
+real_stdout = sys.stdout
+sys.stdout = t6_out
+try:
+    t6_rc = trk2gpx.main(["trk2gpx.py", t6_p])
+finally:
+    sys.stdout = real_stdout
+t6_times = [x.split("</time>")[0]
+            for x in t6_out.getvalue().split("<time>")[1:]]
+t6_n = gl.read_batch(t6_p, 0)
+t6_fw = [x["properties"]["timestamp"] for x in json.loads(
+    bytes(gl._body[:t6_n[2]]).decode())["locations"]]
+shutil.rmtree(t6_dir, ignore_errors=True)
+check("UPL-6: trk2gpx drops times out of range and a point with a field "
+      "that is no number and not UTF-8, as the logger does",
+      t6_rc == 0 and t6_times == t6_fw == [
+          "2024-02-29T10:00:00Z", "2099-01-01T00:00:00Z",
+          "2026-11-01T10:00:02Z", "2026-11-01T10:00:03Z"],
+      repr((t6_times, t6_fw)))
+
 # DIAG: persistent diagnostic log (what happened on a walk)
 def diag_lines(path=None):
     try:
@@ -7293,7 +7384,9 @@ try:
 
     import inspect
     resets = {f: inspect.getsource(getattr(gl, f)) for f in (
-        "_tls_reboot", "_low_reboot", "_ota_check", "_ota_health")}
+        "_mem_reboot", "_ota_check", "_ota_health")}
+    mem_via = all("_mem_reboot(" in inspect.getsource(getattr(gl, f))
+                  for f in ("_tls_reboot", "_low_reboot"))
     gl._uptime_saved = gl.uptime_s
     diag_clear()
     gl.uptime_s = lambda now=None: 151
@@ -7306,7 +7399,7 @@ try:
         gl.uptime_s = gl._uptime_saved
     check("UPTIME: a deliberate reset (OTA, TLS memory, low IDF, rollback) "
           "writes a status line first: the next boot sees the whole run",
-          pf["up"] == 151 and pf["how"] == "status"
+          pf["up"] == 151 and pf["how"] == "status" and mem_via
           and all(src.index("_diag_final()") < src.index("machine.reset()")
                   for src in resets.values()), repr((pf, tf)))
     loop_src = inspect.getsource(gl._loop)
@@ -9848,6 +9941,75 @@ check("U-10: an unreadable track is held, the next uploads, then .err",
       "posts=%d %r" % (len(_posts), os.listdir(up_td)))
 os.remove(bad_p + ".err")
 
+# UPL-7: the points of a track parked as .err leave up["left"] (counted at
+# boot, they were never sent: 'left' stayed above 0 and held the OTA)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 5)
+make_trk(ok_p, 3)
+gl.up["left"] = gl.count_points()
+u7_left0 = gl.up["left"]
+gl.read_batch = rb_fail
+try:
+    for _ in range(gl.READ_ERR_MAX + 4):
+        gl.up["next_at"] = _clock[0]
+        for p_ in list(gl.up["hold"]):
+            gl.up["hold"][p_] = _clock[0] - 1
+        gl.upload_tick()
+        _clock[0] += 1000
+finally:
+    gl.read_batch = real_rb
+check("UPL-7: a track parked as .err after read errors leaves 'left'",
+      u7_left0 == 8 and os.path.exists(bad_p + ".err")
+      and not os.path.exists(ok_p) and gl.up["left"] == 0,
+      repr((u7_left0, gl.up["left"], os.listdir(up_td))))
+os.remove(bad_p + ".err")
+# ... and one parked because it cannot be deleted after its last batch
+make_trk(ok_p, 3)
+gl.up["left"] = gl.count_points()
+_rm7 = os.remove
+os.remove = lambda path, *a: (_ for _ in ()).throw(OSError(5)) \
+    if path == ok_p else _rm7(path, *a)
+try:
+    for _ in range(gl.READ_ERR_MAX + 1):
+        gl.up["hold"] = {}
+        pump()
+        _clock[0] += 1000
+finally:
+    os.remove = _rm7
+check("UPL-7: a track parked as .err after failed deletes leaves 'left'",
+      os.path.exists(ok_p + ".err") and gl.up["left"] == gl.count_points()
+      == 0, repr((gl.up["left"], os.listdir(up_td))))
+os.remove(ok_p + ".err")
+
+# UPL-4: a 5xx or another answer that is no payload error (404, 403, 3xx)
+# for the same batch SRV_ERR_MAX times in a row holds that track, so the
+# others go (only a global backoff: files[0] retried for ever, the queue
+# blocked)
+u4 = []
+for code_ in (500, 404):
+    online(up_td)
+    gl.up["url"], gl.up["key"] = "https://d.example", "k"
+    make_trk(bad_p, 3)
+    make_trk(ok_p, 4)
+    _post_code[0] = code_
+    for _ in range(getattr(gl, "SRV_ERR_MAX", 3)):
+        pump()
+        _clock[0] += 1000
+    held4 = bad_p in (gl.up.get("hold") or {})
+    _post_code[0] = 201
+    _posts[:] = []
+    pump()
+    u4.append((code_, held4, len(locations()), os.path.exists(bad_p),
+               os.path.exists(ok_p)))
+    gl.up["hold"] = {}
+    pump()
+    u4[-1] += (os.path.exists(bad_p),)
+check("UPL-4: SRV_ERR_MAX server errors on one batch hold that track, the "
+      "next one goes, then the held one",
+      u4 == [(500, True, 4, True, False, False),
+             (404, True, 4, True, False, False)], repr(u4))
+
 # POS-ERR: a batch with nothing to send whose .pos write fails is a flash
 # error, not an unreadable track: READ_ERR_MAX of them must not park it
 pe_p = os.path.join(up_td, "20261002_100000.trk")
@@ -9959,10 +10121,10 @@ pb_mode = ["big"]
 
 
 def _pb_open(name, mode="r", *a, **k):
-    if name == pb_p + ".pos" and mode == "r":
+    if name == pb_p + ".pos" and mode in ("r", "rb"):
         if pb_mode[0] == "oom":
             raise MemoryError()
-        with builtins.open(name) as f_:
+        with builtins.open(name, mode) as f_:
             return _PosSized(f_.read())
     return builtins.open(name, mode, *a, **k)
 
@@ -10007,7 +10169,7 @@ pump()                                   # pe1's first batch up, .pos written
 
 
 def _pe_open(name, mode="r", *a, **k):
-    if name == pe1 + ".pos" and mode == "r":
+    if name == pe1 + ".pos" and mode in ("r", "rb"):
         raise OSError(5)
     return builtins.open(name, mode, *a, **k)
 
@@ -10064,6 +10226,51 @@ finally:
     del gl.open
 check("POS-EIO-COUNT: an unreadable .pos counts the whole track, not 0",
       pc_n == 30, repr(pc_n))
+for n_ in os.listdir(up_td):
+    os.remove(os.path.join(up_td, n_))
+
+# UPL-1: a .pos that is not UTF-8 (a damaged flash block) is a corrupt one,
+# resent from 0. Read as text it raised UnicodeError (a ValueError) out of
+# read_pos, count_points, up_reset and upload_tick: a reset at every boot
+online(up_td)
+u1_p = os.path.join(up_td, "20261004_200000.trk")
+make_trk(u1_p, 5)
+with builtins.open(u1_p + ".pos", "wb") as f:
+    f.write(b"\xff\xfe 12\n")
+u1_res = []
+for fn_ in (lambda: gl.read_pos(u1_p), gl.count_points, gl.up_reset):
+    try:
+        u1_res.append(fn_())
+    except Exception as e:
+        u1_res.append(type(e).__name__)
+u1_left = gl.up.get("left")
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.wifi["state"] = "connected"
+_posts[:] = []
+try:
+    pump()
+    u1_up = (len(locations()), os.path.exists(u1_p))
+except Exception as e:
+    u1_up = type(e).__name__
+check("UPL-1: a .pos that is not UTF-8 is corrupt: offset 0, counted, "
+      "resent, no exception",
+      u1_res == [(0, None), 5, None] and u1_left == 5 and u1_up == (5, False),
+      repr((u1_res, u1_left, u1_up)))
+# any other error counting one track (not only OSError / MemoryError)
+# leaves the others counted: it ran in up_reset at boot
+make_trk(u1_p, 5)
+make_trk(os.path.join(up_td, "20261004_210000.trk"), 7)
+real_rp = gl.read_pos
+gl.read_pos = lambda p: ((_ for _ in ()).throw(ValueError("x"))
+                         if p == u1_p else real_rp(p))
+try:
+    u1_cnt = gl.count_points()
+except Exception as e:
+    u1_cnt = type(e).__name__
+finally:
+    gl.read_pos = real_rp
+check("UPL-1: count_points survives any error of one track",
+      u1_cnt == 7, repr(u1_cnt))
 for n_ in os.listdir(up_td):
     os.remove(os.path.join(up_td, n_))
 
@@ -10437,6 +10644,52 @@ check("HOST-PORT: POST Host header has a non-default port, not a default one",
                    b"Host: d.example", b"Host: h.lan:3000", b"Host: h.lan"],
       repr(hp_hosts))
 
+# UPL-9: an API_KEY or GEO_URL that cannot go into a request head (a space,
+# CR or another control byte, non-ASCII) or whose host:port does not parse
+# (userinfo, IPv6, a port that is no number: int() raised, "err net" for
+# ever) sends nothing: "no .env" and a diag line that names the key, never
+# its value
+u9_td = tempfile.mkdtemp(prefix="env9-")
+u9 = []
+diag_clear()
+gl.DIAG = 60000
+try:
+    for url_, key_ in (("https://d.example", "ab cd"),
+                       ("https://d.example", "abc\r\nX-Evil: 1"),
+                       ("https://d.example", "ab\x01cd"),
+                       ("https://d.example", u"kulcs\xe9"),
+                       ("https://user:pw@d.example", "k"),
+                       ("https://[::1]:8443", "k"),
+                       ("https://d.example:80a", "k"),
+                       ("https://d.example:99999", "k"),
+                       ("https://d.ex ample/x", "k"),
+                       ("ftp://d.example", "k"),
+                       ("https://d.example:8443/sub", "good-Key_1.~")):
+        online(u9_td)
+        gl.up["url"], gl.up["key"] = url_, key_
+        make_trk(os.path.join(u9_td, "20261009_100000.trk"), 3)
+        try:
+            pump()
+            u9.append((len(_posts), gl.up["state"]))
+        except Exception as e:
+            u9.append(type(e).__name__)
+finally:
+    gl.DIAG = 0
+    shutil.rmtree(u9_td, ignore_errors=True)
+u9_diag = [l for l in diag_lines() if "env" in l]
+diag_clear()
+check("UPL-9: a bad API_KEY / GEO_URL sends nothing ('no .env'), a good "
+      "one goes",
+      u9 == [(0, "no .env")] * 10 + [(1, "ok")], repr(u9))
+check("UPL-9: one diag line per bad value, naming the key, not the value",
+      len(u9_diag) == 10 and all(("API_KEY" in l) != ("GEO_URL" in l)
+                                 for l in u9_diag)
+      and not any(s_ in l for l in u9_diag
+                  for s_ in ("ab cd", "abc", "ab\x01", "kulcs", "user:",
+                             "pw@", "::1", "80a", "99999", "ex ample",
+                             "ftp")),
+      repr(u9_diag))
+
 
 def ctx_now():
     """(verify_mode, ca) of the SSLContext kept, or None."""
@@ -10565,6 +10818,39 @@ check("TLS-CA-OOM: ValueError making the context counts as out of memory "
       oom_res == [(False, "low mem", 3, None), (False, "ca err", 0, None)]
       and later is False, "%r %r" % (oom_res, later))
 
+# UPL-3: a CA_FILE over CA_MAX (a PEM bundle saved as ca.der) is not read:
+# "ca err", not "low mem" (its f.read() hit MemoryError at every POST, a
+# TLS reboot every few minutes for ever)
+ca_td = tempfile.mkdtemp(prefix="ca-")
+ca_p = os.path.join(ca_td, "ca.der")
+with open(ca_p, "wb") as f:
+    f.write(b"\x30\x82" + b"x" * getattr(gl, "CA_MAX", 200000))
+ca_reads = []
+
+
+def _ca_open(name, mode="r", *a, **k):
+    if name == ca_p:
+        ca_reads.append(mode)
+        raise MemoryError()
+    return builtins.open(name, mode, *a, **k)
+
+
+online(up_td)
+gl.CA_FILE = ca_p
+gl.open = _ca_open
+tls_ctx_reset()
+try:
+    gl.up["enomem"] = 0
+    ca_big = (gl._tls_ready(_clock[0]), gl.up["state"], gl.up["enomem"],
+              ctx_now(), ca_reads)
+finally:
+    del gl.open
+    gl.CA_FILE = "/ca.der"
+    tls_ctx_reset()
+    shutil.rmtree(ca_td, ignore_errors=True)
+check("UPL-3: a CA_FILE over CA_MAX is not read: 'ca err', not the ENOMEM "
+      "run", ca_big == (False, "ca err", 0, None, []), repr(ca_big))
+
 # RTC: mbedTLS checks certificate dates against the board clock (2000-01-01
 # at boot): set it from a valid GPS fix before a POST, once, again only when
 # it drifted more than RTC_DRIFT s; no fix or a date outside 2020-2087: no
@@ -10671,6 +10957,43 @@ check("TLS: ENOMEM TLS_REBOOT_N times at home -> one controlled reboot",
       "resets=%d enomem=%d" % (len(_resets), gl.up["enomem"]))
 _post_raise[0] = None
 gl.wifi["home"] = False
+
+# UPL-3: the TLS reboot is rate limited as the low-memory one: it writes
+# LOWIDF_MARK, and after a boot it took, none before LOWIDF_REBOOT_GAP of
+# uptime (a lasting cause, a CA_FILE too big for the heap or a chain over
+# TLS_MIN_KB, rebooted every ~2.5 min for ever)
+u3_mark = os.path.exists(gl.LOWIDF_MARK)
+online(up_td)                            # the next boot takes the mark
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+gl.wifi["home"] = True
+make_trk(os.path.join(up_td, "20261006_100000.trk"), 3)
+u3_saved = list(gl._up)
+gl._up[:] = [0, _clock[0], 0]           # just booted
+u3_boot = gl.up.get("lowidf_boot")
+_resets[:] = []
+u3_t = None
+t0_ = _clock[0]
+try:
+    while _clock[0] - t0_ < gl.LOWIDF_REBOOT_GAP + 4 * gl.LOWIDF_RETRY:
+        _post_raise[0] = OSError(-0x7F00)
+        try:
+            pump()
+        except SystemExit:
+            u3_t = _clock[0] - t0_
+            break
+        _clock[0] += gl.LOWIDF_RETRY
+finally:
+    _post_raise[0] = None
+    gl.wifi["home"] = False
+    gl._up[:] = u3_saved
+check("UPL-3: a TLS reboot writes LOWIDF_MARK, the next waits "
+      "LOWIDF_REBOOT_GAP of uptime",
+      u3_mark and u3_boot is True and u3_t is not None
+      and gl.LOWIDF_REBOOT_GAP <= u3_t <= gl.LOWIDF_REBOOT_GAP
+      + gl.LOWIDF_RETRY and len(_resets) == 1,
+      repr((u3_mark, u3_boot, u3_t, len(_resets))))
+if os.path.exists(gl.LOWIDF_MARK):
+    os.remove(gl.LOWIDF_MARK)
 
 # ENOMEM-RUN: "in a row" means consecutive: another failure ends the run
 for n_ in os.listdir(up_td):
@@ -14086,6 +14409,28 @@ try:
               (o2, k2) == (0, None) and len(set(ts)) == 120
               and k1 is not None, repr((o2, k2, len(ts), len(set(ts)))))
 
+    # UPL-8: a .pos "offset -1" (no keyframe before it) is checked from the
+    # start of the file: a corrupt one inside a record resends from 0 (it
+    # was read from there, misframed); at a record start the records
+    # before it are read again for the state, nothing lost
+    u8 = []
+    for d_ in (1, 0):
+        online(_tb)
+        gl.LOG_DIR = _tb
+        _tb_write(pr, rl[:120])
+        n, ok, size, off1, eof = gl.read_batch(pr, 0)
+        with builtins.open(pr + ".pos", "w") as f:
+            f.write("%d -1\n" % (off1 + d_))
+        left_ = gl.count_points()
+        for _ in range(10):
+            if os.path.exists(pr):
+                pump()
+        ts = [x["properties"]["timestamp"] for x in locations()]
+        u8.append((left_, len(ts), len(set(ts))))
+    check("UPL-8: a .pos 'offset -1' inside a record resends from 0; at a "
+          "record start the rest goes up whole",
+          u8 == [(120, 120, 120), (70, 70, 70)], repr(u8))
+
     # a misaligned offset (not on a record) with a good keyframe: from 0
     online(_tb)
     gl.LOG_DIR = _tb
@@ -14379,6 +14724,24 @@ try:
           repr([(len(a), len(b)) if a == b else (a, b)
                 for a, b in zip(bp, bf)])[:600])
 
+    # UPL-6: a keyframe whose time is no UTC time (month 13, hour 24:
+    # _kb_parse rejects it, no deltas from it) is no point either, in the
+    # upload and in trk2gpx (it went up as month 13)
+    k6 = os.path.join(_tb, "20261101_150000.trb")
+    k6_res = []
+    for kf_ in ("47.1,19.1,1.0,1.0,1.0,20261301T000000Z",
+                "47.1,19.1,1.0,1.0,1.0,20261101T240000Z",
+                "47.1,19.1,1.0,1.0,1.0,20261101T235959Z"):
+        with builtins.open(k6, "wb") as f:
+            f.write(_tb_case(kf_, [0x80]))
+        n6, ok6 = gl.read_batch(k6, 0)[:2]
+        g6 = trk2gpx.convert(trk2gpx.trb_lines(_tb_raw(k6)), "x")
+        k6_res.append((n6, ok6, g6.count("<trkpt")))
+    os.remove(k6)
+    check("UPL-6: a .trb keyframe dated out of range is no point (upload "
+          "and trk2gpx), a good one and its delta are",
+          k6_res == [(2, 0, 0), (2, 0, 0), (2, 2, 2)], repr(k6_res))
+
     # fuzz: single damaged bytes (a flipped bit, a random byte, a flag
     # byte's top bit cleared) in a TRK1 and a TRK2 drive, a fixed seed
     fr = _rnd.Random(7)
@@ -14411,6 +14774,62 @@ try:
     check("TRKB: fuzz - 400 single damaged bytes: trk2gpx decodes the very "
           "point lines of the logger, neither raises",
           not fbad, "%d differ: %r" % (len(fbad), fbad[:4]))
+
+    # UPL-2: a flag byte followed by more bytes of 0x80 or more than a
+    # record can hold (an erased flash block reads 0xFF) is a damaged
+    # record of 1 byte. It ended where the read buffer did, so where it
+    # ended depended on where the reading started: a .pos (offset,
+    # keyframe) committed in it was no record start when read from its
+    # keyframe ("pos misaligned", resent from 0, the same .pos again, for
+    # ever: every later track blocked)
+    def _tb_starts(data, at=0):
+        out = []
+        gl._rd_open(at)
+        with io.BytesIO(data) as f:
+            f.seek(at)
+            while gl._rd_rec(f):
+                out.append(gl._rd[0] + gl._rd[1])
+        return out
+
+    u2_base = fz[1]
+    u2_d = [i_ for i_ in _tb_starts(u2_base) if u2_base[i_] >= 0x80]
+    u2_bad = []
+    for L_ in (31, 32, 40, 200, 600):
+        for q_ in (u2_d[5], u2_d[40], u2_d[-3]):
+            d_ = bytearray(u2_base)
+            d_[q_ + 1:q_ + 1 + L_] = b"\xff" * L_
+            d_ = bytes(d_)
+            all_ = _tb_starts(d_)
+            for s_ in all_[::3]:
+                tail = _tb_starts(d_, s_)
+                if tail != all_[all_.index(s_):]:
+                    u2_bad.append((L_, q_, s_, "starts"))
+                    break
+            if _tb_fw(d_) != _tb_py(d_):
+                u2_bad.append((L_, q_, "trk2gpx"))
+    check("UPL-2: a run of bytes >= 0x80 after a flag byte: records start "
+          "where they do whatever the read starts from, trk2gpx the same",
+          not u2_bad, repr(u2_bad[:6]))
+
+    # ... end to end: a track ending in an erased block goes up once
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:200], per=200)
+    raw = _tb_raw(pr)
+    q_ = [i_ for i_ in _tb_starts(raw) if raw[i_] >= 0x80][-5]
+    with builtins.open(pr, "wb") as f:
+        f.write(raw[:q_ + 1] + b"\xff" * 600)
+    left_ = gl.up["left"] = gl.count_points()
+    for _ in range(40):
+        if os.path.exists(pr):
+            pump()
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    check("UPL-2: a .trb ending in a long run of 0xFF uploads once, its "
+          "points all up, the file gone",
+          not os.path.exists(pr) and len(ts) == len(set(ts))
+          and len(ts) >= 190 and gl.up["left"] == 0,
+          repr((os.path.exists(pr), len(ts), len(set(ts)), left_,
+                gl.up["left"])))
 
     # out of memory while encoding is no write failure: the batch waits
     online(_tb)
