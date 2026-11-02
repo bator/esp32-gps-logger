@@ -247,6 +247,10 @@ PB_CONNECTED = False                     # .env KEEPALIVE_CONNECTED=1: pulses
 SEEN_WAIT = 60000                        # ms: a keep-alive scan that sees home
                                          # wakes the radio at most this often
                                          # (doubling while rounds fail)
+SEEN_MIN_RSSI = -85                      # dBm: a home AP this strong wakes the
+                                         # sleeping radio (ROAM_MIN_RSSI is
+                                         # for switching: a -78 dBm home that
+                                         # connects fine never woke it)
 WIFI_OFF_WAIT = 60000                    # ms: an upload backoff at least
                                          # this long turns the radio off
                                          # until it is due (server down, 401)
@@ -2045,9 +2049,14 @@ def wifi_reset():
                 wake=False, wake_at=None,
                 blank_rssi=None, blank_bssid=None, blank_bad=[],
                 blank_ours=False, home_aps=[], home_miss={}, learn=False,
-                hid_wait=ROAM_CHECK, hid_at=None,
-                rounds=0, down_at=None, hh=None,
+                hid_wait=ROAM_CHECK, hid_at=None, blank_any=False,
+                rounds=0, hh=None,
                 seen_at=None, seen_wait=SEEN_WAIT, pb_conn_at=time.ticks_ms())
+    # the link is down since boot (a board booting faster than the
+    # router): _web_search counts from here, as after a drop (lost)
+    wifi["down_at"] = time.ticks_ms()
+    wifi["down_home"] = True
+    wifi["down_rssi"] = None
 
 def _set_hostname(name):
     if not name:
@@ -2143,26 +2152,37 @@ def _scan_known(w):
     taken first (blank_ours); else the strongest blank AP stays weak
     evidence (a mesh node not learned yet): enough for the candidate order
     and a roam, not for "home in range" or the keep-alive wake. A blank AP
-    whose hidden-home try failed lately (blank_bad) is skipped."""
-    by = {}
-    for n in wifi["nets"]:
-        by[_ssid_b(n)] = n
-    mine = wifi.get("home_aps") or ()
+    whose hidden-home try failed lately (blank_bad) is skipped. A
+    MemoryError after the scan (the stay check, the copies below) is a
+    failed scan too: it escaped wifi_tick and reset the board."""
     try:
         aps = w.scan()
     except SCAN_ERR:
         aps = None
-    if aps is None or _scan_empty(aps):
-        wifi["blank_rssi"] = None
-        wifi["blank_bssid"] = None
-        wifi["blank_ours"] = False
-        return None
+    if aps is not None and not _scan_empty(aps):
+        try:
+            return _scan_found(aps)
+        except MemoryError:
+            gc.collect()
+    wifi["blank_rssi"] = None
+    wifi["blank_bssid"] = None
+    wifi["blank_ours"] = False
+    wifi["blank_any"] = False
+    return None
+
+def _scan_found(aps):
+    """_scan_known's list from a good scan (aps)."""
+    by = {}
+    for n in wifi["nets"]:
+        by[_ssid_b(n)] = n
+    mine = wifi.get("home_aps") or ()
     _stay_scan(aps)
     _home_seen(aps)
     now = time.ticks_ms()
     best = {}
     blank_rssi, blank_bssid = None, None
     own_rssi, own_bssid = None, None
+    wifi["blank_any"] = False
     for rec in aps:
         # SSIDs compared as bytes: a neighbour's Latin-1 or cut-off UTF-8
         # SSID raised UnicodeError on decode() and crashed the logger
@@ -2171,6 +2191,7 @@ def _scan_known(w):
         rssi = rec[3]
         bssid = rec[1] if len(rec) > 1 else None
         if not ssid:
+            wifi["blank_any"] = True     # some hidden AP is around
             if _blank_bad(bssid, now):
                 continue                 # its hidden-home try failed
             if bssid in mine:
@@ -2451,8 +2472,10 @@ def _candidate_order(w):
     """Visible strongest first (deduped), then unscanned nets in config
     order: all of them when the scan failed, else only hidden ones (a scan
     never lists them by name) and, every UNLISTED_EVERY rounds (the first
-    one too), the rest (a scan can miss an AP). Each try of a network that
-    is not there costs CONNECT_TIMEOUT with the radio on."""
+    one too), the rest (a scan can miss an AP). A hidden network still
+    beacons with an empty SSID: a good scan without any blank AP leaves
+    it for that Nth round too. Each try of a network that is not there
+    costs CONNECT_TIMEOUT with the radio on."""
     now = time.ticks_ms()
     scanned = _scan_known(w)
     rounds = wifi.get("rounds") or 0
@@ -2462,9 +2485,10 @@ def _candidate_order(w):
     else:
         seen = set(n["ssid"] for n in scanned)
         every = rounds % UNLISTED_EVERY == 0
+        blank = wifi.get("blank_any")
         cands = scanned + [dict(n) for n in wifi["nets"]
                            if n["ssid"] not in seen
-                           and (every or n.get("hidden"))]
+                           and (every or (blank and n.get("hidden")))]
     if _blank_home_ok() and wifi.get("blank_ours"):
         # a hidden home behind one of its learned BSSIDs gets the scan's
         # RSSI, so a failed first association is retried at once
@@ -2649,6 +2673,9 @@ def _wifi_next(w):
     cands = wifi.get("cand") or []
     if i < len(cands):
         return _wifi_connect(w, cands[i])
+    # a roam is over: status() raising during it (no _mark_failed) left
+    # roaming set, and a later hidden-home failure was taken for a roam
+    wifi["roaming"] = False
     _wifi_round_failed(w)
     return False
 
@@ -2658,8 +2685,6 @@ def _wifi_round_failed(w):
     off between rounds (_wifi_begin_round turns it on); with nothing to
     upload, sleep (not yet while _web_search)."""
     now = time.ticks_ms()
-    if wifi.get("down_at") is None:
-        wifi["down_at"] = now
     if _nothing_to_send() and not _web_search(now):
         _wifi_off(w, "sleep")
         return
@@ -2671,15 +2696,24 @@ def _wifi_round_failed(w):
 
 def _web_search(now):
     """The status page is on (at home, or WEB_AWAY) and no keep-alive scan
-    can see the home network come back (_home_seen): a failed round keeps
-    searching with the "not found" backoff for WEB_SEARCH after the link
-    went down, instead of sleeping WIFI_SLEEP (1 h, page down) at once
-    (a router restart, a board booting faster than the router). A hidden
-    home whose BSSIDs are not known yet is invisible to those scans."""
+    can see the dropped network come back (_home_seen): a failed round
+    keeps searching with the "not found" backoff for WEB_SEARCH after the
+    link went down (down_at: boot, lost, a roam), instead of sleeping
+    WIFI_SLEEP (1 h, page down) at once (a router restart, a board booting
+    faster than the router). Those scans watch home networks only, at
+    >= SEEN_MIN_RSSI: not a hidden home whose BSSIDs are not known yet, a
+    home link that dropped weaker than that, or the hotspot WEB_AWAY
+    served the page on. The hourly round after a deliberate sleep is no
+    drop (down_at None)."""
     if not WEB or not (WEB_AWAY or _has_home()):
         return False
     if PB_KEEPALIVE and PB_MODE == "scan" and _home_seeable():
-        return False
+        r = wifi.get("down_rssi")
+        if not wifi.get("down_home"):
+            if not WEB_AWAY:
+                return False             # no page off home anyway
+        elif r is None or r >= SEEN_MIN_RSSI:
+            return False                 # _home_seen wakes it
     at = wifi.get("down_at")
     return at is not None and _age(now, at) < WEB_SEARCH
 
@@ -2874,6 +2908,9 @@ def _try_roam_home(w, arrival=False):
     wifi["cand_i"] = 0
     wifi["retried"] = False
     wifi["roaming"] = True
+    wifi["down_at"] = now                # the link is left: if neither
+    wifi["down_home"] = False            # connects, a drop off home
+    wifi["down_rssi"] = None
     print("wifi roam", target["ssid"])
     _wifi_connect(w, target)
 
@@ -3144,7 +3181,7 @@ def _pb_wlan():
 
 def _home_seen(aps):
     """With the status page on (WEB), a keep-alive scan that sees a home
-    network at >= ROAM_MIN_RSSI while the radio sleeps or found nothing
+    network at >= SEEN_MIN_RSSI while the radio sleeps or found nothing
     starts a round now. Before, a router restart (or a board booting
     faster than the router) left the page down for WIFI_SLEEP (1 h) while
     every scan saw home. At most every seen_wait ms, doubling while those
@@ -3157,7 +3194,7 @@ def _home_seen(aps):
         return
     mine = wifi.get("home_aps") or ()    # the hidden home's learned BSSIDs
     for rec in aps:
-        if rec[3] < ROAM_MIN_RSSI:
+        if rec[3] < SEEN_MIN_RSSI:
             continue
         raw = rec[0]
         if not isinstance(raw, bytes):
@@ -3299,6 +3336,10 @@ def wifi_tick():
         wifi["state"] = "lost"
         wifi["lost_at"] = now
         wifi["fails"] = 0
+        # a drop: what dropped decides whether _web_search searches
+        wifi["down_at"] = now
+        wifi["down_home"] = bool(wifi.get("home"))
+        wifi["down_rssi"] = wifi.get("rssi")
         _wifi_diag("lost", "wifi lost %s rssi %s" % (wifi.get("ssid") or "",
                                                     wifi.get("rssi")))
         # a stay that began at home stays a home stay while the link is

@@ -1355,8 +1355,10 @@ try:
     # WR-a: a good scan that lists none of them: the boot round tries every
     # configured network (12 s each, radio on), later rounds only every
     # UNLISTED_EVERY rounds; a hidden one (never listed by name) every round
-    def wr_rounds(env_text, n):
-        start_wifi(env_text, [("unrelated", -40)], [])
+    # while the scan shows some blank AP (WB-5: none, a hidden one cannot
+    # be there either)
+    def wr_rounds(env_text, n, aps=(("unrelated", -40),)):
+        start_wifi(env_text, list(aps), [])
         tries = []
         for _ in range(n):
             WLAN.connects = []
@@ -1368,10 +1370,12 @@ try:
         return tries
     every = getattr(gl, "UNLISTED_EVERY", 4)
     tries = wr_rounds(triple, every)
-    hid = wr_rounds(env_hid_home, 2)
+    hid = wr_rounds(env_hid_home, 2, (("unrelated", -40), ("", -80)))
+    hid_none = wr_rounds(env_hid_home, 2)
     check("WR-a: unlisted networks are tried at boot and every Nth round",
           tries == [[]] * (every - 1) + [["home", "phone", "cabin"]]
-          and hid == [["home"], ["home"]], "%r %r" % (tries, hid))
+          and hid == [["home"], ["home"]] and hid_none == [[], []],
+          "%r %r %r" % (tries, hid, hid_none))
     # logging continues
     gl.log_reset()
     gl.log["full"] = False
@@ -8815,6 +8819,191 @@ try:
           and back <= 120 and gl.wifi["state"] == "sleep",
           "%r %r %r" % (first, back, gl.wifi["state"]))
     gl.WEB, gl.PB_MODE = False, "scan"
+
+    def wb_drop(w, aps_back, ok_back, after, limit=10 * 60):
+        """The link drops (beacon timeout), the AP is back after `after` s:
+        seconds until connected again (None within `limit`)."""
+        WLAN.ok, WLAN.scan_aps = set(), []
+        w._status = 5
+        w._requested = True
+        for i in range(limit):
+            if i == after:
+                WLAN.ok, WLAN.scan_aps = set(ok_back), aps_back
+            _clock[0] += 1000
+            gl.wifi_tick()
+            gl.keepalive_tick(_clock[0])
+            if i > after and gl.wifi["state"] == "connected":
+                return i + 1
+        return None
+
+    # WB-1: WEB on, the home AP at -78 dBm (connects fine, under
+    # ROAM_MIN_RSSI), a router restart of 60 s with nothing to send: the
+    # keep-alive scans saw home only at >= ROAM_MIN_RSSI, so the radio
+    # slept WIFI_SLEEP (page down 1 h); at -60 dBm it was back in 64 s
+    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = True, False, "scan"
+    wb_mine = b"\x61" * 6
+    wb_back = []
+    for hid in (False, True):
+        aps = [("" if hid else "home", -78, wb_mine)]
+        ns = [dict(n) for n in hid_nets] if hid else rv_nets()
+        w = rv_connect(["home"], aps, nets=ns)
+        if hid:
+            gl.wifi["home_aps"] = [wb_mine]
+        for _ in range(30):
+            _clock[0] += 1000
+            gl.wifi_tick()
+            gl.keepalive_tick(_clock[0])
+        wb_back.append(wb_drop(w, aps, ["home"], 60))
+    check("WB-1: a weak home AP (-78 dBm) back after a router restart wakes "
+          "the radio", all(b is not None and b <= 150 for b in wb_back),
+          "back after %r s" % (wb_back,))
+    # under SEEN_MIN_RSSI no scan wakes it: the drop searches instead
+    aps = [("home", -88, wb_mine)]
+    w = rv_connect(["home"], aps)
+    for _ in range(gl.WIFI_CHECK // 1000 + 2):
+        _clock[0] += 1000
+        gl.wifi_tick()
+    rssi0 = gl.wifi["rssi"]
+    back = wb_drop(w, aps, ["home"], 60)
+    check("WB-1: a home link dropped under SEEN_MIN_RSSI searches on",
+          rssi0 == -88 and back is not None and back <= 150,
+          "%r back after %r s" % (rssi0, back))
+
+    # WB-2: WEB_AWAY, on the phone hotspot with nothing to send: a 20 s
+    # blip took the "a keep-alive scan sees home come back" shortcut,
+    # but those scans only watch home networks: page down 1 h
+    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = True, True, "scan"
+    w = rv_connect(["hot"], [("hot", -50)])
+    for _ in range(60):
+        _clock[0] += 1000
+        gl.wifi_tick()
+        gl.keepalive_tick(_clock[0])
+    on_hot = gl.wifi["state"] == "connected" and gl.wifi["ssid"] == "hot"
+    back = wb_drop(w, [("hot", -50)], ["hot"], 20)
+    check("WB-2: WEB_AWAY: a hotspot blip searches on (not 1 h asleep)",
+          on_hot and back is not None and back <= 120,
+          "%r back after %r s" % (on_hot, back))
+    # without WEB_AWAY there is no page on the hotspot: it sleeps as before
+    gl.WEB_AWAY = False
+    w = rv_connect(["hot"], [("hot", -50)])
+    WLAN.ok, WLAN.scan_aps = set(), []
+    w._status = 5
+    w._requested = True
+    for _ in range(30):
+        _clock[0] += 1000
+        gl.wifi_tick()
+    check("WB-2: without WEB_AWAY a hotspot drop still sleeps",
+          gl.wifi["state"] == "sleep", gl.wifi["state"])
+
+    # WB-3: down_at was set by any failed round, also the hourly one after
+    # a deliberate sleep (all uploaded): _web_search took that for a fresh
+    # drop and searched for WEB_SEARCH (~7 extra rounds in ~35 min)
+    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = True, False, "gpio"
+    w = rv_connect(["hot"], [("hot", -50)])
+    gl.wifi["idle_at"] = _clock[0] - gl.WIFI_IDLE
+    gl.wifi_tick()
+    slept = gl.wifi["state"]
+    WLAN.ok, WLAN.scan_aps = set(), []
+    real_br = gl._wifi_begin_round
+    wb_rounds = [0]
+
+    def wb_round(w, real=real_br):
+        wb_rounds[0] += 1
+        return real(w)
+    gl._wifi_begin_round = wb_round
+    try:
+        for _ in range(int(2.5 * 3600) // 5):
+            _clock[0] += 5000
+            gl.wifi_tick()
+    finally:
+        gl._wifi_begin_round = real_br
+    check("WB-3: a failed round after a deliberate sleep is no drop (no "
+          "WEB_SEARCH rounds)", slept == "sleep" and wb_rounds[0] <= 3
+          and gl.wifi["state"] == "sleep" and gl.wifi["down_at"] is None,
+          "%r %d rounds %r %r" % (slept, wb_rounds[0], gl.wifi["state"],
+                                  gl.wifi["down_at"]))
+    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = False, False, "scan"
+
+    # WB-4: a MemoryError after the scan (_stay_scan, _home_seen, the sort,
+    # the dict copies) escaped wifi_tick and the roam: run()'s crash
+    # handler reset the board. Now a failed scan (every network tried)
+    w = rv_connect([], [("cafe", -60, b"\x04" * 6), ("hot", -50)])
+    real_ss = gl._stay_scan
+
+    def wb_boom(aps):
+        raise MemoryError("memory allocation failed")
+    gl._stay_scan = wb_boom
+    wb_err = []
+    try:
+        gl.wifi["state"] = "not found"
+        gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"] - 1
+        try:
+            gl.wifi_tick()
+        except MemoryError as e:
+            wb_err.append(("round", repr(e)))
+        tried = [c["ssid"] for c in gl.wifi.get("cand") or []]
+        try:
+            gl._try_roam_home(w)
+        except MemoryError as e:
+            wb_err.append(("roam", repr(e)))
+    finally:
+        gl._stay_scan = real_ss
+    check("WB-4: a MemoryError after a scan is a failed scan, not a reset",
+          not wb_err and tried == ["home", "hot"], "%r %r" % (wb_err, tried))
+
+    # WB-5: a good scan with no empty-SSID AP at all: a hidden network
+    # cannot be in range (it beacons with an empty SSID), so it waits for
+    # the UNLISTED_EVERY round like the other unlisted ones (12 s each)
+    w = rv_connect([], [], nets=[dict(n) for n in hid_nets])
+    w.active(True)
+    order = {}
+    for name, aps, rounds in (("none", [("hot", -50)], 1),
+                              ("blank", [("hot", -50), ("", -80, b"\x62" * 6)],
+                               1),
+                              ("every", [("hot", -50)], gl.UNLISTED_EVERY),
+                              ("failed", [], 1)):
+        WLAN.scan_aps = aps
+        gl.wifi["rounds"] = rounds
+        gl.wifi["empty"] = 0
+        gl.wifi["failed"] = {}
+        order[name] = [c["ssid"] for c in gl._candidate_order(w)]
+    check("WB-5: no blank AP in a good scan: the hidden home waits for the "
+          "UNLISTED_EVERY round", order == {"none": ["hot"],
+                                             "blank": ["hot", "home"],
+                                             "every": ["hot", "home"],
+                                             "failed": ["home", "hot"]},
+          repr(order))
+
+    # WB-6: status() raising during a roam (_wifi_poll -> _wifi_next, no
+    # _mark_failed) left roaming set once the hotspot fallback failed too;
+    # a later failed hidden-home try in a plain round then blamed a blank
+    # AP and grew hid_wait as if it were a roam
+    w = rv_connect(["hot"], [("", -50, b"\x63" * 6), ("hot", -40)],
+                   nets=[dict(n) for n in hid_nets])
+    _clock[0] += gl.FAIL_HOLD            # the boot round's home try
+    gl._try_roam_home(w)
+    roam_to = gl.wifi.get("ssid")
+    WLAN.ok = set()
+    wb_raise = [2]
+
+    def wb_status(arg=None, real=w.status):
+        if wb_raise[0] > 0 and arg is None:
+            wb_raise[0] -= 1
+            raise OSError("status")
+        return real(arg)
+    w.status = wb_status
+    try:
+        for _ in range(30):
+            _clock[0] += 500
+            gl.wifi_tick()
+            if gl.wifi["state"] != "connecting":
+                break
+    finally:
+        del w.status
+    check("WB-6: roaming is cleared once a roam's candidates are used up",
+          roam_to == "home" and gl.wifi["state"] in ("not found", "sleep")
+          and gl.wifi.get("roaming") is False,
+          "%r %r %r" % (roam_to, gl.wifi["state"], gl.wifi.get("roaming")))
 
     # WR-e: wifi_tick asked any(home) of every configured network on every
     # loop pass: cached per nets list
