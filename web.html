@@ -11,7 +11,7 @@
      and redraws the boxes. The map tiles come from OpenStreetMap and the
      fonts from Google Fonts when the phone is online. -->
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
 <style>
 :root{--b:#060b16;--l:#16233d;--t:#d6e2ff;--m:#7487ae;--a:#22d3ee;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
 body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-serif}
@@ -62,7 +62,7 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .col{display:flex;flex-direction:column;gap:12px}.col .p:last-child{flex:1}
 /* sky radar */
 .radar svg{display:block;width:100%;max-width:380px;margin:auto}
-.col.l .p{flex:none}.col.l .radar{flex:1;display:flex;flex-direction:column}
+.col.l .p{flex:none}.col.l .radar{flex:1;display:flex;flex-direction:column;contain:size;min-height:320px}  /* (its own size 0: it fills what Systems leaves, not its width) */
 .col.l .radar svg{flex:1;height:0;min-height:240px;max-width:none}
 .rg{fill:none;stroke:rgba(34,211,238,.18)}.rx{stroke:rgba(34,211,238,.12)}
 .sweep{fill:url(#sw)}
@@ -74,8 +74,22 @@ circle.u{fill:none;filter:none;opacity:.7}
 .legend i{display:inline-block;width:8px;height:8px;border-radius:4px;background:var(--s);box-shadow:0 0 6px var(--s);margin-right:5px}
 .legend .u i{background:none;border:1.5px solid var(--m);box-shadow:none;box-sizing:border-box}
 /* signal */
-.r{display:flex;align-items:flex-end;gap:2px;height:90px;background:linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 0/100% 1px no-repeat,linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 33.33%/100% 1px no-repeat,linear-gradient(rgba(34,211,238,.1),rgba(34,211,238,.1)) 0 66.67%/100% 1px no-repeat}
-.r i{flex:1;min-height:2px;background:linear-gradient(0deg,var(--s),transparent 140%);box-shadow:0 0 6px var(--s)}
+/* Signal: a bar a satellite, in words (strong / fair / weak), no dB-Hz */
+.sg-h{display:flex;gap:2px 22px;align-items:baseline;flex-wrap:wrap;margin:0 0 4px}.sg-h b{font:500 26px "JetBrains Mono",monospace;color:#fff}.sg-h .q-strong{color:#7fe39a}.sg-h .q-fair{color:#a3e635}.sg-h .q-weak{color:#fbbf24}.sg-h .q-none{color:#f87171}
+.sg-h b em{font:400 12px "JetBrains Mono",monospace;color:#8a96ad;font-style:normal;margin-left:6px}
+.sg-s{color:#8a96ad;font-size:12px;margin:0 0 10px}
+.q-strong{color:#7fe39a}.q-fair{color:#a3e635}.q-weak{color:#fbbf24}.q-none{color:#f87171}
+.sg-c{position:relative;height:150px;padding-right:58px}
+.sg-z{position:absolute;inset:0 0 18px 0;display:flex;flex-direction:column}.sg-z i{position:relative;display:block}
+.sg-z i:before{content:"";position:absolute;inset:0 58px 0 0;background:currentColor;opacity:.05}
+.sg-z i.q-strong{height:30%}.sg-z i.q-fair{height:20%}.sg-z i.q-weak{height:50%}
+.sg-z em{position:absolute;right:0;top:50%;transform:translateY(-50%);font:10px "JetBrains Mono",monospace;font-style:normal}
+.sg-r{position:relative;display:flex;gap:4px;height:100%}
+.sg-k{flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-width:0}
+.sg-k span{height:18px;line-height:18px;text-align:center;font:10px "JetBrains Mono",monospace;color:#8a96ad;overflow:hidden}
+.sg-b{display:block;margin:0 18%;border-radius:3px 3px 1px 1px;background:currentColor}
+.sg-b.sg-u{background:none;border:1.5px solid #7487ae;box-sizing:border-box;color:#7487ae}.sg-b.sg-0{border-style:dashed;height:3px!important}
+.sg-l{font-size:11px;color:#8a96ad;margin-top:6px}.sg-l i{display:inline-block;width:9px;height:9px;border:1.5px solid #7487ae;border-radius:2px;margin:0 6px 0 14px;vertical-align:-1px}
 .r .u{opacity:.25;box-shadow:none}
 /* systems */
 
@@ -121,57 +135,95 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sx-k td.warn{color:var(--wo)}
 .sx-chip{display:inline-block;border:1px solid rgba(127,227,154,.45);background:rgba(127,227,154,.08);color:var(--g);font:600 10.5px Inter,sans-serif;letter-spacing:.06em;padding:4px 7px;border-radius:3px;margin-left:8px;vertical-align:1px;text-transform:uppercase}
 /* log + satellite table */
-/* Event log, after the "server log monitoring" design */
+/* GPS telemetry, after "Orbital Systems" (Orizon, dribbble 27639068): a
+   graphite panel with cut corners, a dot-matrix accuracy chart, amber anomaly */
+.gt{position:relative;margin-bottom:12px;background:radial-gradient(120% 140% at 50% 0%,#1d2622 0%,#121816 55%,#0d1110 100%);padding:18px 20px 20px;color:#e7efe9;font-family:Inter,sans-serif;
+ clip-path:polygon(16px 0,calc(100% - 16px) 0,100% 16px,100% calc(100% - 16px),calc(100% - 16px) 100%,16px 100%,0 calc(100% - 16px),0 16px)}
+.gt:before,.gt-b:before,.gt-an:before{content:"";position:absolute;inset:0;pointer-events:none;border:1px solid rgba(214,232,222,.16);clip-path:inherit}
+.gt-hd{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.gt-hd h3{font:400 21px Audiowide,"JetBrains Mono",monospace;margin:0;color:#e7efe9}.gt-hd h3 small{display:block;font:400 11px Inter,sans-serif;color:#8b9590;margin-top:6px}
+.gt-chip{font:400 11px Audiowide,monospace;padding:5px 10px;border:1px solid rgba(214,232,222,.16);color:#d7ece0;background:rgba(215,236,224,.06)}
+.gt-chip.a{color:#f5a524;border-color:rgba(245,165,36,.4);background:rgba(245,165,36,.08)}
+.gt-g{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}.gt-g>*{min-width:0}
+.gt-b{position:relative;background:rgba(255,255,255,.025);padding:14px 16px;clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px)}
+.gt-l{font:400 12px Audiowide,monospace}.gt-l em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590;margin-left:8px}
+.gt-big{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:4px 12px;margin:6px 0 10px}.gt-big b{font:400 30px Audiowide,monospace}
+.gt-big span{font:500 11px "JetBrains Mono",monospace;color:#d7ece0}
+.gt-dm{display:flex;gap:2px;align-items:flex-end;height:96px;margin-left:34px}.gt-c{flex:1;display:flex;flex-direction:column-reverse;gap:2px;height:100%;min-width:0}
+.gt-c s{display:block;flex:1;background:rgba(215,236,224,.07)}.gt-c s.on{background:#d7ece0}.gt-c s.am{background:#f5a524}.gt-c s.rd{background:#ef8a4c}.gt-c.x s:first-child{background:#ef5b4c}
+.gt-ax{display:flex;justify-content:space-between;font:500 10.5px "JetBrains Mono",monospace;color:#8b9590;margin-top:6px}
+.gt-lg{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#8b9590}.gt-lg b{display:inline-block;width:8px;height:8px;margin-right:6px;background:#d7ece0}
+.gt-lg b.am{background:#f5a524}.gt-lg b.rd{background:#ef8a4c}.gt-lg b.x{background:#ef5b4c}
+.gt-dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}.gt-dg svg{display:block;width:100%;height:40px}
+.gt-dg small{display:block;font-size:11px;color:#8b9590;margin-top:4px}.gt-dg b{font:500 14px "JetBrains Mono",monospace}.gt-dg b em{font:400 11px Inter,sans-serif;font-style:normal;color:#8b9590}
+.gt-lk{display:flex;align-items:center;gap:8px;margin-top:6px}.gt-lk span{font:500 10px "JetBrains Mono",monospace;color:#8b9590;width:26px;flex:none}
+.gt-lk div{flex:1;display:flex;gap:2px;height:8px;min-width:0}.gt-k{flex:1;min-width:0;background:rgba(215,236,224,.07)}.gt-k.ok{background:#7fbf9a}.gt-k.am{background:#f5a524}.gt-k.rd{background:#ef5b4c}
+.gt-mks{position:relative;height:22px;margin:2px 0 0 34px}.gt-mk{position:absolute;top:0;transform:translateX(-50%);font:500 10px "JetBrains Mono",monospace;color:#ef5b4c;white-space:nowrap;text-align:center}
+.gt-mk i{display:block;width:0;height:0;margin:0 auto 2px;border:4px solid transparent;border-bottom-color:#ef5b4c;border-top:0}
+.gt-ax{padding-left:34px}.gt-lg .gt-sep{margin-left:6px;color:#d7ece0}.gt-lg b.ok{background:#7fbf9a}
+.gt-n{display:block;font:400 26px Audiowide,monospace!important}
+.gt-an>p{display:flex;justify-content:space-between;margin:0;padding:6px 0;border-top:1px solid rgba(245,165,36,.18);font:500 12px "JetBrains Mono",monospace;color:#ffe2b0}
+.gt-an>p b{font-weight:500;color:#f5a524}.gt-an>p.gt-more{color:#b9a27a;font-size:11px}
+.gt-ok{margin:12px 0 0;font-size:12px;color:#8b9590}
+.gt-n.a{color:#f5a524}.gt-n em{font:400 12px Inter,sans-serif;font-style:normal;color:#8b9590;margin:0 2px}
+.gt-bad{margin:12px 0 0;font-size:12px;color:#8b9590}.gt-bad b{font:500 13px "JetBrains Mono",monospace;color:#e7efe9}
+
+.gt-an{position:relative;margin-top:14px;background:linear-gradient(180deg,rgba(245,165,36,.16),rgba(245,165,36,.05));padding:12px 14px;clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.gt-an:before{border-color:rgba(245,165,36,.45)}
+.gt-an h4{margin:0 0 8px;font:400 13px Audiowide,monospace;color:#ffe2b0;display:flex;gap:10px;align-items:center}
+.gt-an h4 i{width:22px;height:22px;display:grid;place-items:center;border:1px solid rgba(245,165,36,.6);font-style:normal;color:#f5a524;font-size:12px}
+/* Event log, aggregated (Sentry / Loki patterns): KPI tiles, GPS telemetry,
+   the events grouped by kind */
 .ev{--g:#7fe39a;--lab:#8a96ad;--ln:rgba(255,255,255,.07);margin-top:12px;padding:18px;font-family:"JetBrains Mono",ui-monospace,monospace}
 .ev-t{font:500 26px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}
 .ev-s{font:400 12px "JetBrains Mono",monospace;color:var(--lab);margin:0 0 16px}
-.ev-row{display:grid;grid-template-columns:2fr 1fr;gap:12px}
+.ev-k4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+.ev-k4 div{background:rgba(255,255,255,.04);border-radius:10px;padding:10px 12px;min-width:0}
+.ev-k4 small{display:block;font-size:10.5px;color:var(--lab);letter-spacing:.06em;text-transform:uppercase}
+.ev-k4 b{font:500 22px "JetBrains Mono",monospace;color:#fff;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ev-k4 b em{font:400 12px "JetBrains Mono",monospace;color:var(--lab);font-style:normal;margin-left:4px}
+.ev-k4 .t-ok b{color:var(--g)}.ev-k4 .t-warn b{color:var(--warn)}
 .ev-card{background:rgba(0,0,0,.25);border:1px solid var(--ln);border-radius:12px;padding:14px 16px;min-width:0}
-.ev-card h3{font:500 14px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}.ev-card>p{margin:0 0 8px;font-size:12px;color:var(--lab)}
-.ev-leg{display:flex;gap:14px;font-size:11px;color:var(--lab);margin-top:4px}
-.ev-leg i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:6px;vertical-align:2px;background:var(--g)}.ev-leg .u i{background:var(--a)}
-.ev-ch{width:100%;display:block}.ev-ch .gr line{stroke:rgba(255,255,255,.06)}
-.ev-ch text{fill:var(--lab);font:10px "JetBrains Mono",monospace;text-anchor:middle}.ev-ch .gr text{text-anchor:end}
-.ev-ch .l1{fill:none;stroke:var(--g);stroke-width:2.2;filter:drop-shadow(0 0 4px rgba(127,227,154,.8))}
-.ev-ch .l2{fill:none;stroke:var(--a);stroke-width:1.6;opacity:.9}
-.ev-dn{width:150px;display:block;margin:6px auto 10px}.ev-dn circle,.ev-dn path{fill:none;stroke-width:16}.ev-dn .bg{stroke:rgba(255,255,255,.06)}
-.ev-dn .ok{stroke:var(--g);filter:drop-shadow(0 0 4px rgba(127,227,154,.5))}.ev-dn .warn{stroke:var(--warn)}.ev-dn .bad{stroke:var(--bad)}
-.ev-dn .big{fill:#fff;font:500 26px "JetBrains Mono",monospace;text-anchor:middle;dominant-baseline:middle}
-.ev-dn .sm{fill:var(--lab);font:9px "JetBrains Mono",monospace;text-anchor:middle;letter-spacing:.1em}
-.ev-k4{display:grid;grid-template-columns:1fr 1fr;gap:6px}.ev-k4 div{background:rgba(255,255,255,.04);border-radius:8px;padding:9px 10px}
-.ev-k4 small{display:block;font-size:10px;color:var(--lab)}.ev-k4 b{font:500 15px "JetBrains Mono",monospace;color:#fff}
-.ev-logs{margin-top:12px}
-.ev-chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 8px}
-.ev-chips button{font:12px "JetBrains Mono",monospace;color:#c9d3e6;padding:6px 10px;border-radius:7px;background:rgba(255,255,255,.04);border:0;cursor:pointer}
-.ev-chips button.on{background:rgba(127,227,154,.14);color:var(--g)}.ev-chips em{font-style:normal;color:var(--lab);margin-left:6px}
-.lr{display:grid;grid-template-columns:28px 1.3fr 1fr 1fr 1fr 1fr 70px 52px;align-items:center;gap:12px;padding:8px 10px;border-radius:8px;font-size:12.5px;color:#e6ecf7}
-#log .lr:nth-child(odd){background:rgba(255,255,255,.025)}
-.lr.hd{font-size:10.5px;color:var(--lab);letter-spacing:.08em;padding-top:2px;padding-bottom:6px;border-bottom:1px solid var(--ln);border-radius:0;margin-bottom:4px}
-.lr .ic{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;background:rgba(127,227,154,.12)}
-.lr .ic svg{width:14px;height:14px;fill:none;stroke:var(--g);stroke-width:2}
-.lr .ic.boot,.lr .ic.ota{background:rgba(34,211,238,.12)}.lr .ic.boot svg,.lr .ic.ota svg{stroke:var(--a)}
-.lr .ic.err{background:rgba(248,113,113,.12)}.lr .ic.err svg{stroke:var(--bad)}.lr .ic.warn{background:rgba(251,191,36,.12)}.lr .ic.warn svg{stroke:var(--warn)}
-.lr b{font-weight:500;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lr b.ok{color:var(--g)}.lr b.warn,.lr .c.warn{color:var(--warn)}.lr b.err,.lr .c.err{color:var(--bad)}.lr b.boot,.lr b.ota{color:var(--a)}.lr b.info{color:#c4b5fd}
-.lr .c em{font-style:normal;color:var(--lab)}
-.lr .ms{grid-column:3/7;color:#c9d3e6;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.lr .src{color:var(--lab);font-size:11px}.lr .lt{color:var(--lab);text-align:right}
+.ev-card+.ev-card{margin-top:12px}
+.ev-card h3{font:500 14px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}.ev-card>p{margin:0 0 10px;font-size:12px;color:var(--lab)}
+.ev-leg{display:flex;gap:14px;font-size:11px;color:var(--lab);margin-top:6px}
+.ev-leg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:-1px;background:var(--g)}.ev-leg .u i{background:var(--a)}
+/* the chart: lines in a stretched SVG (strokes kept thin), labels in HTML */
+.ev-pl{position:relative;height:160px;margin:8px 4px 24px 26px}
+.ev-pl svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.ev-pl line{stroke:rgba(255,255,255,.06);vector-effect:non-scaling-stroke}
+.ev-pl path{fill:none;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.ev-pl .s{stroke:var(--g);stroke-width:1.6}.ev-pl .u{stroke:var(--a);stroke-width:1.4;opacity:.9}
+.ev-pl span{position:absolute;font-size:10px;color:var(--lab);line-height:1}
+.ev-pl .y{left:-26px;width:20px;text-align:right;transform:translateY(-50%)}
+.ev-pl .x{top:100%;margin-top:7px;transform:translateX(-50%)}
+.ev-grp{display:grid;grid-template-columns:30px 1.3fr 64px 2fr 150px 54px;gap:12px;align-items:center;padding:9px 10px;border-radius:8px;font-size:12.5px}
+.ev-grp:nth-child(even){background:rgba(255,255,255,.025)}
+.ev-grp.ev-hd{font-size:10.5px;color:var(--lab);letter-spacing:.08em;border-bottom:1px solid var(--ln);border-radius:0;background:none}
+.ev-grp>*{min-width:0}
+.ev-ic{position:relative;width:26px;height:26px;border-radius:7px;display:grid;place-items:center}
+.ev-ic:before{content:"";position:absolute;inset:0;border-radius:7px;background:currentColor;opacity:.14}
+.ev-ic svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ev-nm{overflow:hidden;text-overflow:ellipsis}
+.ev-n{font:600 18px "JetBrains Mono",monospace;color:#fff;text-align:right;font-variant-numeric:tabular-nums}
+.ev-hd .ev-n{font:inherit;color:inherit}
+.ev-dt{color:#c9d3e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ev-dt em{color:var(--lab);font-style:normal}
+.ev-sk{display:flex;gap:2px;align-items:flex-end;height:22px}.ev-sk i{flex:1;background:rgba(255,255,255,.06);border-radius:2px;min-height:2px}
+.ev-sk i.on{background:currentColor}
+.ev-lt{color:var(--lab);text-align:right;white-space:nowrap}
+.t-bad{color:var(--bad)}.t-warn{color:var(--warn)}.t-ok{color:var(--g)}.t-boot{color:var(--a)}.t-mut{color:var(--m)}
 details.p{margin-top:12px}
 details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter-spacing:.16em;color:var(--m);text-transform:uppercase}
 .svt{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
 .svt td{padding:3px 6px;border-top:1px solid var(--l);text-align:right}
 .svt td:first-child{text-align:left}.svt .u td{color:var(--m)}
-/* GPS link alert, track and static panels */
+/* GPS link alert and the track panel */
 .alert{margin-bottom:12px;padding:11px 14px;border:1px solid var(--bad);border-radius:14px;background:rgba(248,113,113,.12);color:var(--bad);font:600 12px "JetBrains Mono",monospace;letter-spacing:.08em}
 .alert em{font-style:normal;color:var(--t);font-weight:400;margin-left:8px}
 .alert:empty{display:none}
 .ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}.ph h2{margin:0;margin-right:auto}
 .btn{font:600 11px "JetBrains Mono",monospace;letter-spacing:.08em;color:var(--a);background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.35);border-radius:8px;padding:5px 9px;cursor:pointer}
 .btn:disabled{opacity:.4;cursor:default}
-.kv{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-family:"JetBrains Mono",monospace}
-.kv small{display:block;font-size:10px;font-weight:600;letter-spacing:.14em;color:var(--m)}.kv b{font-size:16px;color:#fff}
-.scat svg{display:block;width:100%;margin-top:10px}
-.k3{grid-template-columns:repeat(3,1fr)}
 .dn{font:600 12px "JetBrains Mono",monospace;letter-spacing:.08em;color:#fff;min-width:96px;text-align:center}
 .kpi{display:flex;gap:22px;font-family:"JetBrains Mono",monospace;margin-bottom:12px}.kpi b{font-size:22px;color:#fff}.kpi em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
 .tr{display:grid;grid-template-columns:50px 18px 1fr;min-height:30px;font:12.5px "JetBrains Mono",monospace;line-height:16px}
@@ -185,13 +237,12 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .tr.go:hover span,.tr.go.on span,.tr.go.on span b{color:var(--a)}.tr.go.on i:after{border-left-color:#fff}
 .tr.end i:after{display:none}
 .trk path.hl{stroke:#fff;stroke-width:5;filter:drop-shadow(0 0 6px rgba(255,255,255,.8))}
-.scat circle.d{fill:var(--a);opacity:.55}.scat .c50{fill:none;stroke:var(--ok);stroke-dasharray:3 3}.scat .c95{fill:none;stroke:var(--warn);stroke-dasharray:3 3}
 .hint{font-size:11px;color:var(--m);margin-top:8px}
 /* a narrow HUD wraps whole items (offline with a day's km it needs ~490 px;
    squeezed, the uptime broke over 5 lines into the map); the uptime of the
    last answer is not shown offline */
 @media(max-width:760px){.hud{flex-wrap:wrap;row-gap:6px}.hud>*{white-space:nowrap}.off .hud .up{display:none}
-.kv{grid-template-columns:repeat(2,1fr)}.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-row{grid-template-columns:1fr}.lr{grid-template-columns:24px 1.2fr 1fr 1fr 46px;gap:8px}.lr .pts,.lr .idf,.lr .src{display:none}.lr .ms{grid-column:3/5}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
+.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}}
 </style>
 </head>
 <body>
@@ -220,24 +271,17 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
       </div>
       <div class="p"><div class="ph"><h2>Track</h2><button class="btn" id="dprev" onclick="step(-1)">&lsaquo;</button><span class="dn" id="dname">TODAY</span><button class="btn" id="dnext" onclick="step(1)">&rsaquo;</button><button class="btn" id="gpx" onclick="gpxSave()">GPX</button></div>
         <div class="kpi" id="tkpi"></div><div id="tline"></div></div>
-      <div class="p"><div class="ph"><h2>Static test</h2><button class="btn" id="sbtn" onclick="statToggle()">START</button><button class="btn" onclick="statReset()">RESET</button></div>
-        <div class="kv k3" id="sstat"></div><div class="scat" id="scat"></div></div>
+      <div class="p sg"><h2>Signal</h2><div id="sig"></div></div>
     </div>
     <div class="col">
-      <div class="p"><h2 id="bh">Signal &middot; dBHz</h2><div class="r" id="bars"></div></div>
       <div class="p sx" id="sys"></div>
     </div>
   </div>
-  <!-- after the "server log monitoring" design: a chart, a donut, a table -->
-  <div class="p ev"><p class="ev-t">Event log</p><p class="ev-s">A status line every minute, events as they happen</p>
-    <div class="ev-row">
-      <div class="ev-card"><h3>Satellites</h3><p>seen and used, one point a minute</p><div id="evc"></div>
-        <div class="ev-leg"><span><i></i>seen</span><span class="u"><i></i>used</span></div></div>
-      <div class="ev-card"><h3>Fix quality</h3><p>share of minutes</p><div id="evd"></div></div>
-    </div>
-    <div class="ev-card ev-logs"><h3>Logs</h3><p>status lines, boots, updates, errors</p><div class="ev-chips" id="evf"></div>
-      <div class="lr hd"><span></span><span>EVENT</span><span class="c sats">SATS</span><span class="c hdop">HDOP / ACC</span><span class="c pts">POINTS</span><span class="c idf">IDF BLOCK</span><span class="src">SOURCE</span><span class="lt">TIME</span></div>
-      <div id="log"></div></div>
+  <!-- the whole diag log on the board, aggregated: tiles, satellites, events by kind -->
+  <div class="p ev"><p class="ev-t">Event log</p><p class="ev-s" id="evs">reading the diag log&hellip;</p>
+    <div class="ev-k4" id="evk"></div>
+    <div id="evt"></div>
+    <div class="ev-card"><h3>Events, grouped</h3><p>what repeats, how often, when it was last seen</p><div id="evg"></div></div>
   </div>
   <details class="p"><summary id="svh">Satellite table</summary><table class="svt" id="svt"></table></details>
 </div>
@@ -252,13 +296,13 @@ var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
 var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
 // every status.json key the page shows (tests check none is missing)
-var SHOWN = ("fix sats hdop hacc fix_src ubx utc position pos6 nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
+var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
 var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime", "web_errs",
-  "track_drop", "write_errs", "q_thin"];   // raw status.json only
+  "track_drop", "write_errs", "q_thin", "pos6"];   // raw status.json only
 
 function esc(v) {
   if (v === null || v === undefined) return "-";
@@ -310,135 +354,356 @@ function cell(label, value, unit, tone) {
   return '<div class="' + (tone || "") + '"><small>' + label + "</small><b>" + value + (unit ? "<em>" + unit + "</em>" : "") +
     "</b></div>";
 }
-// Event log: the diag tail, newest on top. Status lines (one a minute) are
-// a row of numbers, everything else an event.
-var STATUS = /^up (\d+) utc (\S+) nmea (\d+)\/(\d+) gpsboots (\d+) loops (\d+) sats (\S+) fix (\S+) hdop (\S+) points (\d+) sent (\d+) wifi (\S+) pulses (\d+) mem (\d+) idf (\S+)\/(\S+)/;
-function clock(utc, up) {
-  var m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/.exec(utc);
-  if (!m) return "+" + Math.floor(up / 60) + "m";
-  var t = new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
-  return two(t.getHours()) + ":" + two(t.getMinutes());
-}
-var EV_ICON = {
-  st: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>',
-  boot: '<svg viewBox="0 0 24 24"><path d="M12 3v9M6.3 7.3a8 8 0 1 0 11.4 0"/></svg>',
-  ota: '<svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
-  info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>',
-  err: '<svg viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3zM12 10v5M12 18h.01"/></svg>'
+// Event log: the whole diag log on the board (DIAG_OLD, then DIAG_FILE, read
+// with /diag; ~26 h), aggregated as it is read: status lines (one a minute)
+// into the fix tiles and 5-minute satellite means, every other line into its
+// kind. An event line has no time: it takes the next status line's with a
+// utc (one without utc counts its minute, but is not on the chart).
+// The kinds: [key, test, name, severity (rows sorted by it), tone, icon]
+var EVK = [
+  ["crash", /^crash /, "Crash", 3, "bad", "bug"],
+  ["bug", /^(bug|web error) /, "Caught bug", 3, "bad", "bug"],
+  ["gloop", /^gps reset loop /, "GPS reset loop", 3, "bad", "loop"],
+  ["gsil", /^gps (silent|back) /, "GPS silent", 3, "bad", "mute"],
+  ["track", /^(track \S+ (failing|error) |upload: )/, "Track write error", 3, "bad", "disk"],
+  ["full", /^track full /, "Flash full", 3, "bad", "disk"],
+  ["upl", /^upload (err|aborted|ca err) /, "Upload error", 3, "bad", "up"],
+  ["ota", /^ota \S+ (installed|booted|ok$|set to boot|.*(rolled|rolling) back)/, "Firmware update", 1, "ok", "ota"],
+  ["otax", /^ota/, "Update check", 2, "warn", "ota"],
+  ["reboot", /^reboot /, "Reboot for memory", 2, "warn", "power"],
+  ["tback", /^time back /, "Clock went back", 2, "warn", "clock"],
+  ["wfail", /^wifi fail /, "WiFi connect failed", 2, "warn", "wifi"],
+  ["wlost", /^wifi lost /, "WiFi lost", 2, "warn", "wifi"],
+  ["low", /^upload low /, "Upload waits for memory", 2, "warn", "up"],
+  ["setup", /^gps (setup not taken|rate )/, "GPS setup refused", 2, "warn", "sat"],
+  ["pvt", /^gps pvt /, "NAV-PVT given up", 2, "warn", "sat"],
+  ["env", /^(env |upload (API_KEY|GEO_URL) )/, "Config (.env)", 2, "warn", "cfg"],
+  ["boot", /^boot cause /, "Boot", 1, "boot", "power"],
+  ["wback", /^wifi back /, "WiFi back", 1, "ok", "wifi"],
+  ["stay", /^stay left /, "Stay ended", 0, "mut", "dot"],
+  ["grx", /^gps /, "Receiver start", 0, "mut", "sat"],
+  ["other", /^/, "Other", -1, "mut", "dot"]
+];
+var EVI = {
+  bug: '<path d="M8 3h8l5 5v8l-5 5H8l-5-5V8zM12 8v5M12 16.5h.01"/>',
+  loop: '<path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/>',
+  mute: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  disk: '<path d="M4 4h12l4 4v12H4zM8 4v5h7V4M8 20v-6h8v6"/>',
+  up: '<path d="M12 15V3M7 8l5-5 5 5M4 15v5h16v-5"/>',
+  ota: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+  power: '<path d="M12 3v9M6.3 7.3a8 8 0 1 0 11.4 0"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  wifi: '<path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M2 9a14 14 0 0 1 20 0M12 19.5h.01"/>',
+  sat: '<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
+  cfg: '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+  dot: '<circle cx="12" cy="12" r="2.5"/>'
 };
-// one diag line -> {k: "st" status / "ev" event / "er" error or warning, h: its row}
-function logRow(l) {
-  var m = STATUS.exec(l), ha, f = l.split(" "), w = f[0], rest = esc(f.slice(1).join(" "));
-  if (m) {
-    var fix = m[8].replace(/_/g, " "), sv = m[7].split("/"), big = nn(m[16]);
-    ha = / hacc ([\d.]+)/.exec(l);
-    var low = big !== null && +big < TLS_KB;
-    return {k: "st", h: '<div class="lr"><span class="ic' + (fixTone(fix) === "ok" ? "" : " warn") + '">' + EV_ICON.st + "</span>" +
-      '<b class="' + (fixTone(fix) === "ok" ? "ok" : "warn") + '">' + esc(fix.toUpperCase()) + "</b>" +
-      '<span class="c sats">' + esc(nn(sv[1])) + "<em>/" + esc(nn(sv[0])) + "</em></span>" +
-      '<span class="c hdop">' + (ha ? "&plusmn;" + esc(ha[1]) + "<em> m</em>" : isNaN(+m[9]) ? "-" : (+m[9]).toFixed(2)) + "</span>" +
-      '<span class="c pts">' + num(m[10]) + "</span>" +
-      '<span class="c idf' + (low ? " err" : "") + '">' + esc(big) + "<em> KB</em></span>" +
-      '<span class="src">GPS</span><span class="lt">' + clock(m[2], +m[1]) + "</span></div>"};
-  }
-  var k = "ev", ic = "info", title = esc(w.toUpperCase()), msg = rest, src = title;
-  var b = /^boot cause (\S+) prev_up (\S+)/.exec(l);
-  if (b) {
-    ic = "boot";
-    title = src = "BOOT";
-    msg = esc(BOOT[b[1]] || "cause " + (nn(b[1]) || "-")) + (b[2] === "-" ? "" : " &middot; previous run " + esc(hms(+b[2])));
-  } else if (w === "ota") {
-    ic = "ota";
-  } else if (w === "gps") {
-    title = "RECEIVER";
-    src = "GPS";
-    if (/^gps reset loop/.test(l)) { k = "er"; ic = "warn"; }
-  } else if (/^(crash|reboot|bug|web error|upload (err|aborted|low idf|ca err))/.test(l)) {
-    k = "er";
-    ic = "err";
-  }
-  return {k: k, h: '<div class="lr"><span class="ic ' + ic + '">' + EV_ICON[ic === "warn" ? "err" : ic] + '</span><b class="' + ic + '">' +
-    title + '</b><span class="ms">' + msg + '</span><span class="src">' + src + '</span><span class="lt">--:--</span></div>'};
+var EV_STATUS = /^up \d+ utc (\S+) .*? sats (\d+)\/(\S+) fix (\S+)/, EV_PEND = 500;
+var EV_LINK = /^up (\d+) .*? nmea (\d+)\/(\d+) .*? hdop (\S+)/;
+function evKind(l) {
+  if (/^up \d+ utc /.test(l)) return "status";
+  for (var i = 0; i < EVK.length; i++) if (EVK[i][1].test(l)) return EVK[i][0];
+  return "other";
 }
-function logLine(l) { return logRow(l).h; }
-var EVF = "all";                         // the Logs filter: all, st, ev, er
-function evPick(f) {
-  EVF = f;
-  if (prevD) { var v = view(prevD); paint({log: v.log, evf: v.evf}); }
+function evNew() {                      // the aggregate of a diag log read so far
+  return {rest: "", n: 0, n3: 0, nno: 0, t0: null, t1: null, b5: {}, bk: [], g: {}, pend: [],
+    lk: null, lt: null, tu: null, drops: 0, run: 0, lng: 0, bad: 0, okn: 0, up: 0, dn: 0, eps: []};
 }
-// the status lines of the diag tail -> the satellites chart and the fix donut
-function evStatus(lines) {
-  var out = [];
-  for (var i = 0; i < lines.length; i++) {
-    var m = STATUS.exec(lines[i]);
-    if (!m) continue;
-    var u = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/.exec(m[2]), sv = m[7].split("/");
-    out.push({t: u ? Date.UTC(+u[1], u[2] - 1, +u[3], +u[4], +u[5], +u[6]) : +m[1] * 1000, utc: !!u,
-      seen: +sv[0], used: +sv[1], fix: m[8].replace(/_/g, " "), hd: +m[9],
-      ha: (/ hacc ([\d.]+)/.exec(lines[i]) || [])[1]});
+// UTC "20261102T091639Z" -> ms, or null
+function evUtc(u) {
+  var m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/.exec(u);
+  return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+}
+// a reply's text (one char a byte: x-user-defined) -> whole lines, the cut
+// one kept for the next; a line with a non-ASCII byte (an SSID) as UTF-8
+function evFeed(a, t) {
+  var ls = (a.rest + t).split("\n");
+  a.rest = ls.pop();
+  if (a.rest.length > 4096) a.rest = "";
+  for (var i = 0; i < ls.length; i++) evLine(a, evUtf8(ls[i]));
+}
+function evEnd(a) { if (a.rest) evLine(a, evUtf8(a.rest)); a.rest = ""; }   // the end of a file
+function evUtf8(s) {
+  if (!/[^\x00-\x7f]/.test(s)) return s;
+  var b = s.replace(/[\uf780-\uf7ff]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xf700); });
+  try { return decodeURIComponent(escape(b)); } catch (e) { return b; }
+}
+function evLine(a, l) {
+  if (!l) return;
+  if (/^up \d+ utc /.test(l)) {
+    var m = EV_STATUS.exec(l);
+    if (!m) return;
+    a.n++;
+    if (/^3D/.test(m[4])) a.n3++;
+    else if (!/^2D/.test(m[4])) a.nno++;
+    var t = evUtc(m[1]), up = +/^up (\d+)/.exec(l)[1], r = t;
+    if (t === null) return;
+    // a silent receiver: the line repeats the last GPS time (the board's
+    // clock), its time goes on with up
+    if (a.tu && t === a.tu[0] && up > a.tu[1]) t = a.tu[2] + (up - a.tu[1]) * 1000;
+    a.tu = [r, up, t];
+    if (a.t0 === null) a.t0 = t;
+    a.t1 = t;
+    var k = Math.floor(t / 300000), b = a.b5[k];
+    if (!b) { b = a.b5[k] = [t, 0, 0, 0, 0, 0, 0]; a.bk.push(k); }
+    b[1] += +m[2] || 0; b[2] += +m[3] || 0; b[3]++;
+    evLink(a, l, b, /^(3D|2D|Fix)/.test(m[4]), t);
+    for (var i = 0; i < a.pend.length; i++) evAdd(a.g, a.pend[i][0], a.pend[i][1], t);
+    a.pend = [];
+    return;
   }
-  return out;
+  a.pend.push([evKind(l), l]);
+  // (no utc for hours: the oldest at the last time known)
+  if (a.pend.length > EV_PEND) { var p = a.pend.shift(); evAdd(a.g, p[0], p[1], a.t1); }
 }
-function evChart(st) {
-  var p = st.filter(function (s) { return !isNaN(s.seen) && !isNaN(s.used); });
-  if (p.length < 2) return '<p class="none">TWO STATUS LINES ARE NEEDED (ONE A MINUTE)</p>';
-  // a point a line (one a minute), not by time: after a boot the lines
-  // without UTC carry the uptime, not a date
-  var W = 640, H = 230, x0 = 34, x1 = W - 22, y0 = 10, y1 = H - 28, n = p.length - 1, top = 12;
-  for (var i = 0; i < p.length; i++) top = Math.max(top, Math.ceil(p[i].seen / 4) * 4);
-  function X(i) { return (x0 + i / n * (x1 - x0)).toFixed(1); }
-  function Y(v) { return (y1 - v / top * (y1 - y0)).toFixed(1); }
-  function line(key) {
-    var d = "M" + X(0) + " " + Y(p[0][key]);
-    for (var j = 1; j < p.length; j++) {
-      var mx = ((+X(j - 1) + +X(j)) / 2).toFixed(1);
-      d += " C" + mx + " " + Y(p[j - 1][key]) + " " + mx + " " + Y(p[j][key]) + " " + X(j) + " " + Y(p[j][key]);
+// the receiver link and accuracy from a status line: its NMEA count against
+// the line before (a boot starts it again: up or the count goes back, or a
+// gap over 3 min), a minute it stood still is a drop-out minute (the board
+// ran, the receiver sent nothing); HDOP while there was a fix. b: the
+// 5-minute bucket [.., hdop sum, its count, drop-out minutes]
+function evLink(a, l, b, fix, t) {
+  var m = EV_LINK.exec(l);
+  if (!m) return;
+  var up = +m[1], ok = +m[2], er = +m[3], h = parseFloat(m[4]), p = a.lk, pt = a.lt;
+  if (fix && h > 0) { b[4] += h; b[5]++; }
+  a.lk = [up, ok, er]; a.lt = t;
+  if (!p || up <= p[0] || ok < p[1] || er < p[2] || up - p[0] > 180) { a.run = 0; return; }
+  a.bad += er - p[2]; a.okn += ok - p[1];
+  if (ok === p[1]) {                     // a drop-out: from the line before to this one
+    a.dn++; b[6]++;
+    if (!a.run) {
+      a.drops++;
+      a.eps.push([pt, t, 0]);
+      if (a.eps.length > 20) a.eps.shift();
     }
-    return d;
-  }
-  var close = " L" + X(n) + " " + y1 + " L" + X(0) + " " + y1 + "Z", g = "", xt = "", ls = line("seen"), lu = line("used");
-  for (var v = 0; v <= top; v += 4) g += '<line x1="' + x0 + '" x2="' + x1 + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text x="' + (x0 - 8) +
-    '" y="' + (+Y(v) + 4) + '">' + v + "</text>";
-  var every = Math.max(1, Math.ceil(p.length / 8));
-  for (i = 0; i < p.length; i += every) xt += '<text x="' + X(i) + '" y="' + (H - 8) + '">' +
-    (p[i].utc ? hm(p[i].t) : "+" + Math.floor(p[i].t / 60000) + "m") + "</text>";
-  return '<svg class="ev-ch" viewBox="0 0 ' + W + " " + H + '"><defs>' +
-    '<linearGradient id="evfa" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7fe39a" stop-opacity=".35"/><stop offset="1" stop-color="#7fe39a" stop-opacity="0"/></linearGradient>' +
-    '<linearGradient id="evfb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22d3ee" stop-opacity=".25"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></linearGradient></defs>' +
-    '<g class="gr">' + g + '</g><path d="' + ls + close + '" fill="url(#evfa)"/><path class="l1" d="' + ls + '"/>' +
-    '<path d="' + lu + close + '" fill="url(#evfb)"/><path class="l2" d="' + lu + '"/><g>' + xt + "</g></svg>";
+    a.run += Math.round((up - p[0]) / 60) || 1;
+    a.lng = Math.max(a.lng, a.run);
+    var e = a.eps[a.eps.length - 1];
+    e[1] = t; e[2] = a.run;
+  } else { a.up++; a.run = 0; }
 }
-function evDonut(st, nev) {
-  // the accuracy: hAcc metres when any line has it (an HDOP is no metre,
-  // those lines left out), else HDOP
-  var n = st.length, f3 = 0, f2 = 0, su = 0, nu = 0, sh = 0, nh = 0, sa = 0, na = 0;
-  for (var i = 0; i < n; i++) {
-    var s = st[i];
-    if (s.fix.indexOf("3D") === 0) f3++;
-    else if (/^(2D|Fix)/.test(s.fix)) f2++;
-    if (!isNaN(s.used)) { su += s.used; nu++; }
-    if (s.ha !== undefined) { if (!isNaN(+s.ha)) { sa += +s.ha; na++; } }
-    else if (!isNaN(s.hd)) { sh += s.hd; nh++; }
-  }
-  var pvt = na > 0;
-  if (pvt) { sh = sa; nh = na; }
-  var segs = "", at = 0, parts = [[f3, "ok"], [f2, "warn"], [n - f3 - f2, "bad"]];
-  for (i = 0; i < 3 && n; i++) {
-    var fr = parts[i][0] / n;
-    if (!fr) continue;
-    if (fr > 0.999) { segs += '<circle class="' + parts[i][1] + '" cx="80" cy="80" r="62"/>'; break; }
-    var a0 = 2 * Math.PI * (at + 0.004) - Math.PI / 2, a1 = 2 * Math.PI * (at + fr - 0.004) - Math.PI / 2;
-    segs += '<path class="' + parts[i][1] + '" d="M' + (80 + 62 * Math.cos(a0)).toFixed(1) + " " + (80 + 62 * Math.sin(a0)).toFixed(1) +
-      " A62 62 0 " + (fr > 0.5 ? 1 : 0) + " 1 " + (80 + 62 * Math.cos(a1)).toFixed(1) + " " + (80 + 62 * Math.sin(a1)).toFixed(1) + '"/>';
-    at += fr;
-  }
-  return '<svg class="ev-dn" viewBox="0 0 160 160"><circle class="bg" cx="80" cy="80" r="62"/>' + segs +
-    '<text class="big" x="80" y="80">' + (n ? Math.round(f3 * 100 / n) + "%" : "-") + '</text><text class="sm" x="80" y="100">3D FIX</text></svg>' +
-    '<div class="ev-k4"><div><small>3D fix</small><b>' + f3 + "/" + n + "</b></div><div><small>Avg used</small><b>" +
-    (nu ? (su / nu).toFixed(1) : "-") + "</b></div><div><small>" + (pvt ? "Avg acc" : "Avg HDOP") + "</small><b>" +
-    (nh ? (sh / nh).toFixed(pvt ? 1 : 2) + (pvt ? " m" : "") : "-") + "</b></div><div><small>Events</small><b>" + nev + "</b></div></div>";
+function evHour(t) { return Math.floor((t - new Date(t).getTimezoneOffset() * 60000) / 3600000); }   // a local hour
+function evAdd(gs, k, l, t) {
+  var g = gs[k] || (gs[k] = {n: 0, last: null, h: {}, d: {}});
+  var c = (EVD[k] || evDflt)(g.d, l);
+  g.n += c;
+  if (t === null || t === undefined) return;
+  g.last = t;
+  if (c) { var h = evHour(t); g.h[h] = (g.h[h] || 0) + c; }
 }
-
+// "(+N more)" (WiFi), "(N more)" (a setup): the lines counted into this one
+function evMore(l) { var m = /\(\+?(\d+) more\)$/.exec(l); return m ? 1 + +m[1] : 1; }
+function evText(d, l) {                 // the last few different messages
+  var x = l.replace(/ \(\+?\d+ more\)$/, "");
+  d.x = d.x || [];
+  var i = d.x.indexOf(x);
+  if (i >= 0) d.x.splice(i, 1);
+  d.x.push(x);
+  if (d.x.length > 2) d.x.shift();
+}
+function evDflt(d, l) { evText(d, l.replace(/^\S+ /, "")); return evMore(l); }
+// per kind: the detail kept, and how many the line counts
+var EVD = {
+  boot: function (d, l) {
+    var m = /^boot cause (\S+) prev_up (\S+)/.exec(l) || [];
+    if (m[1] === "1") d.pw = (d.pw || 0) + 1; else d.rs = (d.rs || 0) + 1;
+    if (+m[2] > (d.up || 0)) d.up = +m[2];
+    return 1;
+  },
+  ota: function (d, l) {                // an update once, its last word kept
+    var m = /^ota (\S+) /.exec(l), c = m[1], st = / ok$/.test(l) ? "ok" : /(rolled|rolling) back/.test(l) ? "bad" : "run";
+    d.c = d.c || {};
+    d.o = d.o || [];
+    var nw = !(c in d.c);
+    d.c[c] = st;
+    if (nw) { d.o.push(c); if (d.o.length > 12) delete d.c[d.o.shift()]; }
+    return nw ? 1 : 0;
+  },
+  gloop: function (d, l) {
+    var m = /(\d+) restarts in (\d+) s/.exec(l), w = /(\d+) more windows/.exec(l);
+    if (m) { d.r = +m[1]; d.lo = Math.min(d.lo === undefined ? 1e9 : d.lo, +m[2]); d.hi = Math.max(d.hi || 0, +m[2]); }
+    return w ? +w[1] : 1;
+  },
+  gsil: function (d, l) {               // an episode a "silent" (or a "back" whose start rotated out)
+    var b = /^gps back after (\d+) s/.exec(l);
+    if (!b) { d.open = true; return 1; }
+    d.s = (d.s || 0) + +b[1];
+    var n = d.open ? 0 : 1;
+    d.open = false;
+    return n;
+  },
+  wfail: function (d, l) {
+    var m = /^wifi fail (.*) status (\S+) after (\d+) ms/.exec(l);
+    if (!m) return evDflt(d, l);
+    d.ss = m[1]; d.st = m[2]; d.ms = (d.ms || 0) + +m[3]; d.k = (d.k || 0) + 1;
+    return evMore(l);
+  },
+  wlost: function (d, l) { evText(d, l.replace(/^wifi lost /, "").replace(/ rssi /, " \u00b7 rssi ")); return evMore(l); },
+  wback: function (d, l) { evText(d, l.replace(/^wifi back /, "").replace(/ after /, " \u00b7 after ")); return evMore(l); },
+  full: function (d, l) { var m = / drop (\d+)/.exec(l); d.drop = (d.drop || 0) + (m ? +m[1] : 0); return 1; },
+  grx: function (d, l) { d.x = [l.slice(4)]; return 1; },
+  setup: function (d, l) { evText(d, l.replace(/^gps (setup not taken: )?/, "")); return evMore(l); },
+  pvt: function (d, l) { evText(d, l.replace(/^gps pvt /, "")); return 1; },
+  tback: function (d, l) { evText(d, l.replace(/^time back /, "")); return 1; },
+  stay: function (d, l) { evText(d, l.replace(/^stay left /, "")); return 1; },
+  other: function (d, l) {              // its first two words
+    evText(d, l.split(" ").slice(0, 2).join(" "));
+    d.x = d.x.length > 1 && d.x[0] > d.x[1] ? [d.x[1], d.x[0]] : d.x;
+    return 1;
+  }
+};
+function evOta(d) {                     // -> [updates, failed, checking]
+  var n = 0, bad = 0, run = 0;
+  for (var c in d.c || {}) { n++; if (d.c[c] === "bad") bad++; else if (d.c[c] === "run") run++; }
+  return [n, bad, run];
+}
+// the groups to show: the committed ones and the lines still waiting for a
+// status line (at the last time known), sorted by severity, then count.
+// -> [{k, name, sev, tone, icon, n, last, det, spark: per-hour counts}]
+function evGroups(a) {
+  var gs = a.g;
+  if (a.pend.length) {
+    gs = {};
+    for (var k in a.g) gs[k] = a.g[k];
+    for (var i = 0; i < a.pend.length; i++) {
+      k = a.pend[i][0];
+      if (gs[k] === a.g[k] && a.g[k]) gs[k] = JSON.parse(JSON.stringify(a.g[k]));
+      evAdd(gs, k, a.pend[i][1], a.t1);
+    }
+  }
+  var out = [], h0 = a.t0 === null ? null : evHour(a.t0), h1 = a.t1 === null ? null : evHour(a.t1);
+  for (var j = 0; j < EVK.length; j++) {
+    var e = EVK[j], g = gs[e[0]];
+    if (!g || !g.n) continue;
+    var sev = e[3], tone = e[4], sp = [];
+    if (e[0] === "ota" && evOta(g.d)[1]) { sev = 3; tone = "bad"; }
+    for (var h = Math.max(h0, h1 - 47); h0 !== null && h <= h1; h++) sp.push(g.h[h] || 0);   // (48 h at most)
+    out.push({k: e[0], name: e[2], sev: sev, tone: tone, icon: e[5], n: g.n, last: g.last, det: evDet(e[0], g), spark: sp, d: g.d});
+  }
+  return out.sort(function (x, y) { return y.sev - x.sev || y.n - x.n; });
+}
+var MD = " &middot; ";
+function evDet(k, g) {                  // a group's detail line (HTML)
+  var d = g.d, x = (d.x || []).map(esc).join(", ");
+  if (k === "boot") return (d.pw || 0) + " power-on" + MD + (d.rs || 0) + " reset<em>" + MD + "longest run " + dur(d.up * 1000) + "</em>";
+  if (k === "ota") {
+    var o = evOta(d);
+    return (d.o || []).map(esc).join(" &rarr; ") + "<em>" + MD + (o[1] ? o[1] + " rolled back" : o[2] ? "checking" :
+      o[0] > 1 ? "each validated" : "validated") + "</em>";
+  }
+  if (k === "gloop") return d.r ? d.r + " restarts in " + (d.lo === d.hi ? d.lo : d.lo + "&ndash;" + d.hi) + " s<em>" + MD + "check power / wiring</em>" :
+    "<em>check power / wiring</em>";
+  if (k === "gsil") return esc(hms(d.s || 0)) + " in total<em>" + MD + (d.open ? "still silent" : "no bytes from the receiver") + "</em>";
+  if (k === "wfail" && d.k) return esc(d.ss) + MD + "status " + esc(d.st) + "<em>" + MD + Math.round(d.ms / d.k / 1000) + " s each</em>";
+  if (k === "full") return d.drop + " points dropped<em>" + MD + "flash full</em>";
+  if (k === "grx") return x + (g.n > 1 ? "<em>" + MD + "after each boot</em>" : "");
+  return x;
+}
+// -> {evs: the window, evk: the tiles, evt: GPS telemetry, evg: the groups}
+// (pure, for tests; st: the loader's busy / done)
+function evView(a, st) {
+  var v = {}, nb = 0, gs = evGroups(a), ota = [0, 0, 0], boot = {};
+  for (var i = 0; i < gs.length; i++) {
+    if (gs[i].k === "ota") ota = evOta(gs[i].d);
+    if (gs[i].k === "boot") { nb = gs[i].n; boot = gs[i].d; }
+  }
+  v.evs = a.t0 !== null ? when(a.t0) + "&ndash;" + when(a.t1) + MD + dur(a.t1 - a.t0) + " of the diag log" :
+    st.done ? "no status line with a time" : "reading the diag log&hellip;";
+  var no = a.nno, nm = no < 60 ? no + "<em>min</em>" : Math.floor(no / 60) + "<em>h</em> " + two(no % 60) + "<em>min</em>";
+  v.evk = '<div class="t-ok"><small>3D fix</small><b>' + (a.n ? Math.round(a.n3 * 100 / a.n) : "-") + "<em>% of minutes</em></b></div>" +
+    '<div class="' + (no ? "t-warn" : "") + '"><small>No fix / no data</small><b>' + nm + "</b></div>" +
+    "<div><small>Boots</small><b>" + nb + "<em>" + (boot.pw || 0) + " power-on</em></b></div>" +
+    '<div class="' + (ota[1] ? "t-warn" : "") + '"><small>Updates</small><b>' + ota[0] + "<em>" +
+    (ota[1] ? ota[1] + " failed" : ota[0] ? (ota[2] ? "checking" : "all ok") : "none") + "</em></b></div>";
+  v.evt = evTele(a, st.cols || 72);
+  if (!gs.length) {
+    v.evg = '<p class="none">' + (!st.done ? "READING THE DIAG LOG&hellip;" : a.n ? "NO EVENTS IN THE WINDOW" :
+      "THE DIAGNOSTIC LOG IS EMPTY") + "</p>";
+    return v;
+  }
+  var h = '<div class="ev-grp ev-hd"><span></span><span>EVENT</span><span class="ev-n">COUNT</span><span>DETAIL</span>' +
+    '<span>PER HOUR</span><span class="ev-lt">LAST</span></div>';
+  for (i = 0; i < gs.length; i++) {
+    var g = gs[i], sk = "";
+    for (var j = 0; j < g.spark.length; j++) {
+      var c = g.spark[j];
+      sk += c ? '<i class="on" style="height:' + Math.max(5, Math.min(22, 6 + c * 4)) + 'px"></i>' : "<i></i>";
+    }
+    h += '<div class="ev-grp"><span class="ev-ic t-' + g.tone + '"><svg viewBox="0 0 24 24">' + EVI[g.icon] + "</svg></span>" +
+      '<span class="ev-nm t-' + (g.sev >= 2 || g.k === "ota" || g.k === "boot" || g.k === "wback" ? g.tone : "mut") + '">' + g.name +
+      '</span><span class="ev-n">' + num(g.n) + '</span><span class="ev-dt">' + g.det + '</span><span class="ev-sk t-' + g.tone + '">' +
+      sk + '</span><span class="ev-lt">' + (g.last === null ? "-" : when(g.last)) + "</span></div>";
+  }
+  v.evg = h;
+  return v;
+}
+// GPS telemetry, after the "Orbital Systems" dashboard (Orizon, dribbble
+// shot 27639068): position accuracy as a dot matrix, a column a time slice
+// (cols of them over the window), 12 dots for HDOP 1, one for 6 and over,
+// coloured precise / moderate / poor, a red dot where there was no fix; the
+// receiver link (the share of minutes it sent, broken sentences, its
+// drop-outs as a dotted curve) and an amber anomaly card while it dropped out
+function evTele(a, cols) {
+  var ks = a.bk.slice().sort(function (x, y) { return x - y; });
+  if (ks.length < 2) return '<div class="ev-card"><p class="none">NOT ENOUGH STATUS LINES YET</p></div>';
+  var k0 = ks[0], nb = ks[ks.length - 1] - k0 + 1, per = Math.max(1, Math.ceil(nb / cols)), nc = Math.ceil(nb / per);
+  var cs = [], i, j, hs = [], fixn = 0, good = 0;
+  for (i = 0; i < nc; i++) cs.push([0, 0, 0, 0]);   // hdop sum, its count, lines, drop-out minutes
+  for (i = 0; i < ks.length; i++) {
+    var b = a.b5[ks[i]], c = cs[Math.floor((ks[i] - k0) / per)];
+    c[0] += b[4]; c[1] += b[5]; c[2] += b[3]; c[3] += b[6];
+    if (b[5]) { var h5 = b[4] / b[5]; hs.push(h5); fixn++; if (h5 <= 2) good++; }
+  }
+  hs.sort(function (x, y) { return x - y; });
+  var dm = "", lk = "";
+  for (i = 0; i < nc; i++) {
+    var h = cs[i][1] ? cs[i][0] / cs[i][1] : null, f = h === null ? 0 : Math.max(1, Math.min(12, Math.round((7 - h) / 6 * 12)));
+    var q = h === null ? "" : h <= 2 ? "on" : h <= 5 ? "am" : "rd", dd = cs[i][2] ? cs[i][3] / cs[i][2] : null;
+    dm += '<i class="gt-c' + (h === null ? " x" : "") + '">';
+    for (j = 0; j < 12; j++) dm += j < f ? '<s class="' + q + '"></s>' : "<s></s>";
+    dm += "</i>";
+    // the receiver link under it: data every minute, some, none (no line: the board was off)
+    lk += '<i class="gt-k' + (dd === null ? "" : !dd ? " ok" : dd < .5 ? " am" : " rd") + '"></i>';
+  }
+  var an = a.drops > 0, mid = a.t0 + (a.t1 - a.t0) / 2;
+  function hmin(m) { return m < 60 ? m + "<em>min</em>" : Math.floor(m / 60) + "<em>h</em> " + two(m % 60) + "<em>min</em>"; }
+  // a marker under the strip at each drop-out's start, its time below
+  // (none closer than 9% to the one before: the dot stays, the time goes)
+  var ep = "", mk = "", span = Math.max(1, (k0 + nb) * 300000 - k0 * 300000), lastx = -1;
+  for (i = 0; i < a.eps.length; i++) {
+    var s0 = a.eps[i][1] - a.eps[i][2] * 60000, x = Math.max(0, Math.min(100, (s0 - k0 * 300000) / span * 100));
+    if (x < 0 || s0 < a.t0 - 300000) continue;
+    mk += '<span class="gt-mk" style="left:' + x.toFixed(1) + '%"><i></i>' + (x - lastx >= 9 || lastx < 0 ? when(s0) : "") + "</span>";
+    if (x - lastx >= 9 || lastx < 0) lastx = x;
+  }
+  for (i = a.eps.length - 1; i >= 0 && i >= a.eps.length - 5; i--) {
+    var e = a.eps[i];
+    ep += "<p><span>" + when(e[1] - e[2] * 60000) + "&ndash;" + when(e[1]) + "</span><b>" + e[2] + " min</b></p>";
+  }
+  if (a.drops > 5) ep += '<p class="gt-more">' + (a.drops - 5) + " earlier</p>";
+  return '<div class="gt"><div class="gt-hd"><h3>GPS telemetry<small>accuracy and receiver link' + MD + when(a.t0) + "&ndash;" +
+    when(a.t1) + MD + "from the diag log</small></h3>" + '<span class="gt-chip' + (an ? " a" : "") + '">' +
+    (an ? "Anomaly" : "Nominal") + "</span></div>" +
+    '<div class="gt-g"><div class="gt-b"><div class="gt-l">Position accuracy<em>' + (per * 5) +
+    "-minute columns, taller = more precise</em></div>" +
+    '<div class="gt-big"><b>' + (fixn ? Math.round(good * 100 / fixn) : 0) + "%</b><span>precise (HDOP &le; 2)" +
+    (hs.length ? MD + "typical " + hs[Math.floor(hs.length / 2)].toFixed(1) : "") + "</span></div>" +
+    '<div class="gt-dm">' + dm + '</div><div class="gt-lk"><span>link</span><div>' + lk + "</div></div>" +
+    (mk ? '<div class="gt-mks">' + mk + "</div>" : "") +
+    '<div class="gt-ax"><span>' + when(a.t0) + "</span><span>" + when(mid) + "</span><span>NOW</span></div>" +
+    '<div class="gt-lg"><span><b class="on"></b>precise</span><span><b class="am"></b>moderate</span>' +
+    '<span><b class="rd"></b>poor</span><span><b class="x"></b>no fix</span><span class="gt-sep">link:</span>' +
+    '<span><b class="ok"></b>data</span><span><b class="am"></b>gaps</span><span><b class="x"></b>none</span></div></div>' +
+    '<div class="gt-b"><div class="gt-l">Receiver link<em>while the board ran</em></div><div class="gt-dg"><div><b class="gt-n">' +
+    hmin(a.up) + "</b><small>the receiver sent data</small></div><div><b class=\"gt-n" + (a.dn ? " a" : "") + '">' + hmin(a.dn) +
+    "</b><small>it sent nothing" + (a.drops ? " (" + a.drops + " drop-out" + (a.drops === 1 ? "" : "s") + ")" : "") +
+    '</small></div></div><p class="gt-bad"><b>' + num(a.bad) + "</b> broken messages" +
+    (a.bad ? MD + "1 in " + num(Math.round((a.okn + a.bad) / a.bad)) : MD + "none") + "</p>" +
+    (an ? '<div class="gt-an"><h4><i>!</i>' + a.dn + " min without data, in " + a.drops + " drop-out" + (a.drops === 1 ? "" : "s") +
+      ":</h4>" + ep + "</div>" :
+      '<p class="gt-ok">No drop-out in the window: the receiver sent data every minute.</p>') +
+    "</div></div></div>";
+}
 function bytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }
 // The GPS link: seconds since the last whole NMEA/UBX frame (good_age_s,
 // null: none since boot), the bytes a second between two polls (rx_bytes over
@@ -481,6 +746,32 @@ function sxLeft(kb) {
   return h >= 48 ? ["&asymp;" + Math.floor(h / 24), "days"] : ["&asymp;" + Math.floor(h), "h"];
 }
 
+// Signal: how clear each satellite's signal is (C/N0) in words: strong
+// from 35 dB-Hz, fair from 25, weak below (a weak one is easily lost); a
+// bar a satellite, strongest first, its number under it, hollow when the
+// receiver does not use it. The overall grade is the mean of those in use
+function sigQ(c) { return c >= 35 ? "strong" : c >= 25 ? "fair" : c > 0 ? "weak" : "none"; }
+function sigView(svs) {
+  if (!svs.length) return '<span class="none">NO SATELLITE LIST YET</span>';
+  var s = svs.slice().sort(function (a, b) { return (+b.cno || 0) - (+a.cno || 0); }), bars = "";
+  var used = 0, sum = 0, n = {strong: 0, fair: 0, weak: 0, none: 0}, idle = 0;
+  for (var i = 0; i < s.length; i++) {
+    var c = +s[i].cno || 0, hh = Math.min(c, 50) * 2;      // % of the bar area (50 at the top)
+    if (s[i].used) { used++; sum += c; n[sigQ(c)]++; }
+    else if (!c) idle++;
+    bars += '<div class="sg-k"><i class="sg-b ' + (s[i].used ? "q-" + sigQ(c) : "sg-u" + (c ? "" : " sg-0")) +
+      '" style="height:calc((100% - 18px) * ' + (Math.max(hh, 2) / 100).toFixed(2) + ')"></i><span>' + esc(s[i].svid) + "</span></div>";
+  }
+  var q = used ? sigQ(sum / used) : "none", word = {strong: "Strong", fair: "Fair", weak: "Weak", none: "None"}[q];
+  return '<div class="sg-h"><b class="q-' + q + '">' + word + "<em>overall</em></b><b>" + used + "<em>satellite" + (used === 1 ? "" : "s") +
+    " in use, of " + s.length + " in view</em></b></div>" +
+    '<p class="sg-s">' + n.strong + " strong &middot; " + n.fair + " fair &middot; " + n.weak + " weak" +
+    (idle ? " &middot; " + idle + " seen without a signal yet" : "") + "</p>" +
+    '<div class="sg-c"><div class="sg-z"><i class="q-strong"><em>strong</em></i><i class="q-fair"><em>fair</em></i><i class="q-weak"><em>weak</em></i></div>' +
+    '<div class="sg-r">' + bars + "</div></div>" +
+    '<div class="sg-l">a bar a satellite (its number below), taller = clearer signal<i></i>seen, not in use</div>';
+}
+
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it;
 // prev: the poll before, for rates)
 function view(d, prev) {
@@ -512,7 +803,7 @@ function view(d, prev) {
       cell("WIFI", esc(ws[0]).toUpperCase())) +
     (d.fix_src === "pvt" ? cell("UBX BAD", ubp.toFixed(2), "%", ubp > 1 ? "warn" : "") :
       cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : ""));
-  var dots = "", bars = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
+  var dots = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
   for (var i = 0; i < svs.length; i++) {
     var s = svs[i], up = s.elev !== null && s.elev >= 0;
     if (s.used) used++;
@@ -521,17 +812,13 @@ function view(d, prev) {
       dots += '<circle class="' + cls(s) + '" cx="' + Math.round(r * Math.sin(a)) + '" cy="' + Math.round(-r * Math.cos(a)) +
         '" r="' + (2.4 + Math.floor((s.cno || 0) / 14)) + '"><title>' + tip(s) + "</title></circle>";
     }
-    bars += '<i class="' + cls(s) + '" style="height:' + Math.min(Math.floor((s.cno || 0) * 100 / 45), 100) +
-      '%" title="' + tip(s) + '"></i>';
     tbl += '<tr class="' + (s.used ? "" : "u") + '"><td>' + esc(s.name) + (s.unhealthy ? " !" : "") + "</td><td>" +
       esc(s.cno || "-") + "</td><td>" + (up ? esc(s.elev) + "&deg;" : "-") + "</td><td>" + (up ? esc(s.azim) + "&deg;" : "-") +
       "</td><td>" + (s.used ? "&#9679;" : "") + "</td></tr>";
   }
   v.dots = dots;
-  v.bars = bars || '<span class="none">NO SATELLITE LIST YET</span>';
+  v.sig = sigView(svs);
   v.skyh = "Sky &middot; " + used + " locked / " + svs.length + " tracked";
-  v.bh = "Signal &middot; dBHz" + (d.satellites_age_s === null || d.satellites_age_s === undefined ? "" :
-    " &middot; list " + hms(d.satellites_age_s) + " old");
   v.svh = "Satellite table &middot; " + svs.length;
   v.svt = tbl;
   var rx = String(d.receiver || "unknown receiver"), comma = rx.indexOf(", ");
@@ -590,23 +877,6 @@ function view(d, prev) {
       (pr ? "<tr><td>Previous run</td><td" + (/crash/.test(pr) ? ' class="warn"' : "") + ">" + esc(prevText(d)) + "</td></tr>" : "") +
       "<tr><td>Chip</td><td>" + esc(d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz</td></tr>" +
       (d.utc ? "<tr><td>GPS time</td><td>" + esc(String(d.utc).slice(11, 19)) + " UTC</td></tr>" : "") + "</table>";
-  // Event log: rows newest first, filtered by the chips; chart and donut
-  // from the status lines
-  var lines = d.diag || [], log = "", cnt = {all: 0, st: 0, ev: 0, er: 0};
-  for (var j = lines.length - 1; j >= 0; j--) {
-    var row = logRow(lines[j]);
-    cnt.all++;
-    cnt[row.k]++;
-    if (EVF === "all" || EVF === row.k) log += row.h;
-  }
-  v.log = log || '<p class="none">' + (lines.length ? "NOTHING OF THIS KIND" : "THE DIAGNOSTIC LOG IS EMPTY") + "</p>";
-  var chips = [["all", "All"], ["st", "Status"], ["ev", "Events"], ["er", "Errors"]];
-  v.evf = chips.map(function (c) {
-    return '<button class="' + (EVF === c[0] ? "on" : "") + '" onclick="evPick(\'' + c[0] + '\')">' + c[1] + "<em>" + cnt[c[0]] + "</em></button>";
-  }).join("");
-  var evs = evStatus(lines);
-  v.evc = evChart(evs);
-  v.evd = evDonut(evs, cnt.ev + cnt.er);
   var p = String(d.position || "").split(", ");
   v.coord = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ?
     Math.abs(+p[0]).toFixed(5) + "&deg; " + (+p[0] < 0 ? "S" : "N") + "  " +
@@ -827,72 +1097,43 @@ function gpxSave() {
   setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
-// The static test: while it runs, each poll's position (pos6, the track's
-// precision) and hAcc are kept (and saved in the browser, so a reload does
-// not lose an hour). The spread around their mean: CEP50 / CEP95 (the radius
-// that holds 50 / 95 % of the fixes) against the receiver's own hAcc.
-var STAT_KEY = "gps-static", STAT_MAX = 5000, stat = {on: false, s: []};
-// the saved state (another tab may have added to it); a broken one is none
-function statLoad() {
-  try {
-    var t = JSON.parse(localStorage.getItem(STAT_KEY));
-    if (t && Array.isArray(t.s)) stat = {on: !!t.on, s: t.s};
-  } catch (e) {}
+// The diag log from the board: /diag?f=1 (DIAG_OLD) from byte 0, HIST_REPLY
+// bytes a reply at most, then f=0 (DIAG_FILE); after that once a minute f=0
+// from where it got to. X-Diag-Size is the file's size: DIAG_FILE smaller
+// than where the page got to (it became DIAG_OLD), or DIAG_OLD another size
+// while it is read: both again from the start (the aggregate anew).
+var dg = dgNew();
+function dgNew() { return {f: 1, off: [0, 0], s1: null, busy: false, done: false, at: 0, a: evNew()}; }
+function diagDue() { return !dg.busy && Date.now() - dg.at >= 60000; }
+function diagLoad() { dg.busy = true; diagNext(); }
+function diagNext() {
+  var g = dg, f = g.f, o = g.off[f], x = new XMLHttpRequest();
+  x.open("GET", "/diag?f=" + f + "&o=" + o, true);
+  x.overrideMimeType("text/plain; charset=x-user-defined");   // one char a byte: o counts bytes
+  x.timeout = 10000;
+  function fail() { if (g === dg) { g.busy = false; g.at = Date.now(); evPaint(); } }
+  x.onload = function () {
+    if (g !== dg) return;
+    if (x.status !== 200 && x.status !== 404) { fail(); return; }   // (404: no such file)
+    var ok = x.status === 200, t = ok ? x.responseText : "", hs = ok ? x.getResponseHeader("X-Diag-Size") : null;
+    var size = hs === null ? o + t.length : +hs;
+    if (ok && (f === 0 ? size < o : g.s1 !== null && size !== g.s1)) { dg = dgNew(); diagLoad(); return; }
+    if (ok && f === 1) g.s1 = size;
+    if (t) { evFeed(g.a, t); g.off[f] = o + t.length; }
+    if (t && g.off[f] < size) { evPaint(); diagNext(); return; }
+    if (f === 1) { evEnd(g.a); g.f = 0; diagNext(); return; }
+    g.busy = false;
+    g.done = true;
+    g.at = Date.now();
+    evPaint();
+  };
+  x.onerror = x.ontimeout = fail;
+  x.send();
 }
-statLoad();
-function statSave() { try { localStorage.setItem(STAT_KEY, JSON.stringify(stat)); } catch (e) {} }
-function statAdd(d, now) {
-  // only a fix the receiver just sent (a frozen one would shrink the CEP)
-  statLoad();                           // (another tab's samples kept)
-  if (!stat.on || (d.good_age_s !== undefined && (d.good_age_s === null || d.good_age_s > GPS_OK_S))) return;
-  var p = String(d.pos6 || d.position || "").split(", ");
-  if (p.length !== 2 || isNaN(+p[0]) || isNaN(+p[1])) return;
-  stat.s.push([now, +p[0], +p[1], typeof d.hacc === "number" ? d.hacc : null]);
-  if (stat.s.length > STAT_MAX) stat.s.splice(0, stat.s.length - STAT_MAX);   // ~21 h at 15 s
-  statSave();
-}
-function statToggle() { statLoad(); stat.on = !stat.on; statSave(); statPaint(); }
-function statReset() { stat = {on: stat.on, s: []}; statSave(); statPaint(); }
-function quant(a, q) { return a.length ? a[Math.min(a.length - 1, Math.ceil(q * a.length) - 1)] : null; }
-function statView(s, on) {              // -> {btn, sstat, scat} (pure, for tests)
-  var n = s.length, la = 0, lo = 0, ha = 0, nh = 0, i, r = [], xy = [];
-  for (i = 0; i < n; i++) { la += s[i][1]; lo += s[i][2]; if (s[i][3] !== null) { ha += s[i][3]; nh++; } }
-  la /= n || 1; lo /= n || 1;
-  var ky = 110540, kx = 111320 * Math.cos(la * Math.PI / 180);
-  for (i = 0; i < n; i++) {
-    var x = (s[i][2] - lo) * kx, y = (s[i][1] - la) * ky;
-    xy.push([x, y]);
-    r.push(Math.sqrt(x * x + y * y));
-  }
-  r.sort(function (a, b) { return a - b; });
-  var c50 = quant(r, .5), c95 = quant(r, .95), dur = n > 1 ? (s[n - 1][0] - s[0][0]) / 1000 : 0, f = function (m) {
-    return m === null ? "-" : m.toFixed(2); };
-  var v = {btn: on ? "STOP" : "START"};
-  v.sstat = cell("SAMPLES", num(n), on ? "rec" : "") + cell("SPAN", esc(hms(dur).toUpperCase())) +
-    cell("CEP50", f(c50), "m") + cell("CEP95", f(c95), "m") + cell("MAX", f(r.length ? r[r.length - 1] : null), "m") +
-    cell("MEAN HACC", nh ? (ha / nh).toFixed(2) : "-", "m");
-  if (n < 2) {
-    v.scat = '<span class="hint">' + (on ? "RECORDING: ONE POSITION A POLL, LEAVE THE BOARD STILL UNDER OPEN SKY" :
-      "START IT WITH THE BOARD STILL UNDER OPEN SKY; AN HOUR GIVES A GOOD CEP95") + "</span>";
-    return v;
-  }
-  var R = Math.max(r[r.length - 1], 1) * 1.1, k = 90 / R, h = '<svg viewBox="-100 -100 200 200" style="max-width:300px;margin:10px auto 0">';
-  h += '<circle class="rg" r="90"/><path class="rx" d="M0-90V90M-90 0H90"/>';
-  for (i = 0; i < xy.length; i++)
-    h += '<circle class="d" r="1.8" cx="' + (xy[i][0] * k).toFixed(1) + '" cy="' + (-xy[i][1] * k).toFixed(1) + '"/>';
-  h += '<circle class="c50" r="' + (c50 * k).toFixed(1) + '"/><circle class="c95" r="' + (c95 * k).toFixed(1) + '"/>';
-  h += '<text y="98">' + R.toFixed(1) + " M RADIUS</text></svg>";
-  v.scat = h + '<div class="legend"><span style="color:var(--ok)">- - CEP50</span><span style="color:var(--warn)">- - CEP95</span></div>';
-  return v;
-}
-var statKey = "";
-function statPaint() {                  // (the scatter: up to STAT_MAX dots)
-  var n = stat.s.length, k = stat.on + "/" + n + (n ? "/" + stat.s[0][0] + "/" + stat.s[n - 1][0] : "");
-  if (k === statKey) return;
-  statKey = k;
-  var v = statView(stat.s, stat.on);
-  document.getElementById("sbtn").innerHTML = v.btn;
-  paint({sstat: v.sstat, scat: v.scat});
+function evPaint() {                    // (a matrix column at least 8 px wide)
+  var e = document.getElementById("evt"), w = e && e.clientWidth ? e.clientWidth : 1000;
+  dg.cols = Math.max(12, Math.min(96, Math.floor(w * .58 / 8)));
+  paint(evView(dg.a, dg));
 }
 // world pixels (256 a tile at zoom 0) of a position at zoom z
 function wpx(lat, lon, z) {
@@ -1054,10 +1295,9 @@ function tick() {
       prevD = d;
       boardDays = d.days || [];
       navPaint();
-      statAdd(d, last);
-      statPaint();
       placeMap(d);
       if (histDue()) histLoad();
+      if (diagDue()) diagLoad();
     } catch (e) {
       document.getElementById("live").innerHTML = "LIVE &middot; PAGE ERROR " + esc(String(e && e.message || e)).slice(0, 60);
     }

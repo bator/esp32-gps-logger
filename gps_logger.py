@@ -72,7 +72,9 @@ DIAG = 60000                             # ms between diagnostic log lines
                                          # (0 = off; .env DIAG=<seconds>)
 DIAG_FILE = "/diag.log"                  # survives power-off: what happened
 DIAG_OLD = "/diag.1"                     # on a walk, read it back over USB
-DIAG_MAX = 32768                         # bytes, then DIAG_FILE -> DIAG_OLD
+DIAG_MAX = 163840                        # bytes, then DIAG_FILE -> DIAG_OLD:
+                                         # the two ~26 h of ~210 B lines a
+                                         # minute (the page reads both)
 DIAG_LINE = 220                          # bytes read back per line wanted
 DIAG_CUT = 320                           # a longer diag line is cut (the
                                          # status line runs to ~220 B)
@@ -8648,6 +8650,8 @@ def _web_reply(c, req):
         _web_status(c)
     elif path.startswith(b"/hist?"):
         _web_hist(c, path)
+    elif path.startswith(b"/diag?"):
+        _web_diag_file(c, path)
     elif path == b"/" or path.startswith(b"/?"):
         _web_page(c, _web_gzip(req))
     else:
@@ -8711,19 +8715,58 @@ def _web_hist(c, path):
                       "X-Hist-End: %d\r\n" % (k, nxt, end))
             _hist_lines(f, o, nxt, c)
             return
-        o = min(o, size)
-        n = min(size - o, HIST_REPLY)
-        _web_head(c, "200 OK", "text/plain", "Content-Length: %d\r\n" % n)
-        f.seek(o)
-        buf = bytearray(WEB_CHUNK)
-        mv = memoryview(buf)
-        while n > 0:
-            k = f.readinto(mv[:min(n, WEB_CHUNK)])
-            if not k:
-                break
-            _web_out(c, mv[:k])
-            n -= k
-            read_uart()
+        _web_bytes(c, f, o, size, "")
+    finally:
+        f.close()
+
+def _web_bytes(c, f, o, size, extra):
+    """The bytes of f (size long) from o (past the end: none), HIST_REPLY at
+    most, with their Content-Length: WEB_CHUNK reads into one buffer, a
+    send each, the UART read between them."""
+    o = min(o, size)
+    n = min(size - o, HIST_REPLY)
+    _web_head(c, "200 OK", "text/plain", "Content-Length: %d\r\n%s" % (
+        n, extra))
+    f.seek(o)
+    mv = memoryview(bytearray(WEB_CHUNK))
+    while n > 0:
+        k = f.readinto(mv[:min(n, WEB_CHUNK)])
+        if not k:
+            break
+        _web_out(c, mv[:k])
+        n -= k
+        read_uart()
+
+def _web_diag_file(c, path):
+    """/diag?f=<0|1>&o=N: the diag log as it is on flash, DIAG_FILE (f=0)
+    or DIAG_OLD (f=1), from byte N, HIST_REPLY bytes at most (the page
+    reads both files in pieces, then DIAG_FILE from where it got to once a
+    minute), X-Diag-Size the file's size (smaller than where the page got
+    to: it rotated, the page reads both again). A missing file, a bad f
+    or o is a 404."""
+    name, o = None, -1
+    try:
+        for kv in path[6:].decode().split("&"):
+            if kv == "f=0":
+                name = DIAG_FILE
+            elif kv == "f=1":
+                name = DIAG_OLD
+            elif kv.startswith("o="):
+                o = int(kv[2:])
+    except (UnicodeError, ValueError):
+        o = -1
+    f = None
+    if name is not None and o >= 0:
+        try:
+            f = open(name, "rb")
+        except OSError:
+            pass
+    if f is None:
+        _web_send(c, "404 Not Found", "text/plain", ("no such diag file",))
+        return
+    try:
+        size = os.stat(name)[6]
+        _web_bytes(c, f, o, size, "X-Diag-Size: %d\r\n" % size)
     finally:
         f.close()
 
