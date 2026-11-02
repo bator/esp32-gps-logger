@@ -391,10 +391,10 @@ def reset():
     st.clear()
     st.update(start=time.ticks_ms(), rx=None, rx_b=0, good=None, spin=0,
               ok=0, err=0,
-              status=None, quality=None, fixtype=None, valid=False,
+              quality=None, fixtype=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
-              speed=None, course=None, used=None, view={},
-              hdop=None, pdop=None, ttff=None, pos_at=None, hdop_at=None,
+              speed=None, used=None, view={},
+              hdop=None, ttff=None, pos_at=None, hdop_at=None,
               seq=0, epochs=0, extra=0, setup_at=None,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], nav5_ok=None, banners=0, loops=0,
@@ -407,14 +407,13 @@ def reset():
               set_ok=0, gst_at=None, loop_more=0, loop_said=None,
               nt_said=None, nt_more=0, ver_said=None,
               # NAV-PVT (M8/M10): mode of the last setup ("pvt"/"nmea"),
-              # the receiver's kind from MON-VER (kept over a restart),
-              # PVT given up for this boot, the last frame, the source of
-              # the last second, the second's integer position (1e-7 deg)
-              # and accuracy, the latest epoch's speed/heading/accuracies
+              # the receiver's kind from MON-VER (asked anew after a
+              # restart), PVT given up for this boot, the last frame, the
+              # source of the last second, the second's integer position
+              # (1e-7 deg), accuracy and speed (m/s), its time valid
               mode=None, gps_kind=None, pvt_bad=False, pvt_at=None,
               set_boots=0, ubx_ok=0, ubx_bad=0, fix_src=None,
-              lat_i=None, lon_i=None, hacc=None, mps=None, vacc=None,
-              sacc=None, gspeed=None, head=None, tacc=None, t_ok=False,
+              lat_i=None, lon_i=None, hacc=None, mps=None, t_ok=False,
               t_at=None)
     _ep_new(None)
 
@@ -427,21 +426,45 @@ def _ep_new(t):
     ep.update(t=t, date=None, g=None, r=None, alt=[0.0, 0], hdop=[0.0, 0],
               std=None, spd=None, p=None, pn=0, t_ok=False)
 
-def _num(s, conv=float):
-    return conv(s) if s else None
+# The XOR checksum misses two flipped bits: a corrupt sentence can pass it
+# (fuzzed: lat 1e37 in st). A number not in its NMEA form is a ValueError,
+# and handle() counts the sentence bad; the handlers read every field
+# before they keep any of it.
 
-def _deg(v, hemi):
-    """NMEA ddmm.mmmm / dddmm.mmmm + N/S/E/W -> signed decimal degrees."""
+def _num(s, conv=float):
+    """A number field, None when empty. A float must be plain decimal:
+    "1e9", "nan", "inf" are never NMEA (ValueError; looked for in the
+    text, no float made for it)."""
+    if not s:
+        return None
+    if conv is float and ("e" in s or "E" in s or "n" in s or "N" in s):
+        raise ValueError(s)
+    return conv(s)
+
+def _deg(v, hemi, ax):
+    """NMEA ddmm.mmmm + N/S (ax "NS", 90 degrees at most) / dddmm.mmmm +
+    E/W (ax "EW", 180) -> signed decimal degrees, None when empty. Else
+    digits for the degrees, minutes 0 to under 60 without an exponent,
+    the hemisphere one of ax (ValueError). No copy of v to check it: the
+    two slices are the ones parsed."""
     if not v or not hemi:
         return None
     i = v.find(".")
     d = (i if i >= 0 else len(v)) - 2
-    deg = int(v[:d]) + float(v[d:]) / 60
-    return -deg if hemi in "SW" else deg
+    if d < 1 or len(hemi) != 1 or hemi not in ax:
+        raise ValueError(v)
+    a, mm = v[:d], v[d:]
+    m = float(mm)                        # (0 <= m < 60 also ends nan/inf)
+    if not a.isdigit() or not 0 <= m < 60 or "e" in mm or "E" in mm:
+        raise ValueError(v)
+    deg = int(a) + m / 60
+    if deg > (90 if ax == "NS" else 180):
+        raise ValueError(v)
+    return -deg if hemi == ax[1] else deg
 
 def _position(f, i):
     """The sentence's (lat, lon), or None when its fields are empty."""
-    lat, lon = _deg(f[i], f[i + 1]), _deg(f[i + 2], f[i + 3])
+    lat, lon = _deg(f[i], f[i + 1], "NS"), _deg(f[i + 2], f[i + 3], "EW")
     if lat is None or lon is None:
         return None
     return lat, lon
@@ -529,7 +552,13 @@ def _publish():
         st["lat"], st["lon"] = a[0] + a[2] / n, a[1] + a[3] / n
     alt, hd = ep["alt"], ep["hdop"]
     st["alt"] = alt[0] / alt[1] if alt[1] else None
-    st["hdop"], st["hdop_at"] = (hd[0] / hd[1] if hd[1] else None), now
+    if hd[1]:
+        st["hdop"], st["hdop_at"] = hd[0] / hd[1], now
+    elif st["hdop_at"] is None or _age(now, st["hdop_at"]) >= STALE:
+        st["hdop"], st["hdop_at"] = None, now
+    # (a second without a GGA HDOP, RMC only: the last one and its stamp
+    # are kept, _fresh_hdop holds them STALE ms: an unknown HDOP passes
+    # _usable, a lost GGA turned the MAX_HDOP gate off)
     if ep["std"] is not None:            # (a second without GST keeps the
         st["std"], st["std_at"] = ep["std"], now   # last one: _fresh_std)
     _published(now)
@@ -572,11 +601,11 @@ def _load(snap):
 # NAV-PVT payload (92 bytes, little endian): year, month, day, hour, min,
 # sec, valid (bit 0 validDate, 1 validTime, 2 fullyResolved), tAcc ns,
 # nano ns, fixType, flags (bit 0 gnssFixOK, 1 diffSoln), numSV, lon, lat
-# (1e-7 deg), hMSL mm, hAcc, vAcc mm, gSpeed mm/s, headMot 1e-5 deg, sAcc
-# mm/s, headAcc 1e-5 deg, pDOP 0.01, flags3 (bit 0 invalidLlh). iTOW,
-# flags2, height and velN/E/D are skipped (x). The unsigned accuracies are
-# read signed: "unknown" (~2**32) is then -1, not a big int.
-_PVT = "<4xH6B2i2BxB2i4x3i12x4i2H"
+# (1e-7 deg), hMSL mm, hAcc mm, gSpeed mm/s, flags3 (bit 0 invalidLlh).
+# iTOW, flags2, height, vAcc, velN/E/D, headMot, sAcc, headAcc and pDOP
+# are skipped (x): nothing read them. The unsigned accuracies are read
+# signed: "unknown" (~2**32) is then -1, not a big int.
+_PVT = "<4xH6B2i2BxB2i4x2i16xi14xH"
 PVT_LEN = 100                            # whole frame: 6 + 92 + 2
 
 def _i7(v):
@@ -611,13 +640,12 @@ def _pvt_time(y, mo, d, h, mi, s, nano):
 
 def _pvt(fr):
     """One NAV-PVT frame (a memoryview, whole, checksum good): starts its
-    second, keeps the latest epoch's fix type, satellites, speed and
-    accuracies in st, and adds a fix (gnssFixOK, a valid position, fixType
+    second, keeps the latest epoch's fix type, satellites and speed in
+    st, and adds a fix (gnssFixOK, a valid position, fixType
     2D, 3D or GNSS+DR, as GGA's quality 1-5: 2D drops the elevation; DR
     only is no fix) to the second's mean (_pvt_acc)."""
     (y, mo, d, h, mi, sec, valid, tacc, nano, fix, flags, nsv, lon, lat,
-     hmsl, hacc, vacc, gspd, head, sacc, headacc, pdop,
-     flags3) = struct.unpack_from(_PVT, fr, 6)
+     hmsl, hacc, gspd, flags3) = struct.unpack_from(_PVT, fr, 6)
     st["pvt_at"] = time.ticks_ms()
     y, mo, d, t = _pvt_time(y, mo, d, h, mi, sec, nano)
     _second_t(t)
@@ -627,12 +655,8 @@ def _pvt(fr):
     ep["t_ok"] = valid & 7 == 7 and 0 <= tacc < PVT_MAX_TACC
     ok = flags & 1 and not flags3 & 1 and 2 <= fix <= 4
     kmh = gspd * 0.0036
-    st["fixtype"], st["used"], st["pdop"] = fix, nsv, pdop / 100
+    st["fixtype"], st["used"], st["speed"] = fix, nsv, kmh
     st["quality"] = (2 if flags & 2 else 1) if ok else 0
-    st["speed"], st["gspeed"], st["sacc"] = kmh, gspd / 1000, sacc / 1000
-    st["course"] = st["head"] = head / 100000
-    st["vacc"] = vacc / 1000 if vacc >= 0 else None
-    st["tacc"] = tacc
     if not ok:
         return
     if ep["spd"] is None or kmh > ep["spd"]:
@@ -690,31 +714,27 @@ def _publish_pvt(p, now):
 GGA_FIX_MAX = 5
 
 def rmc(talker, f):
+    kn, pos = _num(f[7]), _position(f, 3)     # (all read first: _num)
     _second(f[1])
-    st["status"] = f[2]
-    kn = _num(f[7])
     st["speed"] = None if kn is None else kn * 1.852
     if kn is not None and (ep["spd"] is None or st["speed"] > ep["spd"]):
         ep["spd"] = st["speed"]          # the second's top speed
-    st["course"] = _num(f[8])
     d = f[9]
     if len(d) == 6:
         c = _day                         # (made once a day, as _second)
         if d != c[0]:
             c[0], c[1] = d, "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
         ep["date"] = c[1]
-    pos = _position(f, 3)
     if f[2] == "A" and pos and (len(f) < 13 or f[12] != "E"):
         _acc("r", pos)
 
 def gga(talker, f):
+    q, n, pos = _num(f[6], int), _num(f[7], int), _position(f, 2)
+    alt, hd = _num(f[9]), _num(f[8])     # (all read first: _num)
     _second(f[1])
-    st["quality"] = _num(f[6], int)
-    st["used"] = _num(f[7], int)
-    pos = _position(f, 2)
-    if 0 < (st["quality"] or 0) <= GGA_FIX_MAX and pos:
+    st["quality"], st["used"] = q, n
+    if 0 < (q or 0) <= GGA_FIX_MAX and pos:
         _acc("g", pos)
-        alt, hd = _num(f[9]), _num(f[8])
         if alt is not None:
             ep["alt"][0] += alt
             ep["alt"][1] += 1
@@ -723,13 +743,11 @@ def gga(talker, f):
             ep["hdop"][1] += 1
 
 def gsa(talker, f):
-    """Fix type (and PDOP). One per system and round on a multi-GNSS
+    """Fix type. One per system and round on a multi-GNSS
     receiver; more than GSA_MAX in a second means the GSA rate of the
     setup was lost (a late ACK of another frame looked like its own), and
     that load overruns 9600 baud: gps_check sets it up again."""
     st["fixtype"] = _num(f[2], int)
-    if len(f) > 15:
-        st["pdop"] = _num(f[15])
     now = time.ticks_ms()
     if st["gsa_at"] is None or _age(now, st["gsa_at"]) >= 1000:
         st["gsa_at"], st["gsa_n"] = now, 0
@@ -753,9 +771,9 @@ def gst(talker, f):
     """The receiver's own error estimate (1-sigma, metres) of the second's
     position: the larger of latitude and longitude. A cold start converging
     shows here while its HDOP already looks good."""
+    sl, sn = _num(f[6]), _num(f[7])      # (read first: _num)
     _second(f[1])
     st["gst_at"] = time.ticks_ms()       # it comes (_setup_check)
-    sl, sn = _num(f[6]), _num(f[7])
     if sl is not None and sn is not None:
         ep["std"] = sl if sl > sn else sn
 
@@ -779,8 +797,17 @@ def txt(talker, f):
                  and _age(now, st["storm_at"]) < GPS_FLAP_WINDOW)
         st["setup_wait"] = GPS_STORM_WAIT if storm else GPS_RETRY
         st["ack_n"] = 0                  # at its defaults: a fresh start
-        # maybe another receiver (swapped while running): ask anew
-        st.update(svs=None, svs_at=None, sv_msg=None, gps_ver=None)
+        # maybe another receiver (swapped while running): ask anew, its
+        # model at once. The old one's kind would pick its setup (an M8
+        # given the M10's VALSET: a NAK, PVT off for the boot): until
+        # MON-VER answers the setup is the NMEA one, safe on any, then
+        # (the other mode due: gps_check) the PVT one
+        st.update(svs=None, svs_at=None, sv_msg=None, gps_ver=None,
+                  gps_kind=None)
+        try:
+            uart.write(MON_VER)
+        except OSError:
+            pass
 
 def _gps_flap(now):
     """A receiver that restarts every few seconds but sends NMEA in between
@@ -1108,8 +1135,9 @@ def gps_setup():
     CFG-RATE refused (NAK) is an answer, as NAV5's is: the rest goes on
     acknowledged and the receiver keeps its rate (st["rate_nak"]: 1 fix/s
     is then no "not taken" verdict). A NAV-PVT setup stops at a frame
-    refused or unanswered: the NMEA-off frames after it would leave the
-    receiver silent, no NMEA and no NAV-PVT, until the next setup."""
+    refused (twice: a NAK is sent again once) or unanswered: the NMEA-off
+    frames after it would leave the receiver silent, no NMEA and no
+    NAV-PVT, until the next setup."""
     read_uart()                          # a banner in it came before
     t0 = time.ticks_ms()
     boots = st["gps_boots"]
@@ -1143,6 +1171,11 @@ def gps_setup():
                     time.sleep_ms(30)
                     continue
                 r = _ubx_ack(fr, t0)
+                if r is None and mode == "pvt":
+                    # an ACK-NAK names class and id only, and an M8's
+                    # CFG-MSG frames are all 06 01: a late NAK of the one
+                    # before. Sent once more: refused twice is refused
+                    r = _ubx_ack(fr, t0)
                 ok = r is True or (r is None and fr is PVT_STOP)
                 if not ok and mode == "pvt":
                     # no frame after it: NMEA off with NAV-PVT not on is a
@@ -1160,8 +1193,14 @@ def gps_setup():
         else:
             # no answer: an overrun receiver ignores single frames but takes
             # a burst (measured): the message frames at once cut its output
-            # (no rate change); gps_check then sets it up acknowledged
+            # (no rate change); gps_check then sets it up acknowledged. Not
+            # an M8's NAV-PVT row of CFG-MSG: one NAV-PVT-on dropped and
+            # the NMEA-off taken is a silent receiver. Its NMEA set, then
+            # (mode "nmea", the other one due) the PVT setup acknowledged;
+            # an M10's one VALSET is all or nothing
             mode = _gps_mode()
+            if mode == "pvt" and st["gps_kind"] != "m10":
+                mode = "nmea"
             for fr in _setup_msgs(mode):
                 uart.write(fr)
                 time.sleep_ms(30)
@@ -1220,10 +1259,11 @@ def _setup_check(now):
     age = _age(now, st["setup_at"])
     if age < GPS_VERIFY:
         return
+    if st["gps_boots"] != st["set_boots"]:
+        return                           # restarted (back at 1 Hz, NMEA):
+                                         # its own setup comes, either mode
     pvt = st["mode"] == "pvt"
     if pvt:
-        if st["gps_boots"] != st["set_boots"]:
-            return                       # restarted: its own setup comes
         a = st["pvt_at"]
         if a is None or time.ticks_diff(a, st["setup_at"]) < 0:
             st["checked"] = True
@@ -1719,15 +1759,9 @@ def handle(line, s=0, e=None):
     for b in p:
         c ^= b
         hi |= b
-    h = _hex(v[star + 1]) if star + 1 < e else -1
-    g = _hex(v[star + 2]) if star + 2 < e else -1
-    if h < 0 or g < 0:
-        try:                             # (what int() makes of the rest)
-            h = int(bytes(line[star + 1:min(star + 3, e)]), 16)
-        except ValueError:
-            h = -1
-    else:
-        h = h << 4 | g
+    # exactly two hex digits after the "*" ("*+F", "* 5", "*5" are bad;
+    # a non-hex one, -1, makes h negative: no match)
+    h = _hex(v[star + 1]) << 4 | _hex(v[star + 2]) if star + 3 == e else -1
     if c != h:
         st["err"] += 1
         return
@@ -1757,7 +1791,7 @@ def handle(line, s=0, e=None):
             if st.get("mode") == "pvt" and name in _PVT_OFF:
                 _extra(talker, f)        # the PVT setup turned it off
         st["ok"] += 1
-    except (ValueError, IndexError, UnicodeError):
+    except (ValueError, IndexError, UnicodeError, MemoryError):
         st["err"] += 1
 
 # What the UART delivers goes into one preallocated buffer, read in place
@@ -1787,6 +1821,11 @@ def _rx_drop(r):
     _rx_n = n
 
 def read_uart():
+    """What the UART has: lines to handle(), UBX frames to _ubx_frame(),
+    in place. An error in one (a MemoryError while publishing a second)
+    counts it bad (st["err"]) and the rest is read: no exception leaves
+    the buffer uncommitted, or the next call handled the same sentences
+    again and queued the same seconds twice."""
     global _rx_n, _rx_s
     b = _rx
     while uart.any():
@@ -1821,7 +1860,10 @@ def read_uart():
                 j = e
             if j == e:
                 e = j - 1 if j > r and b[j - 1] == 13 else j
-                handle(b, r, e)          # in place: no copy
+                try:
+                    handle(b, r, e)      # in place: no copy
+                except Exception:        # (a handler's MemoryError): the
+                    st["err"] += 1       # line is bad, not read again
                 r = s = j + 1
                 continue
             # a binary UBX answer: whole, by its length (it may hold 0x0A
@@ -1837,7 +1879,10 @@ def read_uart():
                 break
             ca, cb = _ubx_ck(b, j + 2, need - 2)
             if ca == b[need - 2] and cb == b[need - 1]:
-                _ubx_frame(_rxv[j:need])
+                try:
+                    _ubx_frame(_rxv[j:need])
+                except Exception:        # (as a line's: see handle)
+                    st["err"] += 1
                 r = s = need
                 continue
             # a broken frame, or sync bytes in junk with a plausible length:

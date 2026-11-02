@@ -7456,6 +7456,32 @@ check("SETUP-CHECK: acknowledged but still 1 fix/s, or no GST -> set up again",
       v_slow > 0 and v_nogst > 0 and v_good == 0,
       "slow=%d nogst=%d good=%d" % (v_slow, v_nogst, v_good))
 
+# SETUP-CHECK-RESTART: a receiver restart within GPS_VERIFY (back at 1 Hz,
+# its own setup comes) is no verdict on the setup before it in the NMEA
+# mode either: it was "not taken: 1 fix/s", a diag line and the
+# GPS_NOT_TAKEN_SAY throttle started (the guard was in the PVT branch)
+gl.reset()
+_uart_rx[:] = []
+gl.gps_setup()
+sr_pre = (gl.st["setup_ok"], gl.st["checked"], gl.st["mode"])
+_clock[0] += 2000
+gl.handle(rv_nmea("GPTXT,01,01,02,u-blox AG - www.u-blox.com"))
+sr_extra = gl.st["extra"]
+for k in range(12):
+    _clock[0] += 1000
+    t = "1200%02d.00" % k
+    gl.handle(rv_nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,,021126,,,A" % t))
+    gl.handle(rv_nmea("GPGGA,%s,4730.000,N,01900.000,E,1,08,1.0,100.0,M,"
+                      "40.0,M,," % t))
+    gl.handle(rv_nmea("GPGST,%s,1.0,2.0,1.0,0.0,1.5,1.2,2.0" % t))
+gl._setup_check(_clock[0])
+check("SETUP-CHECK-RESTART: a restart within GPS_VERIFY is no 'not taken' "
+      "in the NMEA mode",
+      sr_pre == (True, False, "nmea") and gl.st["checked"] is False
+      and gl.st["nt_said"] is None and gl.st["extra"] == sr_extra == 1,
+      repr((sr_pre, gl.st["checked"], gl.st["nt_said"], gl.st["extra"])))
+gl.reset()
+
 # RATE-NAK: a CFG-RATE refused (NAK) is an answer, as NAV5's is: it was
 # taken for silence (the blind burst, setup_ok False, set up again and
 # again). The message frames go acknowledged, the receiver stays at its
@@ -7752,8 +7778,81 @@ gl.reset()
 gl.handle(b"$GNGGA,120000.80,4728.0" + rv_nmea(
     "GNRMC,120001.00,A,4728.0000,N,01900.0000,E,0.1,,291026,,,A,V"))
 check("GPS-20: the whole sentence after a cut-off one is parsed",
-      gl.st["ok"] == 1 and gl.st["err"] == 0 and gl.st["status"] == "A",
+      gl.st["ok"] == 1 and gl.st["err"] == 0 and gl.ep["r"] is not None
+      and gl.ep["date"] == "2026-10-29",
       "%d %d" % (gl.st["ok"], gl.st["err"]))
+
+# HDOP-HOLD: a second with RMC only (its GGA lost) set hdop None, and an
+# unknown HDOP passes _usable: the MAX_HDOP gate was off for that second.
+# Now it keeps the last GGA HDOP and its stamp, for STALE ms (_fresh_hdop)
+gl.reset()
+hh_t0 = _clock[0]
+gl.handle(rv_nmea("GPGGA,120000.00,4730.000,N,01900.000,E,1,08,9.0,100.0,M,"
+                  "40.0,M,,"))
+hh = []
+for k in range(1, 4):
+    _clock[0] = hh_t0 + 1000 * k
+    gl.handle(rv_nmea("GPRMC,1200%02d.00,A,4730.000,N,01900.000,E,0.1,,"
+                      "021126,,,A" % k))
+    hh.append((gl.st["time"], gl.st["hdop"], gl._usable(gl.st["pos_at"])))
+check("HDOP-HOLD: an RMC-only second keeps the last GGA HDOP for STALE ms",
+      hh == [("12:00:00", 9.0, False), ("12:00:01", 9.0, False),
+             ("12:00:02", None, True)]
+      and gl.STALE == 2000, repr(hh))
+gl.reset()
+
+# NMEA-RANGE: a checksum-valid corrupt sentence (the XOR misses two flipped
+# bits) put what float() takes in st: minutes 60+, lat 91, lon 181, "e"
+# exponents (lat 5e32), nan / inf. Now such a sentence is bad (counted, none
+# of it used); the edges and the plain forms are read as before
+nr_bad = ("GPGGA,120001.00,4760.000,N,01900.000,E,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,9100.000,N,01900.000,E,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,4730.000,N,18100.000,E,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,4730.0000e33,N,01900.000,E,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,47e30.000,N,01900.000,E,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,-4730.000,N,01900.000,E,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,4730.000,X,01900.000,E,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,4730.000,N,01900.000,N,1,08,1.0,100.0,M,,M,,",
+          "GPGGA,120001.00,4730.000,N,01900.000,E,1,08,1.0,001.0e9,M,,M,,",
+          "GPGGA,120001.00,4730.000,N,01900.000,E,1,08,nan,100.0,M,,M,,",
+          "GPGGA,120001.00,4730.000,N,01900.000,E,1,08,1.0,inf,M,,M,,",
+          "GPRMC,120001.00,A,4730.000,N,01900.000,E,inf,,021126,,,A",
+          "GPRMC,120001.00,A,4730.000,N,01900.000,E,1e3,,021126,,,A",
+          "GPRMC,120001.00,A,4730.000,N,1900.0.00,E,0.1,,021126,,,A",
+          "GPGST,120001.00,1.0,2.0,1.0,0.0,nan,1.2,2.0")
+nr_ok = (("GPGGA,120001.00,8959.9999,S,17959.9999,W,1,08,1.0,-12.5,M,,M,,",
+          (-89.99999833, -179.99999833)),
+         ("GPGGA,120001.00,9000.0000,N,18000.0000,E,1,08,1.0,1.0,M,,M,,",
+          (90.0, 180.0)),
+         ("GPRMC,120001.00,A,0000.000,N,00000.000,E,0.1,,021126,,,A",
+          (0.0, 0.0)),
+         ("GPRMC,120001.00,A,4730,N,1900.5,E,0.1,,021126,,,A",
+          (47.5, 19.00833333)))
+nr_got = []
+for body in nr_bad:
+    gl.reset()
+    gl.handle(rv_nmea(body))
+    gl.handle(rv_nmea("GPRMC,120002.00,V,,,,,,,021126,,,N"))
+    nr_got.append((body, gl.st["err"], gl.st["valid"], gl.st["lat"],
+                   gl.st["alt"], gl.st["hdop"], gl.st["speed"],
+                   gl.st["std"], gl.ep["spd"]))
+nr_fail = [g for g in nr_got
+           if g[1:] != (1, False, None, None, None, None, None, None)]
+nr_okgot = []
+for body, want in nr_ok:
+    gl.reset()
+    gl.handle(rv_nmea(body))
+    gl.handle(rv_nmea("GPRMC,120002.00,V,,,,,,,021126,,,N"))
+    nr_okgot.append((gl.st["err"], gl.st["valid"],
+                     gl.st["lat"] is not None
+                     and round(gl.st["lat"], 6) == round(want[0], 6)
+                     and round(gl.st["lon"], 6) == round(want[1], 6)))
+gl.reset()
+check("NMEA-RANGE: minutes 60+, |lat| > 90, |lon| > 180, exponents, signs, "
+      "bad hemispheres, nan / inf -> the sentence is bad, nothing kept",
+      not nr_fail, repr(nr_fail[:3]))
+check("NMEA-RANGE: 90 / 180 degrees, 0, no fraction still read",
+      nr_okgot == [(0, True, True)] * len(nr_ok), repr(nr_okgot))
 
 # GPS-21: uptime sums tick differences across a ticks_ms wrap
 TPW = 1 << 30
@@ -7915,10 +8014,9 @@ def old_handle(line):
         c = 0
         for b in memoryview(line)[1:star]:
             c ^= b
-        try:
-            ok = c == int(line[star + 1:star + 3], 16)
-        except ValueError:
-            ok = False
+        t = line[star + 1:]               # exactly two hex digits
+        ok = (len(t) == 2 and all(x in b"0123456789abcdefABCDEF" for x in t)
+              and c == int(t, 16))
     if not ok:
         gl.st["err"] += 1
         return
@@ -7946,7 +8044,7 @@ ip_bodies = ("GPRMC,120000.00,A,4730.000,N,01900.000,E,0.1,90.0,171026,,,A",
              "\xe9GRMC,120000.00,A,4730.000,N,01900.000,E,0.1,,171026,,,A",
              "\xe9GGSV,3,1,12,01,40,083,46")
 ip_keys = ("ok", "err", "good", "valid", "lat", "time", "date", "quality", "used",
-           "fixtype", "pdop", "view", "extra", "speed", "status", "seq")
+           "fixtype", "view", "extra", "speed", "seq")
 ip_bad = []
 for n_ in range(1500):
     body = ip_rnd.choice(ip_bodies).encode()
@@ -7980,6 +8078,26 @@ for n_ in range(1500):
 check("NMEA-INPLACE: in place it counts and parses as the copying handle()",
       not ip_bad, "%d differ, first %r" % (len(ip_bad), ip_bad[:1]))
 
+# NMEA-CK-STRICT: the checksum is exactly two hex digits after the "*" and
+# nothing else: the int(..., 16) fallback took "*+F", "* 5", "*5" and
+# "*5Azz" (a checksum of 5 that a corrupt line matches more easily)
+cs_c = 0                                  # (field 10, the variation, not
+for ch in b"GPRMC,120000.00,A,4730.000,N,01900.000,E,0.1,,021126,,,A":
+    cs_c ^= ch                            # read: a checksum under 16)
+cs_x = [x for x in range(0x30, 0x7B) if chr(x).isalnum() and cs_c ^ x < 16]
+cs_body = "GPRMC,120000.00,A,4730.000,N,01900.000,E,0.1,,021126,%s,,A" % (
+    chr(cs_x[0]))
+cs_c ^= cs_x[0]
+cs_got = []
+for ck_ in ("+%X", " %X", "%X", "%02Xzz", "%02X*", "-%X", "%02X", "%02x"):
+    gl.reset()
+    gl.handle(("$%s*%s\r\n" % (cs_body, ck_ % cs_c)).encode())
+    cs_got.append((gl.st["ok"], gl.st["err"]))
+gl.reset()
+check("NMEA-CK-STRICT: only two hex digits after '*' (not '+F', ' 5', '5')",
+      cs_c < 16 and cs_got == [(0, 1)] * 6 + [(1, 0)] * 2,
+      repr((cs_c, cs_got)))
+
 
 # RXBUF-DROP: the rest moves to the front in one slice store (MicroPython
 # copies it with memmove), not in non-overlapping pieces
@@ -8008,6 +8126,68 @@ finally:
     gl._rx_n = gl._rx_s = 0
 check("RXBUF-DROP: the rest moves to the front in one slice store",
       dropped == (True, 500, 1), repr(dropped))
+
+# RXBUF-COMMIT: _rx_n was set before the loop, the drop of what was read
+# only after it: an exception in a handler (MemoryError while publishing)
+# left the buffer uncommitted and the next read_uart handled the same
+# sentences again (queued seconds 10, 11, 10, 11, 12). Now a handler's
+# error counts the line bad and read_uart always commits what it read
+rc_list = [rv_nmea("GPGGA,%02d0000.00,4730.0000,N,01900.0000,E,1,08,1.0,"
+                   "100.0,M,40.0,M,," % (10 + i)) + b"\r\n" for i in range(4)]
+rc_lines = b"".join(rc_list)
+rc_got = []
+for rc_err in (MemoryError, RuntimeError):
+    gl.reset()
+    _uart_rx[:] = []
+    gl._rx_n = gl._rx_s = 0
+    rc_calls = [0]
+    rc_gga = gl.HANDLERS["GGA"]
+
+    def rc_boom(t, f, err=rc_err):
+        rc_calls[0] += 1
+        if rc_calls[0] == 3:
+            raise err("in a handler")
+        rc_gga(t, f)
+    gl.HANDLERS["GGA"] = rc_boom
+    _uart_rx.extend(rc_lines)
+    try:
+        try:
+            gl.read_uart()
+            rc_raised = None
+        except Exception as e:
+            rc_raised = type(e).__name__
+        gl.read_uart()
+    finally:
+        gl.HANDLERS["GGA"] = rc_gga
+    rc_got.append((rc_raised, rc_calls[0], [s[9] for s in gl.st["q"]],
+                   gl.st["err"], gl._rx_n))
+rc_ubx = gl._ubx_frame
+gl.reset()
+gl._rx_n = gl._rx_s = 0
+_uart_rx[:] = []
+_uart_rx.extend(gl.MON_VER + rc_list[0] + rc_list[1])
+
+
+def rc_ubx_boom(fr):
+    raise MemoryError("in _ubx_frame")
+
+
+gl._ubx_frame = rc_ubx_boom
+try:
+    try:
+        gl.read_uart()
+        rc_u = None
+    except Exception as e:
+        rc_u = type(e).__name__
+finally:
+    gl._ubx_frame = rc_ubx
+rc_u = (rc_u, gl.st["err"], gl._rx_n, gl.st["ok"])
+gl.reset()
+gl._rx_n = gl._rx_s = 0
+_uart_rx[:] = []
+check("RXBUF-COMMIT: a handler's error counts the line, nothing handled twice",
+      rc_got == [(None, 4, ["10:00:00", "11:00:00"], 1, 0)] * 2
+      and rc_u == (None, 1, 0, 2), repr((rc_got, rc_u)))
 
 
 # PVT: UBX-NAV-PVT on a u-blox M8/M10 (new feature, 2026-10-31): parsing,
@@ -8076,14 +8256,19 @@ check("PVT-PARSE: negative lat/lon kept as 1e-7 ints, accuracy, elevation",
 pvt_second(T0, n=1, lat=47.5, lon=19.0, mps=2.0, head=12.5, vacc=3.5,
            nsv=9, pdop=1.8, sacc=0.6)    # (an old second: still parsed)
 gl.st["rx"] = _clock[0]
-check("PVT-PARSE: latest epoch's speed, course, sats, fix type, accuracies",
+check("PVT-PARSE: latest epoch's speed, sats, fix type",
       gl.st["used"] == 9 and gl.st["fixtype"] == 3 and gl.st["quality"] == 1
-      and abs(gl.st["speed"] - 7.2) < 1e-9
-      and abs(gl.st["course"] - 12.5) < 1e-9
-      and abs(gl.st["gspeed"] - 2.0) < 1e-9
-      and abs(gl.st["vacc"] - 3.5) < 1e-9 and abs(gl.st["sacc"] - 0.6) < 1e-9
-      and abs(gl.st["pdop"] - 1.8) < 1e-9 and gl.status() == "3D fix",
-      repr((gl.st["used"], gl.st["speed"], gl.st["course"])))
+      and abs(gl.st["speed"] - 7.2) < 1e-9 and gl.status() == "3D fix",
+      repr((gl.st["used"], gl.st["speed"])))
+# (PDOP, course, gSpeed, sAcc, vAcc, tAcc, RMC status: stored every frame /
+# sentence, read by nothing: not in st)
+gl.handle(rv_nmea("GPRMC,120001.00,A,4730.000,N,01900.000,E,0.1,12.5,"
+                  "311026,,,A"))
+gl.handle(rv_nmea("GPGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2"))
+pp_dead = [k for k in ("pdop", "course", "head", "gspeed", "sacc", "vacc",
+                       "tacc", "status") if k in gl.st]
+check("PVT-PARSE: no store nothing reads (PDOP, course, accuracies, status)",
+      pp_dead == [] and gl.st["fixtype"] == 3, repr(pp_dead))
 
 
 def pvt_case(**kw):
@@ -8789,31 +8974,137 @@ check("PVT-NAK-STOP: a NAK (or silence) mid-way -> the frames after it not "
       and st_sil[:2] == (False, False),
       repr((st_gsa, st_sil, [f.hex() for f in s_sil])))
 
+# PVT-BLIND: CFG-RATE unanswered (an overrun or booting receiver) sends the
+# message frames once, blind. An M8's NAV-PVT setup is a row of CFG-MSG:
+# one dropped NAV-PVT-on frame with the NMEA-off ones taken left it silent
+# until a retry (checked=True skipped the "no NAV-PVT" check). Now the
+# blind burst is the NMEA set, and the PVT setup follows acknowledged; an
+# M10's one VALSET (all or nothing) still goes blind
+saved = gl.GPS_PVT
+gl.GPS_PVT = True
+_uart_silent.add((0x06, 0x08))
+try:
+    blind8 = pvt_setup(M8_VER)
+    b8_state = (gl.st["mode"], gl.st["setup_ok"])
+    blind10 = pvt_setup(M10_VER)
+    b10_state = (gl.st["mode"], gl.st["setup_ok"])
+    blind8b = pvt_setup(M8_VER)
+finally:
+    _uart_silent.discard((0x06, 0x08))
+try:
+    _uart_tx[:] = []
+    _clock[0] += gl.GPS_RETRY + 1000
+    gl.gps_check(_clock[0])
+    b8_next = (gl.st["mode"], gl.st["setup_ok"], gl.st["pvt_bad"],
+               [f for f in _uart_tx if f[2:3] == b"\x06"])
+finally:
+    gl.GPS_PVT = saved
+check("PVT-BLIND: M8, CFG-RATE unanswered -> the NMEA set blind, no NAV-PVT "
+      "on; the acknowledged PVT setup next",
+      b8_state == ("nmea", False) and want8[0] not in blind8
+      and nmea_set(blind8) == want_nmea and pvt_stop in blind8
+      and want8[0] not in blind8b
+      and b8_next[:3] == ("pvt", True, False) and b8_next[3][2:-1] == want8
+      and b10_state == ("pvt", False) and vs_frame in blind10,
+      repr((b8_state, b10_state, [f.hex() for f in blind8], b8_next[:3])))
+
+# PVT-NAK-LATE: an ACK / NAK names only class and id, and an M8's CFG-MSG
+# frames are all 06 01: a late NAK of an earlier one, read as the answer
+# to this one, gave PVT up for the whole boot. Now a NAK in the PVT setup
+# is sent again once: refused twice is refused
+nl_once = set([want8[2]])
+nl_write = UART.write
+
+
+def nl_nak_once(self, data):
+    d = bytes(data)
+    if d in nl_once:                      # this send: a NAK (a late one of
+        nl_once.discard(d)                # the frame before), then ACKs
+        _uart_nak_frames.add(d)
+        try:
+            return nl_write(self, data)
+        finally:
+            _uart_nak_frames.discard(d)
+    return nl_write(self, data)
+
+
+UART.write = nl_nak_once
+try:
+    nl_sent = pvt_setup(M8_VER)
+    nl_state = (gl.st["mode"], gl.st["setup_ok"], gl.st["pvt_bad"])
+finally:
+    UART.write = nl_write
+s_nak2, st_nak2, _ = m8_stop(nak=want8[2])
+check("PVT-NAK-LATE: one NAK in the M8 PVT setup -> sent again, PVT kept; "
+      "two -> PVT off",
+      nl_state == ("pvt", True, False) and nl_sent.count(want8[2]) == 2
+      and nl_sent[2:-1] == want8[:3] + want8[2:]
+      and s_nak2.count(want8[2]) == 2 and st_nak2[:2] == (True, False),
+      repr((nl_state, [f.hex() for f in nl_sent])))
+
 # PVT-RESTART: a restarted receiver is back at NMEA: its banner counts, its
 # NMEA positions keep the track going, and the setup turns PVT on again
+# (the restarted M10 answers MON-VER: PVT-SWAP)
 pvt_setup(M10_VER)
 gl.st["checked"] = True
 _uart_tx[:] = []
 _uart_rx[:] = []
-_uart_rx.extend(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
-                + b"\r\n")
-for k in range(3):
-    _uart_rx.extend(rv_nmea("GPGGA,1200%02d.00,4730.000,N,01900.000,E,1,08,"
-                            "1.0,100.0,M,40.0,M,," % k) + b"\r\n")
-    _uart_rx.extend(rv_nmea("GPRMC,1200%02d.00,A,4730.000,N,01900.000,E,"
-                            "0.1,,311026,,,A" % k) + b"\r\n")
-gl.read_uart()
-restart = (gl.st["gps_boots"], gl.st["fix_src"], gl.st["valid"],
-           gl.st["extra"] > 0)
-for _ in range(gl.GPS_RETRY // 1000 + 1):
-    _clock[0] += 1000
-    gl.gps_check(_clock[0])
+_uart_ver[0] = M10_VER
+try:
+    _uart_rx.extend(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+                    + b"\r\n")
+    for k in range(3):
+        _uart_rx.extend(rv_nmea("GPGGA,1200%02d.00,4730.000,N,01900.000,E,"
+                                "1,08,1.0,100.0,M,40.0,M,," % k) + b"\r\n")
+        _uart_rx.extend(rv_nmea("GPRMC,1200%02d.00,A,4730.000,N,01900.000,"
+                                "E,0.1,,311026,,,A" % k) + b"\r\n")
+    gl.read_uart()
+    restart = (gl.st["gps_boots"], gl.st["fix_src"], gl.st["valid"],
+               gl.st["extra"] > 0)
+    for _ in range(gl.GPS_RETRY // 1000 + 1):
+        _clock[0] += 1000
+        gl.gps_check(_clock[0])
+finally:
+    _uart_ver[0] = None
 check("PVT-RESTART: banner counted, NMEA fixes used, PVT set up again",
       restart == (1, "nmea", True, True) and vs_frame in _uart_tx
       and gl.st["mode"] == "pvt" and gl.st["gps_kind"] == "m10",
       repr(restart))
 _uart_rx[:] = []
 gl.reset()
+
+# PVT-SWAP: the receiver's kind was kept over a restart, so a receiver
+# swapped while running got the old model's setup (an M8 the M10's VALSET:
+# a NAK, PVT off for the boot). Now a banner forgets the kind and asks
+# MON-VER at once: the setup is the new model's, or the NMEA one (safe on
+# any) until it answers
+swap = []
+for sw_ver in (M8_VER, None):
+    pvt_setup(M10_VER)
+    gl.st["checked"] = True
+    _uart_tx[:] = []
+    _uart_rx[:] = []
+    _uart_ver[0] = sw_ver
+    try:
+        _uart_rx.extend(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+                        + b"\r\n")
+        gl.read_uart()
+        sw_polled = gl.MON_VER in _uart_tx
+        for _ in range(gl.GPS_RETRY // 1000 + 1):
+            _clock[0] += 1000
+            gl.gps_check(_clock[0])
+    finally:
+        _uart_ver[0] = None
+    sw_cfg = [f for f in _uart_tx if f[2:3] == b"\x06"]
+    swap.append((sw_polled, gl.st["gps_kind"], gl.st["mode"],
+                 vs_frame in sw_cfg, sw_cfg[2:-1] == want8,
+                 nmea_set(sw_cfg) == want_nmea))
+_uart_rx[:] = []
+gl.reset()
+check("PVT-SWAP: a banner asks MON-VER at once; a swapped M8 gets its own "
+      "setup, an unanswered one the NMEA setup, never the M10 VALSET",
+      swap == [(True, "m8", "pvt", False, True, False),
+               (True, None, "nmea", False, False, True)], repr(swap))
 
 
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements

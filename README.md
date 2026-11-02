@@ -372,7 +372,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
 | `gps setup pvt ok` / `no ack` | The NAV-PVT setup (u-blox M8/M10) acknowledged or not answered |
-| `gps pvt no NAV-PVT - NMEA` / `gps pvt refused - NMEA` | 10 s after an acknowledged NAV-PVT setup no NAV-PVT came, or the receiver NAKed its message frame: NMEA for the rest of the boot (also in the diagnostic log as `gps pvt …, NMEA this boot`) |
+| `gps pvt no NAV-PVT - NMEA` / `gps pvt refused - NMEA` | 10 s after an acknowledged NAV-PVT setup no NAV-PVT came, or the receiver NAKed a message frame twice (a NAK is sent again once: an ACK names only class and id, so a late NAK of the frame before looks like its answer): NMEA for the rest of the boot (also in the diagnostic log as `gps pvt …, NMEA this boot`) |
 | `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
 | `gps setup unverified: no fix` | 30 minutes after an acknowledged setup still no fix to check it by: no verdict |
 | `gps rate N ms refused` | The receiver answered the rate (CFG-RATE) with a NAK: it stays at 1 fix a second, the rest of the setup goes on acknowledged, and 1 fix/s is then no "not taken" verdict |
@@ -683,12 +683,19 @@ console line.
   check after the setup counts NAV-PVT epochs (they come without a fix
   too) and needs no `GST`; an NMEA sentence turned off that still comes
   counts as not taken. No NAV-PVT at all 10 s after an acknowledged setup
-  (`GPS_VERIFY`), or a NAK of the message frame: NAV-PVT is given up for the
+  (`GPS_VERIFY`), or a message frame refused twice (a NAK is sent again
+  once: an M8's CFG-MSG frames all share one class and id, and a late NAK
+  of an earlier one looked like its answer): NAV-PVT is given up for the
   boot (`gps pvt …, NMEA this boot` in the diagnostic log) and the NMEA setup
-  follows. A restarted receiver is back at its NMEA defaults: its banner
-  counts as before, its NMEA seconds keep the track going, and the next
-  setup turns NAV-PVT on again (the model is kept over the restart and
-  asked anew). The satellite list (UBX-NAV-SAT) and MON-VER polls work the
+  follows. A receiver that does not answer the rate frame gets the message
+  frames once, blind: on an M8 the NMEA set (one lost NAV-PVT frame among
+  the CFG-MSG ones would leave it silent), on an M10 its one VALSET (all or
+  nothing); the acknowledged NAV-PVT setup follows. A restarted receiver is
+  back at its NMEA defaults: its banner counts as before, its NMEA seconds
+  keep the track going, and the next setup turns NAV-PVT on again. Its
+  model is forgotten and MON-VER asked at once (a module swapped while
+  running is another model): until it answers the setup is the NMEA one,
+  safe on any receiver. The satellite list (UBX-NAV-SAT) and MON-VER polls work the
   same. Each frame is read with one `struct.unpack_from` on the receive
   buffer.
 - **The NMEA setup turns NAV-PVT off.** A VALSET to RAM outlives an ESP
@@ -764,7 +771,14 @@ console line.
   `RMC` speed) the position is the second's first fix instead: the mean of
   five fixes lies ~0.4 s along the track but is stamped with the second,
   6 m behind at 50 km/h and 12 m at 100 km/h. Altitude and HDOP stay
-  averaged.
+  averaged. A second with `RMC` only (its `GGA` lost) keeps the last HDOP
+  for 2 s (`STALE`), so the HDOP filter still applies to it.
+- **Bad sentences.** The checksum must be exactly two hex digits. The XOR
+  checksum misses two flipped bits, so the numbers are checked too: a
+  coordinate's degrees must be digits, its minutes 0 to under 60 (no
+  exponent), at most 90° / 180° with its own hemisphere letters; a number
+  field plain decimal (no exponent, `nan` or `inf`). Anything else makes the whole sentence bad
+  (counted in `nmea` good / bad), none of it used.
 - **Midnight.** Only `RMC` carries the date. A second that runs back past
   midnight without its own `RMC` has no date, so it is not a fix rather than
   a day off.
