@@ -5031,7 +5031,9 @@ def _sample(now):
 # If .bad is full, uploads of that file pause (state "bad full"). Three
 # consecutive payload errors without a 2xx are treated as a server/config
 # problem: backoff, no further quarantine. .bad retries that still 4xx
-# never delete the quarantined data.
+# never delete the quarantined data. The same batch answered SRV_ERR_MAX
+# times in a row with another code (5xx, 404, 403) holds its track while
+# others wait.
 #
 # TLS (mbedTLS) needs ~40 kB contiguous from the ESP-IDF heap, outside the
 # Python heap. If the Python heap ever grows (see gc.threshold at the top) it
@@ -5185,16 +5187,18 @@ def read_pos(path):
     delta records count from, else None). Corrupt / past-EOF sidecars reset
     to 0 (Dawarich dedup handles the resend). Never treat a bad .pos as
     EOF. A .trb offset without a keyframe "=" to start from is one too;
-    key -1: none was read before off (its deltas up to the next keyframe
-    are dropped, as they were then). A .pos that is there but cannot be
-    read raises OSError: resending from 0 sent the file (and a .trb's
-    history) twice. Read bounded: a .pos is under 24 bytes, a corrupt big
-    one raised MemoryError."""
+    key -1: none was read before off (_kb_seek then reads the file from
+    its start to off, which must be a record start). A .pos that is there
+    but cannot be read raises OSError: resending from 0 sent the file (and
+    a .trb's history) twice. Read bounded: a .pos is under 24 bytes, a
+    corrupt big one raised MemoryError. Read as bytes: one that is not
+    UTF-8 (a damaged block) raised UnicodeError read as text, out of
+    up_reset at every boot."""
     size = _file_size(path)
     if size is None:
         return 0, None
     try:
-        with open(path + ".pos") as f:
+        with open(path + ".pos", "rb") as f:
             s = f.read(POS_READ)
     except OSError as e:
         if _enoent(e):
@@ -5207,7 +5211,8 @@ def read_pos(path):
         v = s.split()
         off = int(v[0]) if v else 0
         key = int(v[1]) if len(v) > 1 else None
-    except ValueError:
+    except ValueError:                   # (UnicodeError too)
+        print("pos corrupt", path)
         return 0, None
     if off < 0 or off > size:
         print("pos corrupt", path, off, size)
@@ -5313,7 +5318,11 @@ def _rd_rec(f):
     """Next record of a .trb (opened with _rd_open) in _rbuf[_rd[1]:_rd[2]]:
     a delta record (its first byte 0x80 or more; one cut off at the end of
     the file comes back short, _kb_dec drops it) or a line as _rd_line
-    returns it. False at EOF."""
+    returns it. False at EOF. A flag byte whose varints run past 31 bytes
+    (an erased block reads 0xFF) is a damaged record of 1 byte: it ended
+    where _rbuf did, so where it ended depended on where the read started
+    (a .pos committed in it was no record start read from its keyframe:
+    resent from 0, for ever). trk2gpx's trb_lines takes the same end."""
     a, n = _rd[2], _rd[3]
     if n - a < 32 and not _rd[4]:        # (a record is at most 31 bytes)
         _rd[0] += a
@@ -5334,6 +5343,8 @@ def _rd_rec(f):
                 j += 1
             j += 1
         i += 1
+    if j - a > 31:                       # damaged: not where a record ends
+        j = a + 1
     _rd[1] = a
     _rd[2] = j if j < n else n
     return True
@@ -5475,26 +5486,39 @@ def _kb_rec(a, b, s):
                                          # inside one: none until a keyframe)
 
 def _kb_seek(f, off, key, s):
-    """Read a .trb from its keyframe at key up to off, the state s at off
-    (key -1: no keyframe before off, s not valid). False when off is not
-    where a record starts (s then not valid)."""
+    """Read a .trb from its keyframe at key up to off, the state s at off;
+    key -1 (no keyframe before off): from the start of the file (an
+    offset -1 was not checked: a corrupt "1234 -1" was read from inside a
+    record). -> the offset of the keyframe s is from (with -1 the last one
+    read, -1 if none), None when off is not where a record starts read so
+    (s then not valid)."""
     s[0] = None
-    if key < 0:
-        _rd_open(off)
-        return True
-    _rd_open(key)
+    k = key
+    _rd_open(key if key > 0 else 0)
     while _rd[0] + _rd[2] < off:
         if not _rd_rec(f):
             break
         a, b = _rd[1], _rd[2]
         if a < b:
+            if _rbuf[a] == 61:           # (as read_batch keeps _rk[0])
+                k = _rd[0] + a
             _kb_rec(a, b, s)
         else:
             s[0] = None
     if _rd[0] + _rd[2] != off:
         s[0] = None
-        return False
-    return True
+        return None
+    return k
+
+def _kb_at(f, off, key, s):
+    """_kb_seek from the keyframe at key; when that does not lead to off (a
+    corrupt .pos), from the start of the file: off a record start read so,
+    the upload goes on from off, not from 0 (resent, the same .pos came
+    again). None: off is no record start."""
+    k = None
+    if key is not None and key >= 0:
+        k = _kb_seek(f, off, key, s)
+    return _kb_seek(f, off, -1, s) if k is None else k
 
 def _rd_point(a, b, gpx):
     """_rbuf[a:b] is a point line (see _is_point)."""
@@ -5531,9 +5555,8 @@ def count_points():
             with open(path, "rb") as f:
                 # a .trb offset that is no record start (its keyframe good)
                 # counts from 0, as read_batch then reads the file;
-                # _kb_seek leaves the reader at a good one
-                if tb and off and (key is None
-                                   or not _kb_seek(f, off, key, _ks)):
+                # _kb_at leaves the reader at a good one
+                if tb and off and _kb_at(f, off, key, _ks) is None:
                     off = 0
                 if not (tb and off):
                     _rd_open(off)
@@ -5552,7 +5575,7 @@ def count_points():
                             total += 1
                     elif _rd_point(a, b, gpx):
                         total += 1
-        except (OSError, MemoryError) as e:
+        except Exception as e:           # (it runs in up_reset at boot)
             print("count", path, repr(e))
             gc.collect()
     return total
@@ -5608,8 +5631,27 @@ def _finite(x):
     except AttributeError:
         return x == x and x != float("inf") and x != float("-inf")
 
+def _ymd_ok(y, mo, d, hh, mi, ss):
+    """A real UTC time in 2020-2099 (the ranges _kb_time checks, without
+    its FIX_S_END bound): month 13 or hour 25 went up as they were."""
+    if not (2020 <= y <= 2099 and 1 <= mo <= 12 and d >= 1
+            and hh < 24 and mi < 60 and ss < 60):
+        return False
+    return d <= _days(y, mo + 1, 1) - _days(y, mo, 1)
+
+def _tc_ok(rb, t):
+    """The compact time YYYYMMDDTHHMMSSZ at rb[t:t + 16], its digits
+    checked, is a real one (_ymd_ok)."""
+    return _ymd_ok((rb[t] - 48) * 1000 + (rb[t + 1] - 48) * 100
+                   + (rb[t + 2] - 48) * 10 + rb[t + 3] - 48,
+                   (rb[t + 4] - 48) * 10 + rb[t + 5] - 48,
+                   (rb[t + 6] - 48) * 10 + rb[t + 7] - 48,
+                   (rb[t + 9] - 48) * 10 + rb[t + 10] - 48,
+                   (rb[t + 11] - 48) * 10 + rb[t + 12] - 48,
+                   (rb[t + 13] - 48) * 10 + rb[t + 14] - 48)
+
 def _valid_time(t):
-    """ISO UTC `YYYY-MM-DDTHH:MM:SSZ` with year 2020-2099."""
+    """ISO UTC `YYYY-MM-DDTHH:MM:SSZ`, a real time in 2020-2099."""
     if not t or len(t) != 20:
         return False
     if (t[4] != "-" or t[7] != "-" or t[10] != "T"
@@ -5618,8 +5660,8 @@ def _valid_time(t):
     for i in (0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18):
         if t[i] < "0" or t[i] > "9":
             return False
-    year = int(t[0:4])
-    return 2020 <= year <= 2099
+    return _ymd_ok(int(t[0:4]), int(t[5:7]), int(t[8:10]), int(t[11:13]),
+                   int(t[14:16]), int(t[17:19]))
 
 def _put(pos, b):
     _body[pos:pos + len(b)] = b
@@ -5756,9 +5798,8 @@ def _trk_point(a, b):
     for k in _TDIG:
         if not 48 <= rb[t + k] <= 57:
             return 0
-    y = (rb[t] - 48) * 1000 + (rb[t + 1] - 48) * 100 + (rb[t + 2] - 48) * 10
-    if not 2020 <= y + rb[t + 3] - 48 <= 2099:
-        return 0
+    if not _tc_ok(rb, t):                # (a .trb keyframe _kb_parse did
+        return 0                         # not take is passed here too)
     lat, lon = _fnum(a, c1), _fnum(c1 + 1, c2)
     if (lat is None or lon is None or not _finite(lat) or not _finite(lon)
             or abs(lat) > 90 or abs(lon) > 180):
@@ -5788,8 +5829,8 @@ def _trk_point(a, b):
         if v is None:
             if not _utf8(c3 + 1, c4):
                 return 0
-        elif _finite(v):
-            _pt[10] = _pt[11] = 0
+        elif _finite(v * HDOP_M):        # (1e308: finite, * HDOP_M inf:
+            _pt[10] = _pt[11] = 0        # invalid JSON, the batch a 400)
             _pt[12] = b"%.1f" % (v * HDOP_M)
             need += len(_J_ACC) + 1 + len(_pt[12])
     return need
@@ -5848,7 +5889,7 @@ def _gpx_loc(line):
     extra = ""
     if ele_f is not None:
         extra += '"altitude":%.1f,' % ele_f
-    if hdop_f is not None and _finite(hdop_f):
+    if hdop_f is not None and _finite(hdop_f * HDOP_M):   # (and hdop_f)
         extra += '"horizontal_accuracy":%.1f,' % (hdop_f * HDOP_M)
     return ('{"type":"Feature","geometry":{"type":"Point",'
             '"coordinates":[%.6f,%.6f]},"properties":{'
@@ -5873,13 +5914,14 @@ def read_batch(path, off=0, key=None):
     _rk[1] = off
     with open(path, "rb") as f:
         if tb:
-            if off and (key is None or not _kb_seek(f, off, key, s)):
+            k = _kb_at(f, off, key, s) if off else None
+            if k is None and off:
                 print("pos misaligned", path, off)
                 off = _rk[1] = 0         # (resent: Dawarich deduplicates)
             if not off:
                 _rd_open(0)
                 s[0] = None
-            _rk[0] = key if off else -1
+            _rk[0] = k if off else -1
         else:
             _rd_open(off)
         while True:
@@ -5971,7 +6013,7 @@ def _track_lines(src, path, off, end, key, fn):
     gpx = not _is_trk(path)
     if path.endswith(TRB):
         s = _ks
-        if off and (key is None or not _kb_seek(src, off, key, s)):
+        if off and _kb_at(src, off, key, s) is None:
             return                       # (read_batch read it from 0)
         if not off:
             _rd_open(0)
@@ -6155,6 +6197,10 @@ def _schedule(now, ms=None):
         up["backoff"] = min(max(b * 2, BACKOFF_START), BACKOFF_MAX)
     up["next_at"] = time.ticks_add(now, ms)
 
+SRV_ERR_MAX = 3                          # the same batch answered with a code
+                                         # that is no payload error (5xx,
+                                         # 404...) in a row: its file held
+
 def _hold_file(path, now, ms):
     """Backoff one file so a stuck oldest track does not block the rest."""
     h = up.get("hold") or {}
@@ -6220,6 +6266,10 @@ def _io_write(s, b):
 _tls_ctx = [None, None]                  # the one SSLContext, and the size
                                          # of the CA_FILE it was made with
                                          # (None: there was none)
+CA_MAX = 4096                            # bytes of CA_FILE at most (one DER
+                                         # root is ~1-2 KB; a PEM bundle
+                                         # saved as it hit MemoryError at
+                                         # every POST: TLS reboots)
 
 def _ca_size():
     """Size of CA_FILE, None if there is none (ENOENT). Any other error
@@ -6239,8 +6289,8 @@ def _tls_context():
     block TLS needs, and keep that area for the rest of the run). Not
     kept if making it failed, so the next POST tries again.
     Without CA_FILE (ENOENT only) the server is not verified; a CA_FILE
-    that cannot be read, or is empty, raises: no POST, never a silent
-    fall back to an unverified one."""
+    that cannot be read, is empty or over CA_MAX raises: no POST, never a
+    silent fall back to an unverified one."""
     ctx = _tls_ctx[0]
     if ctx is not None:
         return ctx
@@ -6248,6 +6298,9 @@ def _tls_context():
         import tls
     except ImportError:
         import ssl as tls
+    sz = _ca_size()
+    if sz is not None and sz > CA_MAX:   # (not read: "ca err", no reboot)
+        raise ValueError("%s over %d B" % (CA_FILE, CA_MAX))
     ca = None
     try:
         with open(CA_FILE, "rb") as f:
@@ -6563,21 +6616,40 @@ def _http_post(size):
               % code)
     return code, retry
 
-def _tls_reboot():
-    """TLS_REBOOT_N TLS allocations failed in a row at home: the IDF heap
-    is fragmented for good. Write what is in RAM and restart."""
-    if up.get("enomem", 0) < TLS_REBOOT_N or not at_home():
-        return False
-    if _ota_wants_radio():
-        return False                     # (a reset aborts a pending image)
-    print("upload: TLS out of memory %d times, reboot" % up["enomem"])
+def _mem_reboot_soon():
+    """The last boot was a memory reboot (LOWIDF_MARK) under
+    LOWIDF_REBOOT_GAP ago: no other one yet, for any of the reasons (a
+    lasting cause rebooted every few minutes for ever)."""
+    return up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP
+
+def _mem_reboot(why):
+    """Write what is in RAM, tell the next boot (LOWIDF_MARK), restart."""
     try:
         flush(_still_hold())
     except Exception:
         pass
     _diag_final()
-    _diag_write("reboot tls memory %d" % up["enomem"])
+    _diag_write("reboot " + why)
+    try:
+        with open(LOWIDF_MARK, "w") as f:
+            f.write("1")
+    except OSError:
+        pass
     machine.reset()
+
+def _tls_reboot():
+    """TLS_REBOOT_N TLS allocations failed in a row at home: the IDF heap
+    is fragmented for good. Write what is in RAM and restart; at most one
+    per LOWIDF_REBOOT_GAP, as _low_reboot (one that does not help, a
+    certificate chain over TLS_MIN_KB, rebooted every ~2.5 min)."""
+    if up.get("enomem", 0) < TLS_REBOOT_N or not at_home():
+        return False
+    if _ota_wants_radio():
+        return False                     # (a reset aborts a pending image)
+    if _mem_reboot_soon():
+        return False
+    print("upload: TLS out of memory %d times, reboot" % up["enomem"])
+    _mem_reboot("tls memory %d" % up["enomem"])
     return True
 
 def _low_ms(now, at, seen):
@@ -6599,23 +6671,35 @@ def _low_reboot(fmt, n, low_ms):
     fmt % n: what is low ("idf %d KB", "mem %d B")."""
     if not at_home() or low_ms < LOWIDF_WAIT or _ota_wants_radio():
         return False                     # (a reset aborts a pending image)
-    if up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP:
+    if _mem_reboot_soon():
         return False                     # rebooted for it a short while ago
     what = fmt % n
     print("upload: low %s for %d s, reboot" % (what, low_ms // 1000))
-    try:
-        flush(_still_hold())
-    except Exception:
-        pass
-    _diag_final()
-    _diag_write("reboot low %s %d s" % (what, low_ms // 1000))
-    try:
-        with open(LOWIDF_MARK, "w") as f:
-            f.write("1")
-    except OSError:
-        pass
-    machine.reset()
+    _mem_reboot("low %s %d s" % (what, low_ms // 1000))
     return True
+
+def _env_bad(url, key):
+    """Why GEO_URL / API_KEY cannot go into a request head, or None. Both
+    printable ASCII without a space (a CR in the key split the header, a
+    space or a "# comment" got a 400 / 401 for ever); GEO_URL http(s)://
+    host[:port][/path], host letters, digits, "-" and "." (userinfo or
+    IPv6 made _raw_post's int(port) raise: "err net" for ever)."""
+    for c in key:
+        if not "!" <= c <= "~":
+            return "API_KEY in .env: a space, control or non-ASCII character"
+    for c in url:
+        if not "!" <= c <= "~":
+            return "GEO_URL in .env: a space, control or non-ASCII character"
+    proto, _, rest = url.partition("://")
+    host = rest.partition("/")[0]
+    h, _, p = host.partition(":")
+    if (proto not in ("http", "https") or not h
+            or (":" in host and not (p.isdigit() and 0 < int(p) < 65536))):
+        return "GEO_URL in .env: not http(s)://host[:port][/path]"
+    for c in h:
+        if not (c.isalpha() or c.isdigit() or c in "-."):
+            return "GEO_URL in .env: not http(s)://host[:port][/path]"
+    return None
 
 def upload_tick():
     """Send one batch when WiFi is up and due. Runs on home and hotspot."""
@@ -6626,6 +6710,15 @@ def upload_tick():
     if not up["url"] or not up["key"]:
         up["state"] = "no .env"
         return
+    if up.get("env_u") is not up["url"] or up.get("env_k") is not up["key"]:
+        bad = _env_bad(up["url"], up["key"])  # (once: it allocates)
+        if bad:
+            # never sends (as no .env): the value is never printed
+            print("upload:", bad)
+            _diag_write("upload " + bad)
+            up["state"] = "no .env"
+            return
+        up["env_u"], up["env_k"] = up["url"], up["key"]
     files = pending()
     up["files"] = len(files)
     skip = up.get("skip")
@@ -6704,6 +6797,9 @@ def upload_tick():
                 os.rename(path, path + ".err")
                 _rm(path + ".pos")
                 print("parked", path + ".err")
+                # its points, never sent, leave "left" (it held the OTA);
+                # unreadable, it cannot be counted: count the rest
+                up["left"] = count_points()
             except OSError:
                 pass
         _hold_file(path, now, BACKOFF_MAX)
@@ -6814,6 +6910,7 @@ def upload_tick():
         up["sent"] += n_ok
         up["ok_at"] = now
         up["fail4"] = 0
+        up["srv"] = None
         up["backoff"] = BACKOFF_START
         up["allow_bad"] = True
         up["skip"] = None
@@ -6854,6 +6951,19 @@ def upload_tick():
         up["err"] += 1
         up["state"] = "err " + ("net" if code is None else str(code))
         _schedule(now, retry)
+        if code is not None and len(files) > 1:
+            # the same batch answered so SRV_ERR_MAX times in a row (a 5xx
+            # from one point, a 404 / 403 of a proxy): hold that track, the
+            # others go (only the backoff: files[0] for ever, the rest
+            # blocked behind it). The only one waiting: the backoff alone
+            se = up.get("srv")
+            if se and se[0] == path and se[1] == off:
+                se[2] += 1
+            else:
+                se = up["srv"] = [path, off, 1]
+            if se[2] >= SRV_ERR_MAX:
+                up["srv"] = None
+                _hold_file(path, now, BACKOFF_MAX)
 
 def _fs_err(now):
     """A .pos write (or delete) failed: retry later, the track stays."""

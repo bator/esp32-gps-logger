@@ -5,9 +5,10 @@
     python3 tools/trk2gpx.py 20261005_120005.trb > 20261005_120005.gpx
 
 Quarantined (.trk.bad, .trb.bad) and parked unreadable (.trk.err,
-.trb.err) files convert the same way; bytes that are not UTF-8 (a damaged
-flash block) are replaced. A .trb (#TRKB) holds the same text lines as
-differences (see trb_lines); its .bad copy is text.
+.trb.err) files convert the same way; a point with bytes that are not
+UTF-8 (a damaged flash block) in a field that is no number is dropped, as
+the logger drops it from the upload. A .trb (#TRKB) holds the same text
+lines as differences (see trb_lines); its .bad copy is text.
 
 Line format: "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ" (#TRK1; ele/hdop may be
 empty) or "lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ" (#TRK2, from UBX-NAV-PVT:
@@ -34,9 +35,17 @@ EXT_NS = "https://github.com/bator/esp32-gps-logger/trk2"
 
 
 def _iso(tc):
-    """YYYYMMDDTHHMMSSZ -> YYYY-MM-DDTHH:MM:SSZ, or None."""
+    """YYYYMMDDTHHMMSSZ -> YYYY-MM-DDTHH:MM:SSZ, or None: also for a time
+    that is no UTC time in 2020-2099 (month, day of the month, hour,
+    minute, second), as the logger's _tc_ok."""
     if (len(tc) != 16 or tc[8] != "T" or tc[15] != "Z"
-            or not (tc[:8] + tc[9:15]).isdigit()):
+            or not tc.isascii() or not (tc[:8] + tc[9:15]).isdigit()):
+        return None
+    y, mo, d = int(tc[0:4]), int(tc[4:6]), int(tc[6:8])
+    if not (2020 <= y <= 2099 and 1 <= mo <= 12
+            and 1 <= d <= calendar.monthrange(y, mo)[1]
+            and int(tc[9:11]) < 24 and int(tc[11:13]) < 60
+            and int(tc[13:15]) < 60):
         return None
     return "%s-%s-%sT%s:%s:%sZ" % (tc[0:4], tc[4:6], tc[6:8],
                                    tc[9:11], tc[11:13], tc[13:15])
@@ -48,6 +57,13 @@ def _num(s):
         return s if s and math.isfinite(float(s)) else ""
     except ValueError:
         return ""
+
+
+def _not_utf8(s):
+    """s (read with errors="surrogateescape") is no number and holds bytes
+    that are not UTF-8: the logger drops such a point (_trk_field), a
+    field that is only no number it leaves out."""
+    return not _num(s) and any("\udc80" <= c <= "\udcff" for c in s)
 
 
 def read_points(lines):
@@ -77,7 +93,8 @@ def read_points(lines):
             continue
         t = _iso(tc)
         if (t is None or not math.isfinite(lat) or not math.isfinite(lon)
-                or abs(lat) > 90 or abs(lon) > 180):
+                or abs(lat) > 90 or abs(lon) > 180
+                or any(_not_utf8(x) for x in f[2:-1])):
             continue
         yield (new_seg, lat, lon, _num(ele), _num(hdop), t,
                None if acc is None else _num(acc),
@@ -86,11 +103,13 @@ def read_points(lines):
 
 
 EPOCH = 1577836800                         # 2020-01-01 UTC, the .trb seconds
-# the logger's decoder bounds (gps_logger.py _kb_dec, _kb_time, _rd_line):
+# the logger's decoder bounds (gps_logger.py _kb_dec, _kb_time, _rd_line,
+# _rd_rec):
 # past them a record is damaged, as there
 KB_MAX = 1 << 28                           # _KB_MAX: no varint over 2 * it
 FIX_S_END = 2145916800                     # 2088-01-01 in s since 2020
 LINE_MAX = 512                             # a longer text line is skipped
+REC_MAX = 31                               # bytes of a delta record at most
 _NUM = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?")
 
 
@@ -144,7 +163,7 @@ def _text(st):
     return ",".join(out) + "\n"
 
 
-def trb_lines(data):
+def trb_lines(data, errors="replace"):
     """The text lines of a binary .trb track (bytes): its "#TRKB" header,
     each point as its TRK1/TRK2 text line, "-" lines and the "#END" footer
     (nothing after it). A keyframe is "=" + the line; a delta record is a
@@ -152,12 +171,29 @@ def trb_lines(data):
     the change of field i follows) and LEB128 varints (the step, zigzag
     changes in the field's last decimal). A damaged record, and the deltas
     after it up to the next keyframe, are left out: the same records as the
-    logger's decoder (_kb_rec), so both read the same points."""
+    logger's decoder (_kb_rec), so both read the same points. A flag byte
+    whose varints run past REC_MAX bytes (an erased block reads 0xFF) is a
+    damaged record of 1 byte, as the logger's _rd_rec has it.
+
+    errors: how bytes that are not UTF-8 in a text line are decoded
+    ("surrogateescape" lets read_points tell them from a U+FFFD)."""
     st = None
     i, n = 0, len(data)
     while i < n:
         m = data[i]
         if m >= 0x80:
+            j = i + 1
+            b = 0
+            while b < 6 and j < n:       # where the record ends (_rd_rec)
+                if m & (1 << b):
+                    while j < n and data[j] >= 0x80:
+                        j += 1
+                    j += 1
+                b += 1
+            if j - i > REC_MAX:
+                st = None
+                i += 1
+                continue
             j = i + 1
             vals = []
             ok = True
@@ -204,7 +240,7 @@ def trb_lines(data):
         j = data.find(b"\n", i)
         if j < 0:
             return                       # a line cut off at the end
-        line = data[i:j + 1].decode("utf-8", "replace")
+        line = data[i:j + 1].decode("utf-8", errors)
         ln = j + 1 - i
         i = j + 1
         if ln > LINE_MAX:                # the logger skips it (_rd_line)
@@ -267,11 +303,14 @@ def main(argv):
     path = argv[1]
     name = path.rsplit("/", 1)[-1]
     name = name[:name.index(".tr")]
+    # (bytes that are not UTF-8 never reach the GPX: read_points keeps
+    # only numbers and checked times)
     if path.endswith((".trb", ".trb.err")):
         with open(path, "rb") as f:
-            sys.stdout.write(convert(trb_lines(f.read()), name))
+            sys.stdout.write(convert(trb_lines(f.read(), "surrogateescape"),
+                                     name))
         return 0
-    with open(path, encoding="utf-8", errors="replace") as f:
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
         sys.stdout.write(convert(f, name))
     return 0
 
