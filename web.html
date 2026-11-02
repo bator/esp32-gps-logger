@@ -23,13 +23,30 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .tiles img{position:absolute;width:256px;height:256px}
 .map:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(9,9,11,0) 72%,var(--b) 100%)}
 .grid{display:none}
-.acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1.5px solid rgba(9,9,11,.7);background:rgba(9,9,11,.12);z-index:2}
-.pin{position:absolute;left:50%;top:42%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#09090b;border:3px solid #fff;box-sizing:border-box;box-shadow:0 1px 6px rgba(0,0,0,.5);z-index:3}
-.pin:after{content:"";position:absolute;inset:-14px;border-radius:50%;border:2px solid rgba(9,9,11,.6);animation:p 2s infinite}
+/* the position as a navigation app shows it: a blue dot in a white ring,
+   the accuracy as a pale disc, a cone the way it moves */
+.acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(59,130,246,.4);background:rgba(59,130,246,.14);z-index:2}
+.pin{position:absolute;left:50%;top:42%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-sizing:border-box;box-shadow:0 1px 5px rgba(0,0,0,.45);z-index:3}
+.pin:after{content:"";position:absolute;inset:-12px;border-radius:50%;border:2px solid rgba(37,99,235,.55);animation:p 2s infinite}
+.cone{position:absolute;left:50%;top:42%;width:84px;height:84px;margin:-42px 0 0 -42px;z-index:2;display:none;
+ background:radial-gradient(circle,rgba(59,130,246,.55) 12%,rgba(59,130,246,0) 70%);clip-path:polygon(50% 50%,29% 0,71% 0)}
+.cone.on{display:block}
+.nofix .cone{display:none}
 @keyframes p{from{transform:scale(.5);opacity:1}to{transform:scale(2.2);opacity:0}}
 .nofix .pin,.nofix .acc{display:none}
-.coord{position:absolute;left:50%;top:42%;transform:translate(16px,-34px);font-size:11px;font-weight:600;color:#fff;background:rgba(9,9,11,.82);padding:3px 7px;border-radius:4px;z-index:4;white-space:nowrap}
-.nofix .coord{transform:translate(-50%,-50%);color:var(--warn);text-shadow:none;font-size:13px}
+/* without a fix: the reason in the middle; with one the card says it all */
+.coord{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);font-size:13px;font-weight:600;color:var(--warn);background:rgba(9,9,11,.82);padding:3px 7px;border-radius:4px;z-index:4;white-space:nowrap;display:none}
+.nofix .coord{display:block}
+/* the "now" card: address, how long here, speed, accuracy, fix age; on
+   the half of the map away from the dot */
+.now{position:absolute;left:max(16px,calc(50% - 534px));top:52px;z-index:4;background:rgba(9,9,11,.92);border-radius:14px;padding:12px 16px;box-shadow:0 6px 24px rgba(0,0,0,.45);max-width:calc(100% - 32px);box-sizing:border-box}
+.nofix .now{display:none}
+.now h3{margin:0;font:700 17px Inter,sans-serif;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.now p{margin:2px 0 10px;font:500 12px Inter,sans-serif;color:#a1a1aa}.now p:empty{display:none}
+.now .r{display:flex;gap:18px;font:500 10px "JetBrains Mono",monospace;color:#8e8e96;letter-spacing:.06em}
+.now .r b{display:block;font:600 15px "JetBrains Mono",monospace;color:#fff;letter-spacing:0;margin-top:2px;white-space:nowrap}
+.now .nc{margin-top:8px;font:500 10.5px "JetBrains Mono",monospace;color:#71717a}.now .nc:empty{display:none}
+.now .nm{display:none;font:500 11px "JetBrains Mono",monospace;color:#a1a1aa;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hud{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:12px;padding:10px 16px;z-index:4;max-width:1100px;margin:auto;box-sizing:border-box;background:rgba(9,9,11,.82);border-radius:0 0 12px 12px}
 .hud h1{font-size:14px;font-weight:700;letter-spacing:.18em;margin:0;color:#fff}
 .live{font-size:11px;font-weight:600;color:var(--ok);letter-spacing:.1em;display:flex;align-items:center;gap:6px}
@@ -38,9 +55,12 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .hud .up{margin-left:auto;color:var(--m);font-size:12px}
 .trk{position:absolute;left:50%;top:42%;z-index:1;pointer-events:none}
 .trk svg{position:absolute;overflow:visible}
-.trk circle{stroke-width:3;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 1.5px #fff)}
-.trk circle.s{fill:#fff;stroke:#09090b}.trk circle.e{fill:#09090b;stroke:#fff}
-.trk path{fill:none;stroke:#09090b;stroke-width:3.5;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round;opacity:.85;filter:drop-shadow(0 0 1.5px #fff)}
+/* the track: blue on a white casing, a soft blue glow under it */
+.trk svg{filter:drop-shadow(0 0 5px rgba(29,78,216,.45))}
+.trk circle{stroke-width:3;vector-effect:non-scaling-stroke}
+.trk circle.s{fill:#fff;stroke:#2563eb}.trk circle.e{fill:#2563eb;stroke:#fff}
+.trk path{fill:none;stroke:#2563eb;stroke-width:5;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round}
+.trk path.c{stroke:#fff;stroke-width:8}
 .hud .day{color:var(--a);font-size:11px;font-weight:600;letter-spacing:.1em;white-space:nowrap}.hud .day em{font-style:normal}
 .attr{position:absolute;right:8px;bottom:6px;font-size:10px;color:var(--m);z-index:4}
 .attr a{color:inherit}
@@ -239,19 +259,21 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .tr.go{cursor:pointer}.tr.go span{color:var(--t)}.tr.go span b{color:#fff}
 .tr.go:hover span,.tr.go.on span,.tr.go.on span b{color:var(--a)}.tr.go.on i:after{border-left-color:#fff}
 .tr.end i:after{display:none}
-.trk path.hl{stroke:#09090b;stroke-width:5.5;opacity:1;filter:drop-shadow(0 0 2px #fff)}
+.trk path.hl{stroke:#1d4ed8;stroke-width:7}.trk path.hl.c{stroke:#fff;stroke-width:11}
 .hint{font-size:11px;color:var(--m);margin-top:8px}
 /* a narrow HUD wraps whole items (offline with a day's km it needs ~490 px;
    squeezed, the uptime broke over 5 lines into the map); the uptime of the
    last answer is not shown offline */
 @media(max-width:760px){.hud{flex-wrap:wrap;row-gap:6px}.hud>*{white-space:nowrap}.off .hud .up{display:none}
-.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:300px}.wrap{margin-top:-70px}.coord{transform:translate(-50%,16px)}.coord.up{transform:translate(-50%,-44px)}}
+.hud .day em{display:none}.tm{grid-template-columns:repeat(3,1fr)}.tm b{font-size:19px}.tm .db{display:none}.wi{width:18px;height:14px;margin-right:5px}.g{grid-template-columns:1fr}.ev-k4{grid-template-columns:repeat(2,1fr)}.gt-g{grid-template-columns:1fr}.gt-dm{height:80px}.ev-grp{grid-template-columns:28px 1fr auto;grid-template-areas:"ic nm n" "ic dt lt" ". sk sk";gap:3px 10px;padding:9px 6px}.ev-grp.ev-hd{display:none}.ev-grp .ev-ic{grid-area:ic;align-self:start}.ev-grp .ev-nm{grid-area:nm;white-space:nowrap}.ev-grp .ev-n{grid-area:n}.ev-grp .ev-dt{grid-area:dt;font-size:11.5px;color:var(--lab)}.ev-grp .ev-lt{grid-area:lt;font-size:11.5px}.ev-grp .ev-sk{grid-area:sk;height:12px;margin-top:3px;overflow:hidden}.ev-grp .ev-sk i{max-height:12px}.col.l .radar{contain:none;min-height:0}.col.l .radar svg{flex:none;height:auto;min-height:0;max-width:380px}.map{height:380px}.wrap{margin-top:-70px}
+.now{left:12px;right:12px;max-width:none;height:48px;padding:7px 11px;border-radius:10px}.now h3{font-size:14px}.now p,.now .r,.now .nc{display:none}.now .nm{display:block}}
 </style>
 </head>
 <body>
 <div class="map nofix" id="map">
   <div class="tiles" id="tiles"></div><div class="grid"></div><div class="trk" id="trk"></div>
-  <div class="acc" id="acc"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
+  <div class="acc" id="acc"></div><div class="cone" id="cone"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
+  <div class="now" id="now"><h3 id="nst"></h3><p id="nsub"></p><div class="r" id="nr"></div><div class="nc" id="ncoord"></div><div class="nm" id="nm"></div></div>
   <div class="hud" id="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
   <div class="attr">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &middot; <a href="https://www.geoapify.com/">Geoapify</a></div>
 </div>
@@ -302,6 +324,10 @@ var ZOOM = 17;
 // Geoapify key; Cloudflare caches the tiles); it answers pages on a
 // private-network address, as the board's is
 var TILES = "https://atlas.crusand.org/tiles/geoapify/";
+// the address of the position: Atlas' Photon (reverse geocoding), asked
+// again only after ADDR_M metres and ADDR_S seconds
+var ADDR = "https://atlas.crusand.org/api/v1/photon/reverse";
+var ADDR_M = 25, ADDR_S = 20;
 // every status.json key the page shows (tests check none is missing)
 var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
@@ -890,6 +916,7 @@ function view(d, prev) {
     Math.abs(+p[1]).toFixed(5) + "&deg; " + (+p[1] < 0 ? "W" : "E") +
     (acc === null ? "" : dot + "&plusmn;" + acc.toFixed(1) + " m") :
     "NO FIX &middot; " + esc(fix).toUpperCase();
+  v.ncoord = v.coord.replace(/ &middot; &plusmn;.*$/, "");
   return v;
 }
 
@@ -1158,6 +1185,9 @@ function mapBand(el) {
       u = Math.min(h, wr.getBoundingClientRect().top - m);
     if (u - t >= 100) { b.top = t; b.bot = u; }
   }
+  // a phone: the now card sits at the top, the band starts under it
+  var card = document.getElementById("now");
+  if (el.offsetWidth < 760 && card.offsetHeight && el.className.indexOf("nofix") < 0) b.top += card.offsetHeight + 8;
   return b;
 }
 // The view: the position and the day's track fitted into the free band,
@@ -1260,16 +1290,19 @@ function placeMap(d) {
   var key = z + "/" + t.x + "/" + t.y + "/" + nx + "/" + ny, box = document.getElementById("tiles");
   // the pin, its ring and the coordinates at the position (off the anchor
   // when the view is centred on the day's track)
-  var ids = ["acc", "pin", "coord"];
+  var ids = ["acc", "pin", "cone"];
   for (var j = 0; j < 3; j++) {
     var s = document.getElementById(ids[j]).style;
     s.left = "calc(50% + " + ((me[0] - v.X) * sc).toFixed(1) + "px)";
     s.top = "calc(42% + " + ((me[1] - v.Y) * sc).toFixed(1) + "px)";
   }
-  // on a phone the coordinates sit under the pin: above it in the band's
-  // lower half (not under the telemetry strip)
-  var py = el.offsetHeight * .42 + (me[1] - v.Y) * sc;
-  document.getElementById("coord").className = py > (band.top + band.bot) / 2 ? "coord up" : "coord";
+  // the card on the band's half away from the dot
+  var py = el.offsetHeight * .42 + (me[1] - v.Y) * sc, card = document.getElementById("now");
+  var low = py > (band.top + band.bot) / 2, phone = el.offsetWidth < 760;
+  card.className = low || phone ? "now top" : "now";
+  card.style.top = (phone ? band.top - card.offsetHeight - 2 : low ? band.top + 8 :
+    Math.max(band.top + 8, band.bot - 10 - card.offsetHeight)) + "px";
+  if (fix) nowPaint(d, lat, lon);
   if (key !== mapKey) {
     var h = "";
     for (var dx = -nx; dx <= nx; dx++) for (var dy = -ny; dy <= ny; dy++)
@@ -1285,14 +1318,110 @@ function placeMap(d) {
   if (key + "/" + hist.pts.length + "/" + hist.hl !== trkKey) {
     trkKey = key + "/" + hist.pts.length + "/" + hist.hl;
     var hr = hlRange();
-    trk.innerHTML = hist.pts.length ? '<svg width="1" height="1"><path d="' + histPath(t, z) + '"/>' +
-      (hr ? '<path class="hl" d="' + histPath(t, z, hr[0], hr[1]) + '"/>' : "") +
+    var dd = histPath(t, z), dh = hr ? histPath(t, z, hr[0], hr[1]) : "";
+    trk.innerHTML = hist.pts.length ? '<svg width="1" height="1"><path class="c" d="' + dd + '"/><path d="' + dd + '"/>' +
+      (hr ? '<path class="hl c" d="' + dh + '"/><path class="hl" d="' + dh + '"/>' : "") +
       ends(t, z, hr ? hr[0] : 0, hr ? hr[1] : hist.pts.length - 1, sc) + "</svg>" : "";
   }
   // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
   var acc = document.getElementById("acc"), px = typeof d.hacc === "number" ? d.hacc * 2 / t.mpp :
     typeof d.hdop === "number" ? d.hdop * UERE * 2 / t.mpp : 0;
   acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
+}
+
+// metres between two [_, lat, lon] points
+function metres(a, b) {
+  var c = Math.cos(a[1] * Math.PI / 180);
+  return 1000 * Math.sqrt(Math.pow((a[1] - b[1]) * 110.54, 2) + Math.pow((a[2] - b[2]) * 111.32 * c, 2));
+}
+// Photon's answer -> {st: street and number (or the place's name), sub:
+// district, city}; null when it names nothing (pure, for tests)
+function addrOf(j) {
+  var f = j && j.features && j.features[0], p = f && f.properties;
+  if (!p) return null;
+  var st = p.street ? p.street + (p.housenumber ? " " + p.housenumber : "") : p.name || "";
+  var sub = [p.street && p.name ? p.name : "", p.district || p.locality || "", p.city || p.county || ""];
+  sub = sub.filter(function (x, i) { return x && sub.indexOf(x) === i && x !== st; });
+  return st ? {st: st, sub: sub.join(", ")} : null;
+}
+// From today's track: how long the position has stayed within r metres
+// (ms, null when the track does not end there; a stray fix outside for
+// under STRAY_MS does not end the stay), and the speed over its last
+// minute (km/h; 0 standing, null when the track is not current)
+var STRAY_MS = 120000;
+function hereFor(pts, lat, lon, r, now) {
+  var n = pts.length, me = [0, lat, lon], i = n - 1;
+  if (!n || hist.past || metres(pts[n - 1], me) > r) return {ms: null, kmh: null};
+  for (var k = n - 2; k >= 0; k--) {
+    if (metres(pts[k], me) <= r) { i = k; continue; }
+    if (pts[i][0] - pts[k][0] > STRAY_MS) break;
+  }
+  var ms = now - pts[i][0], kmh = ms >= 60000 ? 0 : null;
+  if (kmh === null && now - pts[n - 1][0] < 120000) {
+    var j = n - 1;
+    while (j > 0 && pts[n - 1][0] - pts[j - 1][0] <= 60000) j--;
+    var dt = pts[n - 1][0] - pts[j][0], dm = 0;
+    for (var k = j + 1; k < n; k++) dm += metres(pts[k - 1], pts[k]);
+    kmh = dt > 0 ? dm / dt * 3600 : 0;
+  }
+  return {ms: ms, kmh: kmh};
+}
+// the heading (degrees from north) over the track's last 30 m; null if shorter
+function heading(pts) {
+  var n = pts.length, i = n - 1;
+  if (n < 2) return null;
+  while (i > 0 && metres(pts[i], pts[n - 1]) < 30) i--;
+  if (metres(pts[i], pts[n - 1]) < 30) return null;
+  var a = pts[i], b = pts[n - 1], c = Math.cos(b[1] * Math.PI / 180);
+  return (Math.atan2((b[2] - a[2]) * c, b[1] - a[1]) * 180 / Math.PI + 360) % 360;
+}
+// the card's HTML (pure, for tests): addr from addrOf, h from hereFor
+function nowCard(d, addr, h, coords) {
+  var ha = typeof d.hacc === "number" ? d.hacc : typeof d.hdop === "number" ? d.hdop * UERE : null;
+  var st = function (k, val, cls) { return "<span" + (cls ? ' class="' + cls + '"' : "") + ">" + k + "<b>" + val + "</b></span>"; };
+  var r = (h.ms !== null ? st("HERE FOR", esc(hms(h.ms / 1000))) : "") +
+    st("SPEED", h.kmh === null ? "&ndash;" : Math.round(h.kmh) + " km/h") +
+    st("ACCURACY", ha === null ? "&ndash;" : "&plusmn;" + Math.round(ha) + " m") +
+    (typeof d.good_age_s === "number" ? st("LAST FIX", d.good_age_s + " s", "fa") : "");
+  // a phone: one line under the address
+  var nm = [h.ms !== null ? "here " + esc(hms(h.ms / 1000)) : "", h.kmh === null ? "" : Math.round(h.kmh) + " km/h",
+    ha === null ? "" : "&plusmn;" + Math.round(ha) + " m"].filter(Boolean).join(" &middot; ");
+  return {nst: addr ? esc(addr.st) : coords, nsub: addr ? esc(addr.sub) : "", nr: r, ncoord: addr ? coords : "", nm: nm};
+}
+// the address: asked when the position moved ADDR_M metres, at most every
+// ADDR_S seconds; the card shows the coordinates until (or if never) known
+var addr = {at: null, t: 0, a: null, busy: false};
+function addrLoad(lat, lon) {
+  var me = [0, lat, lon];
+  if (addr.busy || addr.at && metres(addr.at, me) < ADDR_M || Date.now() - addr.t < ADDR_S * 1000) return;
+  var x = new XMLHttpRequest();
+  addr.busy = true;
+  addr.t = Date.now();
+  x.open("GET", ADDR + "?lat=" + lat.toFixed(5) + "&lon=" + lon.toFixed(5) + "&limit=1", true);
+  x.timeout = 8000;
+  x.onload = function () {
+    addr.busy = false;
+    var a = null;
+    try { a = x.status === 200 ? addrOf(JSON.parse(x.responseText)) : null; } catch (e) { a = null; }
+    if (a) { addr.a = a; addr.at = me; if (mapD) nowPaint(mapD, lat, lon); }
+  };
+  x.onerror = x.ontimeout = function () { addr.busy = false; };
+  x.send();
+}
+function nowPaint(d, lat, lon) {
+  var acc = typeof d.hacc === "number" ? d.hacc : typeof d.hdop === "number" ? d.hdop * UERE : 0;
+  // within 100 m (an indoor fix strays that far), more on a poor one
+  var h = hereFor(hist.pts, lat, lon, Math.max(100, 3 * acc), Date.now());
+  // an address is the position's while within ADDR_M (else coordinates)
+  var a = addr.a && addr.at && metres(addr.at, [0, lat, lon]) < 4 * ADDR_M ? addr.a : null;
+  // the coordinates as the status painted them (view() runs first)
+  var c = nowCard(d, a, h, drawn.ncoord || "");
+  paint({nst: c.nst, nsub: c.nsub, nr: c.nr, nm: c.nm});
+  document.getElementById("ncoord").style.display = a ? "" : "none";
+  var hd = h.kmh !== null && h.kmh >= 3 ? heading(hist.pts) : null, cone = document.getElementById("cone");
+  cone.className = hd === null ? "cone" : "cone on";
+  cone.style.transform = hd === null ? "" : "rotate(" + hd.toFixed(0) + "deg)";
+  addrLoad(lat, lon);
 }
 
 var last = 0, every = 15, prevD = null, drawn = {};
