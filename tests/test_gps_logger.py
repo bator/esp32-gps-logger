@@ -13787,15 +13787,20 @@ else:
             "tback": 1, "wfail": 4, "wlost": 1, "low": 1, "setup": 4,
             "pvt": 1, "env": 2, "boot": 2, "wback": 1, "stay": 1, "grx": 2,
             "other": 2}
-    ev_order = ["gloop", "upl", "bug", "gsil", "ota", "crash", "track", "full",
-                "wfail", "setup", "env", "otax", "reboot", "tback", "wlost",
-                "low", "pvt", "boot", "wback", "grx", "stay", "other"]
+    # the latest first; at the same last time by severity, then count
+    ev_order = ["boot", "grx", "ota", "upl", "bug", "crash", "track", "full",
+                "setup", "env", "otax", "reboot", "tback", "wlost", "low",
+                "pvt", "wback", "stay", "other", "gsil", "gloop", "wfail"]
+    lms = ev.get("lastMs") or []
     check("PAGE-EV: groups - counts by kind ('(+N more)', '(N more)' and "
           "'N more windows' counted, an update once however many lines), "
           "the 2 lines after the last status line pending and shown, rows "
-          "by severity then count",
+          "by the last time seen (latest first), then severity and count",
           ev.get("n") == ev_n and ev.get("pend") == 2
           and ev.get("order") == ev_order
+          and len(lms) == len(ev_order) and None not in lms
+          and all(lms[i] >= lms[i + 1] for i in range(len(lms) - 1))
+          and lms[0] > lms[-1]
           and ev.get("viewN") == [ev_n[k] + (k in ("boot", "grx"))
                                   for k in ev_order],
           repr((ev.get("n"), ev.get("pend"), ev.get("order"),
