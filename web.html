@@ -220,7 +220,7 @@ circle.u{fill:none;filter:none;opacity:.7}
 .ev-pl span{position:absolute;font-size:10px;color:var(--lab);line-height:1}
 .ev-pl .y{left:-26px;width:20px;text-align:right;transform:translateY(-50%)}
 .ev-pl .x{top:100%;margin-top:7px;transform:translateX(-50%)}
-.ev-grp{display:grid;grid-template-columns:30px 1.3fr 64px 2fr 150px 54px;gap:12px;align-items:center;padding:9px 10px;border-radius:8px;font-size:12.5px}
+.ev-grp{display:grid;grid-template-columns:30px 1.3fr 64px 2fr 150px 84px;gap:12px;align-items:center;padding:9px 10px;border-radius:8px;font-size:12.5px}
 .ev-grp:nth-child(even){background:rgba(255,255,255,.025)}
 .ev-grp.ev-hd{font-size:10.5px;color:var(--lab);letter-spacing:.08em;border-bottom:1px solid var(--ln);border-radius:0;background:none}
 .ev-grp>*{min-width:0}
@@ -591,7 +591,8 @@ function evOta(d) {                     // -> [updates, failed, checking]
   return [n, bad, run];
 }
 // the groups to show: the committed ones and the lines still waiting for a
-// status line (at the last time known), sorted by severity, then count.
+// status line (at the last time known), the latest first (Bator's request:
+// what happened lately on top), then by severity and count; never seen last.
 // -> [{k, name, sev, tone, icon, n, last, det, spark: per-hour counts}]
 function evGroups(a) {
   var gs = a.g;
@@ -613,7 +614,10 @@ function evGroups(a) {
     for (var h = Math.max(h0, h1 - 47); h0 !== null && h <= h1; h++) sp.push(g.h[h] || 0);   // (48 h at most)
     out.push({k: e[0], name: e[2], sev: sev, tone: tone, icon: e[5], n: g.n, last: g.last, det: evDet(e[0], g), spark: sp, d: g.d});
   }
-  return out.sort(function (x, y) { return y.sev - x.sev || y.n - x.n; });
+  return out.sort(function (x, y) {
+    var lx = x.last === null ? -Infinity : x.last, ly = y.last === null ? -Infinity : y.last;
+    return (ly > lx) - (ly < lx) || y.sev - x.sev || y.n - x.n;
+  });
 }
 var MD = " &middot; ";
 function evDet(k, g) {                  // a group's detail line (HTML)

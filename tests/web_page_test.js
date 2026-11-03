@@ -626,7 +626,7 @@ try {
     for (const k in a.g) cnt[k] = a.g[k].n;
     const gs = c.evGroups(a);
     for (const g of gs) { spark[g.k] = g.spark; last[g.k] = g.last === null ? null : c.hm(g.last); }
-    return {view: w, n: cnt, order: gs.map((g) => g.k), viewN: gs.map((g) => g.n), spark: spark, last: last,
+    return {view: w, n: cnt, order: gs.map((g) => g.k), lastMs: gs.map((g) => g.last), viewN: gs.map((g) => g.n), spark: spark, last: last,
       det: Object.fromEntries(gs.map((g) => [g.k, g.det])), pend: a.pend.length,
       lines: a.n, empty: c.evView(c.evNew(), {busy: true, done: false}),
       none: c.evView(c.evNew(), {busy: false, done: true})};
