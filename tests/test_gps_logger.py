@@ -7493,8 +7493,9 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and "failed check or write leaves the board as it was" not in bsrc,
           "rc=%d %r" % (rc, err[-400:]))
     # BUILD-SLIM: the board leaves out what the logger never uses (BLE,
-    # ESP-NOW, LAN, mDNS, SD card, I2S: ~400 KB of the 2.02 MB app, and
-    # the BLE controller's RAM) and freezes only the port's own modules
+    # ESP-NOW, LAN, mDNS queries, SD card, I2S: ~400 KB of the 2.02 MB app,
+    # and the BLE controller's RAM) but keeps the mDNS responder (the page
+    # as HOSTNAME.local: without it only the IP answered) and freezes only the port's own modules
     # with the logger (asyncio, umqtt, webrepl, mip, requests... ~25 KB
     # unused); the smaller app fits 1792 KB slots (2 x 2496 KB before: the
     # file system gets ~1.4 MB more on 16 MB, more of 8 MB)
@@ -7517,13 +7518,14 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     app = int(app.group(1), 16) if app else None
     off = ["MICROPY_PY_BLUETOOTH", "MICROPY_PY_ESPNOW",
            "MICROPY_PY_NETWORK_LAN", "MICROPY_HW_ENABLE_SDCARD",
-           "MICROPY_PY_MACHINE_I2S", "MICROPY_HW_ENABLE_MDNS_QUERIES",
-           "MICROPY_HW_ENABLE_MDNS_RESPONDER"]
-    check("BUILD-SLIM: no BLE/ESP-NOW/LAN/mDNS/SD/I2S, only the port's and "
-          "the logger's modules frozen, 1792 KB slots the script knows",
+           "MICROPY_PY_MACHINE_I2S", "MICROPY_HW_ENABLE_MDNS_QUERIES"]
+    check("BUILD-SLIM: no BLE/ESP-NOW/LAN/mDNS queries/SD/I2S, the mDNS "
+          "responder on, only the port's and the logger's modules frozen, "
+          "1792 KB slots the script knows",
           rc == 0 and "boards/manifest.py" not in man
           and 'freeze("$(PORT_DIR)/modules")' in man
           and all(re.search(r"#define %s\s+\(0\)" % m, bh) for m in off)
+          and re.search(r"#define MICROPY_HW_ENABLE_MDNS_RESPONDER\s+\(1\)", bh)
           and "sdkconfig.ble" not in bc and "CONFIG_BT_ENABLED=n" in bs
           and "partitions-ota.csv" in bc
           and pt.get("ota_0") == (0x10000, 0x1c0000)
