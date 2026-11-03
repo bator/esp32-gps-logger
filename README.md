@@ -290,9 +290,10 @@ The firmware is built for `boards/GPS_LOGGER_C6`: MicroPython's
 `ESP32_GENERIC_C6` with two 1792 KB OTA app slots
 (`boards/GPS_LOGGER_C6/partitions-ota.csv`, 16 MB flash; the file system
 takes the ~12.4 MB after them) and the bootloader's rollback on. It leaves
-out what the logger never uses: BLE, ESP-NOW, Ethernet, mDNS, the SD card
-and I2S, and of the frozen packages all but the port's own modules
-(asyncio, umqtt, webrepl, mip, requests...). That made the app 1.51 MB
+out what the logger never uses: BLE, ESP-NOW, Ethernet, mDNS queries, the
+SD card and I2S (the mDNS responder stays, for `http://<HOSTNAME>.local/`:
+~33 KB), and of the frozen packages all but the port's own modules
+(asyncio, umqtt, webrepl, mip, requests...). That made the app 1.54 MB
 instead of 2.02 MB, and the BLE controller's ~34 KB of static RAM is free
 for the ESP-IDF heap. The old single-slot app (1984 KB) was 98% full.
 

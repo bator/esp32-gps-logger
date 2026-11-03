@@ -8,11 +8,13 @@
 #define MICROPY_HW_ENABLE_UART_REPL         (1)
 
 // What the logger never uses (~110 KB of the app with BLE's ~300 KB):
-// BLE, ESP-NOW, Ethernet, mDNS (its URLs are plain hosts), SD card, I2S
+// BLE, ESP-NOW, Ethernet, mDNS queries (its URLs are plain hosts), SD card,
+// I2S. The mDNS responder stays: the page is opened as HOSTNAME.local
+// (without it only the IP worked, 2026-11-03)
 #define MICROPY_PY_BLUETOOTH                (0)
 #define MICROPY_PY_ESPNOW                   (0)
 #define MICROPY_PY_NETWORK_LAN              (0)
 #define MICROPY_HW_ENABLE_SDCARD            (0)
 #define MICROPY_PY_MACHINE_I2S              (0)
 #define MICROPY_HW_ENABLE_MDNS_QUERIES      (0)
-#define MICROPY_HW_ENABLE_MDNS_RESPONDER    (0)
+#define MICROPY_HW_ENABLE_MDNS_RESPONDER    (1)
