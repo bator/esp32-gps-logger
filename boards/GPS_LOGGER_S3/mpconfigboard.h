@@ -21,7 +21,7 @@
 #define MICROPY_PY_BLUETOOTH                (0)
 #define MICROPY_PY_ESPNOW                   (0)
 #define MICROPY_PY_NETWORK_LAN              (0)
-#define MICROPY_HW_ENABLE_SDCARD            (0)
+#define MICROPY_PY_MACHINE_SDCARD           (0)
 #define MICROPY_PY_MACHINE_I2S              (0)
 #define MICROPY_HW_ENABLE_MDNS_QUERIES      (0)
 #define MICROPY_HW_ENABLE_MDNS_RESPONDER    (1)

@@ -96,6 +96,10 @@ if [ -n "$DIRTY" ] || [ "$MODE" = --flash ]; then
 fi
 SHA=$(sha256sum "$OUT/gps_logger.py" | cut -d" " -f1)
 printf 'COMMIT = "%s"\nSHA = "%s"\nBUILD = %s\n' "$COMMIT" "$SHA" "$BUILD" > "$OUT/gps_frozen.py"
+# the display's code too on the board that has it: deploy.sh compares both
+if [ "$BOARD" = GPS_LOGGER_S3 ]; then
+    printf 'TFT = "%s"\n' "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d" " -f1)" >> "$OUT/gps_frozen.py"
+fi
 # only the port's own modules (_boot.py mounts the file system) with the
 # logger's: not boards/manifest.py's asyncio, umqtt, webrepl, mip,
 # requests... (~25 KB the logger never imports)
@@ -231,8 +235,9 @@ case "$MODE" in
     MBOARD=$BOARD
     [ "$BOARD" = GPS_LOGGER_C6 ] && MBOARD=
     if [ -n "$LIVE" ]; then
-        LIVE_BOARD=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read()).get("board") or "")' <<< "$LIVE" 2>/dev/null || true)
-        if [ "$LIVE_BOARD" != "$MBOARD" ]; then
+        # ("?": unreadable, not the C6's empty name: LIVE_BUILD below says so)
+        LIVE_BOARD=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read()).get("board") or "")' <<< "$LIVE" 2>/dev/null || echo "?")
+        if [ "$LIVE_BOARD" != "?" ] && [ "$LIVE_BOARD" != "$MBOARD" ]; then
             echo "$OTA_DEST holds the firmware of another board (${LIVE_BOARD:-GPS_LOGGER_C6}): each board has its own folder" >&2
             exit 1
         fi
