@@ -586,6 +586,9 @@ check("home_aps file round trip", aps == [b"\x01\x02\x03\xaa\xbb\xcc",
 # 2026-11 review: the real things only this port has. The real gc, the real
 # poll on a real socket, what the passes without a client allocate
 if sys.implementation.name == "micropython":
+    check("gc.threshold(8192) set by the import", gc.threshold() == 8192)
+
+
     def _alloc(fn, n=100):
         gc.collect()
         gc.disable()

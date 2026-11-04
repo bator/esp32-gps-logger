@@ -15861,6 +15861,36 @@ try:
           and _ota_log == [("boot", "ota_1"), ("reset",)],
           repr((fw, _ota_log, gl.ota.get("failed"))))
 
+    # GD-OTA-SHA: the page's own sha256 (same size: only the hash tells), and
+    # the slot read back from flash (the stream's hash matches a bad write)
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    _serve(_manifest(200))
+    _files["http://ota.lan/gps/web.html.gz"] = b"x" * len(_page)
+    try:
+        gl._ota_check()
+    except ValueError:
+        pass
+    gd_page = (list(_ota_log), os.path.exists(os.path.join(_ota_dir, "web.html.gz.new")),
+               os.path.exists(os.path.join(_ota_dir, "web.html.gz.tmp")))
+    check("GD-OTA-PAGE: a page of the right size failing its sha256 is not staged, "
+          "nothing boots", gd_page == ([], False, False), repr(gd_page))
+    _ota_reset()
+    _serve(_manifest(200))
+    gd_rb = _slots[1].readblocks
+    def _gd_bad_read(blk, buf):
+        gd_rb(blk, buf)
+        buf[0] ^= 1                      # what the flash holds is not what went in
+    _slots[1].readblocks = _gd_bad_read
+    try:
+        gl._ota_check()
+    finally:
+        del _slots[1].readblocks
+    check("GD-OTA-READBACK: a slot whose read-back differs from its sha256 is a bad "
+          "image, nothing boots",
+          _ota_log == [] and gl.ota["state"] == "bad image",
+          repr((_ota_log, gl.ota["state"])))
+
     # OTA-POWERON: MicroPython 1.29 reports a brownout as PWRON_RESET, so a
     # build that browned out on a weak supply was rolled back, never blamed
     # and installed again 2 min after every boot. A power-on rollback is a
@@ -16084,6 +16114,16 @@ try:
         _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\n\r\nabc")
         out = bytearray()
         got.append((gl._raw_get("http://h/x", out.extend, 5000), bytes(out)))
+        # GD-OTA-LIMIT: no Content-Length: the limit holds while reading
+        _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\n\r\n" + b"y" * 9000)
+        out = bytearray()
+        try:
+            gd_lim = gl._raw_get("http://h/x", out.extend, 5000)
+        except ValueError as e:
+            gd_lim = str(e)
+        check("GD-OTA-LIMIT: a body with no length stops at the limit, not at the "
+              "flash's end", gd_lim == "ota body over 5000" and len(out) <= 5000,
+              repr((gd_lim, len(out))))
         # HOST-PORT: the GET's Host header too
         get_hosts = []
         for u_ in ("http://h:8080/m.json", "http://h/m.json"):
@@ -19355,6 +19395,199 @@ check("RB-HITS: an aborted OTA download is no 'upload aborted' for the next fail
       and len(_rb_l2) == 1, repr((_rb_l1, _rb_l2)))
 diag_clear()
 
+# GD-GC: the early, frequent collection (a heap grown into the IDF heap
+# starves TLS: see gps_logger.py). The unix port checks the real gc too
+_rb_th = []
+_rb_saved = sys.modules["gc"].threshold
+sys.modules["gc"].threshold = lambda *a: _rb_th.append(a)
+_heltec_logger()
+sys.modules["gc"].threshold = _rb_saved
+check("GD-GC: importing the logger sets gc.threshold(8192)", _rb_th == [(8192,)],
+      repr(_rb_th))
+
+# GD-HIST: /hist's day is a date, not a path (d=../gpx/<name> served any file)
+with open(os.path.join(gl.LOG_DIR, "x.trk"), "w") as f:
+    f.write("SECRET-TRACK\n")
+with open(os.path.join(gl.LOG_DIR, "somelongername.trk"), "w") as f:
+    f.write("SECRET-TRACK\n")
+with open(os.path.join(gl.HIST_DIR, "20261001.trk"), "w") as f:
+    f.write("TODAY-LINE\n")
+_rb_hist = []
+for _d in (b"../gpx/x", b"../gpx/somelongername", b"20261001"):
+    _c = _RbConn()
+    gl._web_end[0] = None
+    gl._web_reply(_c, b"GET /hist?d=" + _d + b"&o=0 HTTP/1.1\r\n\r\n")
+    _rb_hist.append((bytes(_c.sent[:12]), b"SECRET" in _c.sent, b"TODAY" in _c.sent))
+check("GD-HIST: a /hist day that is no 8-digit date is a 404 (d=../gpx/<name>), a "
+      "real day is served",
+      _rb_hist == [(b"HTTP/1.0 404", False, False)] * 2 + [(b"HTTP/1.0 200", False, True)],
+      repr(_rb_hist))
+
+# GD-CA: only a missing CA_FILE means "no CA": any other error (a failing
+# flash) must not turn into an unverified POST
+_rb_saved = (gl.CA_FILE, os.stat)
+gl.CA_FILE = os.path.join(_rb_dir, "no-such-ca.der")
+_rb_none = gl._ca_size()
+_rb_real_stat = os.stat
+def _rb_stat(p, *a, **k):
+    if p == gl.CA_FILE:
+        raise OSError(5, "EIO")
+    return _rb_real_stat(p, *a, **k)
+os.stat = _rb_stat
+gl._tls_ctx[0] = None
+_rb_ca = []
+try:
+    for _fn in (gl._ca_size, gl._tls_context):
+        try:
+            _fn()
+            _rb_ca.append("no error")
+        except OSError as e:
+            _rb_ca.append(e.args[0])
+finally:
+    os.stat = _rb_real_stat
+    gl.CA_FILE = _rb_saved[0]
+    gl._tls_ctx[0] = None
+check("GD-CA: _ca_size: ENOENT is None, any other error raises, and the TLS context "
+      "is not made without the CA (no unverified POST)",
+      _rb_none is None and _rb_ca == [5, 5], repr((_rb_none, _rb_ca)))
+
+# GD-IDLE: the radio does not sleep off home while a new firmware still has to
+# read the manifest: a sleep is no retry, a rollback at OTA_HEALTH
+_rb_saved = (gl._radio_idle_ok, set(WLAN.ok))
+_rb_idle = []
+for _p in (200, None):
+    gl.WEB = False
+    gl.wifi_reset()
+    _w = gl.network.WLAN(gl.network.STA_IF)
+    _w.active(True)
+    WLAN.ok = {"phone"}
+    _w.connect("phone", "x")
+    gl.wifi.update(wlan=_w, state="connected", home=False, ssid="phone", ip="1.2.3.4")
+    gl.wifi["idle_at"] = _clock[0]
+    gl.ota["pend"] = _p
+    gl._radio_idle_ok = lambda: True
+    _clock[0] += gl.WIFI_IDLE
+    gl.wifi_tick()
+    _rb_idle.append(gl.wifi["state"])
+gl.ota["pend"] = None
+gl._radio_idle_ok, WLAN.ok = _rb_saved
+gl.wifi_reset()
+check("GD-IDLE: connected off home with all uploaded: the radio sleeps, but not "
+      "while a firmware waits to confirm", _rb_idle == ["connected", "sleep"],
+      repr(_rb_idle))
+
+# GD-DIAG-RES: the log never takes the flash reserve kept for the tracks
+_rb_saved = (gl.free, gl.DIAG)
+gl.DIAG = 60000
+diag_clear()
+gl.free = lambda: gl.MIN_FREE - 1
+gl._diag_write("under the reserve")
+_rb_d1 = os.path.exists(gl.DIAG_FILE)
+gl.free = lambda: gl.MIN_FREE
+gl._diag_write("at the reserve")
+_rb_d2 = diag_lines()
+gl.free = lambda: None
+gl._diag_write("no statvfs")
+_rb_d3 = diag_lines()
+gl.free, gl.DIAG = _rb_saved
+diag_clear()
+check("GD-DIAG-RES: under MIN_FREE free no diag line is written (the tracks keep the "
+      "reserve), at it or with free unknown one is",
+      _rb_d1 is False and _rb_d2 == ["at the reserve"]
+      and _rb_d3 == ["at the reserve", "no statvfs"], repr((_rb_d1, _rb_d2, _rb_d3)))
+
+# GD-HOLD: a held stay keeps at most HOLD_MAX lines: a long drive must not
+# reach MAX_BATCH (which drops the oldest)
+
+
+def _rb_batch(n):
+    return ["47.500000,19.000000,100.0,2,0.0,20261031T%02d%02d%02dZ\n"
+            % (i // 3600, i // 60 % 60, i % 60) for i in range(n)]
+
+
+gl.reset()
+gl.log_reset()
+gl.free = lambda: 10 ** 9
+gl.log["file"] = os.path.join(gl.LOG_DIR, "hold.trk")
+gl.log["created"] = False
+_rb_b = _rb_batch(gl.HOLD_MAX + 5)
+gl.log["batch"][:] = _rb_b
+gl.flush("20261031T000000Z")         # all newer than the hold
+_rb_h1 = list(gl.log["batch"])
+gl.log["batch"][:] = _rb_batch(gl.HOLD_MAX)
+_rb_sz = gl._file_size(gl.log["file"])
+gl.flush("20261031T000000Z")
+_rb_h2 = (len(gl.log["batch"]), gl._file_size(gl.log["file"]) == _rb_sz)
+check("GD-HOLD: flush(hold) lets the oldest lines over HOLD_MAX go to the file, up "
+      "to HOLD_MAX it holds them all",
+      _rb_h1 == _rb_b[5:] and _rb_h2 == (gl.HOLD_MAX, True), repr((len(_rb_h1), _rb_h2)))
+
+# GD-TRIM: at the reserve an older history day goes before any track line:
+# the drawing yields to the points
+_rb_days = [os.path.join(gl.HIST_DIR, d + ".trk") for d in ("20261002", "20261003")]
+for _f in _rb_days:
+    with open(_f, "w") as f:
+        f.write("x\n")
+gl.free = lambda: 10 ** 9 if not os.path.exists(os.path.join(gl.HIST_DIR, "20261001.trk")) else gl.MIN_FREE - 1
+gl.reset()
+gl.log_reset()
+gl.log["file"] = os.path.join(gl.LOG_DIR, "trim.trk")
+gl.log["created"] = False
+gl.log["fix"] = True
+_rb_b = _rb_batch(3)
+gl.log["batch"][:] = _rb_b
+gl.flush()
+_rb_tr = (gl.log["full"], gl.log["batch"], os.path.exists(gl.log["file"]),
+          os.path.exists(os.path.join(gl.HIST_DIR, "20261001.trk")), os.path.exists(_rb_days[-1]))
+check("GD-TRIM: flush at the flash reserve removes older history days and writes the "
+      "lines; the newest day stays",
+      _rb_tr == (False, [], True, False, True), repr(_rb_tr))
+gl.free = lambda: 10 ** 9
+
+# GD-POS-NL: a .trk offset not after a newline is inside a line (a damaged
+# .pos): from 0, not half a line up
+_rb_p = os.path.join(gl.LOG_DIR, "pos.trk")
+_rb_body = b"#head\n" + b"".join(l.encode() for l in _rb_batch(3))
+with open(_rb_p, "wb") as f:
+    f.write(_rb_body)
+_rb_nl = _rb_body.index(b"\n") + 1
+gl.write_offset(_rb_p, _rb_nl)
+_rb_pos1 = gl.read_pos(_rb_p)
+gl.write_offset(_rb_p, _rb_nl + 5)
+_rb_pos2 = gl.read_pos(_rb_p)
+check("GD-POS-NL: a .trk .pos after a newline is kept, one inside a line reads as 0",
+      _rb_pos1 == (_rb_nl, None) and _rb_pos2 == (0, None), repr((_rb_pos1, _rb_pos2)))
+
+# GD-WDT-COUNT: main.py counts a WDT reset before it decides to start: a
+# logger hanging at boot must end in the REPL, not in a reset loop for ever
+_rb_main = {"Pin": Pin, "RTC": RTC, "machine": sys.modules["machine"], "time": time,
+            "__name__": "boot_helpers"}
+with open(os.path.join(ROOT, "main.py")) as f:
+    exec(compile(f.read(), "main.py", "exec"), _rb_main)
+_rb_main["gps_boot"] = None
+_rb_ran = []
+_rb_fake = types.ModuleType("gps_logger")
+_rb_fake.run = lambda: _rb_ran.append(1)
+_rb_real_gl = sys.modules.get("gps_logger")
+sys.modules["gps_logger"] = _rb_fake
+_rb_rc = _reset_cause[0], RTC.mem
+try:
+    _reset_cause[0] = 3                  # WDT_RESET
+    RTC.mem = b"%d" % (_rb_main["BOOT_FAIL_MAX"] - 1)
+    _rb_main["_boot_start"]()
+    _rb_wdt = (list(_rb_ran), _rb_main["_boot_fail_get"]())
+    del _rb_ran[:]
+    _reset_cause[0] = 1
+    RTC.mem = b"%d" % (_rb_main["BOOT_FAIL_MAX"] - 1)
+    _rb_main["_boot_start"]()
+    _rb_pwr = (list(_rb_ran), _rb_main["_boot_fail_get"]())
+finally:
+    _reset_cause[0], RTC.mem = _rb_rc
+    if _rb_real_gl is not None:
+        sys.modules["gps_logger"] = _rb_real_gl
+check("GD-WDT-COUNT: _boot_start counts a WDT reset first: the last one allowed does "
+      "not start the logger again; any other reset does",
+      _rb_wdt == ([], 5) and _rb_pwr == ([1], 4), repr((_rb_wdt, _rb_pwr)))
 shutil.rmtree(_rb_dir, ignore_errors=True)
 
 print()
