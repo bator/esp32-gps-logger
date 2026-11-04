@@ -12729,7 +12729,10 @@ else:
     syb = json.loads(rb_.stdout).get("sys", "")
 
     def _hm(t):
-        return time.strftime("%H:%M", time.localtime(t))
+        # (the page puts the month and day before a time from another day)
+        lt = time.localtime(t)
+        same = lt[:3] == time.localtime(now_)[:3]
+        return time.strftime("%H:%M" if same else "%m-%d %H:%M", lt)
 
     boots = ['<tr><td>Running</td><td>2 h 54 min<span class="sx-chip">since '
              '%s</span></td></tr><tr><td>Last boot</td><td>hard reset</td>'
