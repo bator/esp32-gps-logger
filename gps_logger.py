@@ -198,6 +198,8 @@ STILL_SLOW_GAIN = 5                      # m those samples must gain in all
                                          # (a jump frozen for 10 s gains 0)
 STILL_FILE = 1800000                     # ms an away stay's file stays open
 STILL_HEARTBEAT = 300000                 # ms between anchor points (not home)
+STILL_BACK = 30000                       # ms back within STILL_NEAR before a
+                                         # due anchor point is written
 STILL_MOVE_HITS = 3                      # matching window pairs that move
                                          # the anchor (a two-window multipath
                                          # shift moved it twice in 2 h)
@@ -4240,7 +4242,8 @@ def _still_state():
             "rn": 0, "ri": 0, "rt0": 0, "gap_n": 0, "gap_at": None,
             "gap_ref": None, "gap_seen": None, "pos": None, "qs": None,
             "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
-            "last_at": None, "last_d": 0, "file_at": None, "veto_at": None,
+            "last_at": None, "last_d": 0, "far_at": None, "file_at": None,
+            "veto_at": None,
             "move_c": None, "wins": 0, "hold_tc": None, "aps": {},
             "ap_scans": 0, "ap_miss": 0, "ap_miss_at": None}
 
@@ -5192,7 +5195,11 @@ def _still_beat(now):
     """Heartbeat of a stay away from home, run every tick, fix or not. Not
     while the last usable sample was recently out past STILL_NEAR: that is
     an excursion or a departure, and an anchor stamped then would land in
-    the middle of the way out."""
+    the middle of the way out. Nor for STILL_BACK after that: the car driving
+    off past the anchor comes within STILL_NEAR for seconds, and the anchor
+    point due since the walk to it, with the way out after it, read 44 m in
+    a second (158 km/h, measured). Drift out there every few seconds delays
+    it by at most one STILL_HEARTBEAT."""
     sl = log["still"]
     if not sl["active"]:
         return
@@ -5217,6 +5224,10 @@ def _still_beat(now):
         return
     if (sl["last_at"] is not None and _age(now, sl["last_at"]) < STILL_GAP
             and sl["last_d"] > STILL_NEAR):
+        return
+    if (sl["far_at"] is not None and _age(now, sl["far_at"]) < STILL_BACK
+            and sl["hb_at"] is not None
+            and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT):
         return
     _still_heartbeat(now)
 
@@ -5630,6 +5641,8 @@ def _still_active(now, pos):
                     _ring_add(sl, now, pos, d)
                     print("stay moved")
     sl["last_at"], sl["last_d"] = now, d
+    if d > STILL_NEAR:
+        sl["far_at"] = now
     home = bool(at_home())
     if home != sl["home"]:
         sl["home"] = home
