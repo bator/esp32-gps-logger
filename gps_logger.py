@@ -2128,6 +2128,9 @@ def handle(line, s=0, e=None):
 # bytearray.find (start/end in place, no copy: MicroPython 1.29 has it),
 # not byte by byte in Python.
 RX_READ = 256                            # bytes per readinto: small pieces
+RX_READS = 64                            # readintos per read_uart: 16 KB, twice
+                                         # the Heltec's whole UART buffer; the
+                                         # rest waits there for the next pass
 RX_LINE = 256                            # no newline after this many bytes
 RX_FRAME = 1100                          # (or a UBX frame this long): junk
 _rx = bytearray(RX_FRAME + RX_READ)
@@ -2151,10 +2154,14 @@ def read_uart():
     in place. An error in one (a MemoryError while publishing a second)
     counts it bad (st["err"]) and the rest is read: no exception leaves
     the buffer uncommitted, or the next call handled the same sentences
-    again and queued the same seconds twice."""
+    again and queued the same seconds twice. At most RX_READS reads: a UART
+    never empty (a flood, handlers slower than it) must not hold the loop,
+    its feed() and the logging."""
     global _rx_n, _rx_s
     b = _rx
-    while uart.any():
+    left = RX_READS
+    while left and uart.any():
+        left -= 1
         n = _rx_n
         k = uart.readinto(_rxv[n:n + RX_READ])
         if not k:
@@ -6247,13 +6254,18 @@ def _kb_seek(f, off, key, s):
     offset -1 was not checked: a corrupt "1234 -1" was read from inside a
     record). -> the offset of the keyframe s is from (with -1 the last one
     read, -1 if none), None when off is not where a record starts read so
-    (s then not valid)."""
+    (s then not valid). Feeds the WDT every 64 records: from the start of a
+    long day's file this takes as long as count_points' lines."""
     s[0] = None
     k = key
+    n = 0
     _rd_open(key if key > 0 else 0)
     while _rd[0] + _rd[2] < off:
         if not _rd_rec(f):
             break
+        n += 1
+        if n & 63 == 0:
+            feed()
         a, b = _rd[1], _rd[2]
         if a < b:
             if _rbuf[a] == 61:           # (as read_batch keeps _rk[0])

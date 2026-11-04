@@ -9452,7 +9452,8 @@ try:
         for k in range(5):
             _uart_rx.extend(pvt_frame(t_at(s_), 475000000 + 2000 * s_,
                                       190000000, nano=k * 200000000))
-    gl.read_uart()
+    while gl.uart.any():                 # (RX_READS a call, no log_tick between)
+        gl.read_uart()
     th_n = gl.st.get("q_thin")
     gl.log_tick()
     th_lines = list(gl.log["batch"])
@@ -19068,6 +19069,84 @@ check("RB-OOM-COUNT: a page tick that runs through clears no count of a lasting 
       _rb_kept == gl.GUARD_MEM_MAX - 2 and _rb_pend == []
       and _rb_due == ["guarded memory web"] and _rb_clear == 0 and _rb_tell == "ok",
       repr((_rb_kept, _rb_pend, _rb_due, _rb_clear, _rb_tell)))
+
+# RB-KB-FEED: _kb_seek from the start of a long .trb, on no feed
+_rb_p = os.path.join(gl.LOG_DIR, "feed.trb")
+_rb_lines = _tb_drive(2000, 2)
+_rb_body = gl.HEADERB.encode() + gl._kb_encode(_rb_lines, len(_rb_lines), None)
+with open(_rb_p, "wb") as f:
+    f.write(_rb_body)
+_rb_s = list(gl._ks)
+gl._wdt = WDT(timeout=120000)
+gl._wdt.fed = 0
+with builtins.open(_rb_p, "rb") as f:    # (this file's open decodes a .trb)
+    _rb_k = gl._kb_seek(f, len(_rb_body), -1, _rb_s)
+_rb_fed = gl._wdt.fed
+gl._wdt = None
+check("RB-KB-FEED: _kb_seek feeds the WDT every 64 records (a day's file from its "
+      "start), and still finds the end",
+      _rb_k is not None and _rb_fed >= 2000 // 64 - 1, repr((_rb_k, _rb_fed)))
+
+# RB-UART: read_uart has a budget: a UART that never empties must not hold
+# the loop, its feed() and the logging. In normal use nothing is lost
+
+
+class _RbUart(object):
+    """data as it would wait in the UART's buffer; flood: never empty."""
+    def __init__(self, data=b"", flood=False):
+        self.data, self.flood, self.reads = bytearray(data), flood, 0
+    def any(self):
+        return 1 if self.flood else len(self.data)
+    def readinto(self, mv):
+        self.reads += 1
+        if self.flood:
+            if self.reads > 20000:       # (the old endless loop: ends the test)
+                self.flood = False
+            mv[:6] = b"$junk\n"
+            return 6
+        k = min(len(mv), len(self.data))
+        mv[:k] = self.data[:k]
+        del self.data[:k]
+        return k
+
+
+_rb_saved = (gl.uart, gl.handle)
+_rb_seen = []
+gl.handle = lambda b, a, e: _rb_seen.append(bytes(b[a:e]))
+try:
+    gl.reset()
+    gl._rx_n = gl._rx_s = 0
+    gl.uart = _RbUart(flood=True)
+    gl.read_uart()
+    _rb_flood = gl.uart.reads
+    # a full 8 KB buffer (the Heltec's): one pass takes all of it, in order
+    gl._rx_n = gl._rx_s = 0
+    del _rb_seen[:]
+    _rb_ln = [b"$GNGGA,%05d,47.1,N,18.4,E,1,12,0.9,100,M,40,M,,*00" % i for i in range(160)]
+    _rb_8k = b"\n".join(_rb_ln) + b"\n"
+    gl.uart = _RbUart(_rb_8k)
+    gl.read_uart()
+    _rb_one = (len(_rb_8k) >= 8192, gl.uart.any(), _rb_seen == _rb_ln)
+    # more than a pass takes: the rest waits there, no byte lost or doubled
+    gl._rx_n = gl._rx_s = 0
+    del _rb_seen[:]
+    _rb_ln = [b"$GNGGA,%05d,47.1,N,18.4,E,1,12,0.9,100,M,40,M,,*00" % i for i in range(1500)]
+    gl.uart = _RbUart(b"\n".join(_rb_ln) + b"\n")
+    _rb_n = 0
+    while gl.uart.any() and _rb_n < 100:
+        gl.read_uart()
+        _rb_n += 1
+    _rb_many = (_rb_n > 1, _rb_seen == _rb_ln)
+finally:
+    gl.uart, gl.handle = _rb_saved
+    gl._rx_n = gl._rx_s = 0
+    gl.reset()
+check("RB-UART: a UART never empty: read_uart returns after its budget",
+      _rb_flood <= getattr(gl, "RX_READS", 0) and _rb_flood > 0, repr(_rb_flood))
+check("RB-UART-NOLOSS: a full 8 KB buffer goes in one pass (a pass is ~25 ms at "
+      "2.3 KB/s); more waits in the UART for the next pass, nothing lost or doubled",
+      _rb_one == (True, 0, True) and _rb_many == (True, True),
+      repr((_rb_one, _rb_many)))
 
 shutil.rmtree(_rb_dir, ignore_errors=True)
 
