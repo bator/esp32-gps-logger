@@ -9279,6 +9279,7 @@ def draw():
 TFT_FRAME = 200                          # ms between frames (a row scrolling)
 TFT_STATE = 1000                         # ms between new values
 TFT_MAX_ERR = 3                          # errors in a row, then it goes dark
+TFT_PAGE = 5                             # s each of the rows' two pages stays
 PT_BYTES = 7                             # .trb bytes of a moving second
 _tft = None
 _tft_t = [None, None, 0, 0]              # last values, last frame, the errors
@@ -9342,12 +9343,17 @@ def _tft_state(now):
     big = str(int(speed + 0.5)) if fix and speed is not None else "--"
     used, seen = sv_used() or 0, sv_seen() or 0
     clock = _local_hm()
+    page = uptime_s() // TFT_PAGE % 2    # two still pages, nothing long to read
     if wifi["state"] == "connected":
-        net = ("net", g, [(str(wifi.get("ssid") or "WiFi"), b), ("  ", m),
-                          (str(wifi.get("rssi") or "-"), b), (" dBm  ", m),
-                          (str(wifi.get("ip") or "-"), b), ("  ", m), (clock, b)])
+        # the icon says the signal: the arcs that fill up, and its colour
+        rssi = wifi.get("rssi")
+        lvl = (0 if rssi is None or rssi < -80 else 1 if rssi < -70
+               else 2 if rssi < -60 else 3)
+        name = wifi.get("ip") if page else wifi.get("ssid")
+        net = ("w%d" % lvl, g if lvl >= 2 else a if lvl else r,
+               [(str(name or "WiFi"), b), ("  ", m), (clock, b)])
     else:
-        net = ("net", m, [("nincs WiFi  ", m), (clock, b)])
+        net = ("w-", m, [("nincs WiFi  ", m), (clock, b)])
     left = up["left"] or 0
     if left:
         files = _file_counts()[0]
@@ -9358,20 +9364,23 @@ def _tft_state(now):
     else:
         upl = ("up", g, [("minden feltöltve", g)])
     parts = []
-    hdop = st.get("hdop")
-    if fix and hdop is not None:
-        parts += [(_hu_f(hdop, "%.2f"), b), (" HDOP  ", m)]
-    if fix and st.get("alt") is not None:
-        parts += [(str(int(st["alt"] + 0.5)), b), (" m  ", m)]
     kb = _flash_kb()
-    if kb is not None:
-        parts += [(_hu_f(kb / 1024), b), (" MB  ", m),
-                  (str(kb * 1024 // PT_BYTES // 86400), b), (" nap  ", m)]
-    tc = _temp()
-    if tc is not None:
-        parts += [(str(int(tc)), b), (" °C  ", m)]
-    u = uptime_s() // 60
-    parts += [("%d ó %d" % (u // 60, u % 60), b), (" p", m)]
+    if page:
+        if kb is not None:
+            parts += [(_hu_f(kb / 1024), b), (" MB  ", m)]
+        tc = _temp()
+        if tc is not None:
+            parts += [(str(int(tc)), b), (" °C  ", m)]
+        u = uptime_s() // 60
+        parts += [("%d ó %d" % (u // 60, u % 60), b), (" p", m)]
+    else:
+        hdop = st.get("hdop")
+        if fix and hdop is not None:
+            parts += [(_hu_f(hdop, "%.2f"), b), (" HDOP  ", m)]
+        if fix and st.get("alt") is not None:
+            parts += [(str(int(st["alt"] + 0.5)), b), (" m  ", m)]
+        if kb is not None:
+            parts += [(str(kb * 1024 // PT_BYTES // 86400), b), (" nap", m)]
     # (no " DGPS": it would not fit)
     return (big, text[:6] if fix else "nincs fix", g if fix else r,
             "%d/%d" % (used, seen), [net, upl, ("mem", g, parts)])

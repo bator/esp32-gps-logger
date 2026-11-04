@@ -115,8 +115,10 @@ firmware R6.0.0.0Build3700.
   whatever the rate (~2.3 KB/s). The satellite list comes from GSV, decoded every
   5 s.
 - **Display:** speed, fix and satellites on top, then WiFi and the clock (Hungarian
-  time), what waits for upload, and HDOP, altitude, free space, temperature
-  and uptime; a row too long slides sideways. The backlight is always on.
+  time), what waits for upload, and two pages changing every 5 s: HDOP, altitude,
+  days of driving left / free space, temperature, uptime. The WiFi icon's arcs
+  fill up to the signal's strength. A row too long slides sideways. The backlight
+  is always on.
   `gps_tft.py`, its fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS

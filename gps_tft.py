@@ -34,8 +34,15 @@ BRIGHT, MUTED, GREEN, AMBER, RED = 0, 1, 2, 3, 4
 _COL = (_c(244, 246, 248), _c(142, 154, 168), _c(61, 220, 132), _c(255, 176, 32),
         _c(255, 90, 90))
 # 12 x 12, MONO_HLSB: GPS is not on a row, it has the header
+# The WiFi icon's four parts: the dot and the arcs inner to outer. Icon "w0".."w3":
+# that many arcs fill up again and again, one a WAVE frames, "w-": all dim, still.
+WIFI = (b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\x00\x06\x00\x00\x00",
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0f\x00\x10\x80\x00\x00\x00\x00\x00\x00\x00\x00",
+        b"\x00\x00\x00\x00\x00\x00\x0f\x00\x30\xc0\x40\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        b"\x1f\x80\x60\x60\x80\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+WAVE = 2
+DIM = _c(51, 59, 70)
 ICONS = {
-    "net": b"\x00\x00\x3f\xc0\x60\x60\xcf\x30\x19\x80\x20\x40\x06\x00\x09\x00\x06\x00\x00\x00\x00\x00\x00\x00",
     "up": b"\x06\x00\x0f\x00\x1f\x80\x36\xc0\x06\x00\x06\x00\x06\x00\x06\x00\x00\x00\x7f\xe0\x7f\xe0\x00\x00",
     "mem": b"\x2a\x80\x7f\xc0\x80\x20\xbf\xa0\xa0\xa0\xa0\xa0\xa0\xa0\xbf\xa0\x80\x20\x7f\xc0\x2a\x80\x00\x00",
 }
@@ -47,6 +54,8 @@ _pal = {}
 class _D:
     spi = cs = dc = None
     buf = fb = None
+    ic = icb = None                      # the WiFi icon's own 12 x 12
+    t = 0
     state = None
     head = None                          # the header on the panel
     rows = None                          # per row: parts, width, x, hold, drawn
@@ -90,7 +99,10 @@ def start():
         _D.buf = bytearray(W * ROW_H * 2)
         _D.fb = framebuf.FrameBuffer(_D.buf, W, ROW_H, framebuf.RGB565)
     _D.head = None
-    _D.rows = [[None, 0, 0, HOLD, None] for _ in range(3)]
+    _D.rows = [[None, 0, 0, HOLD, None, None] for _ in range(3)]
+    if _D.ic is None:
+        _D.icb = bytearray(12 * 12 * 2)
+        _D.ic = framebuf.FrameBuffer(_D.icb, 12, 12, framebuf.RGB565)
     _D.fb.fill(BG)
     for y in range(0, H, ROW_H):
         _send(y, ROW_H)
@@ -173,14 +185,38 @@ def _draw_head(big, fix, fixkind, sats):
         _text(fb, _BOLD, sats, 104, 16 - top, _COL[BRIGHT])
         _send(top, h)
 
-def _draw_row(i, icon, kind, parts, off_x):
+def wifi_lit(level, t):
+    """Arcs lit in frame t: 0 up to level, held for three steps, again."""
+    n = level + 4
+    s = (t // WAVE) % n
+    return s if s < level else level
+
+def _wifi(fb, lit, col, x, y):
+    """The dot always, the arcs up to lit in col, the others dim; dim all when
+    lit is None (no WiFi)."""
+    for n, part in enumerate(WIFI):
+        c = DIM if lit is None or n > lit else col
+        fb.blit((part, 12, 12, framebuf.MONO_HLSB), x, y, 0, _palette(c))
+
+def _wifi_frame(y, lit, col):
+    """Only the icon goes up: a wave would redraw the row 2.5 times a second."""
+    _D.ic.fill(BG)
+    _wifi(_D.ic, lit, col, 0, 0)
+    _cmd(0x2A, struct.pack(">HH", XO + 2, XO + 13))
+    _cmd(0x2B, struct.pack(">HH", YO + y + 2, YO + y + 13))
+    _cmd(0x2C, _D.icb)
+
+def _draw_row(i, icon, kind, parts, off_x, lit):
     fb = _D.fb
     fb.fill(BG)
     x = TEXT_X + off_x
     for s, k in parts:
         x = _text(fb, _part_font(k), s, x, 1, _COL[k])
     fb.fill_rect(0, 0, TEXT_X, ROW_H, BG)
-    fb.blit((ICONS[icon], 12, 12, framebuf.MONO_HLSB), 2, 2, 0, _palette(_COL[kind]))
+    if icon[0] == "w":
+        _wifi(fb, lit, _COL[kind], 2, 2)
+    else:
+        fb.blit((ICONS[icon], 12, 12, framebuf.MONO_HLSB), 2, 2, 0, _palette(_COL[kind]))
     _send(HEAD_H + i * ROW_H, ROW_H)
 
 def set_state(big, fix, fixkind, sats, rows):
@@ -191,6 +227,7 @@ def frame():
     s = _D.state
     if s is None:
         return
+    _D.t += 1
     if s[0] != _D.head:
         _draw_head(*s[0])
         _D.head = s[0]
@@ -199,7 +236,13 @@ def frame():
         if parts != c[0]:
             c[0], c[1] = parts, row_width(parts)
         off_x = scroll(c, c[1])
+        lit = None
+        if icon[0] == "w" and icon != "w-":
+            lit = wifi_lit(int(icon[1]), _D.t)
         d = (icon, kind, parts, off_x)
         if d != c[4]:
-            _draw_row(i, icon, kind, parts, off_x)
-            c[4] = d
+            _draw_row(i, icon, kind, parts, off_x, lit)
+            c[4], c[5] = d, lit
+        elif lit != c[5]:
+            _wifi_frame(HEAD_H + i * ROW_H, lit, _COL[kind])
+            c[5] = lit
