@@ -245,12 +245,13 @@ PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
 The script asks the board which chip it is, compiles `gps_logger.py` to
 `gps_logger.mpy` for it and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
-It makes `web.html.gz` (~26 KB instead of the ~70 KB `web.html`, with
-the firmware's 4 KB window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
+It makes `web.html.gz` with `tools/web_min.py` (~27 KB instead of the ~94 KB
+`web.html`: comments and indentation out, gzipped with the firmware's 4 KB
+window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
 `gps_logger.mpy`, `main.py` and the status page, only as `web.html.gz`, as
 `<name>.dpl`, checks their size and SHA-256 on the board, and only then
 renames them over the old files, removing an old plain `/web.html` in the
-same step (~70 KB of flash back); a failed check (`Copy check FAILED`)
+same step (~90 KB of flash back); a failed check (`Copy check FAILED`)
 removes the `.dpl` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module (not
 `<name>.new`: that is how an OTA stages the page it installs). Its first
@@ -304,6 +305,13 @@ Freezing does not stop the Python heap from growing into the IDF heap
 (MicroPython's split heap stays on); it leaves so much of the 64 KB heap
 free that an allocation rarely has to.
 
+The logger, `gps_boot.py` and the display's modules are compiled with
+`-O3` (`opt=3` in the build's manifest, `-O3` in `deploy.sh`): their line
+numbers stay out of the bytecode, ~10 KB of the logger's ~108 KB. The cost: a
+traceback on the USB console no longer says where (each frame reads `line 1`,
+the function names stay); the crash line in `/diag.log` holds `repr(e)` and
+never had a line number. To see them while debugging, build without it.
+
 `--flash` first checks the board's partition table and refuses to flash
 when it differs from the build's. Then it backs up the app partition to
 `firmware/` and writes only the app at 0x10000: the bootloader, the
@@ -334,7 +342,7 @@ built before the SHA was recorded) it stops and asks for
 and the page anyway. A logger change means building and flashing the
 firmware again. In an emergency `FORCE_MPY=1 ./deploy.sh` installs
 `gps_logger.mpy` on a frozen firmware too, with a warning: it shadows the
-frozen module and takes its ~60 KB of Python heap again. To roll back,
+frozen module and takes its ~100 KB of Python heap again. To roll back,
 write the backup with the `esptool.py` command `--flash` prints, then run
 `./deploy.sh`.
 
@@ -750,9 +758,10 @@ wire): useful while moving the wires with the page open.
 
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
-it the page shows the grid and the system font. The page is a file on the
-board, kept only gzipped (`/web.html.gz`, ~26 KB instead of the ~70 KB
-`web.html`; copied by `deploy.sh` or an OTA) and loads once: a browser
+it the page shows a dark map and the system font. The page is a file on the
+board, kept only gzipped (`/web.html.gz`, ~27 KB instead of the ~94 KB
+`web.html`, whose comments and indentation `tools/web_min.py` takes out at build
+time; copied by `deploy.sh` or an OTA) and loads once: a browser
 (`Accept-Encoding: gzip`) gets the file as is; a client without gzip (curl
 without `--compressed`) gets it inflated on the board as it goes out
 (`deflate.DeflateIO`, no `Content-Length`; a firmware without the
@@ -760,13 +769,14 @@ without `--compressed`) gets it inflated on the board as it goes out
 made with a 4 KB window (`WEB_GZ_WBITS = 12`), not `gzip -9`'s 32 KB:
 inflating takes a buffer of the window's size, and the Python heap has
 ~15 KB free (the 4 KB window and its state take ~7 KB while a page goes
-out, measured on the unix port). It costs ~11% (zlib level 9 on
-`web.html`: 23.5 KB with `gzip -9`, 34.0 / 30.3 / 27.9 / 26.2 KB with a
+out, measured on the unix port). It costs ~10% (zlib level 9 on
+the stripped page: 24.3 KB with `gzip -9`, 35.8 / 31.3 / 28.5 / 26.8 KB with a
 0.5 / 1 / 2 / 4 KB window). A board deployed before this still has the
 plain `/web.html` (its `.gz` may have the 32 KB window, too wide to
 inflate here): it goes to clients without gzip until the next deploy or
-OTA removes it. When you change the page by hand, gzip it the way
-`deploy.sh` does and copy only `/web.html.gz`; then it asks
+OTA removes it. When you change the page by hand, make the gzip the way
+`deploy.sh` does (`python3 tools/web_min.py web.html web.html.gz`) and copy
+only `/web.html.gz`; then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
 only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
@@ -1592,8 +1602,9 @@ every pull request:
     10 KB on the unix build);
   - `node tests/web_page_test.js`: `web.html`'s view on generated
     `status.json`, and the whole page script (`tick`, `paint`, `placeMap`,
-    `stale`) against a stub document. With `CI=true` (GitHub Actions) a
-    missing `node` is a FAIL, not a SKIP;
+    `stale`) against a stub document, and the same on the page as
+    `tools/web_min.py` strips it (it must print the same). With `CI=true`
+    (GitHub Actions) a missing `node` is a FAIL, not a SKIP;
   - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
     board-side code under CPython): copy, check and rename, too little
     flash, a cut copy, frozen firmware (stale, `FORCE`, `FORCE_MPY`, no
@@ -1605,7 +1616,7 @@ every pull request:
     file in from a `.tmp` and refusing a build not newer than the published
     one.
 - `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
-- `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`,
+- `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`, `tools/web_min.py`,
   `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
 
@@ -1613,9 +1624,9 @@ The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
-.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
+.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tools/web_min.py tests/mpy_unix_logger.py tests/web_loopback.py
 shellcheck deploy.sh tools/build_firmware.sh
-.venv/bin/python -m mpy_cross -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
+.venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
 MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \
     python3 tests/test_gps_logger.py
 ```

@@ -22,7 +22,6 @@ body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-
 .tiles{position:absolute;left:50%;top:42%}  /* the Atlas map as it is, its own colours */
 .tiles img{position:absolute;width:256px;height:256px}
 .map:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(9,9,11,0) 72%,var(--b) 100%)}
-.grid{display:none}
 /* the position as a navigation app shows it: a blue dot in a white ring,
    the accuracy as a pale disc, a cone the way it moves */
 .acc{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(59,130,246,.4);background:rgba(59,130,246,.14);z-index:2}
@@ -113,7 +112,6 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sg-b{display:block;margin:0 18%;border-radius:3px 3px 1px 1px;background:currentColor}
 .sg-b.sg-u{background:none;border:1.5px solid #8e8e96;box-sizing:border-box;color:#8e8e96}.sg-b.sg-0{border-style:dashed;height:3px!important}
 .sg-l{font-size:11px;color:#8e8e96;margin-top:6px}.sg-l i{display:inline-block;width:9px;height:9px;border:1.5px solid #8e8e96;border-radius:2px;margin:0 6px 0 14px;vertical-align:-1px}
-.r .u{opacity:.25;box-shadow:none}
 /* systems */
 
 .none{font-size:12px;color:var(--m)}
@@ -141,7 +139,7 @@ circle.u{fill:none;filter:none;opacity:.7}
 .sx-m{display:grid;grid-template-columns:1.1fr 1fr;gap:12px;background:rgba(255,255,255,.035);border:1px solid var(--ln);border-radius:10px;padding:16px}
 .sx-big{font:500 40px Inter,sans-serif;color:var(--g);text-shadow:0 0 18px rgba(74,222,128,.35);line-height:1;white-space:nowrap}
 .sx .sx-big small{display:inline;font:500 22px Inter,sans-serif;letter-spacing:0;color:inherit;text-transform:none}
-.sx-big.warn{color:var(--wo);text-shadow:none}.sx-big.bad{color:var(--xr);text-shadow:none}
+.sx-big.warn{color:var(--wo);text-shadow:none}
 .sx-bl{font:500 11px Inter,sans-serif;letter-spacing:.08em;color:var(--lab);margin-top:8px;text-transform:uppercase}
 .sx-4{display:grid;grid-template-columns:1fr 1fr;row-gap:14px}
 .sx-4 div{padding-left:12px;border-left:1px solid var(--ln)}
@@ -174,16 +172,16 @@ circle.u{fill:none;filter:none;opacity:.7}
 .gt-big span{font:500 11px "JetBrains Mono",monospace;color:#d4d4d8}
 .gt-dm{display:flex;gap:2px;align-items:flex-end;height:96px;margin-left:34px}.gt-c{flex:1;display:flex;flex-direction:column-reverse;gap:2px;height:100%;min-width:0}
 .gt-c s{display:block;flex:1;background:rgba(212,212,216,.07)}.gt-c s.on{background:#d4d4d8}.gt-c s.am{background:#f59e0b}.gt-c s.rd{background:#f97316}.gt-c.x s:first-child{background:#ef4444}
-.gt-ax{display:flex;justify-content:space-between;font:500 10.5px "JetBrains Mono",monospace;color:#8e8e96;margin-top:6px}
+.gt-ax{display:flex;justify-content:space-between;font:500 10.5px "JetBrains Mono",monospace;color:#8e8e96;margin-top:6px;padding-left:34px}
 .gt-lg{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#8e8e96}.gt-lg b{display:inline-block;width:8px;height:8px;margin-right:6px;background:#d4d4d8}
 .gt-lg b.am{background:#f59e0b}.gt-lg b.rd{background:#f97316}.gt-lg b.x{background:#ef4444}
-.gt-dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}.gt-dg svg{display:block;width:100%;height:40px}
+.gt-dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}
 .gt-dg small{display:block;font-size:11px;color:#8e8e96;margin-top:4px}.gt-dg b{font:500 14px "JetBrains Mono",monospace}.gt-dg b em{font:400 11px Inter,sans-serif;font-style:normal;color:#8e8e96}
 .gt-lk{display:flex;align-items:center;gap:8px;margin-top:6px}.gt-lk span{font:500 10px "JetBrains Mono",monospace;color:#8e8e96;width:26px;flex:none}
 .gt-lk div{flex:1;display:flex;gap:2px;height:8px;min-width:0}.gt-k{flex:1;min-width:0;background:rgba(212,212,216,.07)}.gt-k.ok{background:#4ade80}.gt-k.am{background:#f59e0b}.gt-k.rd{background:#ef4444}
 .gt-mks{position:relative;height:22px;margin:2px 0 0 34px}.gt-mk{position:absolute;top:0;transform:translateX(-50%);font:500 10px "JetBrains Mono",monospace;color:#ef4444;white-space:nowrap;text-align:center}
 .gt-mk i{display:block;width:0;height:0;margin:0 auto 2px;border:4px solid transparent;border-bottom-color:#ef4444;border-top:0}
-.gt-ax{padding-left:34px}.gt-lg .gt-sep{margin-left:6px;color:#d4d4d8}.gt-lg b.ok{background:#4ade80}
+.gt-lg .gt-sep{margin-left:6px;color:#d4d4d8}.gt-lg b.ok{background:#4ade80}
 .gt-n{display:block;font:400 26px Audiowide,monospace!important}
 .gt-an>p{display:flex;justify-content:space-between;margin:0;padding:6px 0;border-top:1px solid rgba(245,158,11,.18);font:500 12px "JetBrains Mono",monospace;color:#fcd34d}
 .gt-an>p b{font-weight:500;color:#f59e0b}.gt-an>p.gt-more{color:#a8a29e;font-size:11px}
@@ -209,17 +207,6 @@ circle.u{fill:none;filter:none;opacity:.7}
 .ev-card{background:rgba(0,0,0,.25);border:1px solid var(--ln);border-radius:12px;padding:14px 16px;min-width:0}
 .ev-card+.ev-card{margin-top:12px}
 .ev-card h3{font:500 14px "JetBrains Mono",monospace;color:#fff;margin:0 0 2px}.ev-card>p{margin:0 0 10px;font-size:12px;color:var(--lab)}
-.ev-leg{display:flex;gap:14px;font-size:11px;color:var(--lab);margin-top:6px}
-.ev-leg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:-1px;background:var(--g)}.ev-leg .u i{background:var(--a)}
-/* the chart: lines in a stretched SVG (strokes kept thin), labels in HTML */
-.ev-pl{position:relative;height:160px;margin:8px 4px 24px 26px}
-.ev-pl svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
-.ev-pl line{stroke:rgba(255,255,255,.06);vector-effect:non-scaling-stroke}
-.ev-pl path{fill:none;vector-effect:non-scaling-stroke;stroke-linejoin:round}
-.ev-pl .s{stroke:var(--g);stroke-width:1.6}.ev-pl .u{stroke:var(--a);stroke-width:1.4;opacity:.9}
-.ev-pl span{position:absolute;font-size:10px;color:var(--lab);line-height:1}
-.ev-pl .y{left:-26px;width:20px;text-align:right;transform:translateY(-50%)}
-.ev-pl .x{top:100%;margin-top:7px;transform:translateX(-50%)}
 .ev-grp{display:grid;grid-template-columns:30px 1.3fr 64px 2fr 150px 84px;gap:12px;align-items:center;padding:9px 10px;border-radius:8px;font-size:12.5px}
 .ev-grp:nth-child(even){background:rgba(255,255,255,.025)}
 .ev-grp.ev-hd{font-size:10.5px;color:var(--lab);letter-spacing:.08em;border-bottom:1px solid var(--ln);border-radius:0;background:none}
@@ -271,7 +258,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 </head>
 <body>
 <div class="map nofix" id="map">
-  <div class="tiles" id="tiles"></div><div class="grid"></div><div class="trk" id="trk"></div>
+  <div class="tiles" id="tiles"></div><div class="trk" id="trk"></div>
   <div class="acc" id="acc"></div><div class="cone" id="cone"></div><div class="pin" id="pin"></div><div class="coord" id="coord">connecting&hellip;</div>
   <div class="now" id="now"><h3 id="nst"></h3><p id="nsub"></p><div class="r" id="nr"></div><div class="nc" id="ncoord"></div><div class="nm" id="nm"></div></div>
   <div class="hud" id="hud"><h1>GNSS&middot;TELEMETRY</h1><span class="live" id="live">LIVE</span><span class="day" id="day"></span><span class="up" id="up"></span></div>
@@ -328,17 +315,11 @@ var TILES = "https://atlas.crusand.org/tiles/geoapify/";
 // again only after ADDR_M metres and ADDR_S seconds
 var ADDR = "https://atlas.crusand.org/api/v1/photon/reverse";
 var ADDR_M = 25, ADDR_S = 20;
-// every status.json key the page shows (tests check none is missing)
-var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
-  "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
-  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
-var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
-  "track_drop", "write_errs", "q_thin", "pos6"];   // raw status.json only
 
 function esc(v) {
-  if (v === null || v === undefined) return "-";
+  if (v == null) return "-";
   if (v === true) return "yes";
   if (v === false) return "no";
   return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
@@ -354,26 +335,21 @@ function prevText(d) {                  // the run before this boot
   return t + (isNaN(e) ? "" : ", until " + when(e));
 }
 function hms(s) {                       // as _hms() in gps_logger.py
-  if (s === null || s === undefined) return "-";
+  if (s == null) return "-";
   s = Math.floor(s);
   if (s < 60) return s + " s";
   if (s < 3600) return Math.floor(s / 60) + " min " + two(s % 60) + " s";
   if (s < 86400) return Math.floor(s / 3600) + " h " + two(Math.floor(s / 60) % 60) + " min";
   return Math.floor(s / 86400) + " d " + two(Math.floor(s / 3600) % 24) + " h";
 }
-function num(n) { return n === null || n === undefined ? "-" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
+function num(n) { return n == null ? "-" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
 function gid(sv) { return GNSS[sv.system] === undefined ? 1 : GNSS[sv.system]; }
 function cls(sv) { return "g" + gid(sv) + (sv.used ? "" : " u"); }
 function tip(sv) { return esc(sv.name) + " " + esc(sv.cno || "-") + " dBHz"; }
 function fixTone(fix) { return fix.indexOf("3D") === 0 ? "ok" : fix.indexOf("fix") >= 0 ? "warn" : "bad"; }
-function tile(lat, lon, z) {            // slippy-map tile and pixel offset in it
-  var n = Math.pow(2, z), r = lat * Math.PI / 180;
-  var x = (lon + 180) / 360 * n, y = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n;
-  return {x: Math.floor(x), y: Math.floor(y), fx: (x - Math.floor(x)) * 256, fy: (y - Math.floor(y)) * 256,
-    mpp: 156543.03 * Math.cos(r) / n};
-}
+function mpp(lat, z) { return 156543.03 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z); }   // metres a pixel
 function wifiQ(rssi) {                 // [arcs 0-3, quality %, tone] for an RSSI in dBm
-  if (rssi === null || rssi === undefined) return null;
+  if (rssi == null) return null;
   return [rssi >= -60 ? 3 : rssi >= -67 ? 2 : rssi >= -80 ? 1 : 0, Math.max(0, Math.min(100, Math.round(2 * (rssi + 100)))),
     rssi >= -67 ? "" : rssi >= -80 ? "warn" : "bad"];
 }
@@ -520,7 +496,7 @@ function evAdd(gs, k, l, t) {
   var g = gs[k] || (gs[k] = {n: 0, last: null, h: {}, d: {}});
   var c = (EVD[k] || evDflt)(g.d, l);
   g.n += c;
-  if (t === null || t === undefined) return;
+  if (t == null) return;
   g.last = t;
   if (c) { var h = evHour(t); g.h[h] = (g.h[h] || 0) + c; }
 }
@@ -636,6 +612,7 @@ function evDet(k, g) {                  // a group's detail line (HTML)
   if (k === "grx") return x + (g.n > 1 ? "<em>" + MD + "after each boot</em>" : "");
   return x;
 }
+function hmin(m) { return m < 60 ? m + "<em>min</em>" : Math.floor(m / 60) + "<em>h</em> " + two(m % 60) + "<em>min</em>"; }
 // -> {evs: the window, evk: the tiles, evt: GPS telemetry, evg: the groups}
 // (pure, for tests; st: the loader's busy / done)
 function evView(a, st) {
@@ -646,7 +623,7 @@ function evView(a, st) {
   }
   v.evs = a.t0 !== null ? when(a.t0) + "&ndash;" + when(a.t1) + MD + dur(a.t1 - a.t0) + " of the diag log" :
     st.done ? "no status line with a time" : "reading the diag log&hellip;";
-  var no = a.nno, nm = no < 60 ? no + "<em>min</em>" : Math.floor(no / 60) + "<em>h</em> " + two(no % 60) + "<em>min</em>";
+  var no = a.nno, nm = hmin(no);
   v.evk = '<div class="t-ok"><small>3D fix</small><b>' + (a.n ? Math.round(a.n3 * 100 / a.n) : "-") + "<em>% of minutes</em></b></div>" +
     '<div class="' + (no ? "t-warn" : "") + '"><small>No fix / no data</small><b>' + nm + "</b></div>" +
     "<div><small>Boots</small><b>" + nb + "<em>" + (boot.pw || 0) + " power-on</em></b></div>" +
@@ -703,7 +680,6 @@ function evTele(a, cols) {
     lk += '<i class="gt-k' + (dd === null ? "" : !dd ? " ok" : dd < .5 ? " am" : " rd") + '"></i>';
   }
   var an = a.drops > 0, mid = a.t0 + (a.t1 - a.t0) / 2;
-  function hmin(m) { return m < 60 ? m + "<em>min</em>" : Math.floor(m / 60) + "<em>h</em> " + two(m % 60) + "<em>min</em>"; }
   // a marker under the strip at each drop-out's start, its time below
   // (none closer than 9% to the one before: the dot stays, the time goes)
   var ep = "", mk = "", span = Math.max(1, (k0 + nb) * 300000 - k0 * 300000), lastx = -1;
@@ -753,7 +729,7 @@ function gpsLink(d, prev) {
     rate = (d.rx_bytes - prev.rx_bytes) / (d.uptime - prev.uptime);
   var tone = silent <= GPS_OK_S ? "" : silent <= GPS_SILENT_S ? "warn" : "bad";
   return {tone: tone, rate: rate, silent: tone === "bad" ? silent : 0,
-    junk: tone === "bad" && d.rx_age_s !== null && d.rx_age_s !== undefined && d.rx_age_s <= GPS_SILENT_S};
+    junk: tone === "bad" && d.rx_age_s != null && d.rx_age_s <= GPS_SILENT_S};
 }
 
 // Systems panel pieces (line icons as in the picked design)
@@ -764,7 +740,7 @@ var ICON = {
   chip: '<svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></svg>',
   net: '<svg viewBox="0 0 24 24"><path d="M3 20h18M6 16V8M12 16V4M18 16v-6"/></svg>',
   sig: '<svg viewBox="0 0 24 24"><path d="M4 18h2M9 18v-4M14 18V9M19 18V5"/></svg>',
-  clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+  clock: '<svg viewBox="0 0 24 24">' + EVI.clock + "</svg>"
 };
 function sxHead(icon, title, right) {
   return '<div class="sx-h"><span>' + ICON[icon] + title + "</span>" + (right ? "<b>" + right + "</b>" : "") + "</div>";
@@ -809,6 +785,13 @@ function sigView(svs) {
     '<div class="sg-l">a bar a satellite (its number below), taller = clearer signal<i></i>seen, not in use</div>';
 }
 
+// the position's [lat, lon] (status.json has it as text), null without one
+function posOf(d) {
+  var p = String(d.position || "").split(", ");
+  return p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ? [+p[0], +p[1]] : null;
+}
+// metres: NAV-PVT's hAcc as it is, else HDOP * UERE; null without either
+function accM(d) { return typeof d.hacc === "number" ? d.hacc : typeof d.hdop === "number" ? d.hdop * UERE : null; }
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it;
 // prev: the poll before, for rates)
 function view(d, prev) {
@@ -821,12 +804,12 @@ function view(d, prev) {
   var pk = typeof d.mem === "number" ? Math.round(d.mem / 1024) : null;
   var hd = typeof d.hdop === "number" ? d.hdop : null, q4 = wifiQ(d.rssi);
   var ha = typeof d.hacc === "number" ? d.hacc : null;          // NAV-PVT: metres
-  var acc = ha !== null ? ha : hd !== null ? hd * UERE : null;  // (else from HDOP)
+  var acc = accM(d);                                            // (else from HDOP)
   var src = d.fix_src === "pvt" ? "NAV-PVT" : d.fix_src === "nmea" ? "NMEA" : "-";
   var ub = String(d.ubx || "- / -").split(" / ");                 // UBX frames ok / bad
   var ubp = +ub[0] + +ub[1] ? +ub[1] * 100 / (+ub[0] + +ub[1]) : 0;   // NAV-PVT path
   var gl = gpsLink(d, prev), ua = d.upload_age_s;
-  var late = d.left > 0 && (ua === null || ua === undefined ? d.uptime > UPLOAD_LATE_S : ua > UPLOAD_LATE_S);
+  var late = d.left > 0 && (ua == null ? d.uptime > UPLOAD_LATE_S : ua > UPLOAD_LATE_S);
   v.up = "UP " + esc(hms(d.uptime).toUpperCase());
   v.gl = gl && gl.silent ? "GPS SILENT &middot; " + esc(hms(gl.silent).toUpperCase()) + "<em>" +
     (gl.junk ? "bytes arrive but no valid sentence: check TX/RX and the baud rate" :
@@ -888,16 +871,16 @@ function view(d, prev) {
   }
   var rd = Math.round(nom * 100 / subs.length), lit = Math.round(rd / 10), seg = "";
   for (k = 0; k < 10; k++) seg += k < lit ? "<i></i>" : '<i class="off"></i>';
-  var left = fk === null || fk === undefined ? ["-", ""] : sxLeft(fk);
+  var left = fk == null ? ["-", ""] : sxLeft(fk);
   var sig = q4 ? q4[1] + "% " + (q4[2] === "bad" ? "poor" : q4[2] ? "weak" : q4[0] === 3 ? "strong" : "good") : "-";
   v.sys = '<p class="sx-t">LOGGER SYSTEM STATUS</p><p class="sx-s">Real-time diagnostics &amp; health' +
       (d.fw === undefined ? "" : dot + esc(d.fw)) + "</p>" +
     sxHead("ready", "System readiness", rd + "%") + '<div class="sx-seg ' + worst + '">' + seg + "</div>" +
     subs.map(sxRow).join("") +
     sxHead("store", "Storage module") +
-    '<div class="sx-m"><div><div class="sx-big' + (fk !== null && fk !== undefined && fk < 1024 ? " warn" : "") + '">' + left[0] +
+    '<div class="sx-m"><div><div class="sx-big' + (fk != null && fk < 1024 ? " warn" : "") + '">' + left[0] +
       "<small> " + left[1] + '</small></div><div class="sx-bl">Offline driving left</div></div><div class="sx-4">' +
-      "<div><small>Free</small><b>" + (fk === null || fk === undefined ? "-" : (fk / 1024).toFixed(1) + "<em>MB</em>") + "</b></div>" +
+      "<div><small>Free</small><b>" + (fk == null ? "-" : (fk / 1024).toFixed(1) + "<em>MB</em>") + "</b></div>" +
       "<div><small>Waiting</small><b" + (late ? ' class="warn"' : "") + ">" + num(d.left) + "<em>pts</em></b></div>" +
       "<div><small>Logged</small><b>" + num(d.points) + "<em>pts</em>" + (d.stay === "yes" ? "<em>staying</em>" : "") + "</b></div>" +
       "<div><small>Files</small><b" + (d.bad_files > 0 ? ' class="bad"' : "") + ">" + num(d.files) +
@@ -905,7 +888,7 @@ function view(d, prev) {
     sxHead("link", "Uplink") + '<div class="sx-cs">' +
       sxCell("net", "Network", esc(ssid || nn(ws[0])) + (d.pulses ? "<em>" + num(d.pulses) + " keep-alive</em>" : "")) +
       sxCell("sig", "Signal" + (q4 ? dot + esc(d.rssi) + " dBm" : ""), sig, q4 ? (q4[2] || "ok") : "") +
-      sxCell("clock", "Last upload", ua === null || ua === undefined ? (d.upload_age_s === undefined ? "-" : "none yet") : hms(ua) + " ago",
+      sxCell("clock", "Last upload", ua == null ? (d.upload_age_s === undefined ? "-" : "none yet") : hms(ua) + " ago",
         late ? "warn" : "") + "</div>" +
     sxHead("chip", "Device") + '<table class="sx-k">' +
       "<tr><td>Running</td><td>" + hms(d.uptime) + (typeof d.uptime === "number" ?
@@ -914,10 +897,10 @@ function view(d, prev) {
       (pr ? "<tr><td>Previous run</td><td" + (/crash/.test(pr) ? ' class="warn"' : "") + ">" + esc(prevText(d)) + "</td></tr>" : "") +
       "<tr><td>Chip</td><td>" + esc(d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz</td></tr>" +
       (d.utc ? "<tr><td>GPS time</td><td>" + esc(String(d.utc).slice(11, 19)) + " UTC</td></tr>" : "") + "</table>";
-  var p = String(d.position || "").split(", ");
-  v.coord = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ?
-    Math.abs(+p[0]).toFixed(5) + "&deg; " + (+p[0] < 0 ? "S" : "N") + "  " +
-    Math.abs(+p[1]).toFixed(5) + "&deg; " + (+p[1] < 0 ? "W" : "E") +
+  var p = posOf(d);
+  v.coord = p ?
+    Math.abs(p[0]).toFixed(5) + "&deg; " + (p[0] < 0 ? "S" : "N") + "  " +
+    Math.abs(p[1]).toFixed(5) + "&deg; " + (p[1] < 0 ? "W" : "E") +
     (acc === null ? "" : dot + "&plusmn;" + acc.toFixed(1) + " m") :
     "NO FIX &middot; " + esc(fix).toUpperCase();
   v.ncoord = v.coord.replace(/ &middot; &plusmn;.*$/, "");
@@ -1060,8 +1043,7 @@ function tripsOf(pts) {
   for (var i = 1; i <= pts.length; i++) {
     var end = i === pts.length || pts[i][0] - pts[i - 1][0] > GAP_MS;
     if (!end) {
-      var c = Math.cos(pts[i][1] * Math.PI / 180);
-      km += Math.sqrt(Math.pow((pts[i][1] - pts[i - 1][1]) * 110.54, 2) + Math.pow((pts[i][2] - pts[i - 1][2]) * 111.32 * c, 2));
+      km += metres(pts[i], pts[i - 1]) / 1000;
       continue;
     }
     if (km >= TRIP_KM) out.push({i0: i0, i1: i - 1, t0: pts[i0][0], t1: pts[i - 1][0], km: km});
@@ -1232,7 +1214,7 @@ function fitView(lat, lon, el, live, band) {
   return {z: z, sc: sc, X: X, Y: Y};
 }
 function hlRange() {
-  var t = hist.hl === null || hist.hl === undefined || !hist.trips ? null : hist.trips[hist.hl];
+  var t = hist.hl == null || !hist.trips ? null : hist.trips[hist.hl];
   return t ? [t.i0, t.i1] : null;
 }
 // the shown track's start (a ring) and end (a dot), the size kept on screen
@@ -1246,13 +1228,12 @@ function ends(t, z, i0, i1, sc) {
   return o;
 }
 function histPath(t, z, i0, i1) {       // SVG path in the tile layer's pixels
-  var k = Math.pow(2, z), d = "", prev = 0;
+  var d = "", prev = 0;
   i0 = i0 || 0;
   i1 = i1 === undefined ? hist.pts.length - 1 : i1;
   for (var i = i0; i <= i1; i++) {
-    var p = hist.pts[i], r = p[1] * Math.PI / 180;
-    var x = ((p[2] + 180) / 360 * k - t.x) * 256, y = ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * k - t.y) * 256;
-    d += (i > i0 && p[0] - prev <= 300000 ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+    var p = hist.pts[i], m = wpx(p[1], p[2], z);
+    d += (i > i0 && p[0] - prev <= 300000 ? "L" : "M") + (m[0] - t.x * 256).toFixed(1) + " " + (m[1] - t.y * 256).toFixed(1);
     prev = p[0];
   }
   return d;
@@ -1279,18 +1260,17 @@ function trackPaint() {
 var mapKey = "", trkKey = "", mapD = null;
 function placeMap(d) {
   mapD = d;
-  var el = document.getElementById("map"), p = String(d.position || "").split(", ");
-  var fix = p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]);
+  var el = document.getElementById("map"), p = posOf(d), fix = !!p;
   trackPaint();
   // without a fix the day's track is still drawn (the pin hidden)
   if (!fix && !hist.pts.length) { el.className = "map nofix"; return; }
   el.className = fix ? "map" : "map nofix";
-  var lat = fix ? +p[0] : hist.pts[0][1], lon = fix ? +p[1] : hist.pts[0][2];
+  var lat = fix ? p[0] : hist.pts[0][1], lon = fix ? p[1] : hist.pts[0][2];
   // tiles to cover the element from its centre (a wide screen needs more)
   var band = mapBand(el), v = fitView(lat, lon, el, fix, band), z = v.z, sc = v.sc, me = wpx(lat, lon, z);
   var nx = Math.ceil(el.offsetWidth / 512 / sc) + 1, ny = Math.ceil(el.offsetHeight / 512 / sc) + 1;
   var t = {x: Math.floor(v.X / 256), y: Math.floor(v.Y / 256), fx: v.X % 256, fy: v.Y % 256,
-    mpp: tile(lat, lon, z).mpp / sc};
+    mpp: mpp(lat, z) / sc};
   var key = z + "/" + t.x + "/" + t.y + "/" + nx + "/" + ny, box = document.getElementById("tiles");
   // the pin, its ring and the coordinates at the position (off the anchor
   // when the view is centred on the day's track)
@@ -1328,8 +1308,7 @@ function placeMap(d) {
       ends(t, z, hr ? hr[0] : 0, hr ? hr[1] : hist.pts.length - 1, sc) + "</svg>" : "";
   }
   // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
-  var acc = document.getElementById("acc"), px = typeof d.hacc === "number" ? d.hacc * 2 / t.mpp :
-    typeof d.hdop === "number" ? d.hdop * UERE * 2 / t.mpp : 0;
+  var acc = document.getElementById("acc"), px = (accM(d) || 0) * 2 / t.mpp;
   acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
 }
 
@@ -1381,7 +1360,7 @@ function heading(pts) {
 }
 // the card's HTML (pure, for tests): addr from addrOf, h from hereFor
 function nowCard(d, addr, h, coords) {
-  var ha = typeof d.hacc === "number" ? d.hacc : typeof d.hdop === "number" ? d.hdop * UERE : null;
+  var ha = accM(d);
   var st = function (k, val, cls) { return "<span" + (cls ? ' class="' + cls + '"' : "") + ">" + k + "<b>" + val + "</b></span>"; };
   var r = (h.ms !== null ? st("HERE FOR", esc(hms(h.ms / 1000))) : "") +
     st("SPEED", h.kmh === null ? "&ndash;" : Math.round(h.kmh) + " km/h") +
@@ -1413,7 +1392,7 @@ function addrLoad(lat, lon) {
   x.send();
 }
 function nowPaint(d, lat, lon) {
-  var acc = typeof d.hacc === "number" ? d.hacc : typeof d.hdop === "number" ? d.hdop * UERE : 0;
+  var acc = accM(d) || 0;
   // within 100 m (an indoor fix strays that far), more on a poor one
   var h = hereFor(hist.pts, lat, lon, Math.max(100, 3 * acc), Date.now());
   // an address is the position's while within ADDR_M (else coordinates)

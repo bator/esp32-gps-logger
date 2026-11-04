@@ -2,7 +2,8 @@
 # Compile gps_logger.py to .mpy and install it (with main.py and the status
 # page, only gzipped: web.html.gz) on the ESP32, then reboot.
 # It must run precompiled: compiling on the device grows the Python heap,
-# which leaves too little IDF heap for TLS uploads. main.py imports
+# which leaves too little IDF heap for TLS uploads (-O3: no line numbers in
+# tracebacks, ~10 KB less, as in the frozen firmware). main.py imports
 # gps_logger at boot (hold the boot-bypass pin during reset to skip it:
 # GPIO10 on the ESP32-C6, GPIO7 on the Heltec, GPIO25 on the ESP32; main.py's
 # SKIP_PIN).
@@ -10,7 +11,7 @@
 # main.py and the page go up, and only if the frozen logger is this
 # gps_logger.py (same SHA-256; FORCE=1 deploys them anyway). FORCE_MPY=1
 # installs gps_logger.mpy even there (an emergency: it shadows the frozen
-# logger and brings its ~60 KB back into the Python heap).
+# logger and brings its ~100 KB back into the Python heap).
 #
 # The files are copied next to the old ones (<name>.dpl), checked (size and
 # SHA-256 on the board) and only then renamed over them: a copy cut short
@@ -87,7 +88,7 @@ echo "Board: $MACHINE ($ARCH)"
 
 # A firmware built by tools/build_firmware.sh has the logger frozen in (and
 # a gps_frozen marker with the SHA-256 of the gps_logger.py it was built
-# from): a gps_logger.mpy on flash would shadow it and bring its ~60 KB back
+# from): a gps_logger.mpy on flash would shadow it and bring its ~100 KB back
 # into the Python heap, so only main.py and the page go up. Only an
 # explicit answer counts: anything else (a garbled or missing reply) stops.
 FROZEN=$($MPREMOTE connect "$PORT" exec "
@@ -103,9 +104,9 @@ case "$FROZEN" in
         if [ "${FORCE_MPY:-0}" = 1 ]; then
             KEEP_MPY=1
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
-            echo "WARNING: it shadows the frozen one and takes ~60 KB of the Python heap again;"
+            echo "WARNING: it shadows the frozen one and takes ~100 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
-            $PY -m mpy_cross -march="$ARCH" -o gps_logger.mpy gps_logger.py
+            $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
         else
             # (the display's code on the board that has it: an older firmware
             # has no TFT, the logger's SHA alone then)
@@ -121,30 +122,15 @@ case "$FROZEN" in
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
         fi ;;
-    plain) $PY -m mpy_cross -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
+    plain) $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
-# The status page goes up only gzipped (~26 KB; the plain web.html took
-# ~70 KB of flash): sent as is to browsers (Accept-Encoding: gzip), inflated
-# on the board for other clients (curl). Not gzip -9: its 32 KB window is
-# what inflating it takes, more than the Python heap has free; the
-# firmware's WEB_GZ_WBITS window (4 KB). No name or mtime in the header:
-# the same page gives the same bytes.
-WBITS=$(sed -n 's/^WEB_GZ_WBITS = \([0-9][0-9]*\).*/\1/p' gps_logger.py)
-case "$WBITS" in
-    9|1[0-5]) ;;
-    *) echo "No WEB_GZ_WBITS in gps_logger.py: '$WBITS'" >&2; exit 1 ;;
-esac
-python3 - "$WBITS" web.html web.html.gz <<'EOF2'
-import sys, zlib
-w, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-z = zlib.compressobj(9, zlib.DEFLATED, 16 + w)
-with open(src, "rb") as f:
-    gz = z.compress(f.read()) + z.flush()
-with open(dst, "wb") as f:
-    f.write(gz)
-EOF2
+# The status page goes up only gzipped: sent as is to browsers
+# (Accept-Encoding: gzip), inflated on the board for other clients (curl).
+# tools/web_min.py strips it and makes the gzip, with the firmware's
+# WEB_GZ_WBITS window (see there); web.html itself keeps its comments.
+python3 tools/web_min.py web.html web.html.gz
 
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block

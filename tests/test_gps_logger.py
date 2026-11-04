@@ -44,6 +44,25 @@ def _gunzip_w(data, wbits):
         return None
 
 
+def _load_web_min():
+    """tools/web_min.py (without one: None, its checks fail, the rest runs)."""
+    path = os.path.join(ROOT, "tools", "web_min.py")
+    if not os.path.exists(path):
+        return None
+    spec = importlib.util.spec_from_file_location("web_min", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+web_min = _load_web_min()
+
+
+def _page_min(raw):
+    """web.html's bytes as they go on the board, before the gzip."""
+    return web_min.minify(raw.decode("utf-8")).encode("utf-8") if web_min else raw
+
+
 class _FakeDeflate:
     """MicroPython 1.29's deflate module over zlib, for CPython: DeflateIO
     reads a gzip stream with a 2**wbits window, as uzlib does (a stream
@@ -7142,15 +7161,18 @@ lb_td = tempfile.mkdtemp(prefix="loopgz-")
 lb_gz = os.path.join(lb_td, "web.html.gz")
 with open(os.path.join(ROOT, "web.html"), "rb") as f:
     lb_page = f.read()
+lb_plain = os.path.join(lb_td, "web.min.html")
+with open(lb_plain, "wb") as f:
+    f.write(_page_min(lb_page))
 with open(lb_gz, "wb") as f:              # (as deploy.sh makes it)
-    f.write(_gz_small(lb_page, getattr(gl, "WEB_GZ_WBITS", 12)))
+    f.write(_gz_small(_page_min(lb_page), getattr(gl, "WEB_GZ_WBITS", 12)))
 for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
     if not interp:
         print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
         continue
     try:
         out = subprocess.check_output(
-            [interp, os.path.join(ROOT, "tests", "web_loopback.py"), lb_gz],
+            [interp, os.path.join(ROOT, "tests", "web_loopback.py"), lb_gz, lb_plain],
             stderr=subprocess.STDOUT, timeout=60)
         loop_out = out.decode()
     except subprocess.CalledProcessError as e:
@@ -7182,10 +7204,13 @@ shutil.rmtree(lb_td, ignore_errors=True)
 # and SHA-256, then renamed over the old ones; low flash or a bad copy stops
 # it with the old files untouched (a cut copy left an unimportable module)
 FAKE_PY = r"""#!/usr/bin/env python3
-import sys
+import os, sys
 a = sys.argv[1:]
 if a[:1] == ["-c"]:
     sys.exit(0)
+if os.environ.get("FAKE_PY_LOG"):
+    with open(os.environ["FAKE_PY_LOG"], "a") as f:
+        f.write(" ".join(a) + "\n")
 out = a[a.index("-o") + 1]
 with open(a[-1], "rb") as f, open(out, "wb") as g:
     g.write(b"MPY" + f.read())
@@ -7255,6 +7280,10 @@ def deploy_run(env_extra):
     work = tempfile.mkdtemp(dir=dp_td)
     for n in ("deploy.sh", "gps_logger.py", "main.py", "web.html"):
         shutil.copy(os.path.join(ROOT, n), work)
+    os.makedirs(os.path.join(work, "tools"))
+    if web_min:
+        shutil.copy(os.path.join(ROOT, "tools", "web_min.py"),
+                    os.path.join(work, "tools"))
     os.makedirs(os.path.join(work, ".venv", "bin"))
     for n, src in (("python", FAKE_PY), ("mpremote", FAKE_MPREMOTE),
                    ("shim.py", FAKE_SHIM)):
@@ -7326,7 +7355,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     with open(os.path.join(ROOT, "gps_logger.py"), "rb") as f:
         new_mpy = b"MPY" + f.read()
     with open(os.path.join(ROOT, "web.html"), "rb") as f:
-        new_page = f.read()
+        new_page = _page_min(f.read())
     rc, out, err, dev, calls = deploy_run({})
     cps = [c for call in calls for c in call if c[0] == "cp"]
     check("DEPLOY: copies to .dpl, checks, renames; old .dpl and stray .py go",
@@ -7339,14 +7368,33 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
     dp_w = getattr(gl, "WEB_GZ_WBITS", 12)
-    check("DEPLOY-GZIP: only web.html.gz goes up, made with the board's "
-          "small window (WEB_GZ_WBITS: it inflates it for curl), no mtime; "
-          "the old plain web.html is removed in the same swap",
+    check("DEPLOY-GZIP: only web.html.gz goes up, stripped (tools/web_min.py), "
+          "made with the board's small window (WEB_GZ_WBITS: it inflates it for "
+          "curl), no mtime; the old plain web.html is removed in the same swap",
           _gunzip_w(dev_file(dev, "web.html.gz") or b"", dp_w) == new_page
           and (dev_file(dev, "web.html.gz") or b"")[4:8] == b"\0\0\0\0"
           and ["cp", "web.html.gz", ":web.html.gz.dpl"] in cps
           and not [c for c in cps if c[1] == "web.html"]
           and dev_file(dev, "web.html") is None, repr(cps))
+    # DEPLOY-OPT3: both ways deploy.sh compiles the logger leave the line
+    # numbers out, as the frozen firmware does (108097 -> 97980 B on xtensawin);
+    # -O3 would drop an assert or a __debug__ branch too: there must be none
+    dp_opt = []
+    for extra in ({}, {"FAKE_FROZEN": "1", "FORCE_MPY": "1"}):
+        pl = os.path.join(tempfile.mkdtemp(dir=dp_td), "py.log")
+        deploy_run(dict(extra, FAKE_PY_LOG=pl))
+        with open(pl) as f:
+            dp_opt.append(f.read().split("\n")[:-1])
+    opt_src = {}
+    for n in ("gps_logger.py", "gps_boot.py", "gps_tft.py"):
+        with open(os.path.join(ROOT, n)) as f:
+            opt_src[n] = [ln for ln in f.read().splitlines()
+                          if re.match(r"\s*assert\b", ln) or "__debug__" in ln]
+    check("DEPLOY-OPT3: deploy.sh compiles with -O3, plain and FORCE_MPY; no "
+          "assert or __debug__ in what is compiled that way",
+          len(dp_opt) == 2 and all(len(c) == 1 and "-O3" in c[0].split()
+                                   for c in dp_opt)
+          and not any(opt_src.values()), repr((dp_opt, opt_src)))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
     check("DEPLOY: too little free flash -> stops before copying, old kept",
           rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
@@ -7542,6 +7590,9 @@ def build_run(args, env_extra, dirty=False):
     os.makedirs(os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "tools", "build_firmware.sh"),
                 os.path.join(work, "tools"))
+    if web_min:
+        shutil.copy(os.path.join(ROOT, "tools", "web_min.py"),
+                    os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft.py"), work)
@@ -7653,6 +7704,19 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     rc, out, err, work, calls = build_run([], {})
     with open(os.path.join(work, "firmware", "manifest.py")) as f:
         man = f.read()
+    man_re = r'module\("(\w+)\.py", base_path="[^"]*"(, opt=3)?\)'
+    rc_s3, _o, _e, work_s3, _c = build_run(
+        [], {"BOARD_DIR": os.path.join(ROOT, "boards", "GPS_LOGGER_S3")})
+    with open(os.path.join(work_s3, "firmware", "manifest.py")) as f:
+        man_s3 = re.findall(man_re, f.read())
+    man_c6 = re.findall(man_re, man)
+    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_boot", "gps_tft",
+                                     "gps_tft_font")]
+    check("BUILD-OPT3: the frozen modules with code leave the line numbers out "
+          "(opt=3: ~10 KB of the logger), the display's on the Heltec's firmware",
+          rc == 0 and rc_s3 == 0 and all(x in man_s3 for x in opt3)
+          and all(x in man_c6 for x in opt3[:2])
+          and ("gps_frozen", "") in man_c6, repr((man_c6, man_s3)))
     bd = os.path.join(ROOT, "boards", "GPS_LOGGER_C6")
     with open(os.path.join(bd, "mpconfigboard.h")) as f:
         bh = f.read()
@@ -7823,7 +7887,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     # inflates it for a client without gzip); an older firmware (after a
     # rollback: OTA_PAGES of both pages, as on master) accepts it too
     with open(os.path.join(work, "web.html"), "rb") as f:
-        pub_page = f.read()
+        pub_page = _page_min(f.read())
     pub_gz = dev_file(dest, "web-%s.html.gz" % man.get("commit")) or b""
     saved_pages = gl.OTA_PAGES
     gl.OTA_PAGES = ("/web.html", "/web.html.gz")
@@ -7832,7 +7896,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     finally:
         gl.OTA_PAGES = saved_pages
     check("BUILD-PUBLISH-GZ: the manifest names only /web.html.gz "
-          "(web-<commit>.html.gz, the board's WEB_GZ_WBITS window); no "
+          "(web-<commit>.html.gz, stripped, the board's WEB_GZ_WBITS window); no "
           "plain page published; an older firmware's check accepts it",
           rc == 0 and [f["path"] for f in man.get("files", [])]
           == ["/web.html.gz"]
@@ -14505,10 +14569,159 @@ else:
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"
           and v.get("tile", {}).get("x") == 72235
-          and v.get("tile", {}).get("y") == 46048, repr(v.get("tile")))
+          and v.get("tile", {}).get("y") == 46048
+          and abs(v.get("tile", {}).get("mpp", 0) - 0.8130) < 0.0001, repr(v.get("tile")))
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "web.html")) as f:
     page_src = f.read()
+# PAGE-DEAD: no rule without an element, no second copy of the maths. A rule
+# for a class neither the markup nor the script names is dead; q-* and t-* are
+# put together in the script
+_pd_css = page_src[page_src.index("<style>"):page_src.index("</style>")]
+_pd_rest = page_src[page_src.index("</style>"):]
+_pd_sel = re.sub(r"\{[^}]*\}", "{}", re.sub(r"/\*.*?\*/", "", _pd_css, flags=re.S))
+_pd_dead = sorted(c for c in set(re.findall(r"\.([a-zA-Z][\w-]*)", _pd_sel))
+                  if not re.match(r"[qt]-", c)
+                  and not re.search(r"(?<![\w-])" + re.escape(c) + r"(?![\w-])", _pd_rest))
+_pd_gone = [w_ for w_ in (".grid", 'class="grid"', ".r .u", ".sx-big.bad", ".gt-dg svg", "var SHOWN",
+                          "var OTHER", "function tile(", "Math.cos(pts[i][1]")
+            if w_ in page_src]
+_pd_one = {w_: page_src.count(w_) for w_ in (
+    ".gt-ax{", "Math.log(Math.tan(r)", "<path d=\"M12 7v5l3 2\"/>", "Math.sqrt(Math.pow(",
+    "String(d.position || \"\").split", "d.hdop * UERE", "<em>min</em>\" : Math.floor(")}
+_pd_null = re.findall(r"(\w[\w.]*) [!=]== null (?:\|\||&&) \1 [!=]== undefined", page_src)
+check("PAGE-DEAD: every CSS class is in the markup or the script; the dead rules and the "
+      "test-only lists gone; one copy each of the Mercator, metres, the position and the "
+      "accuracy; == null, not both tests; the classes the tests read still drawn",
+      not _pd_dead and not _pd_gone and set(_pd_one.values()) == {1} and not _pd_null
+      and all(w_ in page_src for w_ in ('"now top"', '"st" : "end"', '"fa"')),
+      repr((_pd_dead, _pd_gone, _pd_one, _pd_null)))
+# WEB-MIN: tools/web_min.py strips the page at build time (a // in a string or
+# a regex is no comment: the page has both); web.html keeps its comments
+_wm_js = (
+    ('var u = "https://atlas.crusand.org/x"; // a url\n', 'var u = "https://atlas.crusand.org/x";'),
+    ("var u = 'a//b', v = \"/*no*/\", w = 'it\\'s // no';", "var u = 'a//b', v = \"/*no*/\", w = 'it\\'s // no';"),
+    ('x = s.replace(/\\/\\/.*$/, ""); // gone', 'x = s.replace(/\\/\\/.*$/, "");'),
+    ('if (/[/]\\/\\/"/.test(s)) y(); /* c */ z();', 'if (/[/]\\/\\/"/.test(s)) y(); z();'),
+    ("a = b / c; // d / e\n", "a = b / c;"),
+    ('if (x) /\\/\\/"/.test(y); // z', 'if (x) /\\/\\/"/.test(y);'),
+    ("while (x) /'/.test(y)", "while (x) /'/.test(y)"),
+    ("n = (a + b) / 2 / c; // x", "n = (a + b) / 2 / c;"),
+    ('i++ / 2 // "\n', "i++ / 2"),
+    ("return /'//* c */;", "return /'/ ;"),
+    ("a = [1] / 2; b = x / 3; c = 4 / 5 // q", "a = [1] / 2; b = x / 3; c = 4 / 5"),
+    ('f(/a/g, /b\\/c/i, !/d/.test(e), x ? /"/ : /\'/); // r', 'f(/a/g, /b\\/c/i, !/d/.test(e), x ? /"/ : /\'/);'),
+    ("function f() {\n    // c\n\n    return 1;   // d\n}\n", "function f() {\nreturn 1;\n}"),
+    ("var a = 1 /* x */ + 2;", "var a = 1 + 2;"),
+    ("a /* one\ntwo */ b", "a\nb"),
+    ('s = "a\\\n   b"; // c', 's = "a\\\n   b";'),
+    ("// it's\nx = 1;", "x = 1;"),
+    ("x  =  a   +   b  ;", "x = a + b ;"),
+    ("a = b\n\n\n  c = d", "a = b\nc = d"),
+)
+_wm_got = [(web_min.minify_js(a_), b_) for a_, b_ in _wm_js] if web_min else []
+check("WEB-MIN-JS: comments and indentation out; a // or /* in a string or a regex "
+      "stays, a division is no regex, the lines and the spaces around operators stay",
+      web_min and all(a_ == b_ for a_, b_ in _wm_got), repr([g_ for g_ in _wm_got if g_[0] != g_[1]]))
+_wm_cases = web_min and (
+    web_min.minify_css('a{content:"/* no */"} /* yes */\n   b{c:url(x/*y)}\n\n') == 'a{content:"/* no */"}\nb{c:url(x/*y)}',
+    web_min.minify_css("a/**/b{}") == "a b{}",
+    web_min.minify('<a href="https://x//y">t</a><!-- c -->\n   <b>  x</b>\n\n<style>\n/*c*/ a{b:c}\n</style>'
+                   '<script>\n// s\nf("//");\n</script>\n')
+    == '<a href="https://x//y">t</a>\n<b>  x</b>\n<style>\na{b:c}\n</style><script>\nf("//");\n</script>\n')
+check("WEB-MIN-CSS: comments out, a /* in a CSS string or a url() stays; markup: comments "
+      "and indentation out, a // in an attribute stays", _wm_cases and all(_wm_cases), repr(_wm_cases))
+_wm_bad = []
+if web_min:
+    for fn_, src_ in ((web_min.minify_js, '"cut\n"'), (web_min.minify_js, "a = /cut\n/"),
+                      (web_min.minify_js, "/* cut"), (web_min.minify_js, "a = `b`"),
+                      (web_min.minify_css, "a{b:'cut\n}"), (web_min.minify_css, "/* cut")):
+        try:
+            _wm_bad.append(fn_(src_))
+        except web_min.MinifyError:
+            pass
+_wm_td = tempfile.mkdtemp(prefix="webmin-")
+_wm_broken = os.path.join(_wm_td, "broken.html")
+with open(_wm_broken, "w") as f:
+    f.write('<script>\nvar a = "cut;\n</script>\n')
+_wm_tool = os.path.join(ROOT, "tools", "web_min.py")
+_wm_r = subprocess.run([sys.executable, _wm_tool, _wm_broken, os.path.join(_wm_td, "o.gz")],
+                       capture_output=True, text=True)
+check("WEB-MIN-FAIL: what it cannot read (a string, regex or comment cut short, a template "
+      "literal) stops the build, nothing written",
+      web_min and not _wm_bad and _wm_r.returncode == 1 and "cut short" in _wm_r.stderr
+      and not os.path.exists(os.path.join(_wm_td, "o.gz")), repr((_wm_bad, _wm_r.stderr[-200:])))
+_wm_page = web_min.minify(page_src) if web_min else page_src
+_wm_css = lambda t_: re.sub(r"\s+", " ", re.sub(r"/\*.*?\*/", " ", t_[t_.index("<style>"):t_.index("</style>")],
+                                                flags=re.S)).replace(" }", "}").strip()
+_wm_html = lambda t_: re.sub(r"\s+", " ", re.sub(r"<!--.*?-->", " ", t_[:t_.index("<style>")]
+                                                 + t_[t_.index("</style>"):t_.index("<script>")], flags=re.S))
+_wm_gz = os.path.join(_wm_td, "page.gz")
+_wm_r = subprocess.run([sys.executable, _wm_tool, os.path.join(ROOT, "web.html"), _wm_gz],
+                       capture_output=True, text=True)
+_wm_data = b""
+if os.path.exists(_wm_gz):
+    with open(_wm_gz, "rb") as f:
+        _wm_data = f.read()
+_wm_w = getattr(gl, "WEB_GZ_WBITS", 12)
+check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
+      "mtime, not over 29 KB (35.7 before); the CSS and the markup only lose comments and "
+      "white space; stripping again changes nothing; web.html itself keeps its comments",
+      web_min and _wm_r.returncode == 0
+      and _gunzip_w(_wm_data, _wm_w) == _wm_page.encode("utf-8") and _wm_data[4:8] == b"\0\0\0\0"
+      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 29000
+      and web_min.minify(_wm_page) == _wm_page and "<!--" not in _wm_page
+      and "/*" not in _wm_page[_wm_page.index("<style>"):_wm_page.index("</style>")]
+      and _wm_css(_wm_page) == _wm_css(page_src) and _wm_html(_wm_page) == _wm_html(page_src)
+      and "<!--" in page_src and "// " in page_src,
+      repr((_wm_r.returncode, _wm_r.stderr[-200:], len(_wm_data), len(_wm_page))))
+if node is not None:
+    _wm_min = os.path.join(_wm_td, "web.html")
+    with open(_wm_min, "w", encoding="utf-8") as f:
+        f.write(_wm_page)
+    _wm_here = os.path.join(ROOT, "tests", "web_page_test.js")
+
+    def _wm_view(path, js):
+        return subprocess.run([node, _wm_here, path], input=js, capture_output=True,
+                              text=True).stdout
+
+    _wm_same = []
+    for js_ in (page_json, page_json2, page_json3):
+        # (a minute turning over between the two runs changes a printed time)
+        for _ in range(3):
+            a_ = _wm_view(os.path.join(ROOT, "web.html"), js_)
+            if a_ and a_ == _wm_view(_wm_min, js_):
+                _wm_same.append(True)
+                break
+        else:
+            _wm_same.append(False)
+    check("WEB-MIN-RUN: tests/web_page_test.js on the stripped page prints what it prints "
+          "on web.html, all it runs (view, the DOM stub, the map, the track, the event "
+          "log) on three status answers", web_min and _wm_same == [True] * 3, repr(_wm_same))
+    # the same program: acorn (inside node) on both, the positions left out
+    _wm_ast = (
+        "const a = require('internal/deps/acorn/acorn/dist/acorn');"
+        "const fs = require('fs');"
+        "const js = (p) => { const h = fs.readFileSync(p, 'utf8');"
+        " return h.slice(h.indexOf('<script>') + 8, h.lastIndexOf('</script>')); };"
+        "const c = [];"
+        "const t = (s, o) => JSON.stringify(a.parse(s, Object.assign({ecmaVersion: 'latest'}, o)),"
+        " (k, v) => k === 'start' || k === 'end' ? undefined : typeof v === 'bigint' ? String(v) : v);"
+        "const x = t(js(process.argv[1])), y = t(js(process.argv[2]), {onComment: c});"
+        "console.log(JSON.stringify({same: x === y, comments: c.length, n: x.length}));")
+    _wm_r = subprocess.run([node, "--expose-internals", "-e", _wm_ast, os.path.join(ROOT, "web.html"), _wm_min],
+                           capture_output=True, text=True)
+    if "Cannot find module" in _wm_r.stderr or "bad option" in _wm_r.stderr:
+        print("SKIP  WEB-MIN-AST: this node has no acorn to reach")
+    else:
+        try:
+            _wm_j = json.loads(_wm_r.stdout)
+        except ValueError:
+            _wm_j = {"error": _wm_r.stderr[-300:]}
+        check("WEB-MIN-AST: the stripped script parses to the same program as the source "
+              "(every string and regex with its raw text), no comment left",
+              web_min and _wm_j.get("same") is True and _wm_j.get("comments") == 0, repr(_wm_j))
+shutil.rmtree(_wm_td, True)
 check("PAGE-STATIC-GONE: no Static test panel, code, CSS or browser "
       "storage on the page",
       not any(w_ in page_src for w_ in (
@@ -18786,6 +18999,147 @@ check("TFT-WIFI: the icon stands: 20 frames send nothing; a lower level sends on
       "12x12 icon with fewer arcs lit; no WiFi: all dim",
       _still3 and _sent1 == [288] and _a3 > _a1 > 0 and _off == (0, True),
       repr((_still3, _sent1, _a3, _a1, _off)))
+
+# the fonts: only the rows from the first to the last with ink in any glyph (the
+# font's blank rows were 1/3 of the file), BASE counted from the first kept: put
+# back, they are the bytes the tool wrote before the crop, and a string stays on
+# its rows. A new font or new characters on purpose: new values here
+_font_was = {  # uncropped: HEIGHT, BASE, sha256 of DATA (first 32)
+    "HERO": (47, 37, "f104d736320fb3d4e753dc5d3a05bad9"),
+    "NUM": (22, 17, "d2fed60e2e652f2452c2beb8e569b8e4"),
+    "TXT": (13, 10, "8ad856b704c227df34b62fe578a14bb8"),
+    "LAB": (12, 9, "a556dc2900611d97bcff7c994341e848"),
+    "WORD": (17, 13, "f82a4081a2b77431a6e31a804f4ce2f2"),
+}
+_font_rows = (  # the rows a string's ink takes, against its baseline
+    ("HERO", "47", (-28, -1)), ("HERO", "-", (-14, -10)), ("NUM", "22", (-13, -1)),
+    ("NUM", "-", (-7, -5)), ("TXT", "11:42", (-8, -1)), ("TXT", "k\u00e9sz", (-8, -1)),
+    ("TXT", "<1 \u00f3ra", (-8, -1)), ("LAB", "GPS", (-7, -1)),
+    ("LAB", "m\u0171hold", (-7, -1)), ("LAB", "KM/H", (-7, 0)),
+    ("WORD", "er\u0151s", (-11, -1)), ("WORD", "gyenge", (-8, 2)), ("WORD", "nincs", (-11, -1)),
+)
+
+
+def _font_glyphs(f):
+    """[(the glyph's rows, each (w + 1) // 2 bytes)]: None when OFFS or the
+    size of DATA do not fit HEIGHT."""
+    chars, widths, offs, data, h = f[:5]
+    if len(widths) != len(chars) or len(offs) != 2 * len(chars):
+        return None
+    out, o = [], 0
+    for i, w in enumerate(widths):
+        n = (w + 1) // 2
+        if offs[i * 2] | offs[i * 2 + 1] << 8 != o:
+            return None
+        out.append([data[o + r * n:o + (r + 1) * n] for r in range(h)])
+        o += n * h
+    return out if o == len(data) else None
+
+
+def _font_pad(f, h0, b0):
+    """f with the blank rows back as it had h0 rows, its baseline at b0."""
+    top = b0 - f[5]
+    pad, offs = bytearray(), bytearray()
+    for i, g in enumerate(_font_glyphs(f) or ()):
+        n = (f[1][i] + 1) // 2
+        offs += len(pad).to_bytes(2, "little")
+        pad += bytes(n * max(0, top)) + b"".join(g) + bytes(n * max(0, h0 - top - f[4]))
+    return (f[0], f[1], bytes(offs), bytes(pad), h0, b0)
+
+
+_fnames = ("HERO", "NUM", "TXT", "LAB", "WORD")
+_ffonts = {n: getattr(_ff, n) for n in _fnames}
+_fg = {n: _font_glyphs(f) for n, f in _ffonts.items()}
+_ftight = {n: bool(_fg[n]) and all(any(any(g[r]) for g in _fg[n]) for r in (0, _ffonts[n][4] - 1))
+           for n in _fnames}
+check("TFT-FONT-CROP: no font keeps a row without ink above or below; OFFS and the size "
+      "of DATA fit HEIGHT", all(_fg.values()) and all(_ftight.values()), repr(_ftight))
+_fsha = {n: hashlib.sha256(_font_pad(_ffonts[n], *_font_was[n][:2])[3]).hexdigest()[:32] for n in _fnames}
+check("TFT-FONT-BASE: BASE and HEIGHT say where the crop was: the blank rows back on that "
+      "side give the uncropped bytes",
+      all(_fsha[n] == _font_was[n][2] and 0 <= _font_was[n][1] - _ffonts[n][5]
+          and _font_was[n][1] - _ffonts[n][5] + _ffonts[n][4] <= _font_was[n][0] for n in _fnames),
+      repr((_fsha, [_ffonts[n][4:] for n in _fnames])))
+_fpair = dict(zip(_fnames, (_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD)))
+_frows = []
+_band0, _ft.BAND_H = _ft.BAND_H, 64      # (one tall band: the string is on it)
+for _n, _s, _want in _font_rows:
+    # (the band as gps_tft has it: a string blitted at a row, read back)
+    _fb = _FakeFramebuf.FrameBuffer(bytearray(160 * 64 * 2), 160, 64, _FakeFramebuf.RGB565)
+    _fb.fill(_ft.BG)
+    _ft._text(_fb, _fpair[_n], _s, 2, 40, "txt")
+    _ink = [y - 40 for y in range(64) if any(_fb.pixel(x, y) != _ft.BG for x in range(160))]
+    _frows.append((_n, _s, (_ink[0], _ink[-1]) if _ink else None))
+_ft.BAND_H = _band0
+check("TFT-FONT-ROWS: a string stays on its rows against the baseline",
+      _frows == list(_font_rows), repr(_frows))
+_fstates = (("47", True, 22, "11:42", None, 3, "1284", True),
+            ("--", False, 0, "--:--", 0, 0, "k\u00e9sz", False),
+            ("188", True, 9, "09:05", 2, 2, " ", False, (70, "44 \u00f3ra")),
+            ("-1", True, 40, "23:58", 3, 1, "12k", True, (96, "<1 \u00f3ra")),
+            ("0", True, 1, "06:37", 1, 1, "k\u00e9sz", False, (100, "tele")))
+
+
+def _font_panels():
+    out = []
+    for st in _fstates:
+        _ft._D.top = _ft._D.low = None
+        _ft.set_state(*st)
+        _ft.frame()
+        out.append(dict(_TftSpi.panel))
+    return out
+
+
+_fp1 = _font_panels()
+_fsaved = _ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD
+_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD = [
+    (_font_pad(_ffonts[n], *_font_was[n][:2]), memoryview(_font_pad(_ffonts[n], *_font_was[n][:2])[3]))
+    for n in _fnames]
+_fp2 = _font_panels()
+_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD = _fsaved
+check("TFT-FONT-PANEL: the panel pixel for pixel as with the blank rows back: speeds, "
+      "satellites, clock, WiFi, quality words, upload and the gauge's texts",
+      _fp1 == _fp2 and len(_fp1[0]) == 160 * 80,
+      repr([sum(1 for k in a if a[k] != b.get(k)) for a, b in zip(_fp1, _fp2)]))
+_ft.set_state("47", True, 22, "11:42", None, 3, "k\u00e9sz", False)
+_ft.frame()
+# the tool's crop, on a font small enough to read (importing it writes nothing)
+_mf_path = os.path.join(ROOT, "tools", "make_tft_font.py")
+with open(_mf_path, encoding="utf-8") as f:
+    _mf_src = f.read()
+_mf = {}
+if "def crop(" in _mf_src and '__name__ == "__main__"' in _mf_src:
+    exec(compile(_mf_src, _mf_path, "exec"), {"__name__": "make_tft_font"}, _mf)
+_crop = _mf.get("crop")
+_row0 = b"\x00"
+_tiny = (_row0 + b"\x10" + b"\x20" + _row0                 # width 2: a byte a row
+         + _row0 * 2 + b"\x00\x30" + b"\x40\x00" + _row0 * 2)  # width 3: two
+try:
+    _crop_err = _crop and _crop(b"\x02", b"\x00" * 3, 2, 1)
+except ValueError:
+    _crop_err = "refused"
+check("TFT-FONT-TOOL: crop keeps the rows from the first to the last with ink in any "
+      "glyph, a blank row between them, BASE from the first kept; all blank: one row; "
+      "data of the wrong size refused; importing the tool runs nothing",
+      _crop is not None
+      and _crop(b"\x02\x03", _tiny + b"", 4, 3) == (b"\x00\x00\x02\x00", b"\x10\x20\x00\x30\x40\x00", 2, 2)
+      and _crop(b"\x02", b"\x00\x10\x00\x20", 4, 2) == (b"\x00\x00", b"\x10\x00\x20", 3, 1)
+      and _crop(b"\x02", b"\x00" * 3, 3, 2) == (b"\x00\x00", b"\x00", 1, 2)
+      and _crop_err == "refused" and "main" in _mf, repr(_mf.keys()))
+# what the tool writes is what is committed (needs Pillow and the Inter TTFs)
+_mf_can = importlib.util.find_spec("PIL") is not None and bool(_mf) and os.path.exists(_mf["D"] % "Bold")
+if not _mf_can:
+    print("SKIP  TFT-FONT-REGEN: Pillow or the Inter TTFs are missing")
+else:
+    _mf_td = tempfile.mkdtemp(prefix="font-")
+    _mf_r = subprocess.run([sys.executable, _mf_path], cwd=_mf_td, capture_output=True, text=True)
+    with open(os.path.join(ROOT, "gps_tft_font.py"), "rb") as f:
+        _mf_a = f.read()
+    with open(os.path.join(_mf_td, "gps_tft_font.py"), "rb") as f:
+        _mf_b = f.read()
+    shutil.rmtree(_mf_td, True)
+    check("TFT-FONT-REGEN: tools/make_tft_font.py writes the committed gps_tft_font.py",
+          _mf_r.returncode == 0 and _mf_a == _mf_b, _mf_r.stderr[-200:])
 
 # a panel gone wrong: dark, and each action counted when it runs
 hl._tft = _ft
