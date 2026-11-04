@@ -167,9 +167,14 @@ class I2C(object):
 
 
 class _TftSpi(object):
-    """The TFT's SPI: what goes out, in order."""
+    """The TFT's SPI and the panel behind it: commands (DC low) and data (DC
+    high) as an ST7735S takes them, in the controller's coordinates."""
     out = []
     fail = False
+    panel = {}
+    win = [0, 0, 0, 0]
+    cmd = None
+    frames = 0
 
     def __init__(self, *a, **k):
         pass
@@ -177,29 +182,69 @@ class _TftSpi(object):
     def write(self, data):
         if _TftSpi.fail:
             raise OSError(5)
-        _TftSpi.out.append(bytes(data))
+        data = bytes(data)
+        dc = next((v for n, v, _t in reversed(_pin_levels) if n == 40), 0)
+        if not dc:
+            _TftSpi.cmd = data[0]
+            _TftSpi.out.append(data)
+            return
+        c = _TftSpi.cmd
+        _TftSpi.out.append(data)
+        w = _TftSpi.win
+        if c == 0x2A:
+            w[0], w[2] = data[0] << 8 | data[1], data[2] << 8 | data[3]
+        elif c == 0x2B:
+            w[1], w[3] = data[0] << 8 | data[1], data[2] << 8 | data[3]
+        elif c == 0x2C:
+            _TftSpi.frames += 1
+            cols = w[2] - w[0] + 1
+            for i in range(0, len(data), 2):
+                n = i // 2
+                _TftSpi.panel[(w[0] + n % cols, w[1] + n // cols)] = data[i] | data[i + 1] << 8
 
 
 class _FakeFramebuf(object):
+    """framebuf as extmod/modframebuf.c does it, for the formats gps_tft uses:
+    RGB565 stored little endian in the buffer, MONO_HLSB, blit from a
+    FrameBuffer or a (buffer, w, h, format) tuple, read-only buffers too, with
+    key and palette, clipped on all sides."""
     RGB565, MONO_HLSB = 1, 3
 
     class FrameBuffer(object):
         def __init__(self, buf, w, h, fmt):
+            need = w * h * 2 if fmt == 1 else ((w + 7) // 8) * h
+            if len(buf) < need:
+                raise ValueError("buffer too small")
             self.buf, self.w, self.h, self.fmt = buf, w, h, fmt
-            self.px = {}
+
+        def pixel(self, x, y, c=None):
+            if self.fmt == 1:
+                o = (x + y * self.w) * 2
+                if c is None:
+                    return self.buf[o] | self.buf[o + 1] << 8
+                self.buf[o], self.buf[o + 1] = c & 255, c >> 8
+                return None
+            o = ((self.w + 7) // 8) * y + x // 8
+            return self.buf[o] >> (7 - x % 8) & 1
+
+        def fill_rect(self, x, y, w, h, c):
+            for j in range(max(y, 0), min(y + h, self.h)):
+                for i in range(max(x, 0), min(x + w, self.w)):
+                    self.pixel(i, j, c)
 
         def fill(self, c):
-            self.px = {}
-
-        def fill_rect(self, *a):
-            pass
-
-        def pixel(self, x, y, c):
-            self.px[(x, y)] = c
+            self.fill_rect(0, 0, self.w, self.h, c)
 
         def blit(self, src, x, y, key=-1, palette=None):
-            assert src.fmt == 3 and palette is not None
-            assert len(src.buf) == ((src.w + 7) // 8) * src.h
+            if isinstance(src, tuple):
+                src = _FakeFramebuf.FrameBuffer(src[0], src[1], src[2], src[3])
+            for j in range(max(0, -y), min(src.h, self.h - y)):
+                for i in range(max(0, -x), min(src.w, self.w - x)):
+                    c = src.pixel(i, j)
+                    if palette is not None:
+                        c = palette.pixel(c, 0)
+                    if c != key:
+                        self.pixel(x + i, y + j, c)
 
 
 class UART(object):
@@ -7562,7 +7607,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
         app = re.search(r"^APP_SIZE=(0x[0-9a-f]+)", f.read(), re.M)
     app = int(app.group(1), 16) if app else None
     off = ["MICROPY_PY_BLUETOOTH", "MICROPY_PY_ESPNOW",
-           "MICROPY_PY_NETWORK_LAN", "MICROPY_HW_ENABLE_SDCARD",
+           "MICROPY_PY_NETWORK_LAN", "MICROPY_PY_MACHINE_SDCARD",
            "MICROPY_PY_MACHINE_I2S", "MICROPY_HW_ENABLE_MDNS_QUERIES"]
     check("BUILD-SLIM: no BLE/ESP-NOW/LAN/mDNS queries/SD/I2S, the mDNS "
           "responder on, only the port's and the logger's modules frozen, "
@@ -7682,6 +7727,36 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and man3.get("hmac") == hmac3 and "board" not in man
           and rc_c6on3 != 0 and rc_s3onc6 != 0 and "another board" in err_c6,
           repr((rc3, err3[-200:], man3, rc_c6on3, rc_s3onc6, err_c6[-200:])))
+    # an unreadable manifest is not "the C6's": refused without FORCE, as any board's
+    dest4 = tempfile.mkdtemp(dir=dp_td)
+    with open(os.path.join(dest4, "manifest.json"), "w") as f:
+        f.write("{cut off")
+    penv4 = dict(penv3, OTA_DEST="fakehost:" + dest4)
+    rc4, _o, err4, _w, _c = build_run(["--publish"], penv4)
+    rc5, _o, err5, _w, _c = build_run(["--publish"], dict(penv4, FORCE="1"))
+    with open(os.path.join(dest4, "manifest.json")) as f:
+        man4 = f.read()
+    check("BUILD-PUBLISH-CUT: an unreadable manifest is no other board's: refused as "
+          "unreadable, and FORCE=1 can repair the folder",
+          rc4 != 0 and "another board" not in err4 and "no readable build" in err4
+          and rc5 == 0 and '"board": "GPS_LOGGER_S3"' in man4,
+          repr((rc4, err4[-160:], rc5, err5[-160:], man4[:60])))
+    rc6, _o, _e, work6, _c = build_run([], {"BOARD_DIR": s3})
+    rc7, _o, _e, work7, _c = build_run([], {})
+    with open(os.path.join(work6, "firmware", "manifest.py")) as f:
+        m6 = f.read()
+    with open(os.path.join(work7, "firmware", "manifest.py")) as f:
+        m7 = f.read()
+    fr6 = frozen_marker(work6)
+    with open(os.path.join(work6, "gps_tft.py"), "rb") as f:
+        tft6 = f.read()
+    with open(os.path.join(work6, "gps_tft_font.py"), "rb") as f:
+        tft6 += f.read()
+    check("BUILD-TFT: the display's modules are frozen on the Heltec's firmware only, and "
+          "its marker carries their SHA-256 (deploy.sh compares it)",
+          rc6 == 0 and rc7 == 0 and 'module("gps_tft.py"' in m6 and "gps_tft" not in m7
+          and fr6.get("TFT") == hashlib.sha256(tft6).hexdigest()
+          and "TFT" not in frozen_marker(work7), repr((m6[-120:], m7[-120:], fr6)))
     # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
     # names /web.html.gz alone, made with the board's small window (it
     # inflates it for a client without gzip); an older firmware (after a
@@ -13975,6 +14050,8 @@ else:
         ("gps rate 100 ms refused", "setup"),
         ("gps refused CFGMSG,0,7,5", "setup"),
         ("gps systems h135155", "grx"),
+        ("gps refused CFGSYS,h135155", "setup"),
+        ("gps setup lost: no GST", "setup"),
         ("gps pvt no NAV-PVT, NMEA this boot", "pvt"),
         ("gps setup not taken: no NAV-PVT (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -18020,6 +18097,10 @@ check("UC-SETUP: PDTINFO (no checksum: with one it gets no answer), then CFGNAV 
       and any(c.startswith(b"$CFGMSG,0,2,25*") for c in _cmds)
       and any(c.startswith(b"$CFGMSG,0,3,25*") for c in _cmds)
       and any(c.startswith(b"$CFGMSG,6,0,0*") for c in _cmds)
+      and [c[1:].split(b"*")[0].decode() for c in _cmds[1:]] == [
+          "CFGNAV,200,200,1000", "CFGMSG,0,0,1", "CFGMSG,0,4,1", "CFGMSG,0,1,0",
+          "CFGMSG,0,5,0", "CFGMSG,0,2,25", "CFGMSG,0,3,25", "CFGMSG,0,7,5",
+          "CFGMSG,6,0,0", "CFGMSG,6,1,0"]
       and not any(b"\xb5" in c for c in _cmds), repr(_cmds))
 check("UC-SETUP: all answered: taken for now, NMEA mode, the receiver's model "
       "from PDTINFO",
@@ -18181,6 +18262,21 @@ hl.reset()
 hl.uart = _UcUart()
 hl.gps_setup()
 _c4 = list(hl.uart.cmds)
+hl.UC_SYS = 0x135155
+hl.reset()
+hl.uart = _UcSys(bad=("CFGSYS,",))       # the board's: $FAIL for the SBAS bit
+_rl, _rw = [], hl._diag_write
+hl._diag_write = _rl.append
+hl.gps_setup()
+hl._diag_write = _rw
+_c5 = list(hl.uart.cmds)
+_r5 = hl.st["setup_ok"]
+hl.UC_SYS = None
+check("UC-SYS-REFUSED: a refused mask is said as refused and the setup goes on: "
+      "the receiver is not left at its defaults (1 Hz, no GST)",
+      any(l.startswith("gps refused CFGSYS,") for l in _rl)
+      and not any(l.startswith("gps systems") for l in _rl)
+      and any(c.startswith(b"$CFGNAV") for c in _c5) and _r5 is True, repr((_rl, _c5[:4])))
 _set = lambda cs: [c for c in cs if c.startswith(b"$CFGSYS,")]
 check("UC-SYS: GPS_SYS sets the mask once a boot and only when it differs (it "
       "restarts the receiver, the setup then comes back); without it none is sent",
@@ -18191,36 +18287,130 @@ check("UC-SYS: GPS_SYS sets the mask once a boot and only when it differs (it "
       and not any(c.startswith(b"$CFGSYS") for c in _c4), repr((_c1, _c3[:3])))
 
 # the first minute of a fix counts only moving (its GST says 0.3 m while 4 m off)
+def _uc_fixes(m, n, kn="0.05", q=1):
+    """n seconds of a fix through the real parser."""
+    for _i in range(n):
+        _c = _clock[0] // 1000 % 86400
+        _t = "%02d%02d%02d.00" % (_c // 3600, _c // 60 % 60, _c % 60)
+        _uc_feed(m, _nmea("GNRMC,%s,A,4711.1214,N,01825.6160,E,%s,,041126,,,A,V" % (_t, kn)),
+                 _nmea("GNGGA,%s,4711.1214,N,01825.6160,E,%d,14,0.80,120.5,M,40.0,M,," % (_t, q)))
+        _clock[0] += 1000
+
+
 hl.reset()
 hl.uart = _UcUart()
 _clock[0] += 1000
-hl.st.update(fix_first=_clock[0], speed=2.0, hdop=0.9, hdop_at=_clock[0], std=0.3,
-             std_at=_clock[0])
+_uc_feed(hl, _nmea("GNRMC,090328.00,V,,,,,,,170126,,,N,V"))
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNRMC,090329.00,V,,,,,,,170126,,,N,V"))
+_v0 = hl.st["fix_first"]
+_clock[0] = (_clock[0] // 1000 + 1) * 1000
+_uc_fixes(hl, 3)
+_f0 = hl.st["fix_first"]
 _u0 = hl._usable(_clock[0])
-hl.st["speed"] = 50.0
+_uc_fixes(hl, 2, kn="27.0")              # 50 km/h: a car's trip keeps its start
 _u1 = hl._usable(_clock[0])
-hl.st["speed"] = 2.0
-_u2 = hl._usable(_clock[0] + hl.UC_SETTLE)
-hl.st["hdop_at"] = hl.st["std_at"] = _clock[0] + hl.UC_SETTLE
-_u2 = hl._usable(_clock[0] + hl.UC_SETTLE)
+_uc_fixes(hl, 2)
+_f1 = hl.st["fix_first"]
+_u2 = hl._usable(_clock[0])
+_clock[0] += hl.UC_SETTLE
+_uc_fixes(hl, 2)
+_u3 = hl._usable(_clock[0])
+_s3 = hl.st["settled"]
+check("UC-SETTLE: no fix does not start it; the first fix does, later ones do not "
+      "move it; slow points wait UC_SETTLE, above UC_SETTLE_KMH they count at once, "
+      "after it all do",
+      _v0 is None and _f0 is not None and _f1 == _f0 and _u0 is False
+      and _u1 is True and _u2 is False and _u3 is True and _s3 is True,
+      repr((_v0, _f0, _f1, _u0, _u1, _u2, _u3, _s3)))
+# a day later: no second window (it was in the 24 h stamp clean-up)
+_clock[0] += hl.TICKS_CAP + 1000
+hl._stamps_old(_clock[0])
+_uc_fixes(hl, 2)
+_u4 = hl._usable(_clock[0])
+_nofirst = hl.st["fix_first"] == _f0
 gl.reset()
-gl.st.update(fix_first=_clock[0], speed=2.0)
-_u3 = gl._usable(_clock[0])
-hl.st["fix_first"] = 5
+gl.st.update(speed=2.0)
+_u5 = gl._usable(_clock[0])
+check("UC-SETTLE-DAY: the rule does not come back after TICKS_CAP of uptime; other "
+      "receivers have none", _u4 is True and _nofirst and _u5 is True,
+      repr((_u4, hl.st["fix_first"], _f0, _u5)))
+# a restart in the middle of a second: its fixes do not start the rule
+hl.st.update(settled=True, fix_first=5)
+_uc_fixes(hl, 1)
 _uc_feed(hl, "FWVer R6.0.0.0Build3700")
-_u4 = hl.st["fix_first"]
-check("UC-SETTLE: the first UC_SETTLE after a fix counts only above UC_SETTLE_KMH "
-      "(a car's trip is kept), then all; a restart starts it anew; not other "
-      "receivers", _u0 is False and _u1 is True and _u2 is True and _u3 is True
-      and _u4 is None, repr((_u0, _u1, _u2, _u3, _u4)))
+_r0 = (hl.st["fix_first"], hl.st["settled"])
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNRMC,090330.00,V,,,,,,,170126,,,N,V"))
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNRMC,090331.00,V,,,,,,,170126,,,N,V"))
+_r1 = hl.st["fix_first"]
+check("UC-SETTLE-RESTART: the banner starts the rule anew, and the unfinished second "
+      "from before it does not count as the first fix",
+      _r0 == (None, False) and _r1 is None, repr((_r0, _r1)))
+
+# a restart whose banner was lost: no GST with sentences coming
 hl.reset()
-_clock[0] += 1000
-_uc_feed(hl, _nmea("GNRMC,120001.00,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V"),
-         _nmea("GNGGA,120001.00,4711.1214,N,01825.6160,E,1,14,0.80,120.5,M,40.0,M,,"))
-_clock[0] += 1000
-_uc_feed(hl, _nmea("GNRMC,120002.00,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V"))
-check("UC-SETTLE: the first published fix starts it", hl.st["fix_first"] is not None,
-      repr(hl.st["fix_first"]))
+hl.uart = _UcUart()
+hl.gps_setup()
+_dl2, _dw2 = [], hl._diag_write
+hl._diag_write = _dl2.append
+_clock[0] += hl.UC_GST_LOST - 1000
+hl.st["rx"] = _clock[0]
+hl._uc_watch(_clock[0])
+_w0 = hl.st["extra"]
+_clock[0] += 2000
+hl.st["rx"] = None                       # silent: another case
+hl._uc_watch(_clock[0])
+_w1 = hl.st["extra"]
+hl.st["rx"] = _clock[0]
+hl.st["gst_at"] = _clock[0] - 1000       # GST comes: all is well
+hl._uc_watch(_clock[0])
+_w2 = hl.st["extra"]
+hl.st["gst_at"] = _clock[0] - hl.UC_GST_LOST
+hl._uc_watch(_clock[0])
+_w3 = hl.st["extra"]
+hl._uc_watch(_clock[0])
+_cn = len(hl.uart.cmds)
+hl.st["setup_at"] = _clock[0] - hl.st["setup_wait"]
+hl.gps_check(_clock[0])
+_w4 = len(hl.uart.cmds) > _cn and hl.st["extra"] == 0
+hl._diag_write = _dw2
+check("UC-WATCH: no GST for UC_GST_LOST with sentences coming: gps_check sets it up "
+      "again, said; not before, not when silent, not while GST comes",
+      _w0 == 0 and _w1 == 0 and _w2 == 0 and _w3 == 1 and _w4
+      and _dl2 == ["gps setup lost: no GST"], repr((_w0, _w1, _w2, _w3, _w4, _dl2)))
+hl.reset()
+_wait0 = _clock[0]
+hl.st.update(svs_at=None)
+hl.uart = _UcUart()
+hl._sv_fresh()
+check("UC-NO-WAIT: a page view does not hold the loop for a list nothing can ask for",
+      _clock[0] == _wait0, repr(_clock[0] - _wait0))
+_ipolls = []
+
+
+class _Ipoll(object):
+    def ipoll(self, t):
+        _ipolls.append(t)
+        return iter(())
+
+
+hl._usb_in = _Ipoll()
+hl.gps_check(_clock[0])
+_ip_ok = _ipolls == [0]
+
+
+class _IpollBad(object):
+    def ipoll(self, t):
+        raise MemoryError()
+
+
+hl._usb_in = _IpollBad()
+hl._usb_drain()
+hl._usb_in = None
+check("USB-DRAIN: every gps_check reads stdin on the Heltec, without a list per pass "
+      "(ipoll); no MemoryError leaves it", _ip_ok, repr(_ipolls))
 
 # GSA: a burst is one round, wherever the second's clock falls in it
 hl.reset()
@@ -18255,14 +18445,22 @@ check("TFT-FONT: every glyph's offset and size add up; the accents, ° and ± an
       all(_fo) and all(c in _ff.REG[0] and c in _ff.BOLD[0]
                        for c in "áéíóöőúüűÁÉÍÓÖŐÚÜŰ°±")
       and _ff.HERO[0] == "0123456789-", repr(_fo))
-_room = 142
-_cyc = _ft.HOLD + (300 + _room) // _ft.STEP + 1
-_ps = [_ft.pos(t, 300, _room) for t in range(_cyc + 1)]
+_c = [None, 0, 0, _ft.HOLD, None]
+_ps = [_ft.scroll(_c, 300) for _i in range(_ft.HOLD + (300 + _ft.ROOM) // _ft.STEP + 2)]
+_fit = [None, 0, 12, 0, None]
+_f0 = _ft.scroll(_fit, 100)
+_cw = [None, 0, 60, 0, None]
+_x1 = _ft.scroll(_cw, 300)
+_x2 = _ft.scroll(_cw, 306)               # -99 to -100 dBm: 6 px wider
 check("TFT-SCROLL: a row that fits stands; a long one holds, slides out to the "
-      "left past its end, comes in from the right, back at 0",
-      _ft.pos(7, 100, _room) == 0 and _ps[:_ft.HOLD] == [0] * _ft.HOLD
-      and min(_ps) <= -300 + _ft.STEP and max(_ps) > 100 and _ps[_cyc] == 0
-      and all(p >= -300 and p <= _room for p in _ps), repr(_ps[:14]))
+      "left past its end, comes in from the right, back at 0 and holds; a change of "
+      "width moves it one step, no jump",
+      _f0 == 0 and _fit[2] == 0 and _ps[:_ft.HOLD] == [0] * _ft.HOLD
+      and min(_ps) <= -300 + _ft.STEP and max(_ps) > 100 and _ps[-1] == 0
+      and all(-300 <= p <= _ft.ROOM for p in _ps)
+      and all(abs(_ps[i + 1] - _ps[i]) <= _ft.STEP or _ps[i] < -290
+              for i in range(len(_ps) - 2) if _ps[i + 1] <= 0 and _ps[i] <= 0)
+      and _x1 == -63 and _x2 == -66, repr((_ps[:14], _x1, _x2)))
 
 hl.reset()
 hl.log_reset()
@@ -18274,7 +18472,7 @@ hl.up["url"] = "https://x"
 hl.up["left"] = 1284
 hl.wifi["state"] = "off"
 hl.st.update(date="2026-11-04", time="10:42:10", valid=True, lat=47.1, lon=18.4,
-             pos_at=_clock[0], speed=47.3, hdop=0.968, used=22, view={"GP": 28},
+             pos_at=_clock[0], speed=46.6, hdop=0.968, used=22, view={"GP": 28},
              alt=182.4, rx=_clock[0], fixtype=3)
 _s1 = hl._tft_state(_clock[0])
 _tx = "".join(p[0] for p in _s1[4][2][2])
@@ -18286,7 +18484,7 @@ _s3 = hl._tft_state(_clock[0] + hl.STALE + 1)
 hl.up["url"] = None
 _s4 = hl._tft_state(_clock[0] + hl.STALE + 1)
 check("TFT-STATE: speed rounded and green with a fix, -- and red without; away: "
-      "no WiFi, points waiting with a thin space; at home: name, signal, address; "
+      "no WiFi, points waiting with a space; at home: name, signal, address; "
       "decimal commas; no upload set up says so",
       _s1[:3] == ("47", "3D fix", 2) and _s1[3] == "22/28"
       and _s1[4][0][2][0][0] == "nincs WiFi  " and _s1[4][0][2][1][0] == "11:42"
@@ -18305,50 +18503,127 @@ check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
       and _ls("2026-03-29", "00:59:00") == "01:59" and _ls("2026-03-29", "01:00:00") == "03:00"
       and _ls("2026-10-25", "00:59:00") == "02:59" and _ls("2026-10-25", "01:00:00") == "02:00"
       and _ls(None, None) == "--:--")
+hl.st["rx"] = _clock[0] - hl.NO_DATA
+check("TFT-CLOCK-SILENT: a silent receiver's clock shows --:--, not a stopped time",
+      _ls("2026-11-04", "10:42:10") == "--:--")
+hl.st["rx"] = _clock[0]
 
-# the drawing: start up, a frame draws what changed and only that
+# the drawing, on a model of the panel: real pixels, at real coordinates
+_order = []
+_pin0 = _ft.Pin
+
+
+class _BlPin(Pin):
+    def __init__(self, n, *a, **k):
+        super().__init__(n, *a, **k)
+        if n == 21:
+            _order.append((k.get("value"), len(_TftSpi.out)))
+
+
+_ft.Pin = _BlPin
 _TftSpi.out[:] = []
+_TftSpi.panel.clear()
 _TftSpi.fail = False
 _ft.start()
 _cmds0 = list(_TftSpi.out)
-_bl = [p[:2] for p in _pin_levels if p[0] == 21][-2:]
+_ft.Pin = _pin0
+_bg_all = len(_TftSpi.panel) == 160 * 80 and set(_TftSpi.panel.values()) == {_ft.BG}
 _short = ("net", 2, [("krumpli", 0)])
 _ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), ("mem", 2, [("y", 0)])])
-_TftSpi.out[:] = []
+_TftSpi.frames = 0
 _ft.frame()
-_f1 = sum(1 for b in _TftSpi.out if b == b"\x2c")
-_TftSpi.out[:] = []
+_f1 = _TftSpi.frames
+_px = lambda x, y: _TftSpi.panel.get((x + _ft.XO, y + _ft.YO))
+_lit = lambda x0, y0, x1, y1, c: sum(1 for y in range(y0, y1) for x in range(x0, x1) if _px(x, y) == c)
+_head_big = _lit(3, 4, 30, 26, _ft._COL[_ft.BRIGHT])
+_head_fix = _lit(104, 2, 150, 15, _ft._COL[_ft.GREEN])
+_head_sat = _lit(104, 16, 150, 29, _ft._COL[_ft.BRIGHT])
+_band = _px(90, 2) == _ft.BAND and _px(90, 29) == _ft.BAND
+_rows_lit = [_lit(18, 30 + i * 16, 60, 46 + i * 16, c) for i, c in enumerate(
+    (_ft._COL[_ft.BRIGHT], _ft._COL[_ft.GREEN], _ft._COL[_ft.BRIGHT]))]
+_icons = [_lit(2, 30 + i * 16, 14, 46 + i * 16, _ft._COL[_ft.GREEN]) for i in range(3)]
+_below = set(_px(x, 78) for x in range(160)) == {_ft.BG}
+_TftSpi.frames = 0
 _ft.frame()
-_f2 = sum(1 for b in _TftSpi.out if b == b"\x2c")
+_f2 = _TftSpi.frames
 _long = ("mem", 2, [("0,97 HDOP 4,4 MB 7 nap 37 °C 2 ó 15 p és még sok minden", 0)])
 _ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), _long])
-_TftSpi.out[:] = []
-for _i in range(_ft.HOLD + 3):
+for _i in range(_ft.HOLD):
+    _ft.frame()                          # (drawn, holding at its start)
+_before = {x: _px(x, 67) for x in range(18, 160)}
+_TftSpi.frames = 0
+for _i in range(3):
     _ft.frame()
-_f3 = sum(1 for b in _TftSpi.out if b == b"\x2c")
-check("TFT-DRAW: the panel set up to 16 bits and landscape, the backlight last; a "
-      "first frame draws the header and 3 rows, an unchanged one nothing, a long "
-      "row only itself while it slides",
-      b"\x36" in _cmds0 and b"\x68" in _cmds0 and b"\x05" in _cmds0
-      and _bl == [(21, 0), (21, 1)] and _f1 == 4 and _f2 == 0 and 1 <= _f3 < _ft.HOLD + 3,
-      repr((_bl, _f1, _f2, _f3)))
-# a panel gone wrong: dark, the logger goes on
+_f3 = _TftSpi.frames
+_after = {x: _px(x, 67) for x in range(18, 160)}
+_slid = _before != _after
+_row1_same = _lit(18, 46, 60, 62, _ft._COL[_ft.GREEN]) == _rows_lit[1]
+_icon_kept = _lit(2, 62, 14, 78, _ft._COL[_ft.GREEN]) == _icons[2]
+_tail = _lit(0, 62, 16, 78, _ft._COL[_ft.BRIGHT])
+check("TFT-INIT: 16 bits a pixel and landscape, the whole panel cleared, the backlight "
+      "only after that (no flash of random RAM)",
+      b"\x36" in _cmds0 and b"\x68" in _cmds0 and b"\x05" in _cmds0 and _bg_all
+      and _order[0][0] == 0 and _order[-1][0] == 1 and _order[-1][1] == len(_cmds0),
+      repr((_order, len(_cmds0), _bg_all)))
+check("TFT-DRAW: the measured offset; speed, fix and satellites where they belong, in "
+      "their colours, on the header's band; three rows each in its own 16 px with its "
+      "icon; a first frame sends the header's 2 bands and 3 rows, an unchanged one none",
+      (_ft.XO, _ft.YO) == (1, 26) and _f1 == 5 and _f2 == 0 and _head_big > 60 and _head_fix > 20 and _head_sat > 20
+      and _band and all(n > 3 for n in _rows_lit) and all(n > 10 for n in _icons) and _below,
+      repr((_f1, _f2, _head_big, _head_fix, _head_sat, _band, _rows_lit, _icons, _below)))
+check("TFT-SLIDE: a long row really moves on the panel while the others are not sent; "
+      "its text does not run over its icon",
+      _slid and 1 <= _f3 <= 3 + 1 and _row1_same and _icon_kept and _tail == 0,
+      repr((_slid, _f3, _row1_same, _icon_kept, _tail)))
+
+# a panel gone wrong: dark, and each action counted when it runs
 hl._tft = _ft
-hl._tft_t[:] = [None, None, 0]
+hl._tft_t[:] = [None, None, 0, 0]
 _TftSpi.fail = True
 _dl, _dw = [], hl._diag_write
 hl._diag_write = _dl.append
-_ft._D.drawn = [None, None, None, None]
+_ft._D.head = None
+_pin_levels[:] = []
 for _i in range(hl.TFT_MAX_ERR):
-    hl._tft_t[0] = hl._tft_t[1] = None
-    hl.tft_tick(_clock[0])
+    _clock[0] += hl.TFT_FRAME
+    hl.tft_tick(_clock[0])               # the frame fails
+    if _i < hl.TFT_MAX_ERR - 1:
+        hl.tft_tick(_clock[0] + 1)       # nothing due: must not clear the count
 hl._diag_write = _dw
 _TftSpi.fail = False
-check("TFT-FAIL: TFT_MAX_ERR errors in a row turn the display off for the boot, "
-      "said once, nothing leaves tft_tick",
-      hl._tft is None and len(_dl) == 1 and _dl[0].startswith("bug tft "), repr(_dl))
-check("TFT-OTHER: no other board starts it; the C6's firmware does not carry it",
-      not gl.IS_HELTEC and gl._tft is None)
+_dark = _pin_levels and [p[:2] for p in _pin_levels if p[0] == 21][-1:] == [(21, 0)]
+check("TFT-FAIL: TFT_MAX_ERR failed frames in a row, with idle ticks between, turn the "
+      "display dark for the boot (no frozen speed lit), said once, nothing leaves tft_tick",
+      hl._tft is None and len(_dl) == 1 and _dl[0].startswith("bug tft ") and _dark,
+      repr((hl._tft, _dl, _dark)))
+_st0 = hl._tft_state
+hl._tft = _ft
+hl._tft_t[:] = [None, None, 0, 0]
+hl._tft_state = lambda now: (_ for _ in ()).throw(ValueError("state"))
+hl._diag_write = lambda l: None
+_pin_levels[:] = []
+for _i in range(hl.TFT_MAX_ERR):
+    _clock[0] += hl.TFT_STATE
+    hl.tft_tick(_clock[0])               # a good frame between must not clear it
+hl._tft_state, hl._diag_write = _st0, _dw
+check("TFT-FAIL-STATE: values failing keep counting though frames succeed: no old speed "
+      "and green fix redrawn for ever", hl._tft is None
+      and [p[:2] for p in _pin_levels if p[0] == 21][-1:] == [(21, 0)], repr(hl._tft))
+_ft_seen = []
+_gl_mods = dict(sys.modules)
+gl._tft = None
+sys.modules["gps_tft"] = types.SimpleNamespace(start=lambda: _ft_seen.append("start"))
+gl._tft_start()
+sys.modules["gps_tft"] = _ft
+with open(os.path.join(ROOT, "gps_logger.py")) as f:
+    _lsrc = f.read()
+_runs = _lsrc[_lsrc.index("def run():"):]
+_loops = _lsrc[_lsrc.index("def _loop("):]
+check("TFT-WIRING: only the Heltec starts it; run() starts it before the first GPS "
+      "setup, the loop ticks it",
+      _ft_seen == [] and gl._tft is None
+      and _runs.index("_tft_start()") < _runs.index("gps_setup()")
+      and "tft_tick(now)" in _loops, repr(_ft_seen))
 
 # OTA: each board only its own firmware
 _mf = {"build": 5, "commit": "abc1234", "size": 9, "sha256": "0" * 64,

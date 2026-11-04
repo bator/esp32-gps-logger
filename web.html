@@ -408,7 +408,7 @@ var EVK = [
   ["wfail", /^wifi fail /, "WiFi connect failed", 2, "warn", "wifi"],
   ["wlost", /^wifi lost /, "WiFi lost", 2, "warn", "wifi"],
   ["low", /^upload low /, "Upload waits for memory", 2, "warn", "up"],
-  ["setup", /^gps (setup not taken|rate |refused )/, "GPS setup refused", 2, "warn", "sat"],
+  ["setup", /^gps (setup not taken|setup lost|rate |refused )/, "GPS setup refused", 2, "warn", "sat"],
   ["pvt", /^gps pvt /, "NAV-PVT given up", 2, "warn", "sat"],
   ["env", /^(env |upload (API_KEY|GEO_URL) )/, "Config (.env)", 2, "warn", "cfg"],
   ["boot", /^boot cause /, "Boot", 1, "boot", "power"],

@@ -431,7 +431,7 @@ def reset():
               storm_at=None, boot_at=None, boot_last=None, boot_gap=0,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
               gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0, uc_ok=0, uc_fail=0, uc_sys=None,
-              uc_sys_sent=False, fix_first=None,
+              uc_sys_sent=False, fix_first=None, settled=False, gst_said=None,
               ack_id=None, ack=None, ack_n=0, rate_nak=False, checked=True,
               hz1=0, hz5=0,
               set_ok=0, gst_at=None, loop_more=0, loop_said=None,
@@ -562,7 +562,7 @@ def _publish():
         return
     a = ep["g"] or ep["r"]
     st["valid"] = a is not None
-    if a is not None and st.get("fix_first") is None:
+    if a is not None and st["fix_first"] is None:
         st["fix_first"] = now
     st["epochs"] = a[4] if a else 0
     st["lat_i"] = st["lon_i"] = st["hacc"] = st["mps"] = None
@@ -855,8 +855,13 @@ def _gps_restarted():
     # MON-VER answers the setup is the NMEA one, safe on any, then
     # (the other mode due: gps_check) the PVT one
     st.update(svs=None, svs_at=None, sv_msg=None, gps_ver=None,
-              gps_kind=None, fix_first=None)
+              gps_kind=None)
     if GPS_UC:
+        # the settle rule anew, and not the second it was in: published by
+        # the next sentence, its fixes would start the rule before a real fix
+        st.update(fix_first=None, settled=False)
+        _ep_new(None)
+        _uc_sv.update(new={}, open=False, until=None, used=[], gsa=None)
         return                           # (no UBX: _uc_setup asks PDTINFO)
     try:
         uart.write(MON_VER)
@@ -1187,6 +1192,7 @@ def _ubx_ack(frame, t0):
 UC_ACK_WAIT = 300                        # ms for a command's $OK
 UC_SETTLE = 60000                        # ms after its first fix (_usable)
 UC_SETTLE_KMH = 15                       # at this speed a point counts at once
+UC_GST_LOST = 30000                      # ms without GST: its setup is gone
 UC_SYS = None                            # .env GPS_SYS: its systems and bands
                                          # (CFGSYS mask, hex), None = its own
 GSV_EVERY = 5                            # s between satellite lists
@@ -1242,10 +1248,16 @@ def _uc_setup():
             if st["uc_sys"] not in (None, UC_SYS):
                 st["uc_sys_sent"] = True
                 mask = "h%X" % UC_SYS
-                _uc_cmd("CFGSYS," + mask)
-                print("gps systems", mask)
-                _diag_write("gps systems " + mask)
-                return True
+                r = _uc_cmd("CFGSYS," + mask)
+                if r is True:            # it restarts: the setup comes back
+                    print("gps systems", mask)
+                    _diag_write("gps systems " + mask)
+                    return True
+                if r is None:            # refused: its own stay, and the rest
+                    print("gps refused", mask)
+                    _diag_write("gps refused CFGSYS," + mask)
+                else:
+                    return False
         for cmd in _uc_msgs():
             r = _uc_cmd(cmd)
             if r is False:
@@ -1539,7 +1551,7 @@ def _not_taken(now, why):
 
 _STAMPS = ("rx", "good", "pos_at", "hdop_at", "std_at", "gsa_at",
            "gst_at", "boot_at", "boot_last", "loop_said", "nt_said",
-           "pvt_at", "t_at", "fix_first")
+           "pvt_at", "t_at", "gst_said")
 
 def _stamps_old(now):
     """ticks_ms wraps every 2**30 ms, so a timestamp left alone for 12.4
@@ -1595,9 +1607,29 @@ def _usb_drain():
         if _usb_in is None:
             _usb_in = select.poll()
             _usb_in.register(sys.stdin, select.POLLIN)
-        _usb_in.poll(0)
-    except (OSError, ValueError, AttributeError):
+        _usb_in.ipoll(0)                 # (ipoll: no list per loop pass)
+    except (OSError, ValueError, AttributeError, MemoryError):
         pass
+
+def _uc_watch(now):
+    """A restart whose banner was lost (a blocking POST longer than the UART
+    buffer holds): back at its defaults, nothing else tells, as the setup's
+    check runs once. No GST for UC_GST_LOST with sentences coming: set it up
+    again (GST comes with or without a fix, once it is on)."""
+    at = st["setup_at"]
+    if st["setup_ok"] is not True or at is None or st["extra"]:
+        return
+    g = st["gst_at"]
+    if _age(now, at) < UC_GST_LOST or (g is not None and _age(now, g) < UC_GST_LOST):
+        return
+    if st["rx"] is None or _age(now, st["rx"]) >= NO_DATA:
+        return                           # silent: _gps_mute's case
+    st["extra"] = 1                      # (its usual backoff, under a minute)
+    print("gps setup lost: no GST")
+    said = st["gst_said"]
+    if said is None or _age(now, said) >= GPS_NOT_TAKEN_SAY:
+        st["gst_said"] = now
+        _diag_write("gps setup lost: no GST")
 
 def gps_check(now):
     """Send the setup again while the receiver still sends the sentences it
@@ -1606,6 +1638,8 @@ def gps_check(now):
     that never takes it (or an unwired ESP TX) costs next to nothing."""
     if IS_HELTEC:
         _usb_drain()
+    if GPS_UC:
+        _uc_watch(now)
     if _age(now, st["loop_at"]) >= GPS_LOOP_WINDOW:
         _stamps_old(now)
         _gps_loop_check(now)
@@ -4796,11 +4830,13 @@ def _usable(now):
     if st.get("lat_i") is not None:
         h = st.get("hacc")
         return h is not None and h <= PVT_MAX_HACC
-    if GPS_UC:
-        a = st.get("fix_first")
-        if (a is not None and _age(now, a) < UC_SETTLE
-                and (st.get("speed") or 0) < UC_SETTLE_KMH):
-            return False
+    if GPS_UC and not st["settled"]:
+        a = st["fix_first"]
+        if a is not None:
+            if _age(now, a) >= UC_SETTLE:
+                st["settled"] = True
+            elif (st.get("speed") or 0) < UC_SETTLE_KMH:
+                return False
     hdop = _fresh_hdop(now)
     if hdop is not None and hdop > MAX_HDOP:
         return False
@@ -8636,7 +8672,10 @@ def _sv_fresh():
     again; the answer is read (with the NMEA around it) for up to SV_WAIT
     ms. Silence leaves the older list; after SV_MISS unanswered polls in a
     row the page asks but does not wait (a receiver that drops the answer
-    would cost every page view SV_WAIT)."""
+    would cost every page view SV_WAIT). Not a UC6580: nothing can be asked
+    for, its list comes by itself."""
+    if GPS_UC:
+        return
     now = time.ticks_ms()
     at = st["svs_at"]
     if at is not None and _age(now, at) < SV_FRESH:
@@ -9239,10 +9278,11 @@ def draw():
 # --- The Heltec's TFT (gps_tft.py) -------------------------------------------
 TFT_FRAME = 200                          # ms between frames (a row scrolling)
 TFT_STATE = 1000                         # ms between new values
-TFT_MAX_ERR = 3                          # errors in a row, then it stays dark
+TFT_MAX_ERR = 3                          # errors in a row, then it goes dark
 PT_BYTES = 7                             # .trb bytes of a moving second
 _tft = None
-_tft_t = [None, None, 0]                 # last values, last frame, errors
+_tft_t = [None, None, 0, 0]              # last values, last frame, the errors
+                                         # in a row of each
 
 def _tft_start():
     """Only on the Heltec; a failure leaves the logger running without it."""
@@ -9265,9 +9305,11 @@ def _last_sunday(y, m):
 
 def _local_hm():
     """"HH:MM" in Hungary from the fix's UTC (CET, CEST from the last Sunday
-    of March to October's, 01:00 UTC), "--:--" without one."""
+    of March to October's, 01:00 UTC), "--:--" without one or with the
+    receiver silent: its time stands still then."""
     d, t = st["date"], st["time"]
-    if not d or not t:
+    rx = st["rx"]
+    if not d or not t or rx is None or _age(time.ticks_ms(), rx) >= NO_DATA:
         return "--:--"
     try:
         y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
@@ -9336,25 +9378,46 @@ def _tft_state(now):
 
 def tft_tick(now):
     """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors
-    in a row turn it off for this boot, the logging goes on."""
-    global _tft
+    of either in a row (each counted when it runs: most ticks do neither) turn
+    the display dark for this boot, the logging goes on. Nothing leaves this:
+    the handling itself allocates, out of a MemoryError too."""
+    t = _tft_t
     if _tft is None:
         return
-    t = _tft_t
-    try:
-        if t[0] is None or _age(now, t[0]) >= TFT_STATE:
-            t[0] = now
+    if t[0] is None or _age(now, t[0]) >= TFT_STATE:
+        t[0] = now
+        try:
             _tft.set_state(*_tft_state(now))
-        if t[1] is None or _age(now, t[1]) >= TFT_FRAME:
-            t[1] = now
+            t[2] = 0
+        except Exception as e:
+            t[2] += 1
+            _tft_bad(2, e)
+    if _tft is not None and (t[1] is None or _age(now, t[1]) >= TFT_FRAME):
+        t[1] = now
+        try:
             _tft.frame()
-        t[2] = 0
-    except Exception as e:
-        t[2] += 1
+            t[3] = 0
+        except Exception as e:
+            t[3] += 1
+            _tft_bad(3, e)
+
+def _tft_bad(i, e):
+    global _tft
+    gave_up = _tft_t[i] >= TFT_MAX_ERR
+    tft = _tft
+    if gave_up:
+        _tft = None
+    try:
         print("tft", repr(e))
-        if t[2] >= TFT_MAX_ERR:
+        if gave_up:
             _diag_write("bug tft " + repr(e))
-            _tft = None
+    except Exception:
+        pass
+    if gave_up:
+        try:
+            tft.off()
+        except Exception:
+            pass
 
 # --- Main loop --------------------------------------------------------------
 
