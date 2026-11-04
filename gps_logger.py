@@ -1201,15 +1201,16 @@ def _uc_msgs():
 
 def _uc_cmd(cmd):
     """One command with its checksum: True for $OK, None for $FAIL (it
-    answers, but refuses), False for silence after UC_ACK_WAIT. PDTINFO goes
-    without a checksum: with one it gets no answer (measured)."""
+    answers, but refuses), False for silence after UC_ACK_WAIT. A question
+    (no comma) goes without a checksum: with one it gets no answer (measured
+    on PDTINFO and CFGSYS)."""
     c = 0
     for ch in cmd:
         c ^= ord(ch)
     read_uart()
     ok, bad = st["uc_ok"], st["uc_fail"]
-    uart.write(b"$PDTINFO\r\n" if cmd == "PDTINFO"
-               else ("$%s*%02X\r\n" % (cmd, c)).encode())
+    uart.write(("$%s\r\n" % cmd if "," not in cmd
+                else "$%s*%02X\r\n" % (cmd, c)).encode())
     t0 = time.ticks_ms()
     while True:
         read_uart()

@@ -18154,7 +18154,7 @@ class _UcSys(_UcUart):
 
     def write(self, data):
         n = super().write(data)
-        if bytes(data).startswith(b"$CFGSYS\r") or bytes(data).startswith(b"$CFGSYS*"):
+        if bytes(data) == b"$CFGSYS\r\n":
             del _uart_rx[-8:]
             _uart_rx.extend(_nmea("CFGSYS," + self.has).encode() + b"\r\n$OK*04\r\n")
         return n
