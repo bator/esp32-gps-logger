@@ -50,7 +50,6 @@ class _Dummy:
 
 machine = _Obj()
 machine.Pin = _Dummy
-machine.I2C = _Dummy
 machine.UART = _Uart
 machine.WDT = _Dummy
 machine.Timer = _Dummy

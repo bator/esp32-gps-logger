@@ -128,7 +128,6 @@ def open(path, mode="r", *args, **kw):    # noqa: A001 (see above)
     return builtins.open(path, mode, *args, **kw)
 
 _clock = [100000]
-_oled_fail = [False]
 _resets = []
 _posts = []
 _post_code = [201]
@@ -137,7 +136,6 @@ _post_headers = [{}]
 _wdt = []
 _timers = []
 _hostnames = []
-_oled_inits = []
 _reset_cause = [1]
 _uart_tx = []
 _uart_rx = bytearray()
@@ -170,11 +168,6 @@ class Pin(object):
 
     def __call__(self, v=None):
         return self.value(v)
-
-
-class I2C(object):
-    def __init__(self, *a, **k):
-        pass
 
 
 class _TftSpi(object):
@@ -339,30 +332,6 @@ class Timer(object):
 def _reset():
     _resets.append(True)
     raise SystemExit("machine.reset")
-
-
-class SSD1306_I2C(object):
-    raise_show = False
-
-    def __init__(self, w, h, i2c):
-        _oled_inits.append((w, h))
-        if _oled_fail[0]:
-            raise OSError("no display")
-        self.ops = []
-
-    def fill(self, v):
-        self.ops.append(("fill", v))
-
-    def fill_rect(self, *a):
-        self.ops.append(("fill_rect", a))
-
-    def text(self, *a):
-        self.ops.append(("text", a))
-
-    def show(self):
-        if SSD1306_I2C.raise_show:
-            raise OSError("bus")
-        self.ops.append(("show",))
 
 
 class RTC(object):
@@ -580,7 +549,6 @@ class _TlsCtx(object):
 def _install_mocks():
     machine = types.ModuleType("machine")
     machine.Pin = Pin
-    machine.I2C = I2C
     machine.SPI = _TftSpi
     machine.UART = _UcUart
     sys.modules["framebuf"] = _FakeFramebuf
@@ -603,10 +571,6 @@ def _install_mocks():
         return None
     machine.freq = _freq
     sys.modules["machine"] = machine
-
-    ssd = types.ModuleType("ssd1306")
-    ssd.SSD1306_I2C = SSD1306_I2C
-    sys.modules["ssd1306"] = ssd
 
     net = types.ModuleType("network")
     net.STA_IF = 0
@@ -834,50 +798,30 @@ def locations():
     return out
 
 
-# --- headless display -------------------------------------------------------
-
-_oled_fail[0] = True
 gl = _reload_logger()
-check("headless: oled is None after SSD1306 init failure", gl.oled is None)
-try:
-    gl.draw()
-    gl._oled_banner("hi")
-    check("headless: draw() and banner are no-ops", True)
-except Exception as e:
-    check("headless: draw() and banner are no-ops", False, repr(e))
-_oled_fail[0] = False
-gl = _reload_logger()
-check("oled present after reload with working display", gl.oled is not None)
-gl.st.update(spin=0, rx=None, valid=False, fixtype=None, quality=None)
+gl.st.update(rx=None, valid=False, fixtype=None, quality=None)
 gl.wifi.update(state="off", ssid=None)
 gl.log.update(online=False)
 gl.up.update(left=0)
-try:
-    gl.draw()
-    check("draw() talks to OLED when present",
-          any(op[0] == "show" for op in gl.oled.ops))
-except Exception as e:
-    check("draw() talks to OLED when present", False, repr(e))
 
-# OLED-FLASH: the free flash on the screen comes through _flash_kb's 30 s
-# cache; draw() runs every REFRESH (500 ms) and statvfs walks the LittleFS
+# FLASH-CACHE: the free flash comes through _flash_kb's 30 s cache: statvfs walks
+# the LittleFS, the page and the display ask often
 _sv_calls = []
 _real_statvfs = os.statvfs
 os.statvfs = lambda p: _sv_calls.append(p) or _real_statvfs("/")
 gl._fl[:] = [None, None]
-gl.oled.ops[:] = []
 try:
+    _flash_vals = []
     for _ in range(6):
-        gl.draw()
-        _clock[0] += gl.REFRESH
+        _flash_vals.append(gl._flash_kb())
+        _clock[0] += 500
+    _clock[0] += 30000
+    _flash_vals.append(gl._flash_kb())
 finally:
     os.statvfs = _real_statvfs
-_flash_txt = [op[1][0] for op in gl.oled.ops
-              if op[0] == "text" and str(op[1][0]).startswith("Flash ")]
-check("OLED-FLASH: draw() every REFRESH reads statvfs once per 30 s, in kB",
-      len(_sv_calls) == 1 and len(_flash_txt) == 6
-      and _flash_txt[0] == "Flash %d kB" % gl._fl[0],
-      "%r %r" % (_sv_calls, _flash_txt[:2]))
+check("FLASH-CACHE: _flash_kb reads statvfs once per 30 s, in kB",
+      len(_sv_calls) == 2 and len(set(_flash_vals)) == 1 and _flash_vals[0] > 0,
+      "%r %r" % (_sv_calls, _flash_vals[:2]))
 
 check("default DEVICE_ID is Dawarich-GPS-tracker",
       gl.DEVICE_ID == "Dawarich-GPS-tracker")
@@ -1387,7 +1331,7 @@ try:
     orig_reset = gl.reset
 
     def boom_init():
-        raise OSError("oled banner")
+        raise OSError("at start-up")
 
     gl.reset = boom_init
     try:
@@ -1480,20 +1424,6 @@ try:
     check("HDOP: stale hdop does not block a new sample",
           len(gl.log["batch"]) == 2, "batch=%s" % gl.log["batch"])
 
-    # --- OLED dropout at runtime -------------------------------------------
-    SSD1306_I2C.raise_show = True
-    gl.oled_err = 0
-    for _ in range(gl.OLED_MAX_ERR):
-        gl.draw()
-    check("oled runtime: display disabled after N I2C errors",
-          gl.oled is None)
-    try:
-        gl.draw()
-        check("oled runtime: later draw() is a no-op", True)
-    except Exception as e:
-        check("oled runtime: later draw() is a no-op", False, repr(e))
-    SSD1306_I2C.raise_show = False
-
     # --- multi-WiFi --------------------------------------------------------
     def drain_wifi():
         for _ in range(12):
@@ -1524,8 +1454,8 @@ try:
           w["state"] == "connected" and w["ssid"] == "home")
     check("wifi hostname set from default/env",
           "Dawarich-GPS-tracker" in _hostnames)
-    check("wifi OLED line shows SSID not password",
-          gl._wifi_line() == "WiFi home")
+    check("wifi: the status row shows SSID not password",
+          dict(gl._web_rows())["wifi"] == "connected home")
 
     # static IP is per network; DHCP networks are not touched
     static_env = (triple + "IP=192.168.1.60\nGW=192.168.1.1\n"
@@ -1769,8 +1699,8 @@ try:
           "off=%s state=%s" % (gl.read_offset(path), gl.up["state"]))
     check("B1 bad-full: state is bad full",
           gl.up["state"] == "bad full")
-    check("B1 bad-full: OLED mode BAD FULL",
-          gl._mode_line() == "Mode BAD FULL")
+    check("B1 bad-full: it stays so while the stuck file is there",
+          gl._bad_full_left())
     later = os.path.join(tmpdir, "20261005_19later.gpx")
     make_gpx(later, 8)
     _posts[:] = []
@@ -1780,8 +1710,8 @@ try:
     check("B1: another file's 201 does not clear BAD FULL",
           gl.up["state"] == "bad full",
           "state=%s sent=%s" % (gl.up["state"], gl.up["sent"]))
-    check("B1: OLED stays BAD FULL after another file succeeds",
-          gl._mode_line() == "Mode BAD FULL")
+    check("B1: BAD FULL stays after another file succeeds",
+          gl._bad_full_left())
     with open(path, "rb") as f:
         kept = sum(1 for line in f if line.startswith(b"<trkpt"))
     check("B1 bad-full: original 80 points still in GPX",
@@ -1794,9 +1724,8 @@ try:
         pump()
         n_pump += 1
     check("B1: BAD FULL clears after the stuck file is gone",
-          not gl._bad_full_left() and gl._mode_line() != "Mode BAD FULL",
-          "state=%s mode=%s exists=%s" % (
-              gl.up["state"], gl._mode_line(), os.path.exists(path)))
+          not gl._bad_full_left() and gl.up["state"] != "bad full",
+          "state=%s exists=%s" % (gl.up["state"], os.path.exists(path)))
 
     # --- B2: 200 kB line without newline must not MemoryError/boot-loop ----
     online(tmpdir)
@@ -1872,8 +1801,6 @@ try:
     check("B3: hotspot trip still records GPS points",
           len(gl.log["batch"]) == 1 or gl.log["file"] is not None,
           "batch=%s file=%s" % (gl.log.get("batch"), gl.log.get("file")))
-    check("B3: OLED mode LOG+UP on hotspot",
-          gl._mode_line() == "Mode LOG+UP")
 
     current = gl.log.get("file")
     for n in os.listdir(tmpdir):
@@ -1909,8 +1836,6 @@ try:
     home_path = gl.log["file"]
     check("B3: home WiFi records GPS points",
           bool(gl.log["batch"]) and home_path is not None)
-    check("B3: OLED mode LOG+UP on home",
-          gl._mode_line() == "Mode LOG+UP")
 
     # HOME STAY: two calm minutes on the home network close the track,
     # whatever the (noisy) GPS speed says; a departure opens a new one
@@ -6779,7 +6704,7 @@ try:
                 _clock[0] += 500
                 gl.wifi_tick()
             got = (gl.wifi["state"], [c[:2] for c in WLAN.connects[:1]],
-                   gl._wifi_line())
+                   dict(gl._web_rows())["wifi"])
         except Exception as e:
             crash = e
         finally:
@@ -6788,7 +6713,7 @@ try:
     check("WR-11: a non-UTF-8 .env neither raises nor loses the network",
           ok_env and got is not None and got[0] == "connected"
           and got[1] == [(raw, b"jelsz\xf3")]
-          and got[2].startswith("WiFi K"), "%r %r %r" % (crash, env, got))
+          and got[2].startswith("connected K"), "%r %r %r" % (crash, env, got))
 
     # WR-c: quotes and a comment on a comment-safe key: comment off first,
     # then the quotes (IP="192.168.1.60" # static kept the quotes: DHCP)
@@ -11279,7 +11204,7 @@ def _bi_open(name, mode="r", *a, **k):
 
 
 def _bi_state():
-    return (gl.up["state"], gl._bad_full_left(), gl._mode_line())
+    return (gl.up["state"], gl._bad_full_left())
 
 
 _post_code[0] = 422
@@ -11310,9 +11235,9 @@ bf_gone = (gl._bad_full_left(), os.path.exists(bi_p))
 _post_code[0] = 201
 check("BAD-IO: an I/O error or the flash reserve copying to .bad is "
       "'fs err', not BAD FULL",
-      bi_res == [("fs err", False, "Mode LOG+UP")] * 2, repr(bi_res))
+      bi_res == [("fs err", False)] * 2, repr(bi_res))
 check("BAD-FULL: a full .bad is BAD FULL only while that .bad is on flash",
-      bf_full == ("bad full", True, "Mode BAD FULL")
+      bf_full == ("bad full", True)
       and bf_gone == (False, True), "%r %r" % (bf_full, bf_gone))
 for n_ in os.listdir(up_td):
     os.remove(os.path.join(up_td, n_))
@@ -19084,10 +19009,10 @@ def _rb_loop(n=5):
         if k[0] >= n:
             raise KeyboardInterrupt
     saved = (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
-             gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick, gl.draw,
+             gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick,
              gl._boot_ok, gl.read_uart)
     gl.time.sleep_ms = _sl
-    gl.wifi_tick = gl.upload_tick = gl.log_tick = gl.draw = lambda: None
+    gl.wifi_tick = gl.upload_tick = gl.log_tick = lambda: None
     gl._boot_ok = gl.read_uart = lambda: None
     gl.ota_tick = gl.gps_check = gl.keepalive_tick = gl.tft_tick = lambda now: None
     gl._wdt = None
@@ -19100,7 +19025,7 @@ def _rb_loop(n=5):
         return repr(e)
     finally:
         (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
-         gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick, gl.draw,
+         gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick,
          gl._boot_ok, gl.read_uart) = saved
 
 

@@ -1,4 +1,4 @@
-from machine import Pin, I2C, UART, WDT
+from machine import Pin, UART, WDT
 import machine, sys, time, os, network, gc, math, socket, json, select, struct
 import hashlib, binascii
 try:
@@ -115,25 +115,11 @@ elif IS_HELTEC:
 else:
     GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 2, 17, 16, 22, 21
 
-# OLED is optional: boards without a display (or a failed I²C probe) run
-# headless. draw() and the boot banners become no-ops. Runtime I²C errors
-# disable the display instead of resetting the chip.
-oled = None
-oled_err = 0
-OLED_MAX_ERR = 3
-try:
-    import ssd1306
-    _i2c = I2C(0, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA))
-    oled = ssd1306.SSD1306_I2C(128, 64, _i2c)
-except Exception as e:
-    print("oled", repr(e))
-
 # (rides out HTTP calls; at 115200 the UC6580 sends ~2.3 KB/s: a keep-alive
 # scan's pause overran 4 KB, one cut sentence per pulse, measured)
 uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX,
             rxbuf=8192 if IS_HELTEC else 4096)
 
-REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"
 GPS_SILENT = 60000                       # ms without a byte: a diag line
 
@@ -387,7 +373,7 @@ ep = {}                                  # the second being collected
 
 def reset():
     st.clear()
-    st.update(start=time.ticks_ms(), rx=None, rx_b=0, good=None, spin=0,
+    st.update(start=time.ticks_ms(), rx=None, rx_b=0, good=None,
               ok=0, err=0,
               quality=None, fixtype=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
@@ -1521,7 +1507,6 @@ def read_uart():
         st["rx"] = time.ticks_ms()
         # bytes read (the page's GPS link: differences), kept a small int
         st["rx_b"] = (st["rx_b"] + k) & 0x3FFFFFFF
-        st["spin"] += 1
         n += k
         _rx_n = n
         r = 0                            # bytes before r are done with
@@ -3070,7 +3055,6 @@ def wifi_start():
     if not wifi["nets"]:
         wifi["state"] = "no .env"
         return
-    _oled_banner("WiFi scanning...")
     if _wifi_make() is None:
         return
     w = wifi["wlan"]
@@ -5154,7 +5138,6 @@ def up_reset():
             _rm(LOG_DIR + "/" + n)
         elif n.endswith(".pos") and n[:-4] not in have:
             _rm(LOG_DIR + "/" + n)       # orphan .pos or .bad.pos
-    _oled_banner("Counting points")
     try:
         up["left"] = count_points()
     except MemoryError:
@@ -8452,64 +8435,6 @@ def status():
     s = {2: "2D fix", 3: "3D fix"}.get(st["fixtype"], "Fix")
     return s + " DGPS" if st["quality"] == 2 else s
 
-def _fmt(fmt, v):
-    return fmt % v if v is not None else "--"
-
-def _short(n):
-    """Fit a count into the 4 chars left after "Points left "."""
-    return str(n) if n < 10000 else "%dk" % (n // 1000)
-
-def _wifi_line():
-    if wifi["state"] == "connected" and wifi.get("ssid"):
-        ssid = wifi["ssid"]
-        if len(ssid) > 11:
-            ssid = ssid[:11]
-        return "WiFi " + ssid
-    return "WiFi " + wifi["state"]
-
-def _mode_line():
-    if _bad_full_left() or up.get("state") == "bad full":
-        return "Mode BAD FULL"
-    if wifi["state"] == "connected":
-        return "Mode LOG+UP"
-    return "Mode LOG"
-
-def _oled_ok(fn):
-    global oled, oled_err
-    if oled is None:
-        return
-    try:
-        fn()
-        oled_err = 0
-    except OSError as e:
-        oled_err += 1
-        print("oled", repr(e))
-        if oled_err >= OLED_MAX_ERR:
-            oled = None
-
-def _oled_banner(msg):
-    def _do():
-        oled.fill(0)
-        oled.text(msg, 0, 28)
-        oled.show()
-    _oled_ok(_do)
-
-def draw():
-    def _do():
-        oled.fill(0)
-        oled.fill_rect(0, 0, 128, 8, 1)
-        oled.text("GPS Logger", 0, 0, 0)
-        oled.text("|/-\\"[st["spin"] % 4], 120, 0, 0)
-        for row, line in enumerate((
-                _wifi_line(),
-                "GPS " + status(),
-                _mode_line(),
-                "Flash " + _fmt("%d kB", _flash_kb()),   # cached 30 s
-                "Points left " + _short(up["left"]))):
-            oled.text(line, 0, 10 + row * 11)
-        oled.show()
-    _oled_ok(_do)
-
 # --- The Heltec's TFT (gps_tft.py) -------------------------------------------
 TFT_FRAME = 200                          # ms between frames (a row scrolling)
 TFT_STATE = 1000                         # ms between new values
@@ -9026,7 +8951,7 @@ def _tft_bad(i, e):
 # --- Main loop --------------------------------------------------------------
 
 def run():
-    """Show the logger state on the OLED, logging and uploading when possible."""
+    """Log, and upload when possible, showing the state on the TFT."""
     global _wdt, _running, _boot_ok_done
     _keep_stop()
     _running = False
@@ -9154,7 +9079,6 @@ def _loop():
     if _wdt is None:
         _wdt = WDT(timeout=WDT_TIMEOUT)
     loop_start = time.ticks_ms()
-    last = None
     status_at = loop_start
     diag_at = loop_start
     while True:
@@ -9174,9 +9098,6 @@ def _loop():
         if (not _boot_ok_done
                 and time.ticks_diff(now, loop_start) >= BOOT_OK_MS):
             _boot_ok()
-        if last is None or time.ticks_diff(now, last) >= REFRESH:
-            draw()
-            last = now
         if time.ticks_diff(now, status_at) >= STATUS:
             _guarded("status", _status, None, True)
             status_at = now
