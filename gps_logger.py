@@ -160,7 +160,10 @@ try:
 except Exception as e:
     print("oled", repr(e))
 
-uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX, rxbuf=4096)   # rides out HTTP calls
+# (rides out HTTP calls; at 115200 the UC6580 sends ~2.3 KB/s: a keep-alive
+# scan's pause overran 4 KB, one cut sentence per pulse, measured)
+uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX,
+            rxbuf=8192 if IS_HELTEC else 4096)
 
 REFRESH = 500                            # ms between screen redraws
 NO_DATA = 3000                           # ms of silence = "No data!"
@@ -788,8 +791,6 @@ def gsa(talker, f):
     now = time.ticks_ms()
     if st["gsa_at"] is None or _age(now, st["gsa_at"]) >= 1000:
         st["gsa_at"], st["gsa_n"] = now, 0
-        if GPS_UC:
-            _uc_sv["used"] = []
     st["gsa_n"] += 1
     if st["gsa_n"] == GSA_MAX + 1:
         _extra(talker, f)
@@ -1182,6 +1183,8 @@ def _ubx_ack(frame, t0):
 # u-blox), one sentence set per signal.
 UC_ACK_WAIT = 300                        # ms for a command's $OK
 GSV_EVERY = 5                            # s between satellite lists
+UC_GSA_GAP = 150                         # ms without a GSA: the next is a new
+                                         # round (fixes come 200 ms apart)
 
 def _uc_msgs():
     """The setup. The rate first: CFGNAV resets the GSV rate (its page). A
@@ -1252,7 +1255,7 @@ def _uc_line(p):
 
 _UC_GNSS = {"GP": 0, "GA": 2, "GB": 3, "GQ": 5, "GL": 6}  # NAV-SAT's gnssId
 _UC_SYS = {1: 0, 2: 6, 3: 2, 4: 3, 5: 5}  # GSA's system id -> gnssId
-_uc_sv = {"new": {}, "open": False, "until": None, "used": []}
+_uc_sv = {"new": {}, "open": False, "until": None, "used": [], "gsa": None}
 
 def _uc_gsv_skip():
     """True while a list is fresh: with a fix its GSV comes at 1 Hz whatever
@@ -1267,8 +1270,14 @@ def _uc_gsv_skip():
     return False
 
 def _uc_gsa(f):
-    """One GSA: the satellites of its system in the fix (a round's list:
-    cleared in gsa)."""
+    """One GSA: the satellites of its system in the fix. A pause before it
+    starts a new list: the sentences of a round come in one burst, and a
+    round every second by the clock cut one in two (11 seen, 6 in use)."""
+    u = _uc_sv
+    now = time.ticks_ms()
+    if u["gsa"] is None or _age(now, u["gsa"]) >= UC_GSA_GAP:
+        u["used"] = []
+    u["gsa"] = now
     g = _UC_SYS.get(_num(f[-1], int))
     if g is None:
         return

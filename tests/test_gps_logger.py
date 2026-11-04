@@ -18103,6 +18103,21 @@ hl.sv_poll(_clock[0])
 check("UC-NO-UBX: the satellite poll writes nothing (no UBX to a UC6580)",
       hl.uart.cmds == [] and hl.st["sv_miss"] == 0, repr(hl.uart.cmds))
 
+# GSA: a burst is one round, wherever the second's clock falls in it
+hl.reset()
+hl.uart = _UcUart()
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"))
+hl.st["gsa_at"] = _clock[0] - 1000       # the next one a second after the first
+_uc_feed(hl, _nmea("GNGSA,A,3,25,,,,,,,,,,,,1.2,0.8,0.9,4"))
+_u1 = sorted(hl._uc_sv["used"])
+_clock[0] += 200
+_uc_feed(hl, _nmea("GNGSA,A,3,30,,,,,,,,,,,,1.2,0.8,0.9,1"))
+check("UC-GSA: the satellites in use of one burst stay together past a second's "
+      "boundary; a pause starts the next round's",
+      _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._uc_sv["used"] == [30],
+      repr((_u1, hl._uc_sv["used"])))
+
 # OTA: each board only its own firmware
 _mf = {"build": 5, "commit": "abc1234", "size": 9, "sha256": "0" * 64,
        "url": "x.bin", "files": []}
