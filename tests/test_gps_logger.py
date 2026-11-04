@@ -19148,6 +19148,176 @@ check("RB-UART-NOLOSS: a full 8 KB buffer goes in one pass (a pass is ~25 ms at 
       _rb_one == (True, 0, True) and _rb_many == (True, True),
       repr((_rb_one, _rb_many)))
 
+# RB-POLL: no client: a poll that allocates nothing, no accept() raising
+# EAGAIN (~96 B, ~40 times a second). tests/web_loopback.py and
+# tests/mpy_unix_logger.py run the real one on the unix port
+
+
+class _RbPoll(object):
+    def __init__(self):
+        self.reg, self.timeouts = [], []
+    def register(self, s, ev):
+        self.reg.append((s, ev))
+    def ipoll(self, t=-1):
+        self.timeouts.append(t)
+        return iter([(s, 1) for s, _e in self.reg if s.waiting])
+
+
+class _RbSelect(object):
+    POLLIN = 1
+    @staticmethod
+    def poll():
+        return _RbPoll()
+
+
+_rb_saved = gl.select
+gl.select = _RbSelect
+try:
+    _rb_web()
+    gl.web_tick()
+    _rb_l = _RbListen.made[-1]
+    for _i in range(50):
+        gl.web_tick()
+    _rb_idle = _rb_l.accepts
+    _rb_c = _RbConn(b"GET /nope HTTP/1.1\r\n\r\n")
+    _rb_l.waiting.append(_rb_c)
+    gl.web_tick()
+    _rb_pl = getattr(gl, "_web_poll", None)
+    _rb_tmo = set(_rb_pl.timeouts) if _rb_pl is not None else None
+    gl.wifi["state"] = "sleep"
+    gl.web_tick()
+    _rb_gone = getattr(gl, "_web_poll", 1)
+finally:
+    gl.select = _rb_saved
+check("RB-POLL: no accept() with nobody waiting, a zero-timeout poll; a client is "
+      "served; the poll goes with the socket",
+      _rb_idle == 0 and _rb_c.sent[:12] == b"HTTP/1.0 404" and _rb_tmo == {0}
+      and _rb_gone is None, repr((_rb_idle, bytes(_rb_c.sent[:12]), _rb_tmo, _rb_gone)))
+# ... and where poll has no ipoll (CPython): accept() as before
+_rb_web()
+gl.web_tick()
+_rb_l = _RbListen.made[-1]
+_rb_c = _RbConn(b"GET /nope HTTP/1.1\r\n\r\n")
+_rb_l.waiting.append(_rb_c)
+gl.web_tick()
+check("RB-POLL-NONE: no usable poll: accept() asks, as before",
+      getattr(gl, "_web_poll", None) is None and _rb_c.sent[:12] == b"HTTP/1.0 404",
+      repr(bytes(_rb_c.sent[:12])))
+gl._web_close()
+gl.socket, gl.WEB, gl.WEB_AWAY = _rb_socket, False, False
+gl.wifi_reset()
+
+# RB-Q: no new list on each pass without a fix when the queue is empty
+gl.reset()
+gl.log_reset()
+_rb_q = gl.st["q"]
+gl.log_tick()
+_rb_same = gl.st["q"] is _rb_q
+gl.st["q"] = [("stale",)]
+gl.log_tick()
+check("RB-Q: without a fix an empty seconds queue keeps its list (a new one every "
+      "pass was garbage), a stale second still goes",
+      _rb_same and gl.st["q"] == [], repr(gl.st["q"]))
+
+# RB-CELL: a comprehension over skip made it a cell, allocated at every
+# upload_tick (32 B, ~40 times a second: tests/mpy_unix_logger.py measures)
+import ast as _ast
+_rb_cells = [n for n in _ast.walk(_ast.parse(inspect.getsource(gl.upload_tick)))
+             if isinstance(n, _ast.ListComp)
+             and any(isinstance(x, _ast.Name) and x.id == "skip" for x in _ast.walk(n))]
+check("RB-CELL: upload_tick's skip is no cell", not _rb_cells, repr(len(_rb_cells)))
+
+# RB-TFT: _text blits nothing outside the band, the panel stays as it was
+_ft_saved = _ft._text
+
+
+def _ft_all(fb, font, s, x, base, tone):
+    """_text as it was: every glyph, into every band (blit clips)."""
+    f, mv = font
+    p = _ft._gs4_palette(tone)
+    y = base - f[5]
+    h = f[4]
+    for ch in s:
+        i = _ft._index(f, ch)
+        w = f[1][i]
+        o = f[2][i * 2] | f[2][i * 2 + 1] << 8
+        fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, _FakeFramebuf.GS4_HMSB), x, y, _ft.BG, p)
+        x += w
+    return x
+
+
+_rb_states = [("47", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
+              ("-", False, 0, "--:--", None, 0, "", False, None),
+              ("128", True, 9, "23:59", 0, 1, "kész", False, (100, "tele")),
+              ("0", True, 12, "00:00", 1, 2, "99999", True, (75, "<1 óra"))]
+
+
+def _rb_panel(text):
+    _ft._text = text
+    out = []
+    try:
+        for s in _rb_states:
+            _ft._D.top = _ft._D.low = _ft._D.lit = None
+            _ft.set_state(*s)
+            _ft.frame()
+            out.append(dict(_TftSpi.panel))
+    finally:
+        _ft._text = _ft_saved
+    return out
+
+
+_TftSpi.fail = False
+_ft.start()
+_rb_new = _rb_panel(_ft_saved)
+_ft.start()
+_rb_old = _rb_panel(_ft_all)
+_rb_diff = [i for i in range(len(_rb_old)) if _rb_old[i] != _rb_new[i]]
+
+
+class _RbFb(object):
+    """The band, counting the glyphs blitted wholly outside it."""
+    def __init__(self, fb):
+        self.fb, self.out, self.n = fb, 0, 0
+    def blit(self, src, x, y, key=-1, pal=None):
+        h = src[2] if isinstance(src, tuple) else 0
+        if isinstance(src, tuple) and src[3] == _FakeFramebuf.GS4_HMSB:
+            self.n += 1
+            if y >= _ft.BAND_H or y + h <= 0:
+                self.out += 1
+        self.fb.blit(src, x, y, key, pal)
+    def __getattr__(self, k):
+        return getattr(self.fb, k)
+
+
+# ... and at the band's very edges, one row in and just out: each font's every
+# glyph, and one inked to its first and last row (the fonts' may be blank there)
+_rb_edge = []
+_rb_ink = ("X", b"\x04", b"\x00\x00", b"\xff" * 12, 6, 5)
+for _fnt in _ft._FONTS + [(_rb_ink, memoryview(_rb_ink[3]))]:
+    _f = _fnt[0]
+    _hh = _f[4]
+    for _y in (-_hh, 1 - _hh, _ft.BAND_H - 1, _ft.BAND_H):
+        _ft._D.fb.fill(_ft.BG)
+        _ft_saved(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], "txt")
+        _a1 = bytes(_ft._D.buf)
+        _ft._D.fb.fill(_ft.BG)
+        _ft_all(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], "txt")
+        if _a1 != bytes(_ft._D.buf):
+            _rb_edge.append((_hh, _y))
+_rb_fb0 = _ft._D.fb
+_ft._D.fb = _RbFb(_rb_fb0)
+_ft._D.top = _ft._D.low = None
+_ft.set_state(*_rb_states[0])
+_ft.frame()
+_rb_blit = (_ft._D.fb.n, _ft._D.fb.out)
+_rb_x = (_ft._text(_ft._D.fb, _ft._NUM, "12", 7, 500, "txt"), 7 + _ft.width(_ft._NUM, "12"))
+_ft._D.fb = _rb_fb0
+check("RB-TFT: no glyph blitted outside its band; x still follows; the panel "
+      "pixel-identical to blitting every glyph into every band",
+      not _rb_diff and not _rb_edge and _rb_blit[0] > 0 and _rb_blit[1] == 0
+      and _rb_x[0] == _rb_x[1] and len(_rb_new[0]) == 160 * 80,
+      repr((_rb_diff, _rb_edge, _rb_blit, _rb_x)))
+
 shutil.rmtree(_rb_dir, ignore_errors=True)
 
 print()

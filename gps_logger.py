@@ -5687,8 +5687,9 @@ def log_tick():
     if not has_fix(now):
         if log["fix"]:
             _drain_q()                   # valid seconds just before the loss
-        else:
-            st["q"] = []                 # stale
+        elif st.get("q"):
+            st["q"] = []                 # stale (a new list only if any: this
+                                         # runs every pass without a fix)
         # the heartbeat after the queued seconds: a departure in them comes
         # first, and nothing is stamped before lines already written
         _still_beat(now)
@@ -7471,7 +7472,13 @@ def upload_tick():
     up["files"] = len(files)
     skip = up.get("skip")
     if skip and skip in files and len(files) > 1:
-        files = [p for p in files if p != skip]
+        # (no comprehension: it would make skip a cell, allocated every call,
+        # also on the early returns above, ~40 times a second)
+        due = []
+        for p in files:
+            if p != skip:
+                due.append(p)
+        files = due
     held = up.get("hold") or {}
     due = []
     for p in files:
@@ -8485,6 +8492,7 @@ def ota_tick(now):
 # client used to hold the loop for ~50 s: 2 s per 1 KB send).
 
 _web_sock = None
+_web_poll = None                         # its poll, None: accept() asks itself
 
 def _web_env(env):
     """WEB=0 in .env: no status page, the radio sleeps at home as before.
@@ -8505,8 +8513,20 @@ def _web_env(env):
         else:
             WEB_AWAY = t
 
+def _web_poller(s):
+    """A poll on the listening socket: ipoll(0) with nobody waiting allocates
+    nothing, an accept() raises EAGAIN (~96 B, ~40 times a second). None where
+    it does not work (CPython's poll has no ipoll): accept() as before."""
+    try:
+        p = select.poll()
+        p.ipoll
+        p.register(s, select.POLLIN)
+        return p
+    except (AttributeError, TypeError, ValueError, OSError):
+        return None
+
 def _web_open():
-    global _web_sock
+    global _web_sock, _web_poll
     s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -8514,6 +8534,7 @@ def _web_open():
         s.bind(socket.getaddrinfo("0.0.0.0", WEB_PORT)[0][-1])
         s.listen(2)
         s.setblocking(False)
+        _web_poll = _web_poller(s)
         _web_sock = s
         print("web http://%s/" % wifi.get("ip"))
     except (OSError, MemoryError) as e:  # (no half-open socket left behind)
@@ -8527,7 +8548,8 @@ def _web_open():
         print("web", repr(e))
 
 def _web_close():
-    global _web_sock
+    global _web_sock, _web_poll
+    _web_poll = None
     if _web_sock is not None:
         try:
             _web_sock.close()
@@ -9216,6 +9238,11 @@ def web_tick():
         _web_open()
         if _web_sock is None:
             return
+    if _web_poll is not None:
+        for _ in _web_poll.ipoll(0):
+            break
+        else:
+            return                       # nobody waiting
     try:
         c = _web_sock.accept()[0]
     except OSError:
