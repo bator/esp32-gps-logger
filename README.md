@@ -114,13 +114,22 @@ firmware R6.0.0.0Build3700.
   power cycle brings its defaults back. With a fix it sends GSV and GSA at 1 Hz
   whatever the rate (~2.3 KB/s). The satellite list comes from GSV, decoded every
   5 s.
-- **Display:** the speed, big and orange, the satellites in the fix, the clock
-  (Hungarian time), a WiFi icon with the signal's strength in arcs, how good
-  the GPS is (four rising bars and a word, as on a phone), how full the flash is
-  with how long it still logs (a gauge, yellow from 70%, red from 90%; the time
-  assumes moving at 1 Hz, standing costs next to nothing) and what waits for upload.
-  It never scrolls; the rest is on the status page. The backlight is always on.
-  `gps_tft.py`, its anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
+- **Display:** ink on paper. On the left today's route, a line of dots over a faint
+  grid, north up and fitted to the field (at least 500 m across): the latest trip
+  red, earlier ones black, a round dot where the day began and a red one where it
+  is now, and on an empty day "nincs út". Next to the WiFi bars today's km ("8,6 km",
+  whole km from 100). A trip starts when a stay ends or a fix gap starts a new file;
+  anchor points and the drift a stay drops add nothing, so the km are those of the
+  track, up to a minute late. "Today" is the Hungarian day. On the right the clock
+  (Hungarian time), a satellite icon with the satellites in the fix (red without a
+  fix), the four WiFi bars and what waits for upload. Below, how good the GPS is (a
+  tile in its colour with a word) and how full the flash is with how long it still
+  logs (a gauge, amber from 70%, red from 90%; the time assumes moving at 1 Hz,
+  standing costs next to nothing). The speed is on the status page and in
+  `status.json`. It never scrolls. The backlight is always on. The route survives a
+  reboot in `/route.bin` (at most one write per 5 min of driving and one when a stay
+  starts), shown again once a fix proves it is still the same day. `gps_tft.py`, its
+  anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
   socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first

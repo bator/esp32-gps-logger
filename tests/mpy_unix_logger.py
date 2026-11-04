@@ -657,31 +657,32 @@ if sys.implementation.name == "micropython":
     tft.time = _Obj()
     tft.time.sleep_ms = lambda ms: None
     tft.start()
-    states = (("47", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
-              ("-", False, 0, "--:--", None, 0, "", False, None),
-              ("128", True, 9, "23:59", 0, 1, "kész", False, (100, "tele")),
-              ("0", True, 12, "00:00", 1, 2, "99999", True, (75, "<1 óra")))
+    view = (bytearray(b"\x00\x80\x50\x19"), 2, 0, 1)
+    states = ((view, "8,6 km", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
+              (None, "", False, 0, "--:--", None, 0, "", False, None),
+              (view, "99,9 km", True, 9, "23:59", 0, 1, "kész", False, (100, "tele")),
+              ((view[0], 0, 0, 2), "0,0 km", True, 12, "00:00", 1, 2, "99999", True, (75, "<1 óra")))
 
 
     def panel():
         del sent[:]
         for s in states:
-            tft._D.top = tft._D.low = tft._D.lit = None
+            tft._D.top = tft._D.low = None
             tft.set_state(*s)
             tft.frame()
         return b"".join(sent)
 
 
-    def text_all(fb, font, s, x, base, tone):
+    def text_all(fb, font, s, x, base, tone, bg=tft.PAPER):
         f, mv = font
-        p = tft._gs4_palette(tone)
+        p = tft._gs4_palette(tone, bg)
         y = base - f[5]
         h = f[4]
         for ch in s:
             i = tft._index(f, ch)
             w = f[1][i]
             o = f[2][i * 2] | f[2][i * 2 + 1] << 8
-            fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, tft.framebuf.GS4_HMSB), x, y, tft.BG, p)
+            fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, tft.framebuf.GS4_HMSB), x, y, tft._COL[bg], p)
             x += w
         return x
 
@@ -691,7 +692,7 @@ if sys.implementation.name == "micropython":
     tft._text = text_all
     all_panel = panel()
     tft._text = text_now
-    out_band = _alloc(lambda: tft._text(tft._D.fb, tft._NUM, "12", 4, 500, "txt"))
+    out_band = _alloc(lambda: tft._text(tft._D.fb, tft._SATS, "12", 4, 500, tft.INK))
     print("tft panel bytes", len(now_panel), "out of band alloc", out_band)
     check("tft: on the real framebuf the panel gets each byte as before, a text "
           "outside the band allocates nothing",
