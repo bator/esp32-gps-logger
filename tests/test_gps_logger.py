@@ -18490,9 +18490,9 @@ _gq0 = hl._gps_quality(False)
 check("TFT-STATE: speed rounded with a fix, -- without; the clock; WiFi off or its "
       "level by the signal, down at once, up only past a margin; what waits, short when long, done or nothing set up; the "
       "GPS's quality from HDOP and the satellites in the fix",
-      _s1[:4] == ("47", True, 22, "11:42") and _s1[4] is None and _s1[6:] == ("1284", True)
+      _s1[:4] == ("47", True, 22, "11:42") and _s1[4] is None and _s1[6:8] == ("1284", True)
       and _s2[0] == "--" and _s2[1] is False
-      and _s3[4] == 3 and _s3[6:] == ("kész", False)
+      and _s3[4] == 3 and _s3[6:8] == ("kész", False)
       and _lv == [3, 3, 2, 2, 1, 1, 0, 0] and _hy == [2, 2, 2, 3, 0, 3, 2, 1]
       and _s4[6] == " " and _s5[6] == "12k"
       and _gq == [3, 3, 2, 2, 2, 1, 1, 1] and _gq0 == 0 and _s1[5] == 3 and _s2[5] == 0,
@@ -18508,6 +18508,52 @@ hl.st["rx"] = _clock[0] - hl.NO_DATA
 check("TFT-CLOCK-SILENT: a silent receiver's clock shows --:--, not a stopped time",
       _ls("2026-11-04", "10:42:10") == "--:--")
 hl.st["rx"] = _clock[0]
+
+# the flash: per cent taken, how long a drive still fits
+_sv0, _hn0, _fsz0 = os.statvfs, hl._hist_names, hl._file_size
+_sv_n = []
+
+
+def _store(free_kb, hist=(), total_kb=4544, at=None):
+    os.statvfs = lambda p: _sv_n.append(p) or (1024, 1024, total_kb, free_kb, free_kb, 0, 0, 0, 0, 255)
+    hl._hist_names = lambda: [n for n, _z in hist]
+    hl._file_size = lambda p: dict(hist).get(p.rsplit("/", 1)[-1])
+    hl._tft_fs[:] = [None, None]
+    return hl._store_state(_clock[0] if at is None else at)
+
+
+_stores = (_store(4412), _store(1136), _store(182), _store(64), _store(33), _store(32), _store(0))
+# an older day's file counts as room, today's and a vanished one do not
+_sh = _store(100, (("20261101.trb", 1024 * 1024), ("20261102.trb", None), ("20261103.trb", 500 * 1024)))
+_sh0 = _store(100, (("20261103.trb", 1024 * 1024),))
+_sv_n[:] = []
+_sa = _store(4412, at=_clock[0])
+_sb = hl._store_state(_clock[0] + hl.TFT_STORE - 1)
+_n1 = len(_sv_n)
+_sc = hl._store_state(_clock[0] + hl.TFT_STORE)
+_n2 = len(_sv_n)
+
+
+def _sv_fail(p):
+    raise OSError(5)
+
+
+os.statvfs = _sv_fail
+hl._tft_fs[:] = [None, None]
+_sf = hl._store_state(_clock[0])
+_st9 = hl._tft_state(_clock[0])
+os.statvfs, hl._hist_names, hl._file_size = _sv0, _hn0, _fsz0
+hl._tft_fs[:] = [None, None]
+check("TFT-STORE: the flash in per cent and the time a 1 Hz drive still fits: days from "
+      "48 h, then hours, under an hour, full at the reserve; older history days count as "
+      "room, today's not; statvfs once per TFT_STORE; unreadable: nothing, no exception",
+      _stores == ((3, "7 nap"), (75, "44 óra"), (96, "6 óra"), (99, "1 óra"), (99, "<1 óra"),
+                  (100, "tele"), (100, "tele"))
+      and _sh == (76, "44 óra") and _sh0 == (98, "2 óra")
+      and _sa == _sb == _sc and _n1 == 1 and _n2 == 2
+      and _sf is None and _st9[8] is None
+      and all(c in _ff.TXT[0] for _p, _l in _stores for c in "%d%%" % _p + _l),
+      repr((_stores, _sh, _sh0, _n1, _n2, _sf, _st9[8])))
 
 # the drawing, on a model of the panel: real pixels, at real coordinates
 _order = []
@@ -18587,6 +18633,39 @@ check("TFT-ZONES: a frame draws both zones (3 + 3 bands), an unchanged one none;
       repr((_f1, _f2, _f3, _f4, _weak)))
 check("TFT-NOFIX: no fix: no orange, the satellite count red, all bars off, the word "
       "red, done in grey", _nofix == (0, True, [6, 12, 18, 24], True, True), repr(_nofix))
+
+# the flash's gauge: its length by the per cent, its colour by the level
+_gx = lambda c: sum(1 for x in range(_ft.STORE_X, _ft.STORE_X + _ft.STORE_W) if _px(x, 61) == c)
+_gr, _gy, _gd = (_ft._c(_ft._TONES[t]) for t in ("grn", "yel", "red"))
+_tp = lambda t: _ft._gs4_palette(t).pixel(15, 0)
+_gs = []
+for _p, _l in ((3, "7 nap"), (50, "3 nap"), (70, "44 óra"), (89, "9 óra"), (90, "8 óra"), (100, "tele")):
+    _ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, (_p, _l))
+    _ft.frame()
+    _gs.append((_gx(_gr), _gx(_gy), _gx(_gd), _gx(_ft.OFF), _cnt(_ft.STORE_X, 48, 159, 58, _tp("soft")) > 5,
+                _cnt(_ft.STORE_X, 48, 159, 58, _tp("yel")) > 5, _cnt(_ft.STORE_X, 48, 159, 58, _tp("red")) > 5))
+_TftSpi.frames = 0
+_ft.frame()
+_gs0 = _TftSpi.frames
+_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, (100, "tele"))
+_ft.frame()
+_up_gone = _cnt(_ft.STORE_X, 66, 159, 76, _tp("soft")) > 3
+_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, (99, "<1 óra"))
+_ft.frame()
+_w = _ft.width(_ft._TXT, "99%") + _ft.width(_ft._TXT, "<1 óra")
+_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, None)
+_ft.frame()
+_none = (_gx(_gr), _gx(_gy), _gx(_gd), _gx(_ft.OFF), _cnt(_ft.STORE_X, 48, 159, 58, _tp("soft")))
+check("TFT-STORE-DRAW: the gauge's length by the per cent, green, yellow from 70, red from "
+      "90, the text with it, the upload line left alone, an unchanged state sends nothing, "
+      "the longest two texts fit; unreadable: no gauge, no text",
+      _gs == [(1, 0, 0, 55, True, False, False), (28, 0, 0, 28, True, False, False),
+              (0, 39, 0, 17, False, True, False), (0, 49, 0, 7, False, True, False),
+              (0, 0, 50, 6, False, False, True), (0, 0, 56, 0, False, False, True)]
+      and _gs0 == 0 and _up_gone and _w < _ft.STORE_W and _none == (0, 0, 0, 0, 0),
+      repr((_gs, _gs0, _up_gone, _w, _none)))
+_ft.set_state("47", True, 22, "11:42", None, 3, "kész", False)
+_ft.frame()
 
 # the WiFi icon: still, its arcs by the level; a new level sends only the icon
 _arcs = lambda c: _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, c)

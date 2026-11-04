@@ -9283,6 +9283,10 @@ TFT_WIFI_UP = 3                          # dB past a limit for one more WiFi arc
 TFT_HDOP_GOOD = 1.5                      # strong GPS: HDOP at most this ...
 TFT_SATS_GOOD = 10                       # ... with this many satellites in the fix
 TFT_HDOP_FAIR = 3.0                      # above this: weak
+TFT_STORE = 30000                        # ms between looks at the flash (statvfs
+                                         # walks it)
+TFT_POINT_B = 7                          # bytes a .trb point of a 1 Hz drive takes
+                                         # (as web.html's POINT_B)
 _tft = None
 _tft_t = [None, None, 0, 0]              # last values, last frame, the errors
                                          # in a row of each
@@ -9356,6 +9360,49 @@ def _wifi_level(rssi, last):
         return last
     return level
 
+_tft_fs = [None, None]                   # (what _store_state said, its ticks)
+
+def _store_left(room):
+    """How long room bytes hold a 1 Hz drive, in the display's words."""
+    if room <= 0:
+        return "tele"
+    h = room // TFT_POINT_B // 3600
+    if h < 1:
+        return "<1 óra"
+    return "%d nap" % (h // 24) if h >= 48 else "%d óra" % h
+
+def _store_state(now):
+    """(Per cent of the flash taken, how long a drive still fits in it), at most
+    every TFT_STORE, or None when unreadable. Older days of the history count as
+    free: they go before any point (_hist_trim). The reserve (MIN_FREE) does not:
+    nothing is logged into it. Standing still costs next to nothing, so the time
+    is the worst case."""
+    c = _tft_fs
+    if c[1] is not None and _age(now, c[1]) < TFT_STORE:
+        return c[0]
+    c[1] = now
+    c[0] = None
+    try:
+        v = os.statvfs(LOG_DIR)
+    except OSError:
+        return None
+    room = v[0] * v[3]
+    total = v[0] * v[2]
+    if total <= 0:
+        return None
+    try:
+        for n in _hist_names()[:-1]:
+            room += _file_size(HIST_DIR + "/" + n) or 0
+    except OSError:
+        pass
+    left = room - MIN_FREE
+    if left <= 0:
+        pct = 100
+    else:
+        pct = min(((total - room) * 100 + total - 1) // total, 99)
+    c[0] = (pct, _store_left(left))
+    return c[0]
+
 def _tft_state(now):
     """What the display shows: set_state's arguments."""
     fix = bool(has_fix(now))
@@ -9371,7 +9418,7 @@ def _tft_state(now):
     else:
         text = "kész" if up.get("url") else " "
     return (big, fix, sv_used() or 0, _local_hm(), level, _gps_quality(fix), text,
-            bool(left))
+            bool(left), _store_state(now))
 
 def tft_tick(now):
     """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors

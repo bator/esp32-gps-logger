@@ -35,7 +35,7 @@ def font(weight, size, chars):
 
 FONTS = (("HERO", font("Bold", 38, "0123456789-")),
          ("NUM", font("Bold", 17, "0123456789-")),
-         ("TXT", font("SemiBold", 10, "0123456789:-kész ")),
+         ("TXT", font("SemiBold", 10, "0123456789:-kész %napóratle<")),
          ("LAB", font("SemiBold", 9, "KM/HGPSműhold")),
          ("WORD", font("Bold", 13, "erőögsynickzp")))
 
