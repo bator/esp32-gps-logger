@@ -9279,11 +9279,10 @@ def draw():
 TFT_FRAME = 200                          # ms between frames (a row scrolling)
 TFT_STATE = 1000                         # ms between new values
 TFT_MAX_ERR = 3                          # errors in a row, then it goes dark
-TFT_PAGE = 5                             # s each of the rows' two pages stays
-PT_BYTES = 7                             # .trb bytes of a moving second
 _tft = None
 _tft_t = [None, None, 0, 0]              # last values, last frame, the errors
                                          # in a row of each
+_tft_b = [None, b""]                     # the list's stamp, its bars
 
 def _tft_start():
     """Only on the Heltec; a failure leaves the logger running without it."""
@@ -9326,64 +9325,37 @@ def _local_hm():
     except (ValueError, IndexError):
         return "--:--"
 
-def _hu_n(n):
-    """1284 -> "1 284"."""
-    s = str(n)
-    return s if len(s) < 4 else s[:-3] + " " + s[-3:]
-
-def _hu_f(v, fmt="%.1f"):
-    return (fmt % v).replace(".", ",")
+def _tft_bars():
+    """The satellites for the bars, strongest first, 2 bytes each (cno, in the
+    fix), remade only with a new list."""
+    at = st["svs_at"]
+    if _tft_b[0] != at:
+        _tft_b[0] = at
+        svs = st["svs"] or ()
+        b = bytearray()
+        for v in sorted(svs, key=lambda v: -v[1])[:21]:
+            b.append(v[1] & 255)
+            b.append(1 if v[4] else 0)
+        _tft_b[1] = bytes(b)
+    return _tft_b[1]
 
 def _tft_state(now):
-    """What the display shows: set_state's arguments. Kinds: gps_tft's."""
-    b, m, g, a, r = 0, 1, 2, 3, 4
-    fix = has_fix(now)
-    text = status()
+    """What the display shows: set_state's arguments."""
+    fix = bool(has_fix(now))
     speed = st.get("speed")
     big = str(int(speed + 0.5)) if fix and speed is not None else "--"
-    used, seen = sv_used() or 0, sv_seen() or 0
-    clock = _local_hm()
-    page = uptime_s() // TFT_PAGE % 2    # two still pages, nothing long to read
+    level = None
     if wifi["state"] == "connected":
-        # the icon says the signal: the arcs that fill up, and its colour
-        rssi = wifi.get("rssi")
-        lvl = (0 if rssi is None or rssi < -80 else 1 if rssi < -70
-               else 2 if rssi < -60 else 3)
-        name = wifi.get("ip") if page else wifi.get("ssid")
-        net = ("w%d" % lvl, g if lvl >= 2 else a if lvl else r,
-               [(str(name or "WiFi"), b), ("  ", m), (clock, b)])
-    else:
-        net = ("w-", m, [("nincs WiFi  ", m), (clock, b)])
+        rssi = wifi.get("rssi")          # the arcs that fill up say the signal
+        level = (0 if rssi is None or rssi < -80 else 1 if rssi < -70
+                 else 2 if rssi < -60 else 3)
     left = up["left"] or 0
     if left:
-        files = _file_counts()[0]
-        upl = ("up", a, [(_hu_n(left), a), (" pont vár, ", m), (str(files), b),
-                         (" fájl", m)])
-    elif not up.get("url"):
-        upl = ("up", m, [("nincs feltöltés", m)])
+        text = str(left) if left < 10000 else "%dk" % (left // 1000)
     else:
-        upl = ("up", g, [("minden feltöltve", g)])
-    parts = []
-    kb = _flash_kb()
-    if page:
-        if kb is not None:
-            parts += [(_hu_f(kb / 1024), b), (" MB  ", m)]
-        tc = _temp()
-        if tc is not None:
-            parts += [(str(int(tc)), b), (" °C  ", m)]
-        u = uptime_s() // 60
-        parts += [("%d ó %d" % (u // 60, u % 60), b), (" p", m)]
-    else:
-        hdop = st.get("hdop")
-        if fix and hdop is not None:
-            parts += [(_hu_f(hdop, "%.2f"), b), (" HDOP  ", m)]
-        if fix and st.get("alt") is not None:
-            parts += [(str(int(st["alt"] + 0.5)), b), (" m  ", m)]
-        if kb is not None:
-            parts += [(str(kb * 1024 // PT_BYTES // 86400), b), (" nap", m)]
-    # (no " DGPS": it would not fit)
-    return (big, text[:6] if fix else "nincs fix", g if fix else r,
-            "%d/%d" % (used, seen), [net, upl, ("mem", g, parts)])
+        text = "kész" if up.get("url") else " "
+    return (big, fix, sv_used() or 0, _local_hm(), level, _tft_bars(), text,
+            bool(left))
 
 def tft_tick(now):
     """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors

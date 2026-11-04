@@ -208,11 +208,12 @@ class _FakeFramebuf(object):
     RGB565 stored little endian in the buffer, MONO_HLSB, blit from a
     FrameBuffer or a (buffer, w, h, format) tuple, read-only buffers too, with
     key and palette, clipped on all sides."""
-    RGB565, MONO_HLSB = 1, 3
+    RGB565, MONO_HLSB, GS4_HMSB = 1, 3, 2
 
     class FrameBuffer(object):
         def __init__(self, buf, w, h, fmt):
-            need = w * h * 2 if fmt == 1 else ((w + 7) // 8) * h
+            need = (w * h * 2 if fmt == 1 else ((w + 7) // 8) * h if fmt == 3
+                    else ((w + 1) // 2) * h)
             if len(buf) < need:
                 raise ValueError("buffer too small")
             self.buf, self.w, self.h, self.fmt = buf, w, h, fmt
@@ -224,6 +225,9 @@ class _FakeFramebuf(object):
                     return self.buf[o] | self.buf[o + 1] << 8
                 self.buf[o], self.buf[o + 1] = c & 255, c >> 8
                 return None
+            if self.fmt == 2:
+                o = ((self.w + 1) // 2) * y + x // 2
+                return self.buf[o] & 15 if x % 2 else self.buf[o] >> 4
             o = ((self.w + 7) // 8) * y + x // 8
             return self.buf[o] >> (7 - x % 8) & 1
 
@@ -18427,40 +18431,26 @@ check("UC-GSA: the satellites in use of one burst stay together past a second's 
       _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._uc_sv["used"] == [30],
       repr((_u1, hl._uc_sv["used"])))
 
-# the display: the values, the fonts, what goes to the panel
+# the display: the fonts, the values, what goes to the panel
 import gps_tft as _ft
 import gps_tft_font as _ff
 _fo = []
-for _f in (_ff.REG, _ff.BOLD, _ff.HERO):
-    _chars, _wd, _of, _dat, _h = _f
+for _f in (_ff.HERO, _ff.NUM, _ff.TXT, _ff.LAB):
+    _chars, _wd, _of, _dat, _h, _base = _f
     _end = 0
-    _ok1 = len(_wd) == len(_chars) and len(_of) == 2 * len(_chars)
+    _ok1 = len(_wd) == len(_chars) and len(_of) == 2 * len(_chars) and 0 < _base <= _h
     for _i in range(len(_chars)):
         _o = _of[_i * 2] | _of[_i * 2 + 1] << 8
         _ok1 = _ok1 and _o == _end
-        _end = _o + ((_wd[_i] + 7) // 8) * _h
+        _end = _o + ((_wd[_i] + 1) // 2) * _h
     _fo.append(_ok1 and _end == len(_dat))
-check("TFT-FONT: every glyph's offset and size add up; the accents, ° and ± and "
-      "the header's digits are there",
-      all(_fo) and all(c in _ff.REG[0] and c in _ff.BOLD[0]
-                       for c in "áéíóöőúüűÁÉÍÓÖŐÚÜŰ°±")
-      and _ff.HERO[0] == "0123456789-", repr(_fo))
-_c = [None, 0, 0, _ft.HOLD, None]
-_ps = [_ft.scroll(_c, 300) for _i in range(_ft.HOLD + (300 + _ft.ROOM) // _ft.STEP + 2)]
-_fit = [None, 0, 12, 0, None]
-_f0 = _ft.scroll(_fit, 100)
-_cw = [None, 0, 60, 0, None]
-_x1 = _ft.scroll(_cw, 300)
-_x2 = _ft.scroll(_cw, 306)               # -99 to -100 dBm: 6 px wider
-check("TFT-SCROLL: a row that fits stands; a long one holds, slides out to the "
-      "left past its end, comes in from the right, back at 0 and holds; a change of "
-      "width moves it one step, no jump",
-      _f0 == 0 and _fit[2] == 0 and _ps[:_ft.HOLD] == [0] * _ft.HOLD
-      and min(_ps) <= -300 + _ft.STEP and max(_ps) > 100 and _ps[-1] == 0
-      and all(-300 <= p <= _ft.ROOM for p in _ps)
-      and all(abs(_ps[i + 1] - _ps[i]) <= _ft.STEP or _ps[i] < -290
-              for i in range(len(_ps) - 2) if _ps[i + 1] <= 0 and _ps[i] <= 0)
-      and _x1 == -63 and _x2 == -66, repr((_ps[:14], _x1, _x2)))
+_shows = "0123456789-:kész KM/Hműhold"
+check("TFT-FONT: every glyph's offset and size add up, 16 levels; every character the "
+      "screen shows is in its font",
+      all(_fo) and all(c in _ff.HERO[0] and c in _ff.NUM[0] for c in "0123456789-")
+      and all(c in _ff.TXT[0] for c in "0123456789:-kész ")
+      and all(c in _ff.LAB[0] for c in "KM/Hműhold")
+      and len(set(_ff.HERO[3])) > 2, repr(_fo))
 
 hl.reset()
 hl.log_reset()
@@ -18474,56 +18464,36 @@ hl.wifi["state"] = "off"
 hl.st.update(date="2026-11-04", time="10:42:10", valid=True, lat=47.1, lon=18.4,
              pos_at=_clock[0], speed=46.6, hdop=0.968, used=22, view={"GP": 28},
              alt=182.4, rx=_clock[0], fixtype=3)
-_hu_t = [0]
-_hu0 = hl.uptime_s
-hl.uptime_s = lambda now=None: _hu_t[0]
-_fk0, hl._flash_kb = hl._flash_kb, lambda: 4400
-_tc0, hl._temp = hl._temp, lambda: 37
 _s1 = hl._tft_state(_clock[0])
-_tx = "".join(p[0] for p in _s1[4][2][2])
-_hu_t[0] = hl.TFT_PAGE
-_s1b = hl._tft_state(_clock[0])
-_txb = "".join(p[0] for p in _s1b[4][2][2])
-_hu_t[0] = 0
-_fix2 = hl.has_fix(_clock[0] + hl.STALE + 1)
 _s2 = hl._tft_state(_clock[0] + hl.STALE + 1)
 hl.wifi.update(state="connected", ssid="krumpli", rssi=-55, ip="192.168.1.60")
 hl.up["left"] = 0
 _s3 = hl._tft_state(_clock[0] + hl.STALE + 1)
-_hu_t[0] = hl.TFT_PAGE
-_s3b = hl._tft_state(_clock[0] + hl.STALE + 1)
-_hu_t[0] = 0
 _lv = []
 for _r in (-55, -60, -61, -70, -71, -80, -81, None):
     hl.wifi["rssi"] = _r
-    _x = hl._tft_state(_clock[0] + hl.STALE + 1)[4][0]
-    _lv.append((_x[0], _x[1]))
+    _lv.append(hl._tft_state(_clock[0])[4])
 hl.wifi["rssi"] = -55
 hl.up["url"] = None
-_s4 = hl._tft_state(_clock[0] + hl.STALE + 1)
-check("TFT-STATE: speed rounded and green with a fix, -- and red without; away: "
-      "no WiFi, points waiting with a space; at home: the name and address changing "
-      "with the clock kept, the signal only in the icon; two pages that each fit "
-      "the screen; decimal commas; no upload set up says so",
-      _s1[:3] == ("47", "3D fix", 2) and _s1[3] == "22/28"
-      and _s1[4][0][2][0][0] == "nincs WiFi  " and _s1[4][0][2][1][0] == "11:42"
-      and _s1[4][1][2][0] == ("1 284", 3) and "0,97 HDOP" in _tx and "182 m" in _tx
-      and "±" not in _tx
-      and not _fix2 and _s2[0] == "--" and _s2[1:3] == ("nincs fix", 4)
-      and [p[0] for p in _s3[4][0][2]][0] == "krumpli"
-      and [p[0] for p in _s3b[4][0][2]][0] == "192.168.1.60"
-      and "dBm" not in str(_s3[4][0]) and "11:42" in str(_s3[4][0]) and "11:42" in str(_s3b[4][0])
-      and _s1[4][0][0] == "w-" and _s3[4][0][0] == "w3"
-      and _lv == [("w3", 2), ("w3", 2), ("w2", 2), ("w2", 2), ("w1", 3), ("w1", 3), ("w0", 4), ("w0", 4)]
-      and all(x in _txb for x in (" MB", " °C", " ó ")) and "HDOP" not in _txb and " nap" in _tx
-      and _ft.row_width([(a, b) for a, b in _s1[4][2][2]]) <= _ft.ROOM
-      and _ft.row_width([(a, b) for a, b in _s1b[4][2][2]]) <= _ft.ROOM
-      and _ft.row_width([(a, b) for a, b in _s3[4][0][2]]) <= _ft.ROOM
-      and _ft.row_width([(a, b) for a, b in _s3b[4][0][2]]) <= _ft.ROOM
-      and _s3[4][1][2] == [("minden feltöltve", 2)]
-      and _s4[4][1][2] == [("nincs feltöltés", 1)],
-      repr((_s1, _s2[:3], _s3[4][:2], _s4[4][1])))
-hl.uptime_s, hl._flash_kb, hl._temp = _hu0, _fk0, _tc0
+_s4 = hl._tft_state(_clock[0])
+hl.up["url"] = "https://x"
+hl.up["left"] = 12345
+_s5 = hl._tft_state(_clock[0])
+hl.up["left"] = 0
+hl.st.update(svs=[(14, 44, 77, 11, True, False, 0), (30, 0, 36, 201, False, False, 0),
+                  (5, 20, 10, 50, True, False, 0), (9, 30, 10, 60, False, False, 0)],
+             svs_at=_clock[0])
+_s6 = hl._tft_state(_clock[0])
+_b6 = _s6[5]
+check("TFT-STATE: speed rounded with a fix, -- without; the clock; WiFi off or its "
+      "level by the signal; what waits, short when long, done or nothing set up; the "
+      "bars strongest first with the fix flag",
+      _s1[:4] == ("47", True, 22, "11:42") and _s1[4] is None and _s1[6:] == ("1284", True)
+      and _s2[0] == "--" and _s2[1] is False
+      and _s3[4] == 3 and _s3[6:] == ("kész", False)
+      and _lv == [3, 3, 2, 2, 1, 1, 0, 0]
+      and _s4[6] == " " and _s5[6] == "12k"
+      and _b6 == bytes((44, 1, 30, 0, 20, 1, 0, 0)), repr((_s1, _s2, _s3, _lv, _s4, _s5, _b6)))
 _ls = lambda d, t: hl.st.update(date=d, time=t) or hl._local_hm()
 check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
       "the switch on the last Sunday at 01:00 UTC, past midnight, no date",
@@ -18556,57 +18526,67 @@ _ft.start()
 _cmds0 = list(_TftSpi.out)
 _ft.Pin = _pin0
 _bg_all = len(_TftSpi.panel) == 160 * 80 and set(_TftSpi.panel.values()) == {_ft.BG}
-_short = ("up", 2, [("krumpli", 0)])
-_ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), ("mem", 2, [("y", 0)])])
+_bars = bytes((44, 1, 34, 1, 26, 1, 20, 1, 30, 0))
+_ft.set_state("47", True, 22, "11:42", None, _bars, "1284", True)
 _TftSpi.frames = 0
 _ft.frame()
 _f1 = _TftSpi.frames
 _px = lambda x, y: _TftSpi.panel.get((x + _ft.XO, y + _ft.YO))
-_lit = lambda x0, y0, x1, y1, c: sum(1 for y in range(y0, y1) for x in range(x0, x1) if _px(x, y) == c)
-_head_big = _lit(3, 4, 30, 26, _ft._COL[_ft.BRIGHT])
-_head_fix = _lit(104, 2, 150, 15, _ft._COL[_ft.GREEN])
-_head_sat = _lit(104, 16, 150, 29, _ft._COL[_ft.BRIGHT])
-_band = _px(90, 2) == _ft.BAND and _px(90, 29) == _ft.BAND
-_rows_lit = [_lit(18, 30 + i * 16, 60, 46 + i * 16, c) for i, c in enumerate(
-    (_ft._COL[_ft.BRIGHT], _ft._COL[_ft.GREEN], _ft._COL[_ft.BRIGHT]))]
-_icons = [_lit(2, 30 + i * 16, 14, 46 + i * 16, _ft._COL[_ft.GREEN]) for i in range(3)]
-_below = set(_px(x, 78) for x in range(160)) == {_ft.BG}
+_cnt = lambda x0, y0, x1, y1, c: sum(1 for y in range(y0, y1) for x in range(x0, x1) if _px(x, y) == c)
+_org = _ft._gs4_palette("org").pixel(15, 0)
+_txt = _ft._gs4_palette("txt").pixel(15, 0)
+_soft = _ft._gs4_palette("soft").pixel(15, 0)
+_mid = _ft._gs4_palette("org").pixel(7, 0)
+_speed = _cnt(4, 0, 60, 41, _org)
+_aa = _cnt(4, 0, 60, 41, _mid)
+_num = _cnt(130, 2, 160, 18, _txt)
+_clockp = _cnt(125, 28, 160, 40, _soft)
+_iconp = _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.DIM)
+_col = lambda i: [_px(3 + i * 6, y) for y in range(46, 75)]
+_h0, _h2 = _col(0).count(_ft.HEAT[2]), _col(2).count(_ft.HEAT[1])
+_red3 = _col(3).count(_ft.HEAT[0])
+_un4 = _col(4).count(_ft.UNUSED)
+_stub = _col(10).count(_ft.STUB)
+_below = _px(3, 75) == _ft.BG and _px(3, 47) == _ft.BG
+_upp = _cnt(126, 62, 160, 76, _org)
 _TftSpi.frames = 0
 _ft.frame()
 _f2 = _TftSpi.frames
-_long = ("mem", 2, [("0,97 HDOP 4,4 MB 7 nap 37 °C 2 ó 15 p és még sok minden", 0)])
-_ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), _long])
-for _i in range(_ft.HOLD):
-    _ft.frame()                          # (drawn, holding at its start)
-_before = {x: _px(x, 67) for x in range(18, 160)}
+_ft.set_state("48", True, 22, "11:42", None, _bars, "1284", True)
 _TftSpi.frames = 0
-for _i in range(3):
-    _ft.frame()
+_ft.frame()
 _f3 = _TftSpi.frames
-_after = {x: _px(x, 67) for x in range(18, 160)}
-_slid = _before != _after
-_row1_same = _lit(18, 46, 60, 62, _ft._COL[_ft.GREEN]) == _rows_lit[1]
-_icon_kept = _lit(2, 62, 14, 78, _ft._COL[_ft.GREEN]) == _icons[2]
-_tail = _lit(0, 62, 16, 78, _ft._COL[_ft.BRIGHT])
+_ft.set_state("48", True, 22, "11:42", None, _bars + bytes((25, 1)), "1284", True)
+_TftSpi.frames = 0
+_ft.frame()
+_f4 = _TftSpi.frames
+_ft.set_state("--", False, 0, "--:--", None, b"", "kész", False)
+_ft.frame()
+_nofix = (_cnt(4, 0, 60, 41, _org), _cnt(130, 2, 160, 18, _ft._gs4_palette("red").pixel(15, 0)) > 5,
+          _col(0).count(_ft.STUB), _cnt(126, 62, 160, 76, _ft._gs4_palette("soft").pixel(15, 0)) > 3)
 check("TFT-INIT: 16 bits a pixel and landscape, the whole panel cleared, the backlight "
       "only after that (no flash of random RAM)",
       b"\x36" in _cmds0 and b"\x68" in _cmds0 and b"\x05" in _cmds0 and _bg_all
       and _order[0][0] == 0 and _order[-1][0] == 1 and _order[-1][1] == len(_cmds0),
       repr((_order, len(_cmds0), _bg_all)))
-check("TFT-DRAW: the measured offset; speed, fix and satellites where they belong, in "
-      "their colours, on the header's band; three rows each in its own 16 px with its "
-      "icon; a first frame sends the header's 2 bands and 3 rows, an unchanged one none",
-      (_ft.XO, _ft.YO) == (1, 26) and _f1 == 5 and _f2 == 0 and _head_big > 60 and _head_fix > 20 and _head_sat > 20
-      and _band and all(n > 3 for n in _rows_lit) and all(n > 3 for n in _icons) and _below,
-      repr((_f1, _f2, _head_big, _head_fix, _head_sat, _band, _rows_lit, _icons, _below)))
-check("TFT-SLIDE: a long row really moves on the panel while the others are not sent; "
-      "its text does not run over its icon",
-      _slid and 1 <= _f3 <= 3 + 1 and _row1_same and _icon_kept and _tail == 0,
-      repr((_slid, _f3, _row1_same, _icon_kept, _tail)))
+check("TFT-DRAW: the measured offset; the speed orange and anti-aliased, the satellites, "
+      "the clock and the dim icon where they belong; a bar per satellite, its height by "
+      "the signal, its colour by level, brown out of the fix, stubs for the rest; what "
+      "waits in orange",
+      (_ft.XO, _ft.YO) == (1, 26) and _speed > 200 and _aa > 0 and _num > 15
+      and _clockp > 5 and _iconp > 10
+      and _h0 == _ft.bar_h(44) and _h2 == _ft.bar_h(26) and _red3 == _ft.bar_h(20)
+      and _un4 == _ft.bar_h(30) and _stub == 1 and _below and _upp > 5,
+      repr((_speed, _aa, _num, _clockp, _iconp, _h0, _h2, _red3, _un4, _stub, _below, _upp)))
+check("TFT-ZONES: a frame draws both zones (3 + 3 bands), an unchanged one none; a new "
+      "speed only the top, a new list only the bars",
+      _f1 == 6 and _f2 == 0 and _f3 == 3 and _f4 == 3, repr((_f1, _f2, _f3, _f4)))
+check("TFT-NOFIX: no fix: no orange, the satellite count red, stubs, done in grey",
+      _nofix == (0, True, 1, True), repr(_nofix))
 
 # the WiFi icon: its arcs fill up to the level, only the icon is sent
-_ft.set_state("47", "3D fix", 2, "22/28", [("w2", 2, [("krumpli", 0)]), ("up", 2, [("x", 2)]), ("mem", 2, [("y", 0)])])
-_ft._D.t = -1                            # the next frame is 0
+_ft.set_state("47", True, 22, "11:42", 2, _bars, "kész", False)
+_ft._D.t = -1
 _ft.frame()
 _seen = []
 _sent = []
@@ -18614,11 +18594,11 @@ for _i in range(2 * (2 + 4) + 2):
     _TftSpi.out[:] = []
     _ft.frame()
     _sent.append(sum(len(b) for b in _TftSpi.out if len(b) > 8))
-    _seen.append(_lit(2, 30, 14, 46, _ft._COL[_ft.GREEN]))
-_dim = _lit(2, 30, 14, 46, _ft.DIM)
-_ft.set_state("47", "3D fix", 2, "22/28", [("w-", 1, [("nincs WiFi  ", 1)]), ("up", 2, [("x", 2)]), ("mem", 2, [("y", 0)])])
+    _seen.append(_cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.HEAT[1]))
+_ft.set_state("47", True, 22, "11:42", None, _bars, "kész", False)
 _ft.frame()
-_off = (_lit(2, 30, 14, 46, _ft._COL[_ft.GREEN]), _lit(2, 30, 14, 46, _ft.DIM) > 10)
+_off = (_cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.HEAT[1]),
+        _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.DIM) > 10)
 _TftSpi.out[:] = []
 _ft.frame()
 _ft.frame()
@@ -18627,9 +18607,8 @@ check("TFT-WIFI: the arcs fill up to the level and start again, the rest dim, by
       "sending only the 12x12 icon; no WiFi: all dim and still",
       [_ft.wifi_lit(3, t * _ft.WAVE) for t in range(8)] == [0, 1, 2, 3, 3, 3, 3, 0]
       and [_ft.wifi_lit(0, t * _ft.WAVE) for t in range(4)] == [0, 0, 0, 0]
-      and len(set(_seen)) == 3 and max(_seen) > min(_seen) and _dim > 0
-      and set(_sent) <= {0, 288} and 288 in _sent and _off == (0, True) and _still,
-      repr((_seen, _sent, _off, _still)))
+      and len(set(_seen)) == 3 and set(_sent) <= {0, 288} and 288 in _sent
+      and _off == (0, True) and _still, repr((_seen, _sent, _off, _still)))
 
 # a panel gone wrong: dark, and each action counted when it runs
 hl._tft = _ft
@@ -18637,7 +18616,7 @@ hl._tft_t[:] = [None, None, 0, 0]
 _TftSpi.fail = True
 _dl, _dw = [], hl._diag_write
 hl._diag_write = _dl.append
-_ft._D.head = None
+_ft._D.top = None
 _pin_levels[:] = []
 for _i in range(hl.TFT_MAX_ERR):
     _clock[0] += hl.TFT_FRAME
@@ -18662,10 +18641,9 @@ for _i in range(hl.TFT_MAX_ERR):
     hl.tft_tick(_clock[0])               # a good frame between must not clear it
 hl._tft_state, hl._diag_write = _st0, _dw
 check("TFT-FAIL-STATE: values failing keep counting though frames succeed: no old speed "
-      "and green fix redrawn for ever", hl._tft is None
+      "redrawn for ever", hl._tft is None
       and [p[:2] for p in _pin_levels if p[0] == 21][-1:] == [(21, 0)], repr(hl._tft))
 _ft_seen = []
-_gl_mods = dict(sys.modules)
 gl._tft = None
 sys.modules["gps_tft"] = types.SimpleNamespace(start=lambda: _ft_seen.append("start"))
 gl._tft_start()
