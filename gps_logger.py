@@ -430,7 +430,8 @@ def reset():
               loop_at=time.ticks_ms(), loop_b=0, loop_ok=0, boot_t=[],
               storm_at=None, boot_at=None, boot_last=None, boot_gap=0,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
-              gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0, uc_ok=0, uc_fail=0,
+              gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0, uc_ok=0, uc_fail=0, uc_sys=None,
+              uc_sys_sent=False,
               ack_id=None, ack=None, ack_n=0, rate_nak=False, checked=True,
               hz1=0, hz5=0,
               set_ok=0, gst_at=None, loop_more=0, loop_said=None,
@@ -1182,6 +1183,8 @@ def _ubx_ack(frame, t0):
 # text banner at start-up. Its GSV carries the satellite list (NAV-SAT on a
 # u-blox), one sentence set per signal.
 UC_ACK_WAIT = 300                        # ms for a command's $OK
+UC_SYS = None                            # .env GPS_SYS: its systems and bands
+                                         # (CFGSYS mask, hex), None = its own
 GSV_EVERY = 5                            # s between satellite lists
 UC_GSA_GAP = 150                         # ms without a GSA: the next is a new
                                          # round (fixes come 200 ms apart)
@@ -1226,6 +1229,18 @@ def _uc_setup():
     try:
         if st["gps_ver"] is None:
             _uc_cmd("PDTINFO")           # (its answer: _uc_line)
+        if UC_SYS is not None and not st["uc_sys_sent"]:
+            # asked first (only a mask it does not have, and once a boot:
+            # setting one restarts the receiver, and that restart brings
+            # this setup back)
+            _uc_cmd("CFGSYS")
+            if st["uc_sys"] not in (None, UC_SYS):
+                st["uc_sys_sent"] = True
+                mask = "h%X" % UC_SYS
+                _uc_cmd("CFGSYS," + mask)
+                print("gps systems", mask)
+                _diag_write("gps systems " + mask)
+                return True
         for cmd in _uc_msgs():
             r = _uc_cmd(cmd)
             if r is False:
@@ -1248,6 +1263,11 @@ def _uc_line(p):
         st["uc_ok"] += 1
     elif n >= 4 and bytes(p[:4]) == b"FAIL":
         st["uc_fail"] += 1
+    elif n > 7 and bytes(p[:7]) == b"CFGSYS,":
+        try:
+            st["uc_sys"] = int(str(p[8:], "ascii"), 16)
+        except ValueError:
+            pass
     elif n > 8 and bytes(p[:8]) == b"PDTINFO,":
         f = str(p, "ascii").split(",")
         if len(f) > 4:
@@ -3375,6 +3395,18 @@ def _try_roam_home(w, arrival=False):
     wifi["down_ssid"] = None
     print("wifi roam", target["ssid"])
     _wifi_connect(w, target)
+
+def _gps_sys_env(env):
+    """GPS_SYS=<hex CFGSYS mask> in .env: the UC6580's systems and bands (its
+    own otherwise; H35155 on the board). A bad value keeps its own."""
+    global UC_SYS
+    v = _plain(env.get("GPS_SYS"))
+    if not v or not GPS_UC:
+        return
+    try:
+        UC_SYS = int(v[1:] if v[0] in "hH" else v, 16)
+    except ValueError:
+        print("GPS_SYS invalid, using the receiver's own")
 
 def _gps_model_env(env):
     """GPS_MODEL=<u-blox dynModel> in .env (0 portable, 3 pedestrian, 4
@@ -8477,6 +8509,7 @@ def _web_rows():
         ("fix", status()),
         ("sats", "%d / %s" % (view, sv_used())),
         ("hdop", st["hdop"]),
+        ("std", st.get("std")),          # (GST: the receiver's own error, m)
         ("hacc", None if st.get("hacc") is None or st.get("lat_i") is None
          else round(st["hacc"], 1)),
         ("fix_src", st.get("fix_src")),
@@ -9336,6 +9369,7 @@ def run():
         env = load_env(ENV_FILE)
         _gps_pins_env(env)               # before the first setup
         _gps_model_env(env)
+        _gps_sys_env(env)
         _gps_pvt_env(env)
         _min_move_env(env)
         _diag_env(env)

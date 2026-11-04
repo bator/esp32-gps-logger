@@ -119,6 +119,8 @@ firmware R6.0.0.0Build3700.
   does not use. The GNSS works from the board's own antenna, with the GNSS
   socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
   fix after a power cycle (the receiver keeps nothing without power).
+- **`GPS_SYS`** in `.env`: its `$CFGSYS` mask in hex, set once a boot when the
+  receiver has another (it restarts it); without it the receiver's own stays.
 - **L5:** every system and band is on by default (`$CFGSYS` `H35155`), but
   the board's antenna is L1 only, per Heltec's FAQ; an external one takes a
   moved resistor.

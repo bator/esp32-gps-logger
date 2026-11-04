@@ -13974,6 +13974,7 @@ else:
         ("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10", "grx"),
         ("gps rate 100 ms refused", "setup"),
         ("gps refused CFGMSG,0,7,5", "setup"),
+        ("gps systems h135155", "grx"),
         ("gps pvt no NAV-PVT, NMEA this boot", "pvt"),
         ("gps setup not taken: no NAV-PVT (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -18146,6 +18147,48 @@ hl.uart.cmds[:] = []
 hl.sv_poll(_clock[0])
 check("UC-NO-UBX: the satellite poll writes nothing (no UBX to a UC6580)",
       hl.uart.cmds == [] and hl.st["sv_miss"] == 0, repr(hl.uart.cmds))
+
+# GPS_SYS: a mask set once, only when the receiver has another
+class _UcSys(_UcUart):
+    has = "H35155"
+
+    def write(self, data):
+        n = super().write(data)
+        if bytes(data).startswith(b"$CFGSYS\r") or bytes(data).startswith(b"$CFGSYS*"):
+            del _uart_rx[-8:]
+            _uart_rx.extend(_nmea("CFGSYS," + self.has).encode() + b"\r\n$OK*04\r\n")
+        return n
+
+
+hl.reset()
+hl.UC_SYS = None
+hl._gps_sys_env({"GPS_SYS": "h135155"})
+_w = hl.UC_SYS
+hl._gps_sys_env({"GPS_SYS": "xyz"})
+_bad = hl.UC_SYS
+hl.uart = _UcSys()
+hl.gps_setup()
+_c1 = list(hl.uart.cmds)
+hl.gps_setup()
+_c2 = hl.uart.cmds[len(_c1):]
+hl.reset()
+hl.uart = _UcSys()
+hl.uart.has = "H135155"
+hl.gps_setup()
+_c3 = list(hl.uart.cmds)
+hl.UC_SYS = None
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_c4 = list(hl.uart.cmds)
+_set = lambda cs: [c for c in cs if c.startswith(b"$CFGSYS,")]
+check("UC-SYS: GPS_SYS sets the mask once a boot and only when it differs (it "
+      "restarts the receiver, the setup then comes back); without it none is sent",
+      _w == 0x135155 and _bad == 0x135155 and len(_set(_c1)) == 1
+      and _set(_c1)[0].startswith(b"$CFGSYS,h135155*") and not _set(_c2)
+      and any(c.startswith(b"$CFGNAV") for c in _c2) and not _set(_c3)
+      and any(c.startswith(b"$CFGNAV") for c in _c3)
+      and not any(c.startswith(b"$CFGSYS") for c in _c4), repr((_c1, _c3[:3])))
 
 # GSA: a burst is one round, wherever the second's clock falls in it
 hl.reset()

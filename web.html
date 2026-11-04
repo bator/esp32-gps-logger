@@ -334,7 +334,7 @@ var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
-var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime", "web_errs",
+var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
   "track_drop", "write_errs", "q_thin", "pos6"];   // raw status.json only
 
 function esc(v) {
