@@ -832,9 +832,13 @@ phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
 measured at most every 30 s (also for the OLED) and the waiting files are
 counted at most every 10 s. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
-`WEB=0` in `.env` turns both off. On the other networks the radio sleeps
-a few seconds after the last upload, so the page is up only briefly; with
-`WEB_AWAY=1` it stays connected there too. Those networks use DHCP: find
+`WEB=0` in `.env` turns both off. On the other networks the page is up
+only while the radio is on anyway (something still to upload, then up to
+`WIFI_IDLE`, 10 s, before it sleeps); with `WEB_AWAY=1` the radio stays
+connected for it there too. `WEB_AWAY` decides how long the radio stays
+on, not who is served: whenever the board is connected, on any network in
+`.env`, the page answers everyone on that network, with no password.
+Those networks use DHCP: find
 the board's address in the hotspot or router client list (by its DHCP
 hostname, `HOSTNAME`) or in the `web http://…/`
 console line.

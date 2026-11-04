@@ -3211,9 +3211,10 @@ def _web_search(now):
     >= SEEN_MIN_RSSI: not a hidden home whose BSSIDs are not known yet, a
     home link that dropped weaker than that, or the hotspot WEB_AWAY
     served the page on. The hourly round after a deliberate sleep is no
-    drop (down_at None). A link off home without WEB_AWAY served no page:
-    no search in any keep-alive mode (gpio, radio, KEEPALIVE=0 searched
-    30 min after a hotspot drop)."""
+    drop (down_at None). A link off home without WEB_AWAY keeps no page up
+    (it is served only while the radio is on anyway, see web_tick): no
+    search in any keep-alive mode (gpio, radio, KEEPALIVE=0 searched 30 min
+    after a hotspot drop)."""
     if not WEB or not (WEB_AWAY or _has_home()):
         return False
     if not wifi.get("down_home"):
@@ -9191,7 +9192,9 @@ def _web_bug(e):
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
-    within WEB_DEADLINE."""
+    within WEB_DEADLINE. On any network: WEB_AWAY keeps the radio on for the
+    page off home (wifi_tick), without it the page is up as long as the radio
+    is, for the uploads (README, status page)."""
     if not WEB or wifi["state"] != "connected":
         _web_close()
         return

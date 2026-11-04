@@ -18806,6 +18806,117 @@ check("OTA-BOARD: the Heltec takes only a manifest naming it, the C6 only one "
       and gl._ota_signed(_mf) == hl._ota_signed(_mf))
 _uart_rx[:] = b""
 
+# --- 2026-11 review: robustness (RB-n) and guards the suite did not notice
+# being removed (GD-n) ---------------------------------------------------------
+gl = _reload_logger()
+_rb_dir = tempfile.mkdtemp(prefix="rb-")
+gl.LOG_DIR = os.path.join(_rb_dir, "gpx")
+gl.HIST_DIR = os.path.join(_rb_dir, "hist")
+os.makedirs(gl.LOG_DIR)
+os.makedirs(gl.HIST_DIR)
+gl.reset()
+gl.log_reset()
+gl.wifi_reset()
+gl.up_reset()
+
+
+class _RbConn(object):
+    """An accepted client: what it asked for, what it got."""
+    def __init__(self, req=b""):
+        self.req, self.sent, self.closed = req, bytearray(), False
+    def settimeout(self, t):
+        pass
+    def recv(self, n):
+        out, self.req = self.req[:n], self.req[n:]
+        return out
+    def write(self, b):
+        self.sent.extend(b)
+        return len(b)
+    def send(self, b):
+        self.sent.extend(b)
+        return len(b)
+    sendall = send
+    def close(self):
+        self.closed = True
+
+
+class _RbListen(object):
+    """The listening socket: bind/listen as asked, failing at the name in
+    oom with a MemoryError, accept what waits, EAGAIN otherwise."""
+    oom = None
+    made = []
+    def __init__(self):
+        self.waiting, self.accepts, self.closed = [], 0, False
+        _RbListen.made.append(self)
+    def _oom(self, name):
+        if _RbListen.oom == name:
+            raise MemoryError("memory allocation failed")
+    def setsockopt(self, *a):
+        pass
+    def bind(self, a):
+        self._oom("bind")
+    def listen(self, n):
+        self._oom("listen")
+    def setblocking(self, b):
+        pass
+    def accept(self):
+        self._oom("accept")
+        self.accepts += 1
+        if not self.waiting:
+            raise OSError(11)
+        return self.waiting.pop(0), ("1.2.3.4", 5)
+    def close(self):
+        self.closed = True
+
+
+class _RbSockMod(object):
+    AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR = 2, 1, 1, 4
+    @staticmethod
+    def socket(*a):
+        if _RbListen.oom == "socket":
+            raise MemoryError("memory allocation failed")
+        return _RbListen()
+    @staticmethod
+    def getaddrinfo(host, port):
+        return [(2, 1, 0, "", (host, port))]
+
+
+def _rb_web(home=False, away=False):
+    """The server closed, WEB on, connected; home and WEB_AWAY as asked."""
+    gl._web_close()
+    gl.socket = _RbSockMod
+    gl.WEB, gl.WEB_AWAY = True, away
+    gl.wifi_reset()
+    gl.wifi.update(state="connected", ip="192.168.1.60", home=home)
+    del _RbListen.made[:]
+    _RbListen.oom = None
+    gl.ota["pend"] = None
+    gl._tick_bug.clear()
+    gl._guard_mem[0] = 0
+
+
+_rb_socket = gl.socket
+
+# RB-WEB-NET: web_tick serves on whatever network the radio is on. WEB_AWAY
+# only keeps the radio on for it off home (README, status page; commit
+# 7276921): the page "up only briefly" off home is this, so it stays
+_rb_rows = []
+for _h, _a in ((True, False), (False, False), (False, True)):
+    _rb_web(_h, _a)
+    gl.web_tick()
+    _c = _RbConn(b"GET /nope HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n")
+    _RbListen.made[-1].waiting.append(_c)
+    gl.web_tick()
+    _s1 = bytes(_c.sent[:12])
+    gl.wifi["state"] = "sleep"           # (asleep, on any network: closed)
+    gl.web_tick()
+    _rb_rows.append((_s1, _RbListen.made[-1].closed, gl._web_sock is None))
+check("RB-WEB-NET: connected, home or not, WEB_AWAY or not, the page answers; "
+      "with the radio asleep the socket is closed",
+      _rb_rows == [(b"HTTP/1.0 404", True, True)] * 3, repr(_rb_rows))
+
+shutil.rmtree(_rb_dir, ignore_errors=True)
+
 print()
 print("%d passed, %d failed" % (passed, failed))
 if failures:
