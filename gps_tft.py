@@ -2,10 +2,14 @@
 # Vext with the UC6580 (pins and the 1/26 offset measured on the board). The
 # logger hands over what to show (set_state) and calls frame() every TFT_FRAME.
 #
-# One band of 160x30 is all the RAM it takes, not a 25.6 KB frame buffer: the
-# header goes up once when it changes, a row whenever it changes or scrolls. A
-# row too long for the screen holds, slides out to the left and comes back in
-# from the right. Colours are RGB565 byte-swapped: the panel's order.
+# Top: the speed, big and orange, the satellites in the fix, the WiFi icon and the
+# clock. Bottom: how good the GPS is, four rising bars and a word, as on a phone,
+# and what waits for upload.
+#
+# One band of 160x16 is all the RAM it keeps, not a 25.6 KB frame buffer, and the
+# glyphs are read from flash, 16-level (anti-aliased) GS4: a zone goes up band by
+# band, only when it changed. The WiFi icon has its own 12x12. Colours are RGB565
+# byte-swapped: the panel's order.
 import framebuf
 import struct
 import time
@@ -15,37 +19,41 @@ import gps_tft_font as F
 
 W, H = 160, 80
 XO, YO = 1, 26                           # the panel inside the controller
-HEAD_H, ROW_H = 30, 16
-TEXT_X = 18                              # a row's text, after its icon
-HOLD = 10                                # frames a long row waits at its start
-STEP = 3                                 # px a frame it slides
+BAND_H = 16
+TOP_H, LOW_Y = 41, 46                    # the zones: rows 0-40, rows 46-79
+BL_PIN = 21
+WIFI_X, WIFI_Y = 113, 28
 
-def _c(r, g, b):
-    c = (r & 0xF8) << 8 | (g & 0xFC) << 3 | b >> 3
+def _c(t):
+    c = (t[0] & 0xF8) << 8 | (t[1] & 0xFC) << 3 | t[2] >> 3
     return c >> 8 | (c & 255) << 8
 
-BG, BAND = _c(10, 13, 17), _c(21, 26, 33)
-# a part's kind: bright, muted, green, amber, red
-BRIGHT, MUTED, GREEN, AMBER, RED = 0, 1, 2, 3, 4
-_COL = (_c(244, 246, 248), _c(142, 154, 168), _c(61, 220, 132), _c(255, 176, 32),
-        _c(255, 90, 90))
-# 12 x 12, MONO_HLSB: GPS is not on a row, it has the header
-ICONS = {
-    "net": b"\x00\x00\x3f\xc0\x60\x60\xcf\x30\x19\x80\x20\x40\x06\x00\x09\x00\x06\x00\x00\x00\x00\x00\x00\x00",
-    "up": b"\x06\x00\x0f\x00\x1f\x80\x36\xc0\x06\x00\x06\x00\x06\x00\x06\x00\x00\x00\x7f\xe0\x7f\xe0\x00\x00",
-    "mem": b"\x2a\x80\x7f\xc0\x80\x20\xbf\xa0\xa0\xa0\xa0\xa0\xa0\xa0\xbf\xa0\x80\x20\x7f\xc0\x2a\x80\x00\x00",
+_BG, _DIM_T = (5, 6, 8), (51, 59, 70)
+_TONES = {
+    "org": (255, 106, 43), "txt": (245, 247, 249), "soft": (198, 206, 216),
+    "mut": (141, 153, 167), "red": (255, 90, 90), "grn": (61, 220, 132),
+    "yel": (255, 194, 61),
 }
+BG, DIM, ORG, OFF = _c(_BG), _c(_DIM_T), _c(_TONES["org"]), _c((42, 47, 55))
+# by quality: 0 no fix, 1 weak, 2 fair, 3 strong: its word and tone
+QUALITY = (("nincs", "red"), ("gyenge", "org"), ("közepes", "yel"), ("erős", "grn"))
+UP_ICON = b"\x08\x00\x1c\x00\x3e\x00\x08\x00\x08\x00\x08\x00\x00\x00\x7f\x00"
+# The WiFi icon's four parts, 12x12 MONO_HLSB: the dot and the arcs inner to outer.
+# Level 0-3: that many arcs lit, None: all dim. It changes only with the level.
+WIFI = (b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\x00\x06\x00\x00\x00",
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0f\x00\x10\x80\x00\x00\x00\x00\x00\x00\x00\x00",
+        b"\x00\x00\x00\x00\x00\x00\x0f\x00\x30\xc0\x40\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        b"\x1f\x80\x60\x60\x80\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
 
-_g = {}                                  # glyphs used so far: (width, buffer)
+_FONTS = [(f, memoryview(f[3])) for f in (F.HERO, F.NUM, F.TXT, F.LAB, F.WORD)]
+_HERO, _NUM, _TXT, _LAB, _WORD = _FONTS
 _pal = {}
-_ic = {}
 
 class _D:
     spi = cs = dc = None
-    buf = head = row = None
-    t = 0
+    buf = fb = ic = icb = None
     state = None
-    drawn = [None, None, None, None]     # header, rows: what the panel shows
+    top = low = lit = None               # what the panel shows
 
 def _cmd(c, data=None):
     _D.cs(0)
@@ -60,10 +68,15 @@ def _window(x, y, w, h):
     _cmd(0x2A, struct.pack(">HH", XO + x, XO + x + w - 1))
     _cmd(0x2B, struct.pack(">HH", YO + y, YO + y + h - 1))
 
+def _send(y, h):
+    """The band's top h rows to the panel's row y."""
+    _window(0, y, W, h)
+    _cmd(0x2C, memoryview(_D.buf)[:W * h * 2])
+
 def start():
-    """The panel on and dark blue-black, then the backlight (not before: no
-    flash of its random RAM)."""
-    Pin(21, Pin.OUT, value=0)
+    """The panel on and blank, then the backlight (not before: no flash of its
+    random RAM)."""
+    Pin(BL_PIN, Pin.OUT, value=0)
     _D.cs = Pin(38, Pin.OUT, value=1)
     _D.dc = Pin(40, Pin.OUT, value=0)
     rst = Pin(39, Pin.OUT, value=1)
@@ -80,19 +93,22 @@ def start():
     _cmd(0x21)                           # IPS: colours inverted
     _cmd(0x13)
     _cmd(0x29)
-    _D.buf = bytearray(W * HEAD_H * 2)
-    _D.head = framebuf.FrameBuffer(_D.buf, W, HEAD_H, framebuf.RGB565)
-    _D.row = framebuf.FrameBuffer(_D.buf, W, ROW_H, framebuf.RGB565)
-    _D.drawn = [None, None, None, None]
-    _D.head.fill(BG)
-    _window(0, 0, W, HEAD_H)
-    _cmd(0x2C, _D.buf)
-    for y in range(HEAD_H, H, HEAD_H):
-        _window(0, y, W, min(HEAD_H, H - y))
-        _cmd(0x2C, memoryview(_D.buf)[:W * min(HEAD_H, H - y) * 2])
-    Pin(21, Pin.OUT, value=1)
+    if _D.buf is None:
+        _D.buf = bytearray(W * BAND_H * 2)
+        _D.fb = framebuf.FrameBuffer(_D.buf, W, BAND_H, framebuf.RGB565)
+        _D.icb = bytearray(12 * 12 * 2)
+        _D.ic = framebuf.FrameBuffer(_D.icb, 12, 12, framebuf.RGB565)
+    _D.top = _D.low = _D.lit = None
+    _D.fb.fill(BG)
+    for y in range(0, H, BAND_H):
+        _send(y, BAND_H)
+    Pin(BL_PIN, Pin.OUT, value=1)
 
-def _palette(col):
+def off():
+    """Dark: a frozen speed must not stay lit. A dead SPI bus does not stop this."""
+    Pin(BL_PIN, Pin.OUT, value=0)
+
+def _mono_palette(col):
     p = _pal.get(col)
     if p is None:
         p = framebuf.FrameBuffer(bytearray(4), 2, 1, framebuf.RGB565)
@@ -101,106 +117,109 @@ def _palette(col):
         _pal[col] = p
     return p
 
-def _index(font, ch):
-    i = font[0].find(ch)
-    return i if i >= 0 else font[0].find("?") if font is not F.HERO else 0
+def _gs4_palette(name):
+    """16 levels from the background to a tone: the anti-aliasing."""
+    p = _pal.get(name)
+    if p is None:
+        t = _TONES[name]
+        p = framebuf.FrameBuffer(bytearray(32), 16, 1, framebuf.RGB565)
+        for v in range(16):
+            p.pixel(v, 0, _c(tuple((_BG[k] * (15 - v) + t[k] * v) // 15 for k in range(3))))
+        _pal[name] = p
+    return p
 
-def _width(font, s):
+def _index(f, ch):
+    return max(f[0].find(ch), 0)
+
+def width(font, s):
+    f = font[0]
     n = 0
     for ch in s:
-        n += font[1][_index(font, ch)]
+        n += f[1][_index(f, ch)]
     return n
 
-def _glyph(font, ch):
-    k = (id(font), ch)
-    g = _g.get(k)
-    if g is None:
-        i = _index(font, ch)
-        w = font[1][i]
-        h = font[4]
-        n = ((w + 7) // 8) * h
-        o = font[2][i * 2] | font[2][i * 2 + 1] << 8
-        g = (w, framebuf.FrameBuffer(bytearray(font[3][o:o + n]), w, h,
-                                     framebuf.MONO_HLSB))
-        _g[k] = g
-    return g
-
-def _text(fb, font, s, x, y, col, x1=W):
-    p = _palette(col)
+def _text(fb, font, s, x, base, tone):
+    """s with its baseline at row base, each glyph blitted straight from flash."""
+    f, mv = font
+    p = _gs4_palette(tone)
+    y = base - f[5]
+    h = f[4]
     for ch in s:
-        if x >= x1:
-            break
-        g = _glyph(font, ch)
-        if x + g[0] > 0:
-            fb.blit(g[1], x, y, 0, p)
-        x += g[0]
+        i = _index(f, ch)
+        w = f[1][i]
+        o = f[2][i * 2] | f[2][i * 2 + 1] << 8
+        fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, framebuf.GS4_HMSB), x, y, BG, p)
+        x += w
     return x
 
-def _part_font(kind):
-    return F.REG if kind == MUTED else F.BOLD
+def _right(fb, font, s, x1, base, tone):
+    _text(fb, font, s, x1 - width(font, s), base, tone)
 
-def row_width(parts):
-    n = 0
-    for s, kind in parts:
-        n += _width(_part_font(kind), s)
-    return n
+def _wifi(fb, lit, col, x, y):
+    """The dot always, the arcs up to lit in col, the others dim; dim all when
+    lit is None (no WiFi)."""
+    for n, part in enumerate(WIFI):
+        c = DIM if lit is None or n > lit else col
+        fb.blit((part, 12, 12, framebuf.MONO_HLSB), x, y, 0, _mono_palette(c))
 
-def pos(t, w, room):
-    """A row's x offset in frame t: holds, slides out to the left, comes in
-    from the right. 0 when it fits."""
-    if w <= room:
-        return 0
-    t %= HOLD + (w + room) // STEP + 1
-    if t < HOLD:
-        return 0
-    x = (t - HOLD) * STEP
-    return -x if x <= w else room - (x - w)
+def _wifi_frame(lit):
+    """Only the icon goes up: a changed level needs no whole zone."""
+    _D.ic.fill(BG)
+    _wifi(_D.ic, lit, ORG, 0, 0)
+    _window(WIFI_X, WIFI_Y, 12, 12)
+    _cmd(0x2C, _D.icb)
 
-def _draw_head(big, fix, fixkind, sats):
-    fb = _D.head
-    fb.fill(BAND)
-    x = _text(fb, F.HERO, big, 3, 4, _COL[BRIGHT])
-    _text(fb, F.REG, "km/h", x + 4, 14, _COL[MUTED])
-    _text(fb, F.BOLD, fix, 104, 2, _COL[fixkind])
-    _text(fb, F.BOLD, sats, 104, 16, _COL[BRIGHT])
-    _window(0, 0, W, HEAD_H)
-    _cmd(0x2C, _D.buf)
+def _draw_top(speed, fix, used, clock, lit):
+    fb = _D.fb
+    for top in range(0, TOP_H, BAND_H):
+        fb.fill(BG)
+        x = _text(fb, _HERO, speed, 4, 37 - top, "org" if fix else "mut")
+        _text(fb, _LAB, "KM/H", x + 3, 37 - top, "mut")
+        _right(fb, _NUM, str(used), 158, 17 - top, "txt" if fix else "red")
+        _right(fb, _LAB, "műhold", 158, 26 - top, "mut")
+        _right(fb, _TXT, clock, 158, 38 - top, "soft")
+        _wifi(fb, lit, ORG, WIFI_X, WIFI_Y - top)
+        _send(top, min(BAND_H, TOP_H - top))
 
-def _icon(fb, name, col):
-    g = _ic.get(name)
-    if g is None:
-        g = framebuf.FrameBuffer(bytearray(ICONS[name]), 12, 12, framebuf.MONO_HLSB)
-        _ic[name] = g
-    fb.blit(g, 2, 2, 0, _palette(col))
+def _draw_low(quality, up, up_on):
+    """How good the GPS is, as a phone's signal; what waits for upload."""
+    fb = _D.fb
+    word, tone = QUALITY[quality]
+    col = _c(_TONES[tone])
+    tone_up = "org" if up_on else "soft"
+    for top in range(LOW_Y, H, BAND_H):
+        fb.fill(BG)
+        y0 = 74 - top
+        for i in range(4):
+            h = 6 + i * 6
+            fb.fill_rect(5 + i * 8, y0 - h, 6, h, col if quality and i <= quality else OFF)
+        _text(fb, _LAB, "GPS", 42, 62 - top, "mut")
+        _text(fb, _WORD, word, 42, y0, tone)
+        if up.strip():
+            x = 158 - width(_TXT, up)
+            fb.blit((UP_ICON, 9, 8, framebuf.MONO_HLSB), x - 12, y0 - 8, 0,
+                    _mono_palette(_c(_TONES[tone_up])))
+            _text(fb, _TXT, up, x, y0, tone_up)
+        _send(top, min(BAND_H, H - top))
 
-def _draw_row(i, icon, kind, parts, off):
-    fb = _D.row
-    fb.fill(BG)
-    x = TEXT_X + off
-    for s, k in parts:
-        font = _part_font(k)
-        x = _text(fb, font, s, x, 1, _COL[k])
-    fb.fill_rect(0, 0, TEXT_X, ROW_H, BG)
-    _icon(fb, icon, _COL[kind])
-    _window(0, HEAD_H + 1 + i * ROW_H - 1, W, ROW_H)
-    _cmd(0x2C, memoryview(_D.buf)[:W * ROW_H * 2])
-
-def set_state(big, fix, fixkind, sats, rows):
-    """rows: three (icon, its kind, [(text, kind), ...])."""
-    _D.state = ((big, fix, fixkind, sats), rows)
+def set_state(speed, fix, used, clock, level, quality, up, up_on):
+    """speed: text; fix: a usable fix; used: satellites in it; clock: text;
+    level: WiFi 0-3 or None; quality: see QUALITY; up: text, up_on: points wait."""
+    _D.state = (speed, fix, used, clock, level, quality, up, up_on)
 
 def frame():
     s = _D.state
     if s is None:
         return
-    _D.t += 1
-    if s[0] != _D.drawn[0]:
-        _draw_head(*s[0])
-        _D.drawn[0] = s[0]
-    room = W - TEXT_X
-    for i, (icon, kind, parts) in enumerate(s[1]):
-        off = pos(_D.t, row_width(parts), room)
-        d = (icon, kind, parts, off)
-        if d != _D.drawn[i + 1]:
-            _draw_row(i, icon, kind, parts, off)
-            _D.drawn[i + 1] = d
+    speed, fix, used, clock, level, quality, up, up_on = s
+    top = (speed, fix, used, clock)
+    if top != _D.top:
+        _draw_top(speed, fix, used, clock, level)
+        _D.top, _D.lit = top, level
+    elif level != _D.lit:
+        _wifi_frame(level)
+        _D.lit = level
+    low = (quality, up, up_on)
+    if low != _D.low:
+        _draw_low(quality, up, up_on)
+        _D.low = low

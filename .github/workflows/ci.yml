@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pyflakes
-      - run: python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
+      - run: python -m pyflakes gps_logger.py gps_tft.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
 
   shellcheck:
     name: shellcheck

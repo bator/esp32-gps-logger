@@ -106,23 +106,28 @@ firmware R6.0.0.0Build3700.
   1792 KB OTA slots, the file system is ~4.4 MB (about 7 days of driving
   offline).
 - **Its own OTA folder:** give the board its own `OTA_DEST` and `.env`
-  `OTA_URL`. A manifest names its board and is refused by any other.
+  `OTA_URL`. Its manifest names the board, which the C6 refuses, and it refuses
+  any other (a C6 manifest names none).
 - **Not a u-blox:** no UBX, so no NAV-PVT, `GPS_MODEL` or `GPS_PVT`. The
   logger sets it up with Unicore commands (`$CFGNAV`, `$CFGMSG`: 5 Hz, GGA and
   RMC every fix, GST once a second, GSA and GSV every 5 s) at every boot, as a
-  power cycle brings its defaults back. The satellite list comes from GSV.
-- **Display:** speed, fix and satellites on top, then WiFi and the clock (Hungarian
-  time), what waits for upload, and HDOP, altitude, free space, temperature
-  and uptime; a row too long slides sideways. The backlight is always on.
-  `gps_tft.py`, its fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
+  power cycle brings its defaults back. With a fix it sends GSV and GSA at 1 Hz
+  whatever the rate (~2.3 KB/s). The satellite list comes from GSV, decoded every
+  5 s.
+- **Display:** the speed, big and orange, the satellites in the fix, the clock
+  (Hungarian time), a WiFi icon with the signal's strength in arcs, how good
+  the GPS is (four rising bars and a word, as on a phone) and what waits for upload. It
+  never scrolls; the rest is on the status page. The backlight is always on.
+  `gps_tft.py`, its anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
   socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
   fix after a power cycle (the receiver keeps nothing without power).
 - **Accuracy, measured standing outdoors:** half of the fixes within 2.3 m of the
   middle after two minutes, 95% within 3.8 m, HDOP 0.9, ~26 satellites in use. It
-  starts 15 m off and takes about a minute to reach 5 m, so a fix's first minute
-  counts only above 15 km/h. Its GST does not show this (0.3 m while 4 m off).
+  starts 15 m off and takes about a minute to reach 5 m, so the first minute after
+  a start (boot or receiver restart; a fix regained later is not held back) counts
+  only above 15 km/h. Its GST does not show this (0.3 m while 4 m off).
   It refuses SBAS (`$CFGSYS` bit 20: `$FAIL`).
 - **`GPS_SYS`** in `.env`: its `$CFGSYS` mask in hex, set once a boot when the
   receiver has another (it restarts it); without it the receiver's own stays.

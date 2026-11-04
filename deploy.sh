@@ -93,13 +93,13 @@ echo "Board: $MACHINE ($ARCH)"
 FROZEN=$($MPREMOTE connect "$PORT" exec "
 try:
     import gps_frozen
-    print('frozen', gps_frozen.COMMIT, getattr(gps_frozen, 'SHA', '-'))
+    print('frozen', gps_frozen.COMMIT, getattr(gps_frozen, 'SHA', '-'), getattr(gps_frozen, 'TFT', '-'))
 except ImportError:
-    print('plain')" | tr -d '\r' | grep -E '^(frozen [^ ]+ [^ ]+|plain)$' | tail -n 1 || true)
+    print('plain')" | tr -d '\r' | grep -E '^(frozen [^ ]+ [^ ]+( [^ ]+)?|plain)$' | tail -n 1 || true)
 KEEP_MPY=0
 case "$FROZEN" in
     frozen*)
-        read -r _ FCOMMIT FSHA <<< "$FROZEN"
+        read -r _ FCOMMIT FSHA FTFT <<< "$FROZEN"
         if [ "${FORCE_MPY:-0}" = 1 ]; then
             KEEP_MPY=1
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
@@ -107,7 +107,11 @@ case "$FROZEN" in
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
             $PY -m mpy_cross -march="$ARCH" -o gps_logger.mpy gps_logger.py
         else
-            if [ "$FSHA" != "$(sha256sum gps_logger.py | cut -d' ' -f1)" ]; then
+            # (the display's code on the board that has it: an older firmware
+            # has no TFT, the logger's SHA alone then)
+            if [ "$FSHA" != "$(sha256sum gps_logger.py | cut -d' ' -f1)" ] \
+               || { [ -n "${FTFT:-}" ] && [ "$FTFT" != "-" ] && \
+                    [ "$FTFT" != "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d' ' -f1)" ]; }; then
                 echo "The frozen logger ($FCOMMIT) is not this gps_logger.py: run" >&2
                 echo "tools/build_firmware.sh --flash first (FORCE=1 deploys main.py and the page anyway)" >&2
                 [ "${FORCE:-0}" = 1 ] || exit 1
