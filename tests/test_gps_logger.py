@@ -18435,7 +18435,7 @@ check("UC-GSA: the satellites in use of one burst stay together past a second's 
 import gps_tft as _ft
 import gps_tft_font as _ff
 _fo = []
-for _f in (_ff.HERO, _ff.NUM, _ff.TXT, _ff.LAB):
+for _f in (_ff.HERO, _ff.NUM, _ff.TXT, _ff.LAB, _ff.WORD):
     _chars, _wd, _of, _dat, _h, _base = _f
     _end = 0
     _ok1 = len(_wd) == len(_chars) and len(_of) == 2 * len(_chars) and 0 < _base <= _h
@@ -18449,7 +18449,8 @@ check("TFT-FONT: every glyph's offset and size add up, 16 levels; every characte
       "screen shows is in its font",
       all(_fo) and all(c in _ff.HERO[0] and c in _ff.NUM[0] for c in "0123456789-")
       and all(c in _ff.TXT[0] for c in "0123456789:-kész ")
-      and all(c in _ff.LAB[0] for c in "KM/Hműhold")
+      and all(c in _ff.LAB[0] for c in "KM/HGPSműhold")
+      and all(c in _ff.WORD[0] for w, _t in _ft.QUALITY for c in w)
       and len(set(_ff.HERO[3])) > 2, repr(_fo))
 
 hl.reset()
@@ -18481,20 +18482,21 @@ hl.up["url"] = "https://x"
 hl.up["left"] = 12345
 _s5 = hl._tft_state(_clock[0])
 hl.up["left"] = 0
-hl.st.update(svs=[(14, 44, 77, 11, True, False, 0), (30, 0, 36, 201, False, False, 0),
-                  (5, 20, 10, 50, True, False, 0), (9, 30, 10, 60, False, False, 0)],
-             svs_at=_clock[0])
-_s6 = hl._tft_state(_clock[0])
-_b6 = _s6[5]
+_gq = []
+for _hd, _us in ((0.9, 26), (1.5, 10), (1.5, 9), (1.6, 26), (3.0, 12), (3.1, 26), (9.0, 8), (None, 26)):
+    hl.st.update(hdop=_hd, used=_us, svs=None)
+    _gq.append(hl._gps_quality(True))
+_gq0 = hl._gps_quality(False)
 check("TFT-STATE: speed rounded with a fix, -- without; the clock; WiFi off or its "
       "level by the signal, down at once, up only past a margin; what waits, short when long, done or nothing set up; the "
-      "bars strongest first with the fix flag",
+      "GPS's quality from HDOP and the satellites in the fix",
       _s1[:4] == ("47", True, 22, "11:42") and _s1[4] is None and _s1[6:] == ("1284", True)
       and _s2[0] == "--" and _s2[1] is False
       and _s3[4] == 3 and _s3[6:] == ("kész", False)
       and _lv == [3, 3, 2, 2, 1, 1, 0, 0] and _hy == [2, 2, 2, 3, 0, 3, 2, 1]
       and _s4[6] == " " and _s5[6] == "12k"
-      and _b6 == bytes((44, 1, 30, 0, 20, 1, 0, 0)), repr((_s1, _s2, _s3, _lv, _s4, _s5, _b6)))
+      and _gq == [3, 3, 2, 2, 2, 1, 1, 1] and _gq0 == 0 and _s1[5] == 3 and _s2[5] == 0,
+      repr((_s1, _s2, _s3, _lv, _s4, _s5, _gq, _gq0)))
 _ls = lambda d, t: hl.st.update(date=d, time=t) or hl._local_hm()
 check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
       "the switch on the last Sunday at 01:00 UTC, past midnight, no date",
@@ -18527,8 +18529,7 @@ _ft.start()
 _cmds0 = list(_TftSpi.out)
 _ft.Pin = _pin0
 _bg_all = len(_TftSpi.panel) == 160 * 80 and set(_TftSpi.panel.values()) == {_ft.BG}
-_bars = bytes((44, 1, 34, 1, 26, 1, 20, 1, 30, 0))
-_ft.set_state("47", True, 22, "11:42", None, _bars, "1284", True)
+_ft.set_state("47", True, 22, "11:42", None, 3, "1284", True)
 _TftSpi.frames = 0
 _ft.frame()
 _f1 = _TftSpi.frames
@@ -18537,71 +18538,73 @@ _cnt = lambda x0, y0, x1, y1, c: sum(1 for y in range(y0, y1) for x in range(x0,
 _org = _ft._gs4_palette("org").pixel(15, 0)
 _txt = _ft._gs4_palette("txt").pixel(15, 0)
 _soft = _ft._gs4_palette("soft").pixel(15, 0)
+_grn = _ft._gs4_palette("grn").pixel(15, 0)
 _mid = _ft._gs4_palette("org").pixel(7, 0)
 _speed = _cnt(4, 0, 60, 41, _org)
 _aa = _cnt(4, 0, 60, 41, _mid)
 _num = _cnt(130, 2, 160, 18, _txt)
 _clockp = _cnt(125, 28, 160, 40, _soft)
 _iconp = _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.DIM)
-_col = lambda i: [_px(3 + i * 6, y) for y in range(46, 75)]
-_h0, _h2 = _col(0).count(_ft.HEAT[2]), _col(2).count(_ft.HEAT[1])
-_red3 = _col(3).count(_ft.HEAT[0])
-_un4 = _col(4).count(_ft.UNUSED)
-_stub = _col(10).count(_ft.STUB)
-_below = _px(3, 75) == _ft.BG and _px(3, 47) == _ft.BG
+_barc = _c0 = _ft._c(_ft._TONES["grn"])
+_bh = [sum(1 for y in range(46, 76) if _px(5 + i * 8 + 2, y) == _barc) for i in range(4)]
+_word = _cnt(42, 62, 100, 76, _grn)
+_gpsl = _cnt(42, 50, 70, 63, _ft._gs4_palette("mut").pixel(15, 0))
 _upp = _cnt(126, 62, 160, 76, _org)
+_upi = _cnt(100, 62, 158, 76, _ft._c(_ft._TONES["org"]))
 _TftSpi.frames = 0
 _ft.frame()
 _f2 = _TftSpi.frames
-_ft.set_state("48", True, 22, "11:42", None, _bars, "1284", True)
+_ft.set_state("48", True, 22, "11:42", None, 3, "1284", True)
 _TftSpi.frames = 0
 _ft.frame()
 _f3 = _TftSpi.frames
-_ft.set_state("48", True, 22, "11:42", None, _bars + bytes((25, 1)), "1284", True)
+_ft.set_state("48", True, 22, "11:42", None, 1, "1284", True)
 _TftSpi.frames = 0
 _ft.frame()
 _f4 = _TftSpi.frames
-_ft.set_state("--", False, 0, "--:--", None, b"", "kész", False)
+_weak = [sum(1 for y in range(46, 76) if _px(5 + i * 8 + 2, y) == _ft._c(_ft._TONES["org"])) for i in range(4)]
+_ft.set_state("--", False, 0, "--:--", None, 0, "kész", False)
 _ft.frame()
 _nofix = (_cnt(4, 0, 60, 41, _org), _cnt(130, 2, 160, 18, _ft._gs4_palette("red").pixel(15, 0)) > 5,
-          _col(0).count(_ft.STUB), _cnt(126, 62, 160, 76, _ft._gs4_palette("soft").pixel(15, 0)) > 3)
+          [sum(1 for y in range(46, 76) if _px(5 + i * 8 + 2, y) == _ft.OFF) for i in range(4)],
+          _cnt(42, 62, 100, 76, _ft._gs4_palette("red").pixel(15, 0)) > 5,
+          _cnt(126, 62, 160, 76, _ft._gs4_palette("soft").pixel(15, 0)) > 3)
 check("TFT-INIT: 16 bits a pixel and landscape, the whole panel cleared, the backlight "
       "only after that (no flash of random RAM)",
       b"\x36" in _cmds0 and b"\x68" in _cmds0 and b"\x05" in _cmds0 and _bg_all
       and _order[0][0] == 0 and _order[-1][0] == 1 and _order[-1][1] == len(_cmds0),
       repr((_order, len(_cmds0), _bg_all)))
 check("TFT-DRAW: the measured offset; the speed orange and anti-aliased, the satellites, "
-      "the clock and the dim icon where they belong; a bar per satellite, its height by "
-      "the signal, its colour by level, brown out of the fix, stubs for the rest; what "
-      "waits in orange",
+      "the clock and the dim icon where they belong; strong GPS: four rising green bars, "
+      "the word and the label; what waits in orange with its arrow",
       (_ft.XO, _ft.YO) == (1, 26) and _speed > 200 and _aa > 0 and _num > 15
-      and _clockp > 5 and _iconp > 10
-      and _h0 == _ft.bar_h(44) and _h2 == _ft.bar_h(26) and _red3 == _ft.bar_h(20)
-      and _un4 == _ft.bar_h(30) and _stub == 1 and _below and _upp > 5,
-      repr((_speed, _aa, _num, _clockp, _iconp, _h0, _h2, _red3, _un4, _stub, _below, _upp)))
+      and _clockp > 5 and _iconp > 10 and _bh == [6, 12, 18, 24] and _word > 5
+      and _gpsl > 5 and _upp > 5 and _upi > 10,
+      repr((_speed, _aa, _num, _clockp, _iconp, _bh, _word, _gpsl, _upp, _upi)))
 check("TFT-ZONES: a frame draws both zones (3 + 3 bands), an unchanged one none; a new "
-      "speed only the top, a new list only the bars",
-      _f1 == 6 and _f2 == 0 and _f3 == 3 and _f4 == 3, repr((_f1, _f2, _f3, _f4)))
-check("TFT-NOFIX: no fix: no orange, the satellite count red, stubs, done in grey",
-      _nofix == (0, True, 1, True), repr(_nofix))
+      "speed only the top, a new quality only the lower zone, weak lights two bars",
+      _f1 == 6 and _f2 == 0 and _f3 == 3 and _f4 == 3 and _weak == [6, 12, 0, 0],
+      repr((_f1, _f2, _f3, _f4, _weak)))
+check("TFT-NOFIX: no fix: no orange, the satellite count red, all bars off, the word "
+      "red, done in grey", _nofix == (0, True, [6, 12, 18, 24], True, True), repr(_nofix))
 
 # the WiFi icon: still, its arcs by the level; a new level sends only the icon
 _arcs = lambda c: _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, c)
-_ft.set_state("47", True, 22, "11:42", 3, _bars, "kész", False)
+_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False)
 _ft.frame()
-_a3 = _arcs(_ft.HEAT[1])
+_a3 = _arcs(_ft.ORG)
 _TftSpi.out[:] = []
 for _i in range(20):
     _ft.frame()
 _still3 = sum(1 for b in _TftSpi.out if len(b) > 8) == 0
-_ft.set_state("47", True, 22, "11:42", 1, _bars, "kész", False)
+_ft.set_state("47", True, 22, "11:42", 1, 3, "kész", False)
 _TftSpi.out[:] = []
 _ft.frame()
 _sent1 = [len(b) for b in _TftSpi.out if len(b) > 8]
-_a1 = _arcs(_ft.HEAT[1])
-_ft.set_state("47", True, 22, "11:42", None, _bars, "kész", False)
+_a1 = _arcs(_ft.ORG)
+_ft.set_state("47", True, 22, "11:42", None, 3, "kész", False)
 _ft.frame()
-_off = (_arcs(_ft.HEAT[1]), _arcs(_ft.DIM) > 10)
+_off = (_arcs(_ft.ORG), _arcs(_ft.DIM) > 10)
 check("TFT-WIFI: the icon stands: 20 frames send nothing; a lower level sends only the "
       "12x12 icon with fewer arcs lit; no WiFi: all dim",
       _still3 and _sent1 == [288] and _a3 > _a1 > 0 and _off == (0, True),

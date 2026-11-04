@@ -3,7 +3,8 @@
 # logger hands over what to show (set_state) and calls frame() every TFT_FRAME.
 #
 # Top: the speed, big and orange, the satellites in the fix, the WiFi icon and the
-# clock. Bottom: every satellite's signal as a bar, what waits for upload.
+# clock. Bottom: how good the GPS is, four rising bars and a word, as on a phone,
+# and what waits for upload.
 #
 # One band of 160x16 is all the RAM it keeps, not a 25.6 KB frame buffer, and the
 # glyphs are read from flash, 16-level (anti-aliased) GS4: a zone goes up band by
@@ -19,10 +20,9 @@ import gps_tft_font as F
 W, H = 160, 80
 XO, YO = 1, 26                           # the panel inside the controller
 BAND_H = 16
-TOP_H, BARS_Y = 41, 46                   # the zones: rows 0-40, rows 46-79
+TOP_H, LOW_Y = 41, 46                    # the zones: rows 0-40, rows 46-79
 BL_PIN = 21
 WIFI_X, WIFI_Y = 113, 28
-N_BARS = 21
 
 def _c(t):
     c = (t[0] & 0xF8) << 8 | (t[1] & 0xFC) << 3 | t[2] >> 3
@@ -31,12 +31,13 @@ def _c(t):
 _BG, _DIM_T = (5, 6, 8), (51, 59, 70)
 _TONES = {
     "org": (255, 106, 43), "txt": (245, 247, 249), "soft": (198, 206, 216),
-    "mut": (141, 153, 167), "red": (255, 90, 90),
+    "mut": (141, 153, 167), "red": (255, 90, 90), "grn": (61, 220, 132),
+    "yel": (255, 194, 61),
 }
-BG, DIM = _c(_BG), _c(_DIM_T)
-# a bar's colour by its signal (dB-Hz): red, orange, yellow; not in the fix: brown
-HEAT = (_c((255, 59, 31)), _c((255, 122, 43)), _c((255, 194, 61)))
-UNUSED, STUB = _c((90, 70, 56)), _c((42, 26, 18))
+BG, DIM, ORG, OFF = _c(_BG), _c(_DIM_T), _c(_TONES["org"]), _c((42, 47, 55))
+# by quality: 0 no fix, 1 weak, 2 fair, 3 strong: its word and tone
+QUALITY = (("nincs", "red"), ("gyenge", "org"), ("közepes", "yel"), ("erős", "grn"))
+UP_ICON = b"\x08\x00\x1c\x00\x3e\x00\x08\x00\x08\x00\x08\x00\x00\x00\x7f\x00"
 # The WiFi icon's four parts, 12x12 MONO_HLSB: the dot and the arcs inner to outer.
 # Level 0-3: that many arcs lit, None: all dim. It changes only with the level.
 WIFI = (b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\x00\x06\x00\x00\x00",
@@ -44,15 +45,15 @@ WIFI = (b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x
         b"\x00\x00\x00\x00\x00\x00\x0f\x00\x30\xc0\x40\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         b"\x1f\x80\x60\x60\x80\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
 
-_FONTS = [(f, memoryview(f[3])) for f in (F.HERO, F.NUM, F.TXT, F.LAB)]
-_HERO, _NUM, _TXT, _LAB = _FONTS
+_FONTS = [(f, memoryview(f[3])) for f in (F.HERO, F.NUM, F.TXT, F.LAB, F.WORD)]
+_HERO, _NUM, _TXT, _LAB, _WORD = _FONTS
 _pal = {}
 
 class _D:
     spi = cs = dc = None
     buf = fb = ic = icb = None
     state = None
-    top = bars = lit = None              # what the panel shows
+    top = low = lit = None               # what the panel shows
 
 def _cmd(c, data=None):
     _D.cs(0)
@@ -97,7 +98,7 @@ def start():
         _D.fb = framebuf.FrameBuffer(_D.buf, W, BAND_H, framebuf.RGB565)
         _D.icb = bytearray(12 * 12 * 2)
         _D.ic = framebuf.FrameBuffer(_D.icb, 12, 12, framebuf.RGB565)
-    _D.top = _D.bars = _D.lit = None
+    _D.top = _D.low = _D.lit = None
     _D.fb.fill(BG)
     for y in range(0, H, BAND_H):
         _send(y, BAND_H)
@@ -164,7 +165,7 @@ def _wifi(fb, lit, col, x, y):
 def _wifi_frame(lit):
     """Only the icon goes up: a changed level needs no whole zone."""
     _D.ic.fill(BG)
-    _wifi(_D.ic, lit, HEAT[1], 0, 0)
+    _wifi(_D.ic, lit, ORG, 0, 0)
     _window(WIFI_X, WIFI_Y, 12, 12)
     _cmd(0x2C, _D.icb)
 
@@ -177,40 +178,40 @@ def _draw_top(speed, fix, used, clock, lit):
         _right(fb, _NUM, str(used), 158, 17 - top, "txt" if fix else "red")
         _right(fb, _LAB, "műhold", 158, 26 - top, "mut")
         _right(fb, _TXT, clock, 158, 38 - top, "soft")
-        _wifi(fb, lit, HEAT[1], WIFI_X, WIFI_Y - top)
+        _wifi(fb, lit, ORG, WIFI_X, WIFI_Y - top)
         _send(top, min(BAND_H, TOP_H - top))
 
-def bar_h(cno):
-    return max(2, (cno - 12) * 26 // 34)
-
-def _draw_bars(bars, up, up_on):
-    """bars: 2 bytes a satellite, strongest first: cno, in the fix."""
+def _draw_low(quality, up, up_on):
+    """How good the GPS is, as a phone's signal; what waits for upload."""
     fb = _D.fb
-    for top in range(BARS_Y, H, BAND_H):
+    word, tone = QUALITY[quality]
+    col = _c(_TONES[tone])
+    tone_up = "org" if up_on else "soft"
+    for top in range(LOW_Y, H, BAND_H):
         fb.fill(BG)
         y0 = 74 - top
-        for i in range(N_BARS):
-            x = 3 + i * 6
-            cno = bars[i * 2] if i * 2 < len(bars) else 0
-            if cno:
-                c = (HEAT[0] if cno < 25 else HEAT[1] if cno < 33 else HEAT[2]) if bars[i * 2 + 1] else UNUSED
-                h = bar_h(cno)
-                fb.fill_rect(x, y0 - h, 4, h, c)
-            else:
-                fb.fill_rect(x, y0 - 1, 4, 1, STUB)
-        _right(fb, _TXT, up, 158, y0, "org" if up_on else "soft")
+        for i in range(4):
+            h = 6 + i * 6
+            fb.fill_rect(5 + i * 8, y0 - h, 6, h, col if quality and i <= quality else OFF)
+        _text(fb, _LAB, "GPS", 42, 62 - top, "mut")
+        _text(fb, _WORD, word, 42, y0, tone)
+        if up.strip():
+            x = 158 - width(_TXT, up)
+            fb.blit((UP_ICON, 9, 8, framebuf.MONO_HLSB), x - 12, y0 - 8, 0,
+                    _mono_palette(_c(_TONES[tone_up])))
+            _text(fb, _TXT, up, x, y0, tone_up)
         _send(top, min(BAND_H, H - top))
 
-def set_state(speed, fix, used, clock, level, bars, up, up_on):
+def set_state(speed, fix, used, clock, level, quality, up, up_on):
     """speed: text; fix: a usable fix; used: satellites in it; clock: text;
-    level: WiFi 0-3 or None; bars: see _draw_bars; up: text, up_on: points wait."""
-    _D.state = (speed, fix, used, clock, level, bars, up, up_on)
+    level: WiFi 0-3 or None; quality: see QUALITY; up: text, up_on: points wait."""
+    _D.state = (speed, fix, used, clock, level, quality, up, up_on)
 
 def frame():
     s = _D.state
     if s is None:
         return
-    speed, fix, used, clock, level, bars, up, up_on = s
+    speed, fix, used, clock, level, quality, up, up_on = s
     top = (speed, fix, used, clock)
     if top != _D.top:
         _draw_top(speed, fix, used, clock, level)
@@ -218,7 +219,7 @@ def frame():
     elif level != _D.lit:
         _wifi_frame(level)
         _D.lit = level
-    b = (bars, up, up_on)
-    if b != _D.bars:
-        _draw_bars(bars, up, up_on)
-        _D.bars = b
+    low = (quality, up, up_on)
+    if low != _D.low:
+        _draw_low(quality, up, up_on)
+        _D.low = low

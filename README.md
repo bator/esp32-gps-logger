@@ -115,8 +115,8 @@ firmware R6.0.0.0Build3700.
   whatever the rate (~2.3 KB/s). The satellite list comes from GSV, decoded every
   5 s.
 - **Display:** the speed, big and orange, the satellites in the fix, the clock
-  (Hungarian time), a WiFi icon with the signal's strength in arcs, each
-  satellite's signal as a bar (red, orange, yellow) and what waits for upload. It
+  (Hungarian time), a WiFi icon with the signal's strength in arcs, how good
+  the GPS is (four rising bars and a word, as on a phone) and what waits for upload. It
   never scrolls; the rest is on the status page. The backlight is always on.
   `gps_tft.py`, its anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger

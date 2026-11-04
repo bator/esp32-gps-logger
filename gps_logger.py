@@ -9280,10 +9280,13 @@ TFT_FRAME = 200                          # ms between frames (a row scrolling)
 TFT_STATE = 1000                         # ms between new values
 TFT_MAX_ERR = 3                          # errors in a row, then it goes dark
 TFT_WIFI_UP = 3                          # dB past a limit for one more WiFi arc
+TFT_HDOP_GOOD = 1.5                      # strong GPS: HDOP at most this ...
+TFT_SATS_GOOD = 10                       # ... with this many satellites in the fix
+TFT_HDOP_FAIR = 3.0                      # above this: weak
 _tft = None
 _tft_t = [None, None, 0, 0]              # last values, last frame, the errors
                                          # in a row of each
-_tft_b = [None, b"", None]               # the list's stamp, its bars, WiFi level
+_tft_b = [None, None, None]              # (2: the WiFi level last shown)
 
 def _tft_start():
     """Only on the Heltec; a failure leaves the logger running without it."""
@@ -9326,19 +9329,15 @@ def _local_hm():
     except (ValueError, IndexError):
         return "--:--"
 
-def _tft_bars():
-    """The satellites for the bars, strongest first, 2 bytes each (cno, in the
-    fix), remade only with a new list."""
-    at = st["svs_at"]
-    if _tft_b[0] != at:
-        _tft_b[0] = at
-        svs = st["svs"] or ()
-        b = bytearray()
-        for v in sorted(svs, key=lambda v: -v[1])[:21]:
-            b.append(v[1] & 255)
-            b.append(1 if v[4] else 0)
-        _tft_b[1] = bytes(b)
-    return _tft_b[1]
+def _gps_quality(fix):
+    """0 no fix, 1 weak, 2 fair, 3 strong, from HDOP and the satellites in the fix.
+    Measured: outdoors HDOP 0.7-1.0 with ~26, by a window 3-9 with 8-14."""
+    if not fix:
+        return 0
+    hdop = st.get("hdop")
+    if hdop is None or hdop > TFT_HDOP_FAIR:
+        return 1
+    return 3 if hdop <= TFT_HDOP_GOOD and (sv_used() or 0) >= TFT_SATS_GOOD else 2
 
 def _wifi_level(rssi, last):
     """The arcs of the WiFi icon: down at once, up only TFT_WIFI_UP dB past the
@@ -9371,7 +9370,7 @@ def _tft_state(now):
         text = str(left) if left < 10000 else "%dk" % (left // 1000)
     else:
         text = "kész" if up.get("url") else " "
-    return (big, fix, sv_used() or 0, _local_hm(), level, _tft_bars(), text,
+    return (big, fix, sv_used() or 0, _local_hm(), level, _gps_quality(fix), text,
             bool(left))
 
 def tft_tick(now):

@@ -36,7 +36,8 @@ def font(weight, size, chars):
 FONTS = (("HERO", font("Bold", 38, "0123456789-")),
          ("NUM", font("Bold", 17, "0123456789-")),
          ("TXT", font("SemiBold", 10, "0123456789:-kész ")),
-         ("LAB", font("SemiBold", 9, "KM/Hműhold")))
+         ("LAB", font("SemiBold", 9, "KM/HGPSműhold")),
+         ("WORD", font("Bold", 13, "erőögsynickzp")))
 
 with open("gps_tft_font.py", "w", encoding="utf-8") as out:
     out.write("# Written by tools/make_tft_font.py (Inter): see there.\n")
