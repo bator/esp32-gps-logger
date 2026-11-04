@@ -1104,7 +1104,9 @@ tell a stay from a drive, so the stay filter works on positions.
   minutes (no elevation), so Dawarich still sees the stay. These points need
   no fix: they carry the last fix's GPS time plus the time since, and reach
   flash every minute. On WiFi the anchor file is closed every 30 minutes so it
-  uploads.
+  uploads. A point due while the device is over 50 m from the anchor waits until
+  it has been back within 50 m for 30 s, so a car leaving past the anchor writes
+  none. Drift out there delays a point by 5 minutes at most.
 - **At home** (a home network): no anchor points. If the home WiFi drops,
   anchor points start; it is still a stay.
 - **Arrival.** Entering a stay closes the current track on any network, so

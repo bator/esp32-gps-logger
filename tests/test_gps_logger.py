@@ -4437,9 +4437,10 @@ try:
         gap = ((int(ts[1][9:11]) - int(ts[0][9:11])) * 3600
                + (int(ts[1][11:13]) - int(ts[0][11:13])) * 60
                + int(ts[1][13:15]) - int(ts[0][13:15]))
-        check("STAY: heartbeats are STILL_HEARTBEAT apart",
+        # (drift past STILL_NEAR, here to 56 m, delays one by up to STILL_BACK)
+        check("STAY: heartbeats are STILL_HEARTBEAT apart, at most STILL_BACK late",
               gl.STILL_HEARTBEAT // 1000 <= gap
-              <= gl.STILL_HEARTBEAT // 1000 + 2, "gap=%s" % gap)
+              <= (gl.STILL_HEARTBEAT + gl.STILL_BACK) // 1000 + 2, "gap=%s" % gap)
     a = gl.log["still"]["anchor"]
     check("STAY: the anchor is the mean of the drift (< 15 m off)",
           gl._dist(a[0], a[1], 47.5, 19.0) < 15.0,
@@ -5245,6 +5246,62 @@ try:
     check("ORDER: the way out is still written from near the anchor",
           bool(out) and sv_m(out[0]) < 60.0,
           repr(out[0] if out else None))
+
+    # BEATPASS (2026-11-04, on the road): a walk to the car past STILL_NEAR held
+    # the due anchor point back, the car then passed the anchor 44 m off, and
+    # that second's anchor point, with the way out after it, read 158 km/h
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    n0 = len(sv_lines())
+    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 4000
+    for i in range(60):
+        sv_fix(90.0 + (i % 7), 30.0)               # at the car, 95 m out
+    n1 = len(sv_lines())
+    for i in range(45):
+        sv_fix(90.0 - i * 8.0, -44.0, 30.0)        # the drive past, 8 m/s
+    gl.flush()
+    lines = sv_lines()
+    step = []
+    for a, b in zip(lines[n1:], lines[n1 + 1:]):
+        dt = hb_secs(b) - hb_secs(a)
+        step.append(gl._dist(*(map(float, a.split(",")[:2])),
+                             *map(float, b.split(",")[:2])) / max(dt, 1))
+    beats = [l for l in lines[n1:] if l.split(",")[2] == ""]
+    check("BEATPASS: an anchor point due while out past STILL_NEAR waits; the "
+          "car passing within STILL_NEAR writes none, no false speed on the way out",
+          n1 == n0 and not beats and sv_active() is False
+          and bool(step) and max(step) < 12.0,
+          repr((n0, n1, len(beats), max(step) if step else None)))
+    # ... and coming back to stay: the anchor points go on once it holds
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 4000
+    for i in range(30):
+        sv_fix(90.0, 30.0)
+    n1 = len(sv_lines())
+    wait = None
+    for i in range(gl.STILL_BACK // 1000 + 10):
+        sv_fix(5.0, 5.0)
+        if wait is None and len(sv_lines()) > n1:
+            wait = i + 1
+    check("BEATBACK: back at the place the anchor point comes after STILL_BACK",
+          sv_active() is True and wait is not None
+          and gl.STILL_BACK // 1000 - 1 <= wait <= gl.STILL_BACK // 1000 + 2,
+          repr(wait))
+    # ... and under drift out past STILL_NEAR all the time it is late, not lost
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT
+    n1 = len(sv_lines())
+    wait = None
+    for i in range(gl.STILL_HEARTBEAT // 1000 + 10):
+        sv_fix(5.0 if i % 20 else 70.0, 5.0)
+        if wait is None and len(sv_lines()) > n1:
+            wait = i + 1
+    check("BEATBACK: drift past STILL_NEAR every 20 s delays an anchor point by "
+          "at most one STILL_HEARTBEAT",
+          sv_active() is True and wait is not None
+          and wait <= gl.STILL_HEARTBEAT // 1000 + 2, repr(wait))
 
     # EXIT: a frozen multipath jump is not a departure; a slow walk still is
     sv_reset()
