@@ -4,7 +4,7 @@
 #
 # Top: the speed, big and orange, the satellites in the fix, the WiFi icon and the
 # clock. Bottom: how good the GPS is, four rising bars and a word, as on a phone,
-# and what waits for upload.
+# how full the flash is and how long it still logs, and what waits for upload.
 #
 # One band of 160x16 is all the RAM it keeps, not a 25.6 KB frame buffer, and the
 # glyphs are read from flash, 16-level (anti-aliased) GS4: a zone goes up band by
@@ -23,6 +23,8 @@ BAND_H = 16
 TOP_H, LOW_Y = 41, 46                    # the zones: rows 0-40, rows 46-79
 BL_PIN = 21
 WIFI_X, WIFI_Y = 113, 28
+STORE_X, STORE_W = 102, 56               # the flash's gauge, right-aligned at 158
+STORE_WARN, STORE_BAD = 70, 90           # per cent: yellow, red
 
 def _c(t):
     c = (t[0] & 0xF8) << 8 | (t[1] & 0xFC) << 3 | t[2] >> 3
@@ -181,8 +183,20 @@ def _draw_top(speed, fix, used, clock, lit):
         _wifi(fb, lit, ORG, WIFI_X, WIFI_Y - top)
         _send(top, min(BAND_H, TOP_H - top))
 
-def _draw_low(quality, up, up_on):
-    """How good the GPS is, as a phone's signal; what waits for upload."""
+def _draw_store(fb, top, store):
+    """The flash: the per cent taken and how long it still logs over a gauge."""
+    pct, left = store
+    bad = pct >= STORE_BAD
+    warn = pct >= STORE_WARN
+    tone = "red" if bad else "yel" if warn else "soft"
+    _text(fb, _TXT, "%d%%" % pct, STORE_X, 57 - top, tone)
+    _right(fb, _TXT, left, STORE_X + STORE_W, 57 - top, tone)
+    fb.fill_rect(STORE_X, 60 - top, STORE_W, 4, OFF)
+    fb.fill_rect(STORE_X, 60 - top, max(1, STORE_W * pct // 100), 4,
+                 _c(_TONES["red" if bad else "yel" if warn else "grn"]))
+
+def _draw_low(quality, up, up_on, store):
+    """How good the GPS is, as a phone's signal; the flash; what waits for upload."""
     fb = _D.fb
     word, tone = QUALITY[quality]
     col = _c(_TONES[tone])
@@ -200,18 +214,21 @@ def _draw_low(quality, up, up_on):
             fb.blit((UP_ICON, 9, 8, framebuf.MONO_HLSB), x - 12, y0 - 8, 0,
                     _mono_palette(_c(_TONES[tone_up])))
             _text(fb, _TXT, up, x, y0, tone_up)
+        if store:
+            _draw_store(fb, top, store)
         _send(top, min(BAND_H, H - top))
 
-def set_state(speed, fix, used, clock, level, quality, up, up_on):
+def set_state(speed, fix, used, clock, level, quality, up, up_on, store=None):
     """speed: text; fix: a usable fix; used: satellites in it; clock: text;
-    level: WiFi 0-3 or None; quality: see QUALITY; up: text, up_on: points wait."""
-    _D.state = (speed, fix, used, clock, level, quality, up, up_on)
+    level: WiFi 0-3 or None; quality: see QUALITY; up: text, up_on: points wait;
+    store: (per cent of the flash taken, how long it still logs: text) or None."""
+    _D.state = (speed, fix, used, clock, level, quality, up, up_on, store)
 
 def frame():
     s = _D.state
     if s is None:
         return
-    speed, fix, used, clock, level, quality, up, up_on = s
+    speed, fix, used, clock, level, quality, up, up_on, store = s
     top = (speed, fix, used, clock)
     if top != _D.top:
         _draw_top(speed, fix, used, clock, level)
@@ -219,7 +236,7 @@ def frame():
     elif level != _D.lit:
         _wifi_frame(level)
         _D.lit = level
-    low = (quality, up, up_on)
+    low = (quality, up, up_on, store)
     if low != _D.low:
-        _draw_low(quality, up, up_on)
+        _draw_low(quality, up, up_on, store)
         _D.low = low
