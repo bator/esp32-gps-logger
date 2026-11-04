@@ -52,7 +52,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install "mpy-cross==1.29.*"
-      - run: python -m mpy_cross -march=${{ matrix.march }} -o "$RUNNER_TEMP/gps_logger.mpy" gps_logger.py
+      - run: python -m mpy_cross -O3 -march=${{ matrix.march }} -o "$RUNNER_TEMP/gps_logger.mpy" gps_logger.py
       - run: ls -l "$RUNNER_TEMP/gps_logger.mpy"
 
   test:

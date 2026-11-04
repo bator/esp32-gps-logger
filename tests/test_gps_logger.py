@@ -7182,10 +7182,13 @@ shutil.rmtree(lb_td, ignore_errors=True)
 # and SHA-256, then renamed over the old ones; low flash or a bad copy stops
 # it with the old files untouched (a cut copy left an unimportable module)
 FAKE_PY = r"""#!/usr/bin/env python3
-import sys
+import os, sys
 a = sys.argv[1:]
 if a[:1] == ["-c"]:
     sys.exit(0)
+if os.environ.get("FAKE_PY_LOG"):
+    with open(os.environ["FAKE_PY_LOG"], "a") as f:
+        f.write(" ".join(a) + "\n")
 out = a[a.index("-o") + 1]
 with open(a[-1], "rb") as f, open(out, "wb") as g:
     g.write(b"MPY" + f.read())
@@ -7347,6 +7350,25 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and ["cp", "web.html.gz", ":web.html.gz.dpl"] in cps
           and not [c for c in cps if c[1] == "web.html"]
           and dev_file(dev, "web.html") is None, repr(cps))
+    # DEPLOY-OPT3: both ways deploy.sh compiles the logger leave the line
+    # numbers out, as the frozen firmware does (108097 -> 97980 B on xtensawin);
+    # -O3 would drop an assert or a __debug__ branch too: there must be none
+    dp_opt = []
+    for extra in ({}, {"FAKE_FROZEN": "1", "FORCE_MPY": "1"}):
+        pl = os.path.join(tempfile.mkdtemp(dir=dp_td), "py.log")
+        deploy_run(dict(extra, FAKE_PY_LOG=pl))
+        with open(pl) as f:
+            dp_opt.append(f.read().split("\n")[:-1])
+    opt_src = {}
+    for n in ("gps_logger.py", "gps_boot.py", "gps_tft.py"):
+        with open(os.path.join(ROOT, n)) as f:
+            opt_src[n] = [ln for ln in f.read().splitlines()
+                          if re.match(r"\s*assert\b", ln) or "__debug__" in ln]
+    check("DEPLOY-OPT3: deploy.sh compiles with -O3, plain and FORCE_MPY; no "
+          "assert or __debug__ in what is compiled that way",
+          len(dp_opt) == 2 and all(len(c) == 1 and "-O3" in c[0].split()
+                                   for c in dp_opt)
+          and not any(opt_src.values()), repr((dp_opt, opt_src)))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
     check("DEPLOY: too little free flash -> stops before copying, old kept",
           rc != 0 and dev_file(dev, "gps_logger.mpy") == b"OLD MODULE"
@@ -7653,6 +7675,19 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     rc, out, err, work, calls = build_run([], {})
     with open(os.path.join(work, "firmware", "manifest.py")) as f:
         man = f.read()
+    man_re = r'module\("(\w+)\.py", base_path="[^"]*"(, opt=3)?\)'
+    rc_s3, _o, _e, work_s3, _c = build_run(
+        [], {"BOARD_DIR": os.path.join(ROOT, "boards", "GPS_LOGGER_S3")})
+    with open(os.path.join(work_s3, "firmware", "manifest.py")) as f:
+        man_s3 = re.findall(man_re, f.read())
+    man_c6 = re.findall(man_re, man)
+    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_boot", "gps_tft",
+                                     "gps_tft_font")]
+    check("BUILD-OPT3: the frozen modules with code leave the line numbers out "
+          "(opt=3: ~10 KB of the logger), the display's on the Heltec's firmware",
+          rc == 0 and rc_s3 == 0 and all(x in man_s3 for x in opt3)
+          and all(x in man_c6 for x in opt3[:2])
+          and ("gps_frozen", "") in man_c6, repr((man_c6, man_s3)))
     bd = os.path.join(ROOT, "boards", "GPS_LOGGER_C6")
     with open(os.path.join(bd, "mpconfigboard.h")) as f:
         bh = f.read()

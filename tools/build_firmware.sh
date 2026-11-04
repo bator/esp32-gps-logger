@@ -102,19 +102,21 @@ if [ "$BOARD" = GPS_LOGGER_S3 ]; then
 fi
 # only the port's own modules (_boot.py mounts the file system) with the
 # logger's: not boards/manifest.py's asyncio, umqtt, webrepl, mip,
-# requests... (~25 KB the logger never imports)
+# requests... (~25 KB the logger never imports). opt=3 leaves the line numbers
+# out of the bytecode (~10 KB of the logger's): a traceback on the USB console
+# says line 1 (README); asserts and __debug__ would go too: there are none
 cat > "$OUT/manifest.py" <<EOF
 freeze("\$(PORT_DIR)/modules")
-module("gps_logger.py", base_path="$OUT")
+module("gps_logger.py", base_path="$OUT", opt=3)
 module("gps_frozen.py", base_path="$OUT")
-module("gps_boot.py", base_path="$OUT")
+module("gps_boot.py", base_path="$OUT", opt=3)
 EOF
 # the Heltec's display: on its firmware only
 if [ "$BOARD" = GPS_LOGGER_S3 ]; then
     cp gps_tft.py gps_tft_font.py "$OUT/"
     cat >> "$OUT/manifest.py" <<EOF
-module("gps_tft.py", base_path="$OUT")
-module("gps_tft_font.py", base_path="$OUT")
+module("gps_tft.py", base_path="$OUT", opt=3)
+module("gps_tft_font.py", base_path="$OUT", opt=3)
 EOF
 fi
 

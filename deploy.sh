@@ -2,7 +2,8 @@
 # Compile gps_logger.py to .mpy and install it (with main.py and the status
 # page, only gzipped: web.html.gz) on the ESP32, then reboot.
 # It must run precompiled: compiling on the device grows the Python heap,
-# which leaves too little IDF heap for TLS uploads. main.py imports
+# which leaves too little IDF heap for TLS uploads (-O3: no line numbers in
+# tracebacks, ~10 KB less, as in the frozen firmware). main.py imports
 # gps_logger at boot (hold the boot-bypass pin during reset to skip it:
 # GPIO10 on the ESP32-C6, GPIO7 on the Heltec, GPIO25 on the ESP32; main.py's
 # SKIP_PIN).
@@ -105,7 +106,7 @@ case "$FROZEN" in
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
             echo "WARNING: it shadows the frozen one and takes ~60 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
-            $PY -m mpy_cross -march="$ARCH" -o gps_logger.mpy gps_logger.py
+            $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
         else
             # (the display's code on the board that has it: an older firmware
             # has no TFT, the logger's SHA alone then)
@@ -121,7 +122,7 @@ case "$FROZEN" in
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
         fi ;;
-    plain) $PY -m mpy_cross -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
+    plain) $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac

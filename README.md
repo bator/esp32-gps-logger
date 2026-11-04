@@ -304,6 +304,13 @@ Freezing does not stop the Python heap from growing into the IDF heap
 (MicroPython's split heap stays on); it leaves so much of the 64 KB heap
 free that an allocation rarely has to.
 
+The logger, `gps_boot.py` and the display's modules are compiled with
+`-O3` (`opt=3` in the build's manifest, `-O3` in `deploy.sh`): their line
+numbers stay out of the bytecode, ~10 KB of the logger's ~108 KB. The cost: a
+traceback on the USB console no longer says where (each frame reads `line 1`,
+the function names stay); the crash line in `/diag.log` holds `repr(e)` and
+never had a line number. To see them while debugging, build without it.
+
 `--flash` first checks the board's partition table and refuses to flash
 when it differs from the build's. Then it backs up the app partition to
 `firmware/` and writes only the app at 0x10000: the bootloader, the
@@ -1609,7 +1616,7 @@ The same locally:
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
 .venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
 shellcheck deploy.sh tools/build_firmware.sh
-.venv/bin/python -m mpy_cross -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
+.venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
 MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \
     python3 tests/test_gps_logger.py
 ```
