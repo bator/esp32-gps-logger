@@ -2,14 +2,16 @@
 # Vext with the UC6580 (pins and the 1/26 offset measured on the board). The
 # logger hands over what to show (set_state) and calls frame() every TFT_FRAME.
 #
-# Top: the speed, big and orange, the satellites in the fix, the WiFi icon and the
-# clock. Bottom: how good the GPS is, four rising bars and a word, as on a phone,
-# how full the flash is and how long it still logs, and what waits for upload.
+# Ink on paper. Top zone, left: today's route, a line of 2x2 dots over a faint grid,
+# the latest trip red, a round dot where the day began and one where it is now. Right:
+# the clock, the satellites in the fix (an icon and the count), today's km and WiFi in
+# four rising bars, a rule, what waits for upload. Low zone: the GPS's quality, a tile
+# in its colour with a word, and how full the flash is with how long it still logs
+# over a gauge, amber from 70%, red from 90%. The speed is on the status page.
 #
 # One band of 160x16 is all the RAM it keeps, not a 25.6 KB frame buffer, and the
 # glyphs are read from flash, 16-level (anti-aliased) GS4: a zone goes up band by
-# band, only when it changed. The WiFi icon has its own 12x12. Colours are RGB565
-# byte-swapped: the panel's order.
+# band, only when it changed. Colours are RGB565 byte-swapped: the panel's order.
 import framebuf
 import struct
 import time
@@ -20,42 +22,46 @@ import gps_tft_font as F
 W, H = 160, 80
 XO, YO = 1, 26                           # the panel inside the controller
 BAND_H = 16
-TOP_H, LOW_Y = 41, 46                    # the zones: rows 0-40, rows 46-79
+TOP_H, LOW_Y = 63, 63                    # the zones: rows 0-62, rows 63-79
 BL_PIN = 21
-WIFI_X, WIFI_Y = 113, 28
-STORE_X, STORE_W = 102, 56               # the flash's gauge, right-aligned at 158
-STORE_WARN, STORE_BAD = 70, 90           # per cent: yellow, red
+RIGHT = 158                              # the right column's text ends here
+BARS_X, BARS_Y = 140, 42                 # WiFi: the first bar's left, their foot
+KM_X = 92                                # today's km, on the bars' foot
+RULE_X, RULE_Y = 96, 47
+TILE_W, TILE_Y = 62, 64                  # the GPS tile
+STORE_X, STORE_Y, STORE_W, STORE_H = 66, 75, 92, 3   # the flash's gauge
+STORE_WARN, STORE_BAD = 70, 90           # per cent: amber, red
 
 def _c(t):
     c = (t[0] & 0xF8) << 8 | (t[1] & 0xFC) << 3 | t[2] >> 3
     return c >> 8 | (c & 255) << 8
 
-_BG, _DIM_T = (5, 6, 8), (51, 59, 70)
-_TONES = {
-    "org": (255, 106, 43), "txt": (245, 247, 249), "soft": (198, 206, 216),
-    "mut": (141, 153, 167), "red": (255, 90, 90), "grn": (61, 220, 132),
-    "yel": (255, 194, 61),
-}
-BG, DIM, ORG, OFF = _c(_BG), _c(_DIM_T), _c(_TONES["org"]), _c((42, 47, 55))
-# by quality: 0 no fix, 1 weak, 2 fair, 3 strong: its word and tone
-QUALITY = (("nincs", "red"), ("gyenge", "org"), ("közepes", "yel"), ("erős", "grn"))
-UP_ICON = b"\x08\x00\x1c\x00\x3e\x00\x08\x00\x08\x00\x08\x00\x00\x00\x7f\x00"
-# The WiFi icon's four parts, 12x12 MONO_HLSB: the dot and the arcs inner to outer.
-# Level 0-3: that many arcs lit, None: all dim. It changes only with the level.
-WIFI = (b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\x00\x06\x00\x00\x00",
-        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0f\x00\x10\x80\x00\x00\x00\x00\x00\x00\x00\x00",
-        b"\x00\x00\x00\x00\x00\x00\x0f\x00\x30\xc0\x40\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-        b"\x1f\x80\x60\x60\x80\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+# The tones text comes in, by index: a palette's key stays a small int
+PAPER, INK, RED, AMBER, GREEN, ORANGE = range(6)
+_RGB = ((0xF4, 0xF0, 0xE6), (0x11, 0x11, 0x11), (0xD7, 0x26, 0x1E), (0xC9, 0x8A, 0x00),
+        (0x1F, 0x8A, 0x4C), (0xD9, 0x60, 0x1A))
+_COL = tuple(_c(t) for t in _RGB)
+DIM, OFF = _c((0xE2, 0xDC, 0xCB)), _c((0xCF, 0xC9, 0xBA))   # unlit dots, gauge; bars
+# by quality: 0 no fix, 1 weak, 2 fair, 3 strong: its word and tile
+QUALITY = (("nincs", RED), ("gyenge", ORANGE), ("közepes", AMBER), ("erős", GREEN))
 
-_FONTS = [(f, memoryview(f[3])) for f in (F.HERO, F.NUM, F.TXT, F.LAB, F.WORD)]
-_HERO, _NUM, _TXT, _LAB, _WORD = _FONTS
+ROUTE_X, ROUTE_Y = 4, 4                  # the pixel a route's (0, 0) falls on
+ROUTE_NOTE = "nincs út"                  # a day without a route
+
+# 11x11 MONO_HLSB, 2 bytes a row: a satellite, a dish over a body between two
+# solar panels, left of the count and on its baseline
+SAT_ICON = bytes.fromhex("1f000e00e4e0eee0eee0ffe0eee0eee0e4e0e4e00e00")
+SAT_W, SAT_GAP = 11, 3
+
+_FONTS = [(f, memoryview(f[3])) for f in (F.CLOCK, F.SATS, F.UP, F.WORD, F.SMALL)]
+_CLOCK, _SATS, _UP, _WORD, _SMALL = _FONTS
 _pal = {}
 
 class _D:
     spi = cs = dc = None
-    buf = fb = ic = icb = None
+    buf = fb = None
     state = None
-    top = low = lit = None               # what the panel shows
+    top = low = None                     # what the panel shows
 
 def _cmd(c, data=None):
     _D.cs(0)
@@ -98,36 +104,37 @@ def start():
     if _D.buf is None:
         _D.buf = bytearray(W * BAND_H * 2)
         _D.fb = framebuf.FrameBuffer(_D.buf, W, BAND_H, framebuf.RGB565)
-        _D.icb = bytearray(12 * 12 * 2)
-        _D.ic = framebuf.FrameBuffer(_D.icb, 12, 12, framebuf.RGB565)
-    _D.top = _D.low = _D.lit = None
-    _D.fb.fill(BG)
+    _D.top = _D.low = None
+    _D.fb.fill(_COL[PAPER])
     for y in range(0, H, BAND_H):
         _send(y, BAND_H)
     Pin(BL_PIN, Pin.OUT, value=1)
 
 def off():
-    """Dark: a frozen speed must not stay lit. A dead SPI bus does not stop this."""
+    """Dark: a frozen display must not stay lit. A dead SPI bus does not stop this."""
     Pin(BL_PIN, Pin.OUT, value=0)
 
-def _mono_palette(col):
-    p = _pal.get(col)
+def _mono_palette(tone):
+    k = 64 | tone
+    p = _pal.get(k)
     if p is None:
         p = framebuf.FrameBuffer(bytearray(4), 2, 1, framebuf.RGB565)
         p.pixel(0, 0, 0)                 # (blit's key: transparent)
-        p.pixel(1, 0, col)
-        _pal[col] = p
+        p.pixel(1, 0, _COL[tone])
+        _pal[k] = p
     return p
 
-def _gs4_palette(name):
-    """16 levels from the background to a tone: the anti-aliasing."""
-    p = _pal.get(name)
+def _gs4_palette(tone, bg=PAPER):
+    """16 levels from the background to a tone: the anti-aliasing. One a pair and
+    only seven pairs: ink, red, amber on paper, paper on the four tiles."""
+    k = tone << 3 | bg
+    p = _pal.get(k)
     if p is None:
-        t = _TONES[name]
+        t, b = _RGB[tone], _RGB[bg]
         p = framebuf.FrameBuffer(bytearray(32), 16, 1, framebuf.RGB565)
         for v in range(16):
-            p.pixel(v, 0, _c(tuple((_BG[k] * (15 - v) + t[k] * v) // 15 for k in range(3))))
-        _pal[name] = p
+            p.pixel(v, 0, _c(tuple((b[k] * (15 - v) + t[k] * v) // 15 for k in range(3))))
+        _pal[tone << 3 | bg] = p
     return p
 
 def _index(f, ch):
@@ -140,7 +147,7 @@ def width(font, s):
         n += f[1][_index(f, ch)]
     return n
 
-def _text(fb, font, s, x, base, tone):
+def _text(fb, font, s, x, base, tone, bg=PAPER):
     """s with its baseline at row base, each glyph blitted straight from flash.
     Nothing to blit outside the band (each glyph's slice and tuple, in each band,
     went to the garbage): only how wide it is, the x that follows."""
@@ -149,98 +156,124 @@ def _text(fb, font, s, x, base, tone):
     h = f[4]
     if y >= BAND_H or y + h <= 0:
         return x + width(font, s)
-    p = _gs4_palette(tone)
+    p = _gs4_palette(tone, bg)
+    key = _COL[bg]
     for ch in s:
         i = _index(f, ch)
         w = f[1][i]
         o = f[2][i * 2] | f[2][i * 2 + 1] << 8
-        fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, framebuf.GS4_HMSB), x, y, BG, p)
+        fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, framebuf.GS4_HMSB), x, y, key, p)
         x += w
     return x
 
 def _right(fb, font, s, x1, base, tone):
     _text(fb, font, s, x1 - width(font, s), base, tone)
 
-def _wifi(fb, lit, col, x, y):
-    """The dot always, the arcs up to lit in col, the others dim; dim all when
-    lit is None (no WiFi)."""
-    for n, part in enumerate(WIFI):
-        c = DIM if lit is None or n > lit else col
-        fb.blit((part, 12, 12, framebuf.MONO_HLSB), x, y, 0, _mono_palette(c))
+def _round(fb, x, y, c):
+    """A 6x6 dot without its corners."""
+    fb.fill_rect(x + 1, y, 4, 6, c)
+    fb.fill_rect(x, y + 1, 6, 4, c)
 
-def _wifi_frame(lit):
-    """Only the icon goes up: a changed level needs no whole zone."""
-    _D.ic.fill(BG)
-    _wifi(_D.ic, lit, ORG, 0, 0)
-    _window(WIFI_X, WIFI_Y, 12, 12)
-    _cmd(0x2C, _D.icb)
+def _route(fb, top, route):
+    """The grid; on it the route's rows in this band: (pixels, points, the latest
+    trip's first point, a version). A point marked in its y starts a trip, no line
+    to it."""
+    for j in range(7):
+        y = 4 + j * 8 - top
+        if -2 < y < BAND_H:
+            for i in range(11):
+                fb.fill_rect(4 + i * 8, y, 2, 2, DIM)
+    if route is None:
+        return
+    xy, n, red, _v = route
+    if not n:
+        _text(fb, _SMALL, ROUTE_NOTE, 46 - width(_SMALL, ROUTE_NOTE) // 2, 35 - top, INK)
+        return
+    ink, lit = _COL[INK], _COL[RED]
+    x0 = y0 = 0
+    for i in range(n):
+        x1 = xy[2 * i] + ROUTE_X
+        v = xy[2 * i + 1]
+        y1 = (v & 127) + ROUTE_Y - top
+        c = lit if i >= red else ink
+        if v & 128 or not i:
+            x0, y0 = x1, y1
+        if (y0 > -2 or y1 > -2) and (y0 < BAND_H or y1 < BAND_H):
+            dx, dy = x1 - x0, y1 - y0
+            steps = max(abs(dx), abs(dy))
+            for k in range(steps + 1):   # (steps 0: the one dot of a trip's start)
+                if steps:
+                    fb.fill_rect(x0 + dx * k // steps, y0 + dy * k // steps, 2, 2, c)
+                else:
+                    fb.fill_rect(x0, y0, 2, 2, c)
+        x0, y0 = x1, y1
+    v = n - 1
+    _round(fb, xy[0] + ROUTE_X - 2, (xy[1] & 127) + ROUTE_Y - 2 - top, ink)
+    _round(fb, xy[2 * v] + ROUTE_X - 2, (xy[2 * v + 1] & 127) + ROUTE_Y - 2 - top, lit)
 
-def _draw_top(speed, fix, used, clock, lit):
+def _draw_top(route, km, fix, used, clock, level, up):
     fb = _D.fb
+    tone = INK if fix else RED
+    used = str(used)
+    x = RIGHT - width(_SATS, used)
     for top in range(0, TOP_H, BAND_H):
-        fb.fill(BG)
-        x = _text(fb, _HERO, speed, 4, 37 - top, "org" if fix else "mut")
-        _text(fb, _LAB, "KM/H", x + 3, 37 - top, "mut")
-        _right(fb, _NUM, str(used), 158, 17 - top, "txt" if fix else "red")
-        _right(fb, _LAB, "műhold", 158, 26 - top, "mut")
-        _right(fb, _TXT, clock, 158, 38 - top, "soft")
-        _wifi(fb, lit, ORG, WIFI_X, WIFI_Y - top)
+        fb.fill(_COL[PAPER])
+        _route(fb, top, route)
+        _right(fb, _CLOCK, clock, RIGHT, 14 - top, INK)
+        _text(fb, _SATS, used, x, 28 - top, tone)
+        if top < 28 and top + BAND_H > 28 - SAT_W:
+            fb.blit((SAT_ICON, SAT_W, SAT_W, framebuf.MONO_HLSB), x - SAT_GAP - SAT_W,
+                    28 - SAT_W - top, 0, _mono_palette(tone))
+        for i in range(4):
+            h = 2 + i * 3
+            fb.fill_rect(BARS_X + i * 5, BARS_Y - h - top, 4, h,
+                         OFF if level is None or i > level else _COL[INK])
+        _text(fb, _SMALL, km, KM_X, BARS_Y - top, INK)
+        fb.fill_rect(RULE_X, RULE_Y - top, W - RULE_X, 1, _COL[INK])
+        if up.strip():
+            _right(fb, _UP, up, RIGHT, 62 - top, INK)
         _send(top, min(BAND_H, TOP_H - top))
 
-def _draw_store(fb, top, store):
-    """The flash: the per cent taken and how long it still logs over a gauge."""
-    pct, left = store
-    bad = pct >= STORE_BAD
-    warn = pct >= STORE_WARN
-    tone = "red" if bad else "yel" if warn else "soft"
-    _text(fb, _TXT, "%d%%" % pct, STORE_X, 57 - top, tone)
-    _right(fb, _TXT, left, STORE_X + STORE_W, 57 - top, tone)
-    fb.fill_rect(STORE_X, 60 - top, STORE_W, 4, OFF)
-    fb.fill_rect(STORE_X, 60 - top, max(1, STORE_W * pct // 100), 4,
-                 _c(_TONES["red" if bad else "yel" if warn else "grn"]))
-
-def _draw_low(quality, up, up_on, store):
-    """How good the GPS is, as a phone's signal; the flash; what waits for upload."""
+def _draw_low(quality, store):
+    """How good the GPS is, a tile; the flash, per cent and time over a gauge."""
     fb = _D.fb
-    word, tone = QUALITY[quality]
-    col = _c(_TONES[tone])
-    tone_up = "org" if up_on else "soft"
+    word, tile = QUALITY[quality]
+    x = TILE_W // 2 - width(_WORD, word) // 2
+    if store:
+        pct, left = store
+        tone = RED if pct >= STORE_BAD else AMBER if pct >= STORE_WARN else INK
+        pc = "%d%%" % pct
     for top in range(LOW_Y, H, BAND_H):
-        fb.fill(BG)
-        y0 = 74 - top
-        for i in range(4):
-            h = 6 + i * 6
-            fb.fill_rect(5 + i * 8, y0 - h, 6, h, col if quality and i <= quality else OFF)
-        _text(fb, _LAB, "GPS", 42, 62 - top, "mut")
-        _text(fb, _WORD, word, 42, y0, tone)
-        if up.strip():
-            x = 158 - width(_TXT, up)
-            fb.blit((UP_ICON, 9, 8, framebuf.MONO_HLSB), x - 12, y0 - 8, 0,
-                    _mono_palette(_c(_TONES[tone_up])))
-            _text(fb, _TXT, up, x, y0, tone_up)
+        fb.fill(_COL[PAPER])
+        fb.fill_rect(0, TILE_Y - top, TILE_W, H - TILE_Y, _COL[tile])
+        _text(fb, _WORD, word, x, 76 - top, PAPER, tile)
         if store:
-            _draw_store(fb, top, store)
+            _text(fb, _SMALL, pc, STORE_X, 72 - top, tone)
+            _right(fb, _SMALL, left, RIGHT, 72 - top, tone)
+            fb.fill_rect(STORE_X, STORE_Y - top, STORE_W, STORE_H, DIM)
+            fb.fill_rect(STORE_X, STORE_Y - top, max(1, STORE_W * pct // 100), STORE_H,
+                         _COL[tone])
         _send(top, min(BAND_H, H - top))
 
-def set_state(speed, fix, used, clock, level, quality, up, up_on, store=None):
-    """speed: text; fix: a usable fix; used: satellites in it; clock: text;
-    level: WiFi 0-3 or None; quality: see QUALITY; up: text, up_on: points wait;
-    store: (per cent of the flash taken, how long it still logs: text) or None."""
-    _D.state = (speed, fix, used, clock, level, quality, up, up_on, store)
+def set_state(route, km, fix, used, clock, level, quality, up, up_on, store=None):
+    """route: (pixels, points, the latest trip's first point, a version) or None, the
+    day not known yet: see _route, a new one only when it changed; km: text;
+    fix: a usable fix; used: satellites in it; clock: text; level: WiFi 0-3 or None;
+    quality: see QUALITY; up: text (" ": no upload set up); up_on: points wait (not
+    shown apart from up's text); store: (per cent of the flash taken, how long it
+    still logs: text) or None."""
+    _D.state = (route, km, fix, used, clock, level, quality, up, up_on, store)
 
 def frame():
     s = _D.state
     if s is None:
         return
-    speed, fix, used, clock, level, quality, up, up_on, store = s
-    top = (speed, fix, used, clock)
+    route, km, fix, used, clock, level, quality, up, _on, store = s
+    top = (route, km, fix, used, clock, level, up)
     if top != _D.top:
-        _draw_top(speed, fix, used, clock, level)
-        _D.top, _D.lit = top, level
-    elif level != _D.lit:
-        _wifi_frame(level)
-        _D.lit = level
-    low = (quality, up, up_on, store)
+        _draw_top(route, km, fix, used, clock, level, up)
+        _D.top = top
+    low = (quality, store)
     if low != _D.low:
-        _draw_low(quality, up, up_on, store)
+        _draw_low(quality, store)
         _D.low = low

@@ -18746,7 +18746,7 @@ check("UC-GSA: the satellites in use of one burst stay together past a second's 
 import gps_tft as _ft
 import gps_tft_font as _ff
 _fo = []
-for _f in (_ff.HERO, _ff.NUM, _ff.TXT, _ff.LAB, _ff.WORD):
+for _f in (_ff.CLOCK, _ff.SATS, _ff.UP, _ff.WORD, _ff.SMALL):
     _chars, _wd, _of, _dat, _h, _base = _f
     _end = 0
     _ok1 = len(_wd) == len(_chars) and len(_of) == 2 * len(_chars) and 0 < _base <= _h
@@ -18754,15 +18754,9 @@ for _f in (_ff.HERO, _ff.NUM, _ff.TXT, _ff.LAB, _ff.WORD):
         _o = _of[_i * 2] | _of[_i * 2 + 1] << 8
         _ok1 = _ok1 and _o == _end
         _end = _o + ((_wd[_i] + 1) // 2) * _h
-    _fo.append(_ok1 and _end == len(_dat))
-_shows = "0123456789-:kész KM/Hműhold"
-check("TFT-FONT: every glyph's offset and size add up, 16 levels; every character the "
-      "screen shows is in its font",
-      all(_fo) and all(c in _ff.HERO[0] and c in _ff.NUM[0] for c in "0123456789-")
-      and all(c in _ff.TXT[0] for c in "0123456789:-kész ")
-      and all(c in _ff.LAB[0] for c in "KM/HGPSműhold")
-      and all(c in _ff.WORD[0] for w, _t in _ft.QUALITY for c in w)
-      and len(set(_ff.HERO[3])) > 2, repr(_fo))
+    _fo.append(_ok1 and _end == len(_dat) and len(set(_dat)) > 2)
+check("TFT-FONT: every glyph's offset and size add up, 16 levels (the design's five sizes: "
+      "TFT-FONT-BASE)", all(_fo), repr(_fo))
 
 hl.reset()
 hl.log_reset()
@@ -18798,15 +18792,15 @@ for _hd, _us in ((0.9, 26), (1.5, 10), (1.5, 9), (1.6, 26), (3.0, 12), (3.1, 26)
     hl.st.update(hdop=_hd, used=_us, svs=None)
     _gq.append(hl._gps_quality(True))
 _gq0 = hl._gps_quality(False)
-check("TFT-STATE: speed rounded with a fix, -- without; the clock; WiFi off or its "
+check("TFT-STATE: the fix; the clock; WiFi off or its "
       "level by the signal, down at once, up only past a margin; what waits, short when long, done or nothing set up; the "
       "GPS's quality from HDOP and the satellites in the fix",
-      _s1[:4] == ("47", True, 22, "11:42") and _s1[4] is None and _s1[6:8] == ("1284", True)
-      and _s2[0] == "--" and _s2[1] is False
-      and _s3[4] == 3 and _s3[6:8] == ("kész", False)
+      _s1[2:5] == (True, 22, "11:42") and _s1[5] is None and _s1[7:9] == ("1284", True)
+      and _s2[2] is False
+      and _s3[5] == 3 and _s3[7:9] == ("kész", False)
       and _lv == [3, 3, 2, 2, 1, 1, 0, 0] and _hy == [2, 2, 2, 3, 0, 3, 2, 1]
-      and _s4[6] == " " and _s5[6] == "12k"
-      and _gq == [3, 3, 2, 2, 2, 1, 1, 1] and _gq0 == 0 and _s1[5] == 3 and _s2[5] == 0,
+      and _s4[7] == " " and _s5[7] == "12k"
+      and _gq == [3, 3, 2, 2, 2, 1, 1, 1] and _gq0 == 0 and _s1[6] == 3 and _s2[6] == 0,
       repr((_s1, _s2, _s3, _lv, _s4, _s5, _gq, _gq0)))
 _ls = lambda d, t: hl.st.update(date=d, time=t) or hl._local_hm()
 check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
@@ -18862,9 +18856,9 @@ check("TFT-STORE: the flash in per cent and the time a 1 Hz drive still fits: da
                   (100, "tele"), (100, "tele"))
       and _sh == (76, "44 óra") and _sh0 == (98, "2 óra")
       and _sa == _sb == _sc and _n1 == 1 and _n2 == 2
-      and _sf is None and _st9[8] is None
-      and all(c in _ff.TXT[0] for _p, _l in _stores for c in "%d%%" % _p + _l),
-      repr((_stores, _sh, _sh0, _n1, _n2, _sf, _st9[8])))
+      and _sf is None and _st9[9] is None
+      and all(c in _ff.SMALL[0] for _p, _l in _stores for c in "%d%%" % _p + _l),
+      repr((_stores, _sh, _sh0, _n1, _n2, _sf, _st9[9])))
 
 # the drawing, on a model of the panel: real pixels, at real coordinates
 _order = []
@@ -18885,138 +18879,890 @@ _TftSpi.fail = False
 _ft.start()
 _cmds0 = list(_TftSpi.out)
 _ft.Pin = _pin0
-_bg_all = len(_TftSpi.panel) == 160 * 80 and set(_TftSpi.panel.values()) == {_ft.BG}
-_ft.set_state("47", True, 22, "11:42", None, 3, "1284", True)
-_TftSpi.frames = 0
-_ft.frame()
-_f1 = _TftSpi.frames
-_px = lambda x, y: _TftSpi.panel.get((x + _ft.XO, y + _ft.YO))
-_cnt = lambda x0, y0, x1, y1, c: sum(1 for y in range(y0, y1) for x in range(x0, x1) if _px(x, y) == c)
-_org = _ft._gs4_palette("org").pixel(15, 0)
-_txt = _ft._gs4_palette("txt").pixel(15, 0)
-_soft = _ft._gs4_palette("soft").pixel(15, 0)
-_grn = _ft._gs4_palette("grn").pixel(15, 0)
-_mid = _ft._gs4_palette("org").pixel(7, 0)
-_speed = _cnt(4, 0, 60, 41, _org)
-_aa = _cnt(4, 0, 60, 41, _mid)
-_num = _cnt(130, 2, 160, 18, _txt)
-_clockp = _cnt(125, 28, 160, 40, _soft)
-_iconp = _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.DIM)
-_barc = _c0 = _ft._c(_ft._TONES["grn"])
-_bh = [sum(1 for y in range(46, 76) if _px(5 + i * 8 + 2, y) == _barc) for i in range(4)]
-_word = _cnt(42, 62, 100, 76, _grn)
-_gpsl = _cnt(42, 50, 70, 63, _ft._gs4_palette("mut").pixel(15, 0))
-_upp = _cnt(126, 62, 160, 76, _org)
-_upi = _cnt(100, 62, 158, 76, _ft._c(_ft._TONES["org"]))
-_TftSpi.frames = 0
-_ft.frame()
-_f2 = _TftSpi.frames
-_ft.set_state("48", True, 22, "11:42", None, 3, "1284", True)
-_TftSpi.frames = 0
-_ft.frame()
-_f3 = _TftSpi.frames
-_ft.set_state("48", True, 22, "11:42", None, 1, "1284", True)
-_TftSpi.frames = 0
-_ft.frame()
-_f4 = _TftSpi.frames
-_weak = [sum(1 for y in range(46, 76) if _px(5 + i * 8 + 2, y) == _ft._c(_ft._TONES["org"])) for i in range(4)]
-_ft.set_state("--", False, 0, "--:--", None, 0, "kész", False)
-_ft.frame()
-_nofix = (_cnt(4, 0, 60, 41, _org), _cnt(130, 2, 160, 18, _ft._gs4_palette("red").pixel(15, 0)) > 5,
-          [sum(1 for y in range(46, 76) if _px(5 + i * 8 + 2, y) == _ft.OFF) for i in range(4)],
-          _cnt(42, 62, 100, 76, _ft._gs4_palette("red").pixel(15, 0)) > 5,
-          _cnt(126, 62, 160, 76, _ft._gs4_palette("soft").pixel(15, 0)) > 3)
-check("TFT-INIT: 16 bits a pixel and landscape, the whole panel cleared, the backlight "
-      "only after that (no flash of random RAM)",
+_PAPER_C = _ft._COL[_ft.PAPER]
+_INK_C, _RED_C, _AMB_C = _ft._COL[_ft.INK], _ft._COL[_ft.RED], _ft._COL[_ft.AMBER]
+_bg_all = len(_TftSpi.panel) == 160 * 80 and set(_TftSpi.panel.values()) == {_PAPER_C}
+check("TFT-INIT: 16 bits a pixel and landscape, the whole panel cleared to paper, the "
+      "backlight only after that (no flash of random RAM)",
       b"\x36" in _cmds0 and b"\x68" in _cmds0 and b"\x05" in _cmds0 and _bg_all
       and _order[0][0] == 0 and _order[-1][0] == 1 and _order[-1][1] == len(_cmds0),
       repr((_order, len(_cmds0), _bg_all)))
-check("TFT-DRAW: the measured offset; the speed orange and anti-aliased, the satellites, "
-      "the clock and the dim icon where they belong; strong GPS: four rising green bars, "
-      "the word and the label; what waits in orange with its arrow",
-      (_ft.XO, _ft.YO) == (1, 26) and _speed > 200 and _aa > 0 and _num > 15
-      and _clockp > 5 and _iconp > 10 and _bh == [6, 12, 18, 24] and _word > 5
-      and _gpsl > 5 and _upp > 5 and _upi > 10,
-      repr((_speed, _aa, _num, _clockp, _iconp, _bh, _word, _gpsl, _upp, _upi)))
-check("TFT-ZONES: a frame draws both zones (3 + 3 bands), an unchanged one none; a new "
-      "speed only the top, a new quality only the lower zone, weak lights two bars",
-      _f1 == 6 and _f2 == 0 and _f3 == 3 and _f4 == 3 and _weak == [6, 12, 0, 0],
-      repr((_f1, _f2, _f3, _f4, _weak)))
-check("TFT-NOFIX: no fix: no orange, the satellite count red, all bars off, the word "
-      "red, done in grey", _nofix == (0, True, [6, 12, 18, 24], True, True), repr(_nofix))
 
-# the flash's gauge: its length by the per cent, its colour by the level
-_gx = lambda c: sum(1 for x in range(_ft.STORE_X, _ft.STORE_X + _ft.STORE_W) if _px(x, 61) == c)
-_gr, _gy, _gd = (_ft._c(_ft._TONES[t]) for t in ("grn", "yel", "red"))
-_tp = lambda t: _ft._gs4_palette(t).pixel(15, 0)
-_gs = []
-for _p, _l in ((3, "7 nap"), (50, "3 nap"), (70, "44 óra"), (89, "9 óra"), (90, "8 óra"), (100, "tele")):
-    _ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, (_p, _l))
+_px = lambda x, y: _TftSpi.panel.get((x + _ft.XO, y + _ft.YO))
+_cnt = lambda x0, y0, x1, y1, c: sum(1 for y in range(y0, y1) for x in range(x0, x1) if _px(x, y) == c)
+_rect = lambda x0, y0, x1, y1: set(_px(x, y) for y in range(y0, y1) for x in range(x0, x1))
+_rgb = lambda h: _ft._c(tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)))
+_pal16 = lambda fg, bg: set(_ft._gs4_palette(fg, bg).pixel(v, 0) for v in range(16))
+_ink15 = _ft._gs4_palette(_ft.INK).pixel(15, 0)
+_red15 = _ft._gs4_palette(_ft.RED).pixel(15, 0)
+_amb15 = _ft._gs4_palette(_ft.AMBER).pixel(15, 0)
+_STD = (None, "8,6 km", True, 22, "11:42", None, 3, "kész", False, (5, "7 nap"))
+
+
+def _show(*a, **k):
+    """A frame of _STD with these fields changed, by name."""
+    v = dict(zip(("route", "km", "fix", "used", "clock", "level", "quality", "up", "up_on", "store"), _STD))
+    v.update(k)
+    _ft.set_state(*[v[n] for n in ("route", "km", "fix", "used", "clock", "level", "quality", "up", "up_on", "store")])
     _ft.frame()
-    _gs.append((_gx(_gr), _gx(_gy), _gx(_gd), _gx(_ft.OFF), _cnt(_ft.STORE_X, 48, 159, 58, _tp("soft")) > 5,
-                _cnt(_ft.STORE_X, 48, 159, 58, _tp("yel")) > 5, _cnt(_ft.STORE_X, 48, 159, 58, _tp("red")) > 5))
-_TftSpi.frames = 0
-_ft.frame()
-_gs0 = _TftSpi.frames
-_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, (100, "tele"))
-_ft.frame()
-_up_gone = _cnt(_ft.STORE_X, 66, 159, 76, _tp("soft")) > 3
-_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, (99, "<1 óra"))
-_ft.frame()
-_w = _ft.width(_ft._TXT, "99%") + _ft.width(_ft._TXT, "<1 óra")
-_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False, None)
-_ft.frame()
-_none = (_gx(_gr), _gx(_gy), _gx(_gd), _gx(_ft.OFF), _cnt(_ft.STORE_X, 48, 159, 58, _tp("soft")))
-check("TFT-STORE-DRAW: the gauge's length by the per cent, green, yellow from 70, red from "
-      "90, the text with it, the upload line left alone, an unchanged state sends nothing, "
-      "the longest two texts fit; unreadable: no gauge, no text",
-      _gs == [(1, 0, 0, 55, True, False, False), (28, 0, 0, 28, True, False, False),
-              (0, 39, 0, 17, False, True, False), (0, 49, 0, 7, False, True, False),
-              (0, 0, 50, 6, False, False, True), (0, 0, 56, 0, False, False, True)]
-      and _gs0 == 0 and _up_gone and _w < _ft.STORE_W and _none == (0, 0, 0, 0, 0),
-      repr((_gs, _gs0, _up_gone, _w, _none)))
-_ft.set_state("47", True, 22, "11:42", None, 3, "kész", False)
-_ft.frame()
 
-# the WiFi icon: still, its arcs by the level; a new level sends only the icon
-_arcs = lambda c: _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, c)
-_ft.set_state("47", True, 22, "11:42", 3, 3, "kész", False)
-_ft.frame()
-_a3 = _arcs(_ft.ORG)
+
+_show()
+check("TFT-COLOURS: exactly the design's: paper, ink, red, amber, unlit dots, off bars, the "
+      "four tiles", (_PAPER_C, _INK_C, _RED_C, _AMB_C, _ft.DIM, _ft.OFF)
+      == tuple(_rgb(h) for h in ("#f4f0e6", "#111111", "#d7261e", "#c98a00", "#e2dccb", "#cfc9ba"))
+      and [_ft._COL[t] for _w, t in _ft.QUALITY]
+      == [_rgb(h) for h in ("#d7261e", "#d9601a", "#c98a00", "#1f8a4c")]
+      and [w for w, _t in _ft.QUALITY] == ["nincs", "gyenge", "közepes", "erős"])
+
+# the right column
+_clk = _rect(96, 0, 160, 15) - {_PAPER_C}
+_clk_ok = _clk <= _pal16(_ft.INK, _ft.PAPER) and _ink15 in _clk
+_clk_end = max(x for x in range(96, 160) for y in range(0, 15) if _px(x, y) != _PAPER_C)
+_clk_base = max(y for x in range(96, 160) for y in range(0, 15) if _px(x, y) != _PAPER_C)
+_up_end = max(x for x in range(96, 160) for y in range(48, 63) if _px(x, y) != _PAPER_C)
+_up_base = max(y for x in range(96, 160) for y in range(48, 63) if _px(x, y) != _PAPER_C)
+_rule = [_px(x, 47) for x in range(95, 160)]
+check("TFT-COLUMN: the clock's baseline 14 and the upload's 62, both ending at x=158 at "
+      "most, ink anti-aliased on paper; the rule at y=47 from x=96 to the edge",
+      _clk_ok and _clk_base == 13 and 155 <= _clk_end < 158 and _up_base == 61 and 155 <= _up_end < 158
+      and _rule[0] == _PAPER_C and set(_rule[1:]) == {_INK_C}
+      and set(_px(x, 46) for x in range(96, 160)) == {_PAPER_C},
+      repr((_clk_base, _clk_end, _up_base, _up_end)))
+
+# the satellites: an icon left of the count, on its baseline, in its colour
+_SAT = ("...#####...", "....###....", "###..#..###", "###.###.###", "###.###.###", "###########",
+        "###.###.###", "###.###.###", "###..#..###", "###..#..###", "....###....")
+
+
+def _sat_at(n):
+    """The icon's left edge for count n, from the font's own width."""
+    return 158 - _ft.width(_ft._SATS, str(n)) - _ft.SAT_GAP - 11
+
+
+def _sat_ok(n, col):
+    x0 = _sat_at(n)
+    return all(_px(x0 + i, 17 + j) == (col if ch == "#" else _PAPER_C)
+               for j, row in enumerate(_SAT) for i, ch in enumerate(row))
+
+
+_sat1 = _sat_ok(22, _INK_C)
+_num1 = _rect(_sat_at(22) + 11, 17, 160, 28) - {_PAPER_C}
+_sat_end = max(x for x in range(_sat_at(22) + 11, 160) for y in range(17, 28) if _px(x, y) != _PAPER_C)
+_gap1 = _rect(_sat_at(22) + 11, 17, _sat_at(22) + 13, 28)
+_show(fix=False, used=0, clock="--:--")
+_sat2 = _sat_ok(0, _RED_C)
+_num2 = _rect(_sat_at(0) + 11, 17, 160, 28) - {_PAPER_C}
+_show(used=40)
+_sat3 = _sat_ok(40, _INK_C)
+_num40 = _ft.width(_ft._SATS, "40")
+_clear = _rect(92, 14, 160, 17) | _rect(92, 28, 160, 31)
+check("TFT-SAT: the icon, pixel by pixel, 11x11 on the count's baseline, left of it with a "
+      "gap and no overlap, ink, red without a fix with the count; the widest count keeps "
+      "clear of the clock, the bars and the km; no \"sat\" text in the font",
+      _sat1 and _sat2 and _sat3 and _num1 <= _pal16(_ft.INK, _ft.PAPER)
+      and _num2 <= _pal16(_ft.RED, _ft.PAPER) and _red15 in _num2 and _ink15 in _num1
+      and _gap1 == {_PAPER_C} and 2 <= _ft.SAT_GAP <= 3 and _sat_end == 157
+      and _clear == {_PAPER_C} and _sat_at(40) >= 96 and _num40 < 20
+      and "a" not in _ff.SATS[0] and "t" not in _ff.SATS[0],
+      repr((_sat1, _sat2, _sat3, _sat_end, _gap1, _clear)))
+
+# WiFi: four rising bars
+_bars = []
+for _lv in (None, 0, 1, 2, 3):
+    _show(level=_lv)
+    _bars.append([(sum(1 for y in range(28, 47) if _px(141 + 5 * i, y) == _INK_C),
+                   sum(1 for y in range(28, 47) if _px(141 + 5 * i, y) == _ft.OFF)) for i in range(4)])
+_bar_w = [_px(x, 41) for x in range(138, 160)]
+_bar_foot = set(_px(x, 42) for x in range(140, 160))
+check("TFT-BARS: x=140, foot y=42, heights 2 5 8 11, none lit without WiFi, level 0-3 lights "
+      "that many plus one; 4 wide on a pitch of 5, ending at x=158",
+      _bars == [[(0, 2), (0, 5), (0, 8), (0, 11)], [(2, 0), (0, 5), (0, 8), (0, 11)],
+                [(2, 0), (5, 0), (0, 8), (0, 11)], [(2, 0), (5, 0), (8, 0), (0, 11)],
+                [(2, 0), (5, 0), (8, 0), (11, 0)]]
+      and _bar_w == [_PAPER_C] * 2 + ([_INK_C] * 4 + [_PAPER_C]) * 4
+      and _bar_foot == {_PAPER_C}, repr((_bars, _bar_w)))
+
+# the tile and the flash's gauge
+_tiles = []
+for _q, (_w, _t) in enumerate(_ft.QUALITY):
+    _show(quality=_q)
+    _c0 = _ft._COL[_t]
+    _inner = _rect(0, 64, 62, 80)
+    _ws = [x for x in range(62) if any(_px(x, y) != _c0 for y in range(64, 80))]
+    _tiles.append((_px(0, 64) == _c0 and _px(61, 79) == _c0 and _px(0, 63) == _PAPER_C
+                   and _px(62, 70) == _PAPER_C,
+                   _inner <= _pal16(_ft.PAPER, _t),
+                   _ft._gs4_palette(_ft.PAPER, _t).pixel(15, 0) in _inner,
+                   abs(_ws[0] + _ws[-1] - 61) <= 3))
+_wmax = _ft.width(_ft._WORD, "közepes")
+check("TFT-TILE: 0,64 62x16 in the quality's colour, its word centred in paper, every pixel "
+      "blended against that tile; the longest word fits",
+      all(all(t) for t in _tiles) and _wmax <= 60, repr((_tiles, _wmax)))
+
+_gauge = []
+for _p, _l, _len, _col, _tone in ((3, "7 nap", 2, _INK_C, _ink15), (50, "3 nap", 46, _INK_C, _ink15),
+                                  (70, "44 óra", 64, _AMB_C, _amb15), (89, "9 óra", 81, _AMB_C, _amb15),
+                                  (90, "8 óra", 82, _RED_C, _red15), (100, "tele", 92, _RED_C, _red15)):
+    _show(store=(_p, _l))
+    _g = [[_px(x, y) for x in range(66, 158)] for y in (75, 76, 77)]
+    _txt = _rect(64, 64, 160, 74) - {_PAPER_C}
+    _gauge.append(all(r[:_len] == [_col] * _len and r[_len:] == [_ft.DIM] * (92 - _len) for r in _g)
+                  and _px(65, 76) == _PAPER_C and _px(158, 76) == _PAPER_C
+                  and set(_px(x, 74) for x in range(66, 158)) == {_PAPER_C}
+                  and set(_px(x, 78) for x in range(66, 158)) == {_PAPER_C}
+                  and _tone in _txt)
+_store_l = max(x for x in range(160) if _px(x, 70) not in (_PAPER_C, None))
+_show(store=(0, "7 nap"))
+_g0 = _px(66, 76) == _INK_C and _px(67, 76) == _ft.DIM
+_small_base = max(y for x in range(66, 110) for y in range(64, 74) if _px(x, y) != _PAPER_C)
+_show(store=None)
+_none = _rect(64, 64, 160, 80) == {_PAPER_C}
+check("TFT-GAUGE: 66,75 92x3 on its unlit colour, the length by the per cent (at least one "
+      "pixel), the bar and the text ink, amber from 70, red from 90; unreadable: nothing",
+      all(_gauge) and _g0 and _none and _small_base == 71, repr((_gauge, _g0, _none, _small_base)))
+
+# the strings, each in its font, the longest in their slots
+_str_small = ["%d%%" % p for p in (0, 5, 96, 100)] + [hl._store_left(b) for b in (
+    0, 1, hl.TFT_POINT_B * 3600, hl.TFT_POINT_B * 3600 * 47, hl.TFT_POINT_B * 3600 * 48 * 9)]
+_str_km = ["0,0 km", "8,6 km", "99,9 km", "100 km", "999 km", "1234567890 km"]
+check("TFT-CHARS: every string the screen shows has its characters in its font",
+      all(c in _ff.CLOCK[0] for c in "0123456789:-")
+      and all(c in _ff.SATS[0] for c in "0123456789")
+      and all(c in _ff.UP[0] for s in ("kész", "0123456789", "12k", "999k") for c in s)
+      and all(c in _ff.WORD[0] for w, _t in _ft.QUALITY for c in w)
+      and all(c in _ff.SMALL[0] for s in _str_small + _str_km + [_ft.ROUTE_NOTE] for c in s)
+      and _ft.ROUTE_NOTE == "nincs út",
+      repr(_str_small))
+_sw = _ft.width
+_store_room = _sw(_ft._SMALL, "100%") + _sw(_ft._SMALL, "<1 óra")
+_up_room = _sw(_ft._UP, "12345")
+check("TFT-FIT: the longest strings fit their slots: 100% with <1 óra over the gauge, a "
+      "12345 count and --:-- in the right column",
+      _store_room < 92 - 2 and _up_room < 158 - 96 and _sw(_ft._CLOCK, "--:--") < 158 - 96
+      and _sw(_ft._CLOCK, "88:88") < 158 - 96, repr((_store_room, _up_room)))
+_show(store=(100, "<1 óra"), up="12345", clock="--:--")
+_long = (_rect(92, 48, 96, 63) == {_PAPER_C} and _px(158, 72) == _PAPER_C and _rect(158, 48, 160, 63) == {_PAPER_C})
+
+# what goes up when: a zone of 4 bands (rows 0-62) or 2 (rows 63-79), or nothing
+_show()
+
+
+_zcur = {}
+
+
+def _sends(**k):
+    _zcur.update(k)
+    _TftSpi.frames = 0
+    _TftSpi.out[:] = []
+    _show(**_zcur)
+    return _TftSpi.frames
+
+
+_z = dict(same=_sends(), same2=_sends(), up_on=_sends(up_on=True), km=_sends(km="8,7 km"),
+          route=_sends(km="8,7 km", route=(bytearray(4), 2, 0, 1)),
+          route_same=_sends(km="8,7 km", route=(bytearray(4), 2, 0, 1)),
+          used=_sends(used=23), level=_sends(level=2), level_same=_sends(level=2),
+          up=_sends(up="123"), clock=_sends(clock="11:43"),
+          fix=_sends(fix=False), quality=_sends(quality=1), store=_sends(store=(6, "7 nap")))
+_TftSpi.frames = 0
+_show(route=None, km="", used=7, quality=2, store=(7, "6 nap"))
+_both = _TftSpi.frames
+_show()
 _TftSpi.out[:] = []
 for _i in range(20):
     _ft.frame()
-_still3 = sum(1 for b in _TftSpi.out if len(b) > 8) == 0
-_ft.set_state("47", True, 22, "11:42", 1, 3, "kész", False)
-_TftSpi.out[:] = []
-_ft.frame()
-_sent1 = [len(b) for b in _TftSpi.out if len(b) > 8]
-_a1 = _arcs(_ft.ORG)
-_ft.set_state("47", True, 22, "11:42", None, 3, "kész", False)
-_ft.frame()
-_off = (_arcs(_ft.ORG), _arcs(_ft.DIM) > 10)
-check("TFT-WIFI: the icon stands: 20 frames send nothing; a lower level sends only the "
-      "12x12 icon with fewer arcs lit; no WiFi: all dim",
-      _still3 and _sent1 == [288] and _a3 > _a1 > 0 and _off == (0, True),
-      repr((_still3, _sent1, _a3, _a1, _off)))
+_still = sum(1 for b in _TftSpi.out if len(b) > 8) == 0
+check("TFT-ZONES: an unchanged state sends nothing, for 20 frames too; the route, km, "
+      "satellites, WiFi level, clock, fix and upload redraw the top zone only (4 bands), "
+      "quality and flash the low zone only (2 bands); up_on alone nothing",
+      _z == dict(same=0, same2=0, up_on=0, km=4, route=4, route_same=0, used=4, level=4,
+                 level_same=0, up=4, clock=4, fix=4, quality=2, store=2)
+      and _both == 6 and _still and _long, repr((_z, _both, _still, _long)))
 
-# the fonts: only the rows from the first to the last with ink in any glyph (the
-# font's blank rows were 1/3 of the file), BASE counted from the first kept: put
+# today's route: the logger's side
+M_E6 = hl._CM_E6 / 100
+_rt_dir = os.path.join(diag_dir, "route")
+os.makedirs(_rt_dir, exist_ok=True)
+hl.ROUTE_FILE = os.path.join(_rt_dir, "route.bin")
+_DAY = (hl._days(2026, 6, 15) - hl.EPOCH_DAYS) * 86400 + 36000   # 12:00 Hungarian
+_Rt = hl._Rt
+
+
+def _rfresh():
+    _rt_rm = [hl.ROUTE_FILE, hl.ROUTE_FILE + ".tmp"]
+    for _n in _rt_rm:
+        try:
+            os.remove(_n)
+        except OSError:
+            pass
+    hl._rt_start()
+    hl._rt_reset(-1)
+    _Rt.view, _Rt.km, _Rt.tail, _Rt.drawn, _Rt.saved = None, "", None, None, None
+    _Rt.hour, _Rt.moved, _Rt.unsaved, _Rt.waiting, _Rt.save_ok = None, False, False, False, True
+    hl._tft = _ft
+    hl._tft_t[:] = [None, None, 0, 0, 0]
+
+
+def _rline(lat, lon, s, anchor=False):
+    """A track line as _sample_line and _still_heartbeat write them, format 1."""
+    tc = hl._stamp_s(s)[1]
+    return "%.6f,%.6f,,,%s\n" % (lat, lon, tc) if anchor else "%.6f,%.6f,120.5,1.0,%s\n" % (lat, lon, tc)
+
+
+def _rfeed(*lines):
+    hl._rt_feed(list(lines), len(lines))
+
+
+def _rat(east_m, north_m, s, anchor=False, lat0=10.0, lon0=20.0):
+    """A line that many metres from the made-up origin."""
+    lat = lat0 + north_m / M_E6 / 1e6
+    return _rline(lat, lon0 + east_m / M_E6 / 1e6 / math.cos(math.radians(lat0)), s, anchor)
+
+
+def _rview(s=None):
+    """A look at the route, the clock at s."""
+    _clock[0] += hl.ROUTE_DRAW
+    if s is not None:
+        hl.log["clock"] = (s, _clock[0])
+    hl._rt_tick(_clock[0])
+    return _Rt.view
+
+
+hl.log_reset()
+hl.st.update(valid=False, pos_at=None)
+
+# A real day's route, its shape only: moved to a made-up origin and date, thinned.
+# (east dm, north dm, s, an anchor point): two trips, the second starting at an anchor
+# with the 44 m jump after it, as it did on the board.
+_ROUTE_DAY = [
+  [
+    (0,0,0,0),(60,-18,2,0),(150,13,4,0),(568,207,14,0),(679,80,17,0),(1053,-592,35,0),
+    (1199,-592,39,0),(1563,-458,44,0),(9705,3451,109,0),(13688,5275,138,0),(14092,5411,141,0),
+    (15002,5497,148,0),(15194,5542,150,0),(15457,5653,155,0),(16011,6011,337,0),
+    (16020,6056,344,0),(15957,6134,346,0),(15324,6516,355,0),(14772,7085,396,0),
+    (14509,7495,403,0),(14337,7904,408,0),(14273,8171,411,0),(14238,8518,415,0),
+    (14211,9816,429,0),(14115,11484,489,0),(14002,11916,493,0),(13892,12138,495,0),
+    (13741,12349,497,0),(13334,12672,501,0),(8138,15990,545,0),(6494,17153,559,0),
+    (6163,17426,562,0),(5037,18521,573,0),(4479,19157,579,0),(3332,20567,594,0),
+    (3341,20689,597,0),(3426,20756,599,0),(4000,20811,605,0),(4447,20905,609,0),
+    (4670,20989,611,0),(5387,21367,618,0),(7095,21690,644,0),(8831,21868,659,0),
+    (8886,21892,660,0),(8932,21994,662,0),(8793,23044,682,0),(8762,23120,700,0),
+    (8481,23164,754,0),(8274,23057,775,0),(7807,22750,820,0),(7788,22617,837,0),
+    (7743,22657,855,0),(7785,22688,861,0),(7795,22535,884,0),
+  ],
+  [
+    (7856,22230,5588,1),(8029,21825,5589,0),(6840,21696,5599,0),(6087,21558,5606,0),
+    (5952,21567,5608,0),(5812,21696,5612,0),(5748,21705,5613,0),(5594,21645,5615,0),
+    (4736,21100,5624,0),(4236,20922,5629,0),(3717,20878,5635,0),(2790,20878,5674,0),
+    (2238,20811,5679,0),(1939,20687,5682,0),(597,19904,5696,0),(-601,19272,5709,0),
+    (-898,19148,5714,0),(-1108,19139,5718,0),(-1177,19054,5720,0),(-1127,18961,5722,0),
+    (4440,14838,5780,0),(4407,14753,5782,0),(1823,12183,5815,0),(1662,11907,5818,0),
+    (1477,11262,5825,0),(1401,11093,5828,0),(1431,10993,5830,0),(1693,10904,5834,0),
+    (3172,10572,5850,0),(3422,10497,5896,0),(3481,10452,5898,0),(3493,10370,5900,0),
+    (3422,10281,5902,0),(2421,9807,5913,0),(2368,9770,5914,0),(2333,9681,5916,0),
+    (3660,6676,5961,0),(3612,6605,5963,0),(1191,4844,6024,0),(1182,4766,6026,0),
+    (1211,4710,6027,0),(1743,3816,6038,0),(1746,3683,6040,0),(1519,3438,6044,0),
+    (-360,1993,6072,0),(-342,1855,6075,0),(467,320,6097,0),(402,229,6100,0),(79,89,6107,0),
+    (346,267,6209,0),
+  ],
+]
+
+
+def _rday():
+    """The fixture's lines, trip by trip, and the km of its real lines, by hand."""
+    out, m = [], 0.0
+    for trip in _ROUTE_DAY:
+        lines = [_rat(e / 10, n / 10, _DAY + t, a == 1) for e, n, t, a in trip]
+        real = [r for r in trip if not r[3]]
+        for a, b in zip(real, real[1:]):
+            m += math.hypot(b[0] - a[0], b[1] - a[1]) / 10
+        out.append(lines)
+    return out, m
+
+
+_rfresh()
+_trips, _hand = _rday()
+for _tr in _trips:
+    _rfeed(*_tr)
+_v = _rview(_DAY + 7000)
+_cap_ok = _Rt.n <= hl.ROUTE_CAP and len(_Rt.pts) == 2 * hl.ROUTE_CAP and len(_Rt.xy) == 2 * hl.ROUTE_CAP + 2
+_rx = [_v[0][2 * i] for i in range(_v[1])]
+_ry = [_v[0][2 * i + 1] & 127 for i in range(_v[1])]
+_flags = [i for i in range(_v[1]) if _v[0][2 * i + 1] & 128]
+_e = [r for t in _ROUTE_DAY for r in t if not r[3]]
+_real_w = (max(r[0] for r in _e) - min(r[0] for r in _e)) / 10
+_real_h = (max(r[1] for r in _e) - min(r[1] for r in _e)) / 10
+_sc = (max(_ry) - min(_ry)) / _real_h
+check("ROUTE-REPLAY: a real day's points give 8,6 km without its anchor's 44 m, two trips, "
+      "inside the buffer and the field: fitted, centred, north up, the true aspect",
+      _Rt.km == "8,6 km" and abs(_Rt.cm / 100 - _hand) < 3 and _cap_ok and len(_flags) == 2
+      and _flags[0] == 0 and _v[2] == _flags[1]
+      and 0 <= min(_rx) and max(_rx) <= hl.ROUTE_W and 0 <= min(_ry) and max(_ry) <= hl.ROUTE_H
+      and max(_ry) - min(_ry) == hl.ROUTE_H
+      and abs((max(_rx) - min(_rx)) / _real_w / _sc - 1) < 0.05
+      and abs(min(_rx) + max(_rx) - hl.ROUTE_W) <= 2
+      and _ry[0] > _ry[_flags[1] - 1],           # the way out goes north: up
+      repr((_Rt.km, _Rt.cm, _hand, _Rt.n, _flags, _v[2], min(_rx), max(_rx), min(_ry), max(_ry))))
+
+# anchors add nothing, and neither does a false jump next to one
+_rfresh()
+_rfeed(_rat(0, 0, _DAY), _rat(100, 0, _DAY + 10))
+_c1, _n1 = _Rt.cm, _Rt.n
+_rfeed(_rat(5000, 0, _DAY + 20, True))
+_c2, _n2 = _Rt.cm, _Rt.n
+_rfeed(_rat(200, 0, _DAY + 30))
+_c3 = _Rt.cm
+check("ROUTE-ANCHOR: an anchor point 5 km off adds no km and no point, and the next real "
+      "line counts from the last real one",
+      abs(_c1 - 10000) < 3 and _c2 == _c1 and _n2 == _n1 and abs(_c3 - 20000) < 5, repr((_c1, _c2, _c3)))
+_rfresh()
+_rfeed(_rat(0, 0, _DAY))
+hl._rt_trip(_DAY + 100)
+_rfeed(_rat(0, 0, _DAY + 90, True), _rat(44, 0, _DAY + 100), _rat(55, 0, _DAY + 101))
+check("ROUTE-JUMP: a stay's end: the anchor and the way out's first line 44 m on (158 km/h, "
+      "measured) count nothing, only the way out itself; a new trip",
+      abs(_Rt.cm - 1100) < 15 and _Rt.pts[2] & 1 == 1, repr((_Rt.cm, _Rt.n)))
+
+# through the logger itself: only what flush() really wrote counts
+_rfresh()
+hl.log_reset()
+hl.st.update(date="2026-06-15", time="10:00:00", valid=True, lat=10.0, lon=20.0, pos_at=_clock[0],
+             rx=_clock[0], alt=120.5, hdop=1.0, hdop_at=_clock[0], lat_i=None, fixtype=3)
+
+
+def _rrec(east, s):
+    p = (10.0, 20.0 + east / M_E6 / 1e6 / math.cos(math.radians(10.0)))
+    tc = hl._stamp_s(s)[1]
+    hl._record((hl._stamp_s(s)[0], hl._line("%.6f,%.6f" % p, ("120.5", "1.0", "5.0", ""), tc, hl._trk_fmt())), p)
+
+
+for _i in range(5):
+    _rrec(_i * 20, _DAY + _i)
+_held = _Rt.cm                           # in RAM only: nothing yet
+hl.flush(None)
+_wrote = _Rt.cm
+_rrec(120, _DAY + 5)
+_fgood = hl.log["file"]
+hl.log["file"] = os.path.join(_rt_dir, "no", "such", "dir.trb")
+hl.log["created"] = False
+hl.flush(None)
+_failed = (_Rt.cm, len(hl.log["batch"]))
+hl.log["file"] = _fgood
+hl.log["created"] = True
+hl.log["wfail"] = False
+hl.flush(None)
+_after = _Rt.cm
+# an anchor point written by the logger
+_sl = hl.log["still"]
+_sl.update(anchor=(10.5, 20.5), active=True)
+hl.log["clock"] = (_DAY + 100, _clock[0])
+hl._still_heartbeat(_clock[0])
+_hb = len(hl.log["batch"])
+hl.flush(None)
+_hb_cm = (_Rt.cm, _Rt.n, len(hl.log["batch"]))
+hl.log["still"] = hl._still_state()
+check("ROUTE-FLUSH: lines count when flush() wrote them, not when recorded nor when the "
+      "write failed; the logger's own anchor point goes through and adds nothing",
+      _held == 0 and abs(_wrote - 8000) < 30 and _failed == (_wrote, 1) and abs(_after - 12000) < 40
+      and _hb == 1 and _hb_cm[0] == _after and _hb_cm[2] == 0,
+      repr((_held, _wrote, _failed, _after, _hb, _hb_cm)))
+
+# the drift a stay's proof drops never counted
+_rfresh()
+hl.log_reset()
+hl.log["clock"] = (_DAY, _clock[0])
+for _i in range(10):
+    _rrec(_i * 50, _DAY + _i)
+for _i in range(40):                     # standing at 450 m, 20 m of drift a line
+    _rrec(450 + (20 if _i % 2 else 0), _DAY + 10 + _i)
+_anchor = (10.0, 20.0 + 450 / M_E6 / 1e6 / math.cos(math.radians(10.0)))
+hl._still_enter(_clock[0], _anchor, hl._stamp_s(_DAY + 10)[1], 40)
+hl.flush(None)
+_drift_cm = _Rt.cm
+hl.log["still"] = hl._still_state()
+check("ROUTE-DRIFT: a stay's proof drops the drift from the track: 800 m of it adds nothing "
+      "(only the way in, 450 m)", 44000 < _drift_cm < 47000, repr(_drift_cm))
+
+# a failure here must not stop the logging
+_rfresh()
+hl.log_reset()
+_dl0, _dw0 = [], hl._diag_write
+hl._diag_write = _dl0.append
+_rl0 = hl._rt_line
+
+
+def _rboom(line):
+    raise ValueError("route")
+
+
+hl._rt_line = _rboom
+_rok = []
+for _i in range(hl.TFT_MAX_ERR):
+    _rrec(_i * 10, _DAY + _i)
+    hl.flush(None)
+    _rok.append((len(hl.log["batch"]), hl.log["points"]))
+hl._rt_line = _rl0
+hl._diag_write = _dw0
+check("ROUTE-FAIL: a route that raises leaves each line written and gone from the batch; it "
+      "counts as the display's errors do: TFT_MAX_ERR in a row and the display goes dark",
+      _rok == [(0, 1), (0, 2), (0, 3)] and hl._tft is None and len(_dl0) == 1
+      and _dl0[0].startswith("bug tft ")
+      and [p[:2] for p in _pin_levels if p[0] == 21][-1:] == [(21, 0)], repr((_rok, _dl0)))
+_rfresh()
+_rm0 = hl._rt_project
+
+
+def _rboom2():
+    raise MemoryError()
+
+
+hl._rt_project = _rboom2
+_rfeed(_rat(0, 0, _DAY))
+_st_ok = True
+try:
+    hl._tft_state(_clock[0] + hl.ROUTE_DRAW)
+except Exception:
+    _st_ok = False
+_errs = hl._tft_t[4]
+hl._rt_project = _rm0
+hl._tft_t[4] = 0
+check("ROUTE-FAIL-TICK: a tick that raises is caught and counted, the values still come",
+      _st_ok and _errs == 1, repr((_st_ok, _errs)))
+
+# the Hungarian day
+_rfresh()
+_w0 = (hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 22 * 3600 + 59 * 60 + 50   # 23:59:50 CET
+_rfeed(_rat(0, 0, _w0 - 10), _rat(100, 0, _w0))
+_before = _Rt.km, _Rt.cm > 0, _Rt.n
+_d0 = _Rt.day
+_rfeed(_rat(200, 0, _w0 + 20))           # 00:00:10
+_after = _Rt.cm, _Rt.n, _Rt.day
+_rfresh()
+_rfeed(_rat(0, 0, _w0 - 10), _rat(100, 0, _w0))
+_rview(_w0)
+_stays = _Rt.cm > 0
+_rview(_w0 + 20)                         # midnight: no line needed
+_tick = _Rt.cm, _Rt.n, _Rt.km, _Rt.view[1]
+_rfeed(_rat(100, 0, _w0))                # held over midnight: yesterday's
+_old = _Rt.cm, _Rt.n
+_rfresh()
+_s0 = (hl._days(2026, 7, 1) - hl.EPOCH_DAYS) * 86400 + 21 * 3600 + 59 * 60 + 50    # 23:59:50 CEST
+_rfeed(_rat(0, 0, _s0 - 10), _rat(100, 0, _s0))
+_sum1 = _Rt.cm
+_rfeed(_rat(150, 0, _s0 + 5))            # 23:59:55, no new day yet
+_sum2 = _Rt.cm
+_rfeed(_rat(200, 0, _s0 + 20))
+_sum3 = _Rt.cm, _Rt.n
+_ut = hl._rt_day(_w0) + 1 == hl._rt_day(_w0 + 20) and hl._rt_day(_s0) + 1 == hl._rt_day(_s0 + 20)
+check("ROUTE-MIDNIGHT: reset at local midnight, CET and CEST (not at UTC's): a line of the "
+      "new day or the clock alone, km and points gone; a held line of yesterday changes nothing",
+      _after == (0, 1, _d0 + 1) and _stays and _tick == (0, 0, "0,0 km", 0) and _old == (0, 0)
+      and _sum1 > 0 and _sum2 > _sum1 and _sum3 == (0, 1) and _ut and _before[1],
+      repr((_before, _after, _tick, _old, _sum1, _sum2, _sum3)))
+
+# halving: any day fits
+_rfresh()
+_pts0, _xy0 = _Rt.pts, _Rt.xy
+_ns, _steps = [], []
+_rs = _DAY
+for _i in range(3000):
+    _rfeed(_rat(_i * 200, (_i % 7) * 40, _rs + _i * 10))
+    _ns.append(_Rt.n)
+    _steps.append(_Rt.step)
+_first = _Rt.pts[0] >> 1, _Rt.pts[1]
+_last = _Rt.pts[2 * (_Rt.n - 1)] >> 1, _Rt.pts[2 * (_Rt.n - 1) + 1]
+_want_last = _rat(2999 * 200, (2999 % 7) * 40, 0).split(",")
+_want_first = _rat(0, 0, 0).split(",")
+_keep = (_Rt.pts is _pts0 and _Rt.xy is _xy0 and len(_pts0) == 2 * hl.ROUTE_CAP)
+_v = _rview(_rs + 30000)
+_rx = [_v[0][2 * i] for i in range(_v[1])]
+_mk = sum(1 for i in range(_Rt.n) if _Rt.pts[2 * i] & 1)
+_rfresh()
+for _i in range(hl.ROUTE_CAP):
+    _Rt.pts[2 * _i] = (47000000 + _i) << 1
+    _Rt.pts[2 * _i + 1] = 18000000 + _i
+_Rt.n = hl.ROUTE_CAP
+_Rt.pts[2 * 5] |= 1                      # a mark on a point that goes
+_Rt.pts[2 * 63] |= 1                     # and on the last
+_hstep = _Rt.step
+hl._rt_halve()
+_h = [(_Rt.pts[2 * _i] >> 1, _Rt.pts[2 * _i + 1], _Rt.pts[2 * _i] & 1) for _i in range(_Rt.n)]
+_h_ok = (_Rt.n == 33 and _h[0] == (47000000, 18000000, 0) and _h[-1] == (47000063, 18000063, 1)
+         and _Rt.step == 2 * _hstep and [m for _a, _b, m in _h].count(1) == 2 and _h[3] == (47000006, 18000006, 1)
+         and all(_h[_i][0] == 47000000 + 2 * _i for _i in range(32)))
+for _i in range(40):                     # however often: a spacing the file can hold
+    _Rt.n = hl.ROUTE_CAP
+    hl._rt_halve()
+_h_cap = _Rt.step <= 2 * hl.ROUTE_STEP_MAX and _Rt.step > 1 << 20
+_Rt.day, _Rt.last_s = 1, 1
+hl._rt_save(_clock[0])
+_h_cap = _h_cap and hl._rt_load()
+_rfresh()
+_rs2 = _DAY
+_tr_marks = []
+for _t in range(8):                      # short trips: their marks must outlive halving
+    hl._rt_trip(_rs2)
+    for _i in range(100):
+        _rfeed(_rat(_t * 30000 + _i * 200, 0, _rs2))
+        _rs2 += 10
+_marks = [i for i in range(_Rt.n) if _Rt.pts[2 * i] & 1]
+_sv = _rview(_rs2)
+check("ROUTE-HALVE: never past the buffer, the same one for the whole day, the spacing "
+      "doubling; the first point and the last position stay; the km still add up; the trips' "
+      "marks survive, moved on to the next point kept",
+      _h_ok and _h_cap and max(_ns) == hl.ROUTE_CAP and _keep and _steps[-1] > _steps[0] and _steps[-1] % hl.ROUTE_STEP == 0
+      and all(b in (a, 2 * a) for a, b in zip(_steps, _steps[1:]))
+      and _first == (round(float(_want_first[0]) * 1e6), round(float(_want_first[1]) * 1e6))
+      and _last == (round(float(_want_last[0]) * 1e6), round(float(_want_last[1]) * 1e6))
+      and _mk == 1 and min(_rx) >= 0 and max(_rx) <= hl.ROUTE_W
+      and _rx[0] == min(_rx) and _rx[-1] == max(_rx) and len(_marks) == 8 and _marks[0] == 0
+      and _sv[2] == _marks[-1] and abs(_Rt.cm - 8 * 99 * 20000) < 8 * 99 * 3,
+      repr((_h_ok, max(_ns), _steps[-1], _first, _last, _mk, _marks, _Rt.cm)))
+
+# trips: a stay's end, a fix gap's new file; the time between lines
+_rfresh()
+hl.log_reset()
+_rfeed(_rat(0, 0, _DAY), _rat(100, 0, _DAY + 60))
+_rfeed(_rat(200, 0, _DAY + 60 + hl.NEW_FILE_GAP))      # exactly the gap: same trip
+_same = _Rt.cm, sum(_Rt.pts[2 * i] & 1 for i in range(_Rt.n))
+_rfeed(_rat(5000, 0, _DAY + 61 + 2 * hl.NEW_FILE_GAP))  # past it: a new one
+_new = _Rt.cm, sum(_Rt.pts[2 * i] & 1 for i in range(_Rt.n))
+_sl = hl.log["still"]
+_sl.update(active=True, anchor=(10.0, 20.0), aref=(10.0, 20.0), rn=0, ri=0)
+_Rt.trip = None
+hl.st.update(date="2026-06-15", time="11:30:00")
+hl._still_leave()
+_leave = _Rt.trip
+_Rt.trip = None
+hl.log["file"] = "x"
+hl.log.update(fix=False, lost_at=_clock[0] - hl.NEW_FILE_GAP * 1000 - 1, created=True)
+hl.st.update(valid=True, lat=10.0, lon=20.0, pos_at=_clock[0], rx=_clock[0])
+_cf0 = hl._close_file
+hl._close_file = lambda: True
+hl.log["last_sample"] = _clock[0]
+hl.log_tick()
+_gap = _Rt.trip
+hl._close_file = _cf0
+hl.log_reset()
+_rfresh()
+hl.st.update(valid=False, pos_at=None)
+check("ROUTE-TRIP: more than NEW_FILE_GAP between lines, a stay's end and the fix gap of a "
+      "new file each start a trip: no km across",
+      _same[1] == 1 and abs(_same[0] - 20000) < 5 and _new[1] == 2 and _new[0] == _same[0]
+      and _leave == "20260615T113000Z" and _gap == "20260615T113000Z",
+      repr((_same, _new, _leave, _gap)))
+
+# the file: a reboot's little loss, and anything wrong with it ignored
+_rfresh()
+for _tr in _trips:
+    _rfeed(*_tr)
+_rview(_DAY + 7000)
+_n0, _c0, _km0, _st0a = _Rt.n, _Rt.cm, _Rt.km, _Rt.step
+_p0 = list(_Rt.pts)[:2 * _n0]
+with open(hl.ROUTE_FILE, "rb") as f:
+    _good = f.read()
+_size_ok = len(_good) == 24 + 8 * _n0 + 4 and len(_good) <= 24 + 8 * hl.ROUTE_CAP + 4
+
+
+def _rboot(data, clock=None):
+    """A boot with this file; clock: the first fix's seconds."""
+    hl._Rt.pts = None
+    _rfresh()
+    if data is not None:
+        with open(hl.ROUTE_FILE, "wb") as f:
+            f.write(data)
+        try:
+            hl._rt_load()
+        except (ValueError, TypeError):
+            return "raised"
+    hl.log["clock"] = None
+    if clock is not None:
+        _rview(clock)
+    return _Rt.n, _Rt.cm, _Rt.km
+
+
+_same_day = _rboot(_good, _DAY + 7100)
+_pts_back = list(_Rt.pts)[:2 * _n0] == _p0 and _Rt.step == _st0a and _Rt.view[1] == _n0
+_rfeed(_rat(0, 0, _DAY + 7150))
+_goes_on = _Rt.cm == _c0 and sum(_Rt.pts[2 * i] & 1 for i in range(_Rt.n)) == 3   # (long off: a new trip)
+_rboot(_good, _DAY + 7100)
+_last_t = max(r[2] for t in _ROUTE_DAY for r in t)
+_rfeed(_rat(_ROUTE_DAY[-1][-1][0] / 10 + 100, _ROUTE_DAY[-1][-1][1] / 10, _DAY + _last_t + 60))
+_short = abs(_Rt.cm - _c0 - 10000) < 15 and sum(_Rt.pts[2 * i] & 1 for i in range(_Rt.n)) == 2
+_rboot(_good)
+_wait = (_Rt.waiting, _Rt.view, _Rt.km)
+_rview()
+_wait2 = (_Rt.waiting, _Rt.view)
+_old_day = _rboot(_good, _DAY + 86400)
+_flip = bytearray(_good)
+_flip[40] ^= 1
+_bad_n = bytearray(_good)
+_bad_n[20] = 200
+_badm = bytearray(_good)
+_badm[0] ^= 1
+_torn = [_good[:k] for k in (0, 1, 4, 23, 24, 27, 28, 40, len(_good) - 5, len(_good) - 4, len(_good) - 1)]
+_junk = [bytes(_flip), bytes(_bad_n), bytes(_badm), b"\x00" * len(_good), b"\xff" * 700, _good + b"x"]
+_ign = [_rboot(d, _DAY + 7100) for d in _torn + _junk]
+_none_file = _rboot(None, _DAY + 7100)
+check("ROUTE-FILE: saved and read back the same day whole; shown only once a fix proves its "
+      "day; another day's, a torn or garbled one, or none: an empty day, nothing raised",
+      _size_ok and _same_day == (_n0, _c0, _km0) and _pts_back and _wait == (True, None, "")
+      and _goes_on and _short
+      and _wait2 == (True, None) and _old_day == (0, 0, "0,0 km")
+      and all(i == (0, 0, "0,0 km") for i in _ign) and _none_file == (0, 0, "0,0 km"),
+      repr((_size_ok, _same_day, _pts_back, _wait, _wait2, _old_day, _ign, _none_file)))
+_tmp_left = _rfresh() or os.path.exists(hl.ROUTE_FILE + ".tmp")
+_rn0 = os.rename
+_renames = []
+
+
+def _rn_count(a, b):
+    _renames.append((a, b))
+    return _rn0(a, b)
+
+
+os.rename = _rn_count
+_rt_s = _DAY
+_rx_ = 0
+hl.log["clock"] = (_rt_s, _clock[0])
+for _m in range(60):                     # a drive of an hour: a batch a minute, 6 looks
+    _rfeed(*[_rat(_rx_ + _i * 10, 0, _rt_s + _m * 60 + _i) for _i in range(60)])
+    _rx_ += 600
+    for _i in range(6):
+        _clock[0] += hl.ROUTE_DRAW
+        hl.log["clock"] = (_rt_s + _m * 60 + _i * 10, _clock[0])
+        hl._rt_tick(_clock[0])
+_w_drive = len(_renames)
+_via_tmp = _renames and all(a == hl.ROUTE_FILE + ".tmp" and b == hl.ROUTE_FILE for a, b in _renames)
+_clock[0] += hl.ROUTE_DRAW
+hl.log["clock"] = (_rt_s + 3599, _clock[0])
+hl._rt_tick(_clock[0])
+_renames[:] = []
+hl.log["still"]["active"] = True
+_rfeed(_rat(_rx_, 0, _rt_s + 3600))
+_w_stay0 = 0
+for _i in range(360):                    # an hour's stay: one write at its start
+    _clock[0] += hl.ROUTE_DRAW
+    hl.log["clock"] = (_rt_s + 3600 + _i * 10, _clock[0])
+    hl._rt_tick(_clock[0])
+    if not _i:
+        _w_stay0 = len(_renames)
+_w_stay = len(_renames)
+_renames[:] = []
+for _i in range(6 * 60 * 24):            # standing a day with nothing new: none
+    _clock[0] += hl.ROUTE_DRAW
+    hl.log["clock"] = (_rt_s + 3600 + _i * 10, _clock[0])
+    hl._rt_tick(_clock[0])
+_w_idle = len(_renames)
+hl.log["still"]["active"] = False
+_open0 = builtins.open
+
+
+def _ro_open(path, mode="r", *a, **k):
+    if str(path).endswith(".tmp"):
+        raise OSError(28)
+    return _open0(path, mode, *a, **k)
+
+
+_renames[:] = []
+_rfeed(_rat(_rx_ + 100, 0, _rt_s + 3700))
+hl.log["still"]["active"] = True
+with open(hl.ROUTE_FILE, "rb") as f:
+    _keep_old = f.read()
+builtins.open = _ro_open
+_bad_tick = 0
+_s_fail = True
+try:
+    for _i in range(30):                 # 5 minutes of a stay on a failing flash
+        _clock[0] += hl.ROUTE_DRAW
+        hl.log["clock"] = (_rt_s + 3700 + _i * 10, _clock[0])
+        try:
+            hl._tft_state(_clock[0])
+        except Exception:
+            _s_fail = False
+        _bad_tick += hl._tft_t[4]
+finally:
+    builtins.open = _open0
+os.rename = _rn0
+hl.log["still"]["active"] = False
+_low_ok = hl._tft is _ft
+with open(hl.ROUTE_FILE, "rb") as f:
+    _old_safe = f.read() == _keep_old
+check("ROUTE-WRITES: at most one write per ROUTE_SAVE on a drive, one at a stay's start, none "
+      "while nothing changed, by rename from a .tmp; a failing flash only retries that seldom "
+      "and does not turn the display dark",
+      _w_drive <= 13 and _w_stay0 == 1 and _w_stay == 1 and _w_idle == 0 and _s_fail and _low_ok
+      and _bad_tick <= 2 and not _tmp_left and _via_tmp and _old_safe,
+      repr((_w_drive, _w_stay0, _w_stay, _w_idle, _s_fail, _low_ok, _bad_tick, _via_tmp, _old_safe)))
+
+# the km's text, and its room
+_kt = []
+for _cm in (0, 859800, 994999, 995000, 9994999, 9995000, 99949999):
+    _rfresh()
+    _Rt.cm = _cm
+    hl._rt_project()
+    _kt.append(_Rt.km)
+_kw = max(_ft.width(_ft._SMALL, k) for k in _kt + ["99,9 km", "999 km"])
+_show(km="999 km", level=3)
+_k1 = _rect(_ft.KM_X, 31, 140, 42) - {_PAPER_C}
+_k_col = _rect(_ft.KM_X + _kw, 31, 140, 42) == {_PAPER_C}
+_show(km="99,9 km", level=3)
+_k2 = _rect(_ft.KM_X, 31, 140, 42) - {_PAPER_C}
+_k2_col = _rect(_ft.KM_X + _ft.width(_ft._SMALL, "99,9 km"), 31, 140, 42) == {_PAPER_C}
+_kcomma = max(y for x in range(92, 139) for y in range(30, 47) if _px(x, y) != _PAPER_C)
+_show(km="999 km", level=3)
+_kbase = max(y for x in range(92, 139) for y in range(30, 47) if _px(x, y) != _PAPER_C)
+_kleft = min(x for x in range(90, 139) for y in range(30, 47) if _px(x, y) != _PAPER_C)
+check("ROUTE-KM: a decimal comma under 100, whole km above, rounded; at x=92 on baseline 42 "
+      "in ink, and the widest texts end short of the bars",
+      _kt == ["0,0 km", "8,6 km", "9,9 km", "10,0 km", "99,9 km", "100 km", "999 km"]
+      and _kw < 140 - _ft.KM_X - 1 and _k_col and _k2_col and _k1 <= _pal16(_ft.INK, _ft.PAPER)
+      and _kbase == 41 and 92 <= _kleft <= 93 and _k2 <= _pal16(_ft.INK, _ft.PAPER)
+      and _kcomma < 47, repr((_kt, _kw, _k_col, _k2_col, _kbase, _kcomma, _kleft)))
+
+# the route on the panel
+_GRID_DOTS = [(4 + i * 8, 4 + j * 8) for j in range(7) for i in range(11)]
+_show(route=None, km="", level=None)
+_grid_only = all(_px(x, y) == _ft.DIM and _px(x + 1, y + 1) == _ft.DIM for x, y in _GRID_DOTS)
+_paper_else = sum(1 for y in range(0, 63) for x in range(0, 92) if _px(x, y) != _PAPER_C) == 4 * len(_GRID_DOTS)
+_rfresh()
+_empty_v = _rview(_DAY)
+_show(route=_empty_v, km=_Rt.km)
+_note = [(x, y) for y in range(0, 63) for x in range(0, 92)
+         if _px(x, y) not in (_PAPER_C, _ft.DIM)]
+_note_ok = (_note and _empty_v[1] == 0 and min(x for x, y in _note) >= 4 and max(x for x, y in _note) <= 88
+            and abs(min(x for x, y in _note) + max(x for x, y in _note) - 92) <= 3)
+check("ROUTE-EMPTY: no day known yet: the grid alone, 2x2 on the 8 px pitch, nothing else in "
+      "the field; a known empty day: the grid and the short note, centred; no \"--\" anywhere",
+      _grid_only and _paper_else and _note_ok and "-" not in _ff.SMALL[0],
+      repr((_grid_only, _paper_else, _note_ok)))
+
+
+def _on_row(y, x0, x1, c):
+    return all(_px(x, y) == c for x in range(x0, x1))
+
+
+# one trip east, a gap, a second one: y is the middle row: 1000 m wide: 12 m a pixel
+_rfresh()
+_rfeed(_rat(0, 0, _DAY), _rat(400, 0, _DAY + 60))
+hl._rt_trip(_DAY + 120)
+_rfeed(_rat(600, 0, _DAY + 120), _rat(830, 0, _DAY + 180))
+_v = _rview(_DAY + 200)
+_show(route=_v, km=_Rt.km)
+_y = 4 + (_v[0][1] & 127)
+_ink_part = _on_row(_y, 8, 44, _INK_C) and _on_row(_y + 1, 8, 44, _INK_C)
+_no_chord = _rect(46, _y, 62, _y + 2) <= {_PAPER_C, _ft.DIM}
+_red_part = _on_row(_y, 66, 84, _RED_C) and _on_row(_y + 1, 66, 84, _RED_C)
+_thin = _px(20, _y - 1) in (_PAPER_C, _ft.DIM) and _px(20, _y + 2) in (_PAPER_C, _ft.DIM)
+_start = (_px(2, _y - 2), _px(3, _y - 2), _px(2, _y - 1), _px(7, _y + 3), _px(6, _y + 3), _px(7, _y + 2))
+_end_x = 4 + _v[0][2 * (_v[1] - 1)]
+_end = (_end_x, _px(_end_x - 2, _y - 2), _px(_end_x - 1, _y - 2), _px(_end_x - 2, _y - 1), _px(_end_x + 3, _y + 3),
+        _px(_end_x + 2, _y + 3), _px(_end_x + 3, _y + 2))
+_field_ok = _rect(0, 0, 2, 2) == {_PAPER_C}
+check("ROUTE-DRAW: north up, 2x2 dots: the earlier trip ink, the latest red, no line between "
+      "them; 6x6 round dots: ink at the day's start, red at the current position",
+      _ink_part and _no_chord and _red_part and _thin
+      and _start == (_PAPER_C, _INK_C, _INK_C, _PAPER_C, _INK_C, _INK_C)
+      and _end == (87, _ft.DIM, _RED_C, _RED_C, _PAPER_C, _RED_C, _RED_C)     # (a grid dot's in that corner)
+      and _field_ok and _v[2] == 2, repr((_ink_part, _no_chord, _red_part, _thin, _start, _end, _v[:1] and list(_v[0][:8]), _v[1:3])))
+# north is up, in a band's split too: a line across all the bands
+_rfresh()
+_rfeed(_rat(0, 0, _DAY), _rat(0, 800, _DAY + 60))
+_v = _rview(_DAY + 70)
+_show(route=_v, km=_Rt.km)
+_x = 4 + _v[0][0]
+_col = [y for y in range(0, 63) if _px(_x + 3, y) == _RED_C or _px(_x, y) == _RED_C]
+_ys = (_v[0][1] & 127, _v[0][3] & 127)
+_full = all(_px(_x, y) == _RED_C for y in range(10, 50))
+_start_low = _px(_x, 4 + _ys[0] + 3) == _INK_C and _px(_x, 4 + _ys[1]) == _RED_C
+check("ROUTE-NORTH: a walk due north runs from the ink dot at the bottom to the red one at "
+      "the top, unbroken across the bands",
+      _ys == (51, 0) and _full and _start_low, repr((_ys, _full, _start_low)))
+_rfresh()
+_rfeed(_rat(0, 0, _DAY), _rat(100, 0, _DAY + 60))
+_v = _rview(_DAY + 70)
+_wid = _v[0][2] - _v[0][0]
+_rfresh()
+_rfeed(_rat(0, 0, _DAY), _rat(100, 0, _DAY + 30), _rat(100, 100, _DAY + 60), _rat(0, 100, _DAY + 90))
+_v2 = _rview(_DAY + 100)
+_h2 = (_v2[0][3] & 127) - (_v2[0][5] & 127)
+check("ROUTE-SPAN: 500 m across at the least: 100 m is 16 or 17 pixels, not the whole field, "
+      "and a one-point day stays in the middle",
+      16 <= _wid <= 17 and abs(_v[0][0] + _v[0][2] - hl.ROUTE_W) <= 1 and 16 <= abs(_h2) <= 17,
+      repr((_wid, list(_v[0][:4]), _h2)))
+
+# no fix: the route stays, what the rules say about a fix still holds
+_rfresh()
+for _tr in _trips:
+    _rfeed(*_tr)
+_v = _rview(_DAY + 7000)
+_show(route=_v, km=_Rt.km, level=None)
+_before_px = [_px(x, y) for y in range(0, 63) for x in range(0, 92)]
+_show(route=_v, km=_Rt.km, fix=False, used=0, clock="--:--", quality=0, level=None)
+_after_px = [_px(x, y) for y in range(0, 63) for x in range(0, 92)]
+_nofix = _before_px == _after_px and _sat_ok(0, _RED_C) and _px(0, 64) == _RED_C and _px(30, 66) == _RED_C
+_inks = sum(1 for p in _after_px if p == _INK_C), sum(1 for p in _after_px if p == _RED_C)
+check("ROUTE-NOFIX: the route and the km stay as they were, the count goes red and the tile "
+      "says nincs; both trips on screen, in their colours", _nofix and _inks[0] > 50 and _inks[1] > 50,
+      repr((_nofix, _inks)))
+
+# the current position: the line just recorded, before flush; not during a stay
+_rfresh()
+hl.log_reset()
+_rfeed(_rat(0, 0, _DAY), _rat(400, 0, _DAY + 60))
+_rv0 = _rview(_DAY + 70)
+_ver0 = _rv0[3]
+_rv1 = _rview(_DAY + 71)                 # nothing changed: the very same view
+_same_view = _rv1 is _rv0
+hl.log["prev"] = (10.0, 20.0 + 800 / M_E6 / 1e6 / math.cos(math.radians(10.0)))
+hl.st.update(valid=True, date="2026-06-15", time="10:01:30", lat=10.0, lon=20.1, pos_at=_clock[0] + hl.ROUTE_DRAW,
+             rx=_clock[0] + hl.ROUTE_DRAW)
+_rv2 = _rview(_DAY + 72)
+_tail_on = _rv2[1] == _rv0[1] + 1 and _rv2[3] > _ver0 and _Rt.cm < 45000
+_tail_x = _rv2[0][2 * (_rv2[1] - 1)]
+_c_tail = _rv2[1]
+_tick_before = _Rt.drawn
+_clock[0] += hl.ROUTE_DRAW - 1
+hl.log["prev"] = (10.0, 20.0)
+hl._rt_tick(_clock[0])
+_gated = _Rt.view is _rv2 and _Rt.drawn == _tick_before
+hl.st["pos_at"] = _clock[0] + hl.ROUTE_DRAW
+hl.log["still"]["active"] = True
+_rv3 = _rview(_DAY + 73)
+_in_stay = _rv3[1] == _rv0[1]
+hl.log["still"]["active"] = False
+hl.log_reset()
+hl.st.update(valid=False, pos_at=None)
+check("ROUTE-TICK: an unchanged route keeps its very view (no redraw); the position just "
+      "recorded leads the route without adding km; looked at only every ROUTE_DRAW; a stay's "
+      "drift does not move it",
+      _same_view and _tail_on and _tail_x == hl.ROUTE_W and _gated and _in_stay,
+      repr((_same_view, _tail_on, _tail_x, _gated, _in_stay, _c_tail)))
+
+hl._Rt.pts = None                        # (as on a board without the display)
+hl.ROUTE_FILE = "/route.bin"
+_show()
+_ft.set_state(None, "", True, 22, "11:42", 3, 3, "kész", False)
+_ft.frame()
+_c6 = gl._Rt.pts is None and gl._rt_feed(["x"], 1) is None
+
+# the fonts: only the rows from the first to the last with ink in any glyph, BASE counted from the first kept: put
 # back, they are the bytes the tool wrote before the crop, and a string stays on
 # its rows. A new font or new characters on purpose: new values here
 _font_was = {  # uncropped: HEIGHT, BASE, sha256 of DATA (first 32)
-    "HERO": (47, 37, "f104d736320fb3d4e753dc5d3a05bad9"),
-    "NUM": (22, 17, "d2fed60e2e652f2452c2beb8e569b8e4"),
-    "TXT": (13, 10, "8ad856b704c227df34b62fe578a14bb8"),
-    "LAB": (12, 9, "a556dc2900611d97bcff7c994341e848"),
-    "WORD": (17, 13, "f82a4081a2b77431a6e31a804f4ce2f2"),
+    "CLOCK": (20, 15, "b5fed7c4675f1ab25a14a5ca62adc5a7"),
+    "SATS": (15, 11, "0edb1e7fe3a52847b2ace6589dd4edb0"),
+    "UP": (19, 14, "d343575aba74d600ad6f87e6ae21d612"),
+    "WORD": (16, 12, "2c16dd844e8e8f8c15042cbd7159b776"),
+    "SMALL": (13, 10, "39917aa852d8543e8ffbad6189b77108"),
 }
 _font_rows = (  # the rows a string's ink takes, against its baseline
-    ("HERO", "47", (-28, -1)), ("HERO", "-", (-14, -10)), ("NUM", "22", (-13, -1)),
-    ("NUM", "-", (-7, -5)), ("TXT", "11:42", (-8, -1)), ("TXT", "k\u00e9sz", (-8, -1)),
-    ("TXT", "<1 \u00f3ra", (-8, -1)), ("LAB", "GPS", (-7, -1)),
-    ("LAB", "m\u0171hold", (-7, -1)), ("LAB", "KM/H", (-7, 0)),
-    ("WORD", "er\u0151s", (-11, -1)), ("WORD", "gyenge", (-8, 2)), ("WORD", "nincs", (-11, -1)),
+    ("CLOCK", "11:42", (-11, -1)), ("CLOCK", "--:--", (-8, -1)), ("SATS", "22", (-8, -1)),
+    ("UP", "kész", (-10, -1)), ("UP", "12k", (-10, -1)), ("WORD", "erős", (-9, -1)),
+    ("WORD", "gyenge", (-6, 1)), ("WORD", "közepes", (-8, 1)), ("WORD", "nincs", (-8, -1)),
+    ("SMALL", "<1 óra", (-7, -1)), ("SMALL", "7 nap", (-7, 1)), ("SMALL", "8,6 km", (-7, 2)),
+    ("SMALL", "100%", (-7, -1)),
 )
 
 
@@ -19047,7 +19793,7 @@ def _font_pad(f, h0, b0):
     return (f[0], f[1], bytes(offs), bytes(pad), h0, b0)
 
 
-_fnames = ("HERO", "NUM", "TXT", "LAB", "WORD")
+_fnames = ("CLOCK", "SATS", "UP", "WORD", "SMALL")
 _ffonts = {n: getattr(_ff, n) for n in _fnames}
 _fg = {n: _font_glyphs(f) for n, f in _ffonts.items()}
 _ftight = {n: bool(_fg[n]) and all(any(any(g[r]) for g in _fg[n]) for r in (0, _ffonts[n][4] - 1))
@@ -19060,24 +19806,25 @@ check("TFT-FONT-BASE: BASE and HEIGHT say where the crop was: the blank rows bac
       all(_fsha[n] == _font_was[n][2] and 0 <= _font_was[n][1] - _ffonts[n][5]
           and _font_was[n][1] - _ffonts[n][5] + _ffonts[n][4] <= _font_was[n][0] for n in _fnames),
       repr((_fsha, [_ffonts[n][4:] for n in _fnames])))
-_fpair = dict(zip(_fnames, (_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD)))
+_fpair = dict(zip(_fnames, (_ft._CLOCK, _ft._SATS, _ft._UP, _ft._WORD, _ft._SMALL)))
 _frows = []
 _band0, _ft.BAND_H = _ft.BAND_H, 64      # (one tall band: the string is on it)
 for _n, _s, _want in _font_rows:
     # (the band as gps_tft has it: a string blitted at a row, read back)
     _fb = _FakeFramebuf.FrameBuffer(bytearray(160 * 64 * 2), 160, 64, _FakeFramebuf.RGB565)
-    _fb.fill(_ft.BG)
-    _ft._text(_fb, _fpair[_n], _s, 2, 40, "txt")
-    _ink = [y - 40 for y in range(64) if any(_fb.pixel(x, y) != _ft.BG for x in range(160))]
+    _fb.fill(_PAPER_C)
+    _ft._text(_fb, _fpair[_n], _s, 2, 40, _ft.INK)
+    _ink = [y - 40 for y in range(64) if any(_fb.pixel(x, y) != _PAPER_C for x in range(160))]
     _frows.append((_n, _s, (_ink[0], _ink[-1]) if _ink else None))
 _ft.BAND_H = _band0
 check("TFT-FONT-ROWS: a string stays on its rows against the baseline",
       _frows == list(_font_rows), repr(_frows))
-_fstates = (("47", True, 22, "11:42", None, 3, "1284", True),
-            ("--", False, 0, "--:--", 0, 0, "k\u00e9sz", False),
-            ("188", True, 9, "09:05", 2, 2, " ", False, (70, "44 \u00f3ra")),
-            ("-1", True, 40, "23:58", 3, 1, "12k", True, (96, "<1 \u00f3ra")),
-            ("0", True, 1, "06:37", 1, 1, "k\u00e9sz", False, (100, "tele")))
+_fv = (bytearray(b"\x00\x80\x50\x19"), 2, 0, 1)
+_fstates = ((_fv, "8,6 km", True, 22, "11:42", None, 3, "1284", True),
+            (None, "", False, 0, "--:--", 0, 0, "kész", False),
+            (_fv, "99,9 km", True, 9, "09:05", 2, 2, " ", False, (70, "44 óra")),
+            (_fv, "999 km", True, 40, "23:58", 3, 1, "12k", True, (96, "<1 óra")),
+            ((_fv[0], 0, 0, 2), "0,0 km", True, 1, "06:37", 1, 1, "kész", False, (100, "tele")))
 
 
 def _font_panels():
@@ -19091,18 +19838,17 @@ def _font_panels():
 
 
 _fp1 = _font_panels()
-_fsaved = _ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD
-_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD = [
+_fsaved = _ft._CLOCK, _ft._SATS, _ft._UP, _ft._WORD, _ft._SMALL
+_ft._CLOCK, _ft._SATS, _ft._UP, _ft._WORD, _ft._SMALL = [
     (_font_pad(_ffonts[n], *_font_was[n][:2]), memoryview(_font_pad(_ffonts[n], *_font_was[n][:2])[3]))
     for n in _fnames]
 _fp2 = _font_panels()
-_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD = _fsaved
-check("TFT-FONT-PANEL: the panel pixel for pixel as with the blank rows back: speeds, "
-      "satellites, clock, WiFi, quality words, upload and the gauge's texts",
+_ft._CLOCK, _ft._SATS, _ft._UP, _ft._WORD, _ft._SMALL = _fsaved
+check("TFT-FONT-PANEL: the panel pixel for pixel as with the blank rows back: the route's "
+      "note, km, satellites, clock, WiFi, quality words, upload and the gauge's texts",
       _fp1 == _fp2 and len(_fp1[0]) == 160 * 80,
       repr([sum(1 for k in a if a[k] != b.get(k)) for a, b in zip(_fp1, _fp2)]))
-_ft.set_state("47", True, 22, "11:42", None, 3, "k\u00e9sz", False)
-_ft.frame()
+_show()
 # the tool's crop, on a font small enough to read (importing it writes nothing)
 _mf_path = os.path.join(ROOT, "tools", "make_tft_font.py")
 with open(_mf_path, encoding="utf-8") as f:
@@ -19126,10 +19872,10 @@ check("TFT-FONT-TOOL: crop keeps the rows from the first to the last with ink in
       and _crop(b"\x02", b"\x00\x10\x00\x20", 4, 2) == (b"\x00\x00", b"\x10\x00\x20", 3, 1)
       and _crop(b"\x02", b"\x00" * 3, 3, 2) == (b"\x00\x00", b"\x00", 1, 2)
       and _crop_err == "refused" and "main" in _mf, repr(_mf.keys()))
-# what the tool writes is what is committed (needs Pillow and the Inter TTFs)
+# what the tool writes is what is committed (needs Pillow and the Space Grotesk TTFs)
 _mf_can = importlib.util.find_spec("PIL") is not None and bool(_mf) and os.path.exists(_mf["D"] % "Bold")
 if not _mf_can:
-    print("SKIP  TFT-FONT-REGEN: Pillow or the Inter TTFs are missing")
+    print("SKIP  TFT-FONT-REGEN: Pillow or the Space Grotesk TTFs are missing")
 else:
     _mf_td = tempfile.mkdtemp(prefix="font-")
     _mf_r = subprocess.run([sys.executable, _mf_path], cwd=_mf_td, capture_output=True, text=True)
@@ -19143,7 +19889,7 @@ else:
 
 # a panel gone wrong: dark, and each action counted when it runs
 hl._tft = _ft
-hl._tft_t[:] = [None, None, 0, 0]
+hl._tft_t[:] = [None, None, 0, 0, 0]
 _TftSpi.fail = True
 _dl, _dw = [], hl._diag_write
 hl._diag_write = _dl.append
@@ -19158,12 +19904,12 @@ hl._diag_write = _dw
 _TftSpi.fail = False
 _dark = _pin_levels and [p[:2] for p in _pin_levels if p[0] == 21][-1:] == [(21, 0)]
 check("TFT-FAIL: TFT_MAX_ERR failed frames in a row, with idle ticks between, turn the "
-      "display dark for the boot (no frozen speed lit), said once, nothing leaves tft_tick",
+      "display dark for the boot (nothing frozen stays lit), said once, nothing leaves tft_tick",
       hl._tft is None and len(_dl) == 1 and _dl[0].startswith("bug tft ") and _dark,
       repr((hl._tft, _dl, _dark)))
 _st0 = hl._tft_state
 hl._tft = _ft
-hl._tft_t[:] = [None, None, 0, 0]
+hl._tft_t[:] = [None, None, 0, 0, 0]
 hl._tft_state = lambda now: (_ for _ in ()).throw(ValueError("state"))
 hl._diag_write = lambda l: None
 _pin_levels[:] = []
@@ -19171,7 +19917,7 @@ for _i in range(hl.TFT_MAX_ERR):
     _clock[0] += hl.TFT_STATE
     hl.tft_tick(_clock[0])               # a good frame between must not clear it
 hl._tft_state, hl._diag_write = _st0, _dw
-check("TFT-FAIL-STATE: values failing keep counting though frames succeed: no old speed "
+check("TFT-FAIL-STATE: values failing keep counting though frames succeed: no old state "
       "redrawn for ever", hl._tft is None
       and [p[:2] for p in _pin_levels if p[0] == 21][-1:] == [(21, 0)], repr(hl._tft))
 _ft_seen = []
@@ -19184,8 +19930,8 @@ with open(os.path.join(ROOT, "gps_logger.py")) as f:
 _runs = _lsrc[_lsrc.index("def run():"):]
 _loops = _lsrc[_lsrc.index("def _loop("):]
 check("TFT-WIRING: only the Heltec starts it; run() starts it before the first GPS "
-      "setup, the loop ticks it",
-      _ft_seen == [] and gl._tft is None
+      "setup, the loop ticks it; a board without it holds no route",
+      _ft_seen == [] and gl._tft is None and _c6
       and _runs.index("_tft_start()") < _runs.index("gps_setup()")
       and "tft_tick(now)" in _loops, repr(_ft_seen))
 
@@ -19625,25 +20371,25 @@ check("RB-CELL: upload_tick's skip is no cell", not _rb_cells, repr(len(_rb_cell
 _ft_saved = _ft._text
 
 
-def _ft_all(fb, font, s, x, base, tone):
+def _ft_all(fb, font, s, x, base, tone, bg=_ft.PAPER):
     """_text as it was: every glyph, into every band (blit clips)."""
     f, mv = font
-    p = _ft._gs4_palette(tone)
+    p = _ft._gs4_palette(tone, bg)
     y = base - f[5]
     h = f[4]
     for ch in s:
         i = _ft._index(f, ch)
         w = f[1][i]
         o = f[2][i * 2] | f[2][i * 2 + 1] << 8
-        fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, _FakeFramebuf.GS4_HMSB), x, y, _ft.BG, p)
+        fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, _FakeFramebuf.GS4_HMSB), x, y, _ft._COL[bg], p)
         x += w
     return x
 
 
-_rb_states = [("47", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
-              ("-", False, 0, "--:--", None, 0, "", False, None),
-              ("128", True, 9, "23:59", 0, 1, "kész", False, (100, "tele")),
-              ("0", True, 12, "00:00", 1, 2, "99999", True, (75, "<1 óra"))]
+_rb_states = [(_fv, "8,6 km", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
+              (None, "", False, 0, "--:--", None, 0, "", False, None),
+              (_fv, "99,9 km", True, 9, "23:59", 0, 1, "kész", False, (100, "tele")),
+              ((_fv[0], 0, 0, 2), "0,0 km", True, 12, "00:00", 1, 2, "99999", True, (75, "<1 óra"))]
 
 
 def _rb_panel(text):
@@ -19651,7 +20397,7 @@ def _rb_panel(text):
     out = []
     try:
         for s in _rb_states:
-            _ft._D.top = _ft._D.low = _ft._D.lit = None
+            _ft._D.top = _ft._D.low = None
             _ft.set_state(*s)
             _ft.frame()
             out.append(dict(_TftSpi.panel))
@@ -19691,11 +20437,11 @@ for _fnt in _ft._FONTS + [(_rb_ink, memoryview(_rb_ink[3]))]:
     _f = _fnt[0]
     _hh = _f[4]
     for _y in (-_hh, 1 - _hh, _ft.BAND_H - 1, _ft.BAND_H):
-        _ft._D.fb.fill(_ft.BG)
-        _ft_saved(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], "txt")
+        _ft._D.fb.fill(_PAPER_C)
+        _ft_saved(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], _ft.INK)
         _a1 = bytes(_ft._D.buf)
-        _ft._D.fb.fill(_ft.BG)
-        _ft_all(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], "txt")
+        _ft._D.fb.fill(_PAPER_C)
+        _ft_all(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], _ft.INK)
         if _a1 != bytes(_ft._D.buf):
             _rb_edge.append((_hh, _y))
 _rb_fb0 = _ft._D.fb
@@ -19704,7 +20450,7 @@ _ft._D.top = _ft._D.low = None
 _ft.set_state(*_rb_states[0])
 _ft.frame()
 _rb_blit = (_ft._D.fb.n, _ft._D.fb.out)
-_rb_x = (_ft._text(_ft._D.fb, _ft._NUM, "12", 7, 500, "txt"), 7 + _ft.width(_ft._NUM, "12"))
+_rb_x = (_ft._text(_ft._D.fb, _ft._SATS, "12", 7, 500, _ft.INK), 7 + _ft.width(_ft._SATS, "12"))
 _ft._D.fb = _rb_fb0
 check("RB-TFT: no glyph blitted outside its band; x still follows; the panel "
       "pixel-identical to blitting every glyph into every band",

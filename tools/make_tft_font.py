@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Write gps_tft_font.py: the Heltec TFT's anti-aliased fonts, from Inter (Rsms).
+"""Write gps_tft_font.py: the Heltec TFT's anti-aliased fonts, from Space Grotesk.
 
-Needs Pillow and the Inter TTFs; the output is committed, the build does not run
+Needs Pillow and the Space Grotesk TTFs; the output is committed, the build does not run
 this. Each font: CHARS, the WIDTHS (advance, bytes), OFFS (2 bytes each, little
 endian) into DATA, rows top down of GS4_HMSB (16 levels, 2 pixels a byte, a row
 (w + 1) // 2 bytes), HEIGHT rows a glyph, BASE the baseline's row. In one bytes
 object each (frozen, in flash), not a dict of glyphs in the heap. Only the
 characters the screen shows, only the rows from the first to the last with ink
 in any of them: the font's blank rows above and below (nothing to blit: level 0
-is the blit's key) are 1/3 of the file. BASE counts from the first row kept, so
+is the blit's key) are over 1/3 of the file. BASE counts from the first row kept, so
 a string stays on the same rows (it can reach below HEIGHT: no descender).
 """
 
-D = "/usr/share/fonts/truetype/inter-zorin-os/Inter-%s.ttf"
+D = "/usr/share/fonts/truetype/space-grotesk-zorin-os/SpaceGrotesk-%s.ttf"
 
 
 def crop(widths, data, height, base):
@@ -44,8 +44,10 @@ def font(weight, size, chars):
     widths, data = bytearray(), bytearray()
     for ch in chars:
         w = max(1, int(round(f.getlength(ch))))
-        m = Image.new("L", (w, height), 0)
+        m = Image.new("L", (w + 2, height), 0)
         ImageDraw.Draw(m).text((0, base), ch, fill=255, font=f, anchor="ls")
+        box = m.getbbox()
+        w = max(w, box[2]) if box else w  # ink past the advance (4 at 10 px) stays
         px = m.load()
         widths.append(w)
         for y in range(height):
@@ -58,13 +60,13 @@ def font(weight, size, chars):
 
 
 def main():
-    fonts = (("HERO", font("Bold", 38, "0123456789-")),
-             ("NUM", font("Bold", 17, "0123456789-")),
-             ("TXT", font("SemiBold", 10, "0123456789:-kész %napóratle<")),
-             ("LAB", font("SemiBold", 9, "KM/HGPSműhold")),
-             ("WORD", font("Bold", 13, "erőögsynickzp")))
+    fonts = (("CLOCK", font("Bold", 15, "0123456789:-")),
+             ("SATS", font("Bold", 11, "0123456789")),
+             ("UP", font("Bold", 14, "0123456789kész")),
+             ("WORD", font("Bold", 12, "nicsgyekzpörő")),
+             ("SMALL", font("Bold", 10, "0123456789% napóratel<km,icsú")))
     with open("gps_tft_font.py", "w", encoding="utf-8") as out:
-        out.write("# Written by tools/make_tft_font.py (Inter): see there.\n")
+        out.write("# Written by tools/make_tft_font.py (Space Grotesk): see there.\n")
         for name, (chars, widths, offs, data, height, base) in fonts:
             out.write("%s = (%r,\n    %r,\n    %r,\n    %r,\n    %d, %d)\n"
                       % (name, chars, widths, offs, data, height, base))

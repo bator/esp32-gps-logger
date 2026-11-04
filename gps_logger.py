@@ -4546,6 +4546,7 @@ def flush(hold=None):
                 start_file(name)
                 log["new_seg"], log["seg_tc"] = seg   # (a fix loss in
             return                                    # the batch stays one)
+    _rt_feed(batch, k)                   # (the lines that landed: raises nothing)
     del batch[:k]                        # first: nothing allocated before it
     log["created"] = True
     log["good_size"] = expected
@@ -5221,6 +5222,7 @@ def _still_beat(now):
             # next morning and swallowed a trip that did not recede from it
             print("stay end: home without a fix")
             log["still"] = _still_state()
+            _rt_trip()
         return
     # Rotate the anchor file so the stay uploads while it lasts (the usual
     # age-close is off during a stay: it would open a file per heartbeat).
@@ -5511,6 +5513,7 @@ def _still_leave(wifi_seen=False):
     the stay's drift, and the stay just ends."""
     sl = log["still"]
     n, i0, cap = sl["rn"], sl["ri"], len(_RT)
+    _rt_trip(sl["rt0"] + _RT[i0] if n else None)
     if (wifi_seen and n
             and _RF[_RW * ((i0 + n - 1) % cap) + _RW - 1] <= STILL_NEAR):
         n = 0
@@ -5709,6 +5712,7 @@ def log_tick():
             pass                         # same place: the stay keeps its file
         elif (log["file"] is not None and log.get("lost_at") is not None
                 and _age(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
+            _rt_trip()
             # A new file: the old track closes so it uploads, unless a write
             # failed within FLUSH (a rate limit). Before, a non-empty batch
             # and any flush within FLUSH kept it: held lines and the flush
@@ -9336,7 +9340,7 @@ def draw():
 TFT_FRAME = 200                          # ms between frames (a row scrolling)
 TFT_STATE = 1000                         # ms between new values
 TFT_MAX_ERR = 3                          # errors in a row, then it goes dark
-TFT_WIFI_UP = 3                          # dB past a limit for one more WiFi arc
+TFT_WIFI_UP = 3                          # dB past a limit for one more WiFi bar
 TFT_HDOP_GOOD = 1.5                      # strong GPS: HDOP at most this ...
 TFT_SATS_GOOD = 10                       # ... with this many satellites in the fix
 TFT_HDOP_FAIR = 3.0                      # above this: weak
@@ -9345,8 +9349,8 @@ TFT_STORE = 30000                        # ms between looks at the flash (statvf
 TFT_POINT_B = 7                          # bytes a .trb point of a 1 Hz drive takes
                                          # (as web.html's POINT_B)
 _tft = None
-_tft_t = [None, None, 0, 0]              # last values, last frame, the errors
-                                         # in a row of each
+_tft_t = [None, None, 0, 0, 0]           # last values, last frame, the errors
+                                         # in a row of each (4: today's route)
 _tft_b = [None, None, None]              # (2: the WiFi level last shown)
 
 def _tft_start():
@@ -9360,6 +9364,11 @@ def _tft_start():
         _tft = gps_tft
     except Exception as e:
         print("tft", repr(e))
+        return
+    try:
+        _rt_start()
+    except Exception as e:               # (the display goes on without a route)
+        print("tft route", repr(e))
 
 _T_DAYS = (0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4)
 
@@ -9368,9 +9377,19 @@ def _last_sunday(y, m):
     yy = y - 1 if m < 3 else y
     return 31 - (yy + yy // 4 - yy // 100 + yy // 400 + _T_DAYS[m - 1] + 31) % 7
 
+def _utc_hours(y, m, day, h):
+    """Hours Hungary is ahead of UTC at that UTC hour: CET, CEST from the last
+    Sunday of March to October's, 01:00 UTC."""
+    if 3 < m < 10:
+        return 2
+    if m in (3, 10):
+        ls = _last_sunday(y, m)
+        past = day > ls or (day == ls and h >= 1)
+        return 2 if past == (m == 3) else 1
+    return 1
+
 def _local_hm():
-    """"HH:MM" in Hungary from the fix's UTC (CET, CEST from the last Sunday
-    of March to October's, 01:00 UTC), "--:--" without one or with the
+    """"HH:MM" in Hungary from the fix's UTC, "--:--" without one or with the
     receiver silent: its time stands still then."""
     d, t = st["date"], st["time"]
     rx = st["rx"]
@@ -9379,14 +9398,7 @@ def _local_hm():
     try:
         y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
         h = int(t[:2])
-        n = 1
-        if 3 < m < 10:
-            n = 2
-        elif m in (3, 10):
-            ls = _last_sunday(y, m)
-            past = day > ls or (day == ls and h >= 1)
-            n = 2 if past == (m == 3) else 1
-        return "%02d:%s" % ((h + n) % 24, t[3:5])
+        return "%02d:%s" % ((h + _utc_hours(y, m, day, h)) % 24, t[3:5])
     except (ValueError, IndexError):
         return "--:--"
 
@@ -9401,7 +9413,7 @@ def _gps_quality(fix):
     return 3 if hdop <= TFT_HDOP_GOOD and (sv_used() or 0) >= TFT_SATS_GOOD else 2
 
 def _wifi_level(rssi, last):
-    """The arcs of the WiFi icon: down at once, up only TFT_WIFI_UP dB past the
+    """The bars of WiFi lit: down at once, up only TFT_WIFI_UP dB past the
     limit, so a signal around a limit does not flicker."""
     if rssi is None:
         return 0
@@ -9460,11 +9472,328 @@ def _store_state(now):
     c[0] = (pct, _store_left(left))
     return c[0]
 
+# Today on the display: the route as ROUTE_CAP points and the km, of the Hungarian
+# day. Fed only by the lines flush() has written (_rt_feed), so what a stay's proof
+# dropped as drift or a full flash lost never counts, and the 1 Hz path does nothing
+# for it: it shows up to a FLUSH late, and a walk's lines a stay still holds later.
+# Anchor points are the stay's place and no way travelled (the car driving off past
+# one read 44 m in a second): skipped. A trip starts when a stay ends, when a fix gap
+# starts a new file (_rt_trip), or with more than NEW_FILE_GAP between two lines: no
+# km and no line across. RAM: the points, 8 B each, and their pixels, 2 B each.
+ROUTE_CAP = 64                           # points; when full every other one goes
+ROUTE_STEP = 50                          # m between points at first; each halving
+                                         # doubles it, so any day fits
+ROUTE_STEP_MAX = 1 << 24                 # m: past any way a day holds (and the file's
+                                         # field: trip starts add points without one)
+ROUTE_SPAN = 4497                        # the field's width shows at least 500 m
+                                         # (6 m a pixel), in millionths of a degree
+ROUTE_W, ROUTE_H = 83, 51                # the pixels a point can land on
+ROUTE_DRAW = 10000                       # ms between looks at the route
+ROUTE_SAVE = 300000                      # ms between saves of a changed route (and
+                                         # one when a stay starts)
+ROUTE_FILE = "/route.bin"
+ROUTE_HEAD = "<4siiiii"                  # magic, day, cm, step, last line's s, n
+ROUTE_MAGIC = b"RTE1"
+_CM_E6 = 11.1194927                      # cm per millionth of a degree of latitude
+
+class _Rt:
+    pts = xy = view = None               # lat << 1 | starts a trip, lon: 1e-6 degrees;
+    km = ""                              # the pixels, y | 128 when starting a trip
+    day = -1                             # Hungarian day number, -1 not known yet
+    waiting = False                      # read from flash, its day not proven yet
+    n = cm = ver = 0                     # points; centimetres today; views made
+    step = ROUTE_STEP
+    k = 1.0                              # the cosine of the latitude, lately
+    last_s = trip = tail = None          # last line's time; first time of a new trip
+    hour = None                          # (the hour hday was worked out for)
+    hday = 0
+    drawn = saved = None                 # ticks of the last look and save
+    moved = unsaved = False
+    save_ok = True
+
+def _e6(line, a, b):
+    """Millionths of a degree of a track line's coordinate at line[a:b], without a
+    float: a single float holds a latitude to only 0.4 m, and these get summed."""
+    d = line.find(".", a, b)
+    v = int(line[a:d]) * 1000000
+    f = int(line[d + 1:d + 7])
+    return v - f if line[a] == "-" else v + f
+
+def _rt_step(lat1, lon1, lat2, lon2):
+    """Centimetres between two positions in millionths of a degree. A line of a
+    drive allocates this path's floats every second of it: as few as can be, the
+    cosine kept from the last point added (R.k)."""
+    x = lon2 - lon1
+    if x > 180000000:
+        x -= 360000000
+    elif x < -180000000:
+        x += 360000000
+    x *= _Rt.k
+    y = lat2 - lat1
+    return int(_CM_E6 * math.sqrt(x * x + y * y) + 0.5)
+
+def _rt_day(s):
+    """The Hungarian day of s (seconds since 2020 UTC), counted from 2020. It can
+    change only on a UTC hour, so most calls just compare."""
+    R = _Rt
+    h = s // 3600
+    if h != R.hour:
+        y, m, d = _civil(s // 86400 + EPOCH_DAYS)
+        R.hour = h
+        R.hday = (s + _utc_hours(y, m, d, h % 24) * 3600) // 86400
+    return R.hday
+
+def _rt_reset(day):
+    R = _Rt
+    R.day = day
+    R.n = R.cm = 0
+    R.step = ROUTE_STEP
+    R.last_s = R.trip = None
+    R.moved = True
+    R.unsaved = False                    # (nothing worth a write yet: the old
+                                         # day's file is ignored by its day)
+
+def _rt_halve():
+    """Every other point goes, in place; the first and the last stay. A trip mark
+    moves on to the next point kept. Double the spacing from here on."""
+    R = _Rt
+    p, n = R.pts, R.n
+    j = 1
+    mark = 0
+    i = 1
+    while i < n:
+        if i & 1 and i < n - 1:
+            mark |= p[2 * i] & 1
+        else:
+            p[2 * j] = p[2 * i] | mark
+            p[2 * j + 1] = p[2 * i + 1]
+            j += 1
+            mark = 0
+        i += 1
+    R.n = j
+    if R.step < ROUTE_STEP_MAX:
+        R.step *= 2
+
+def _rt_add(lat, lon, new):
+    R = _Rt
+    if R.n >= ROUTE_CAP:
+        _rt_halve()
+    i = 2 * R.n
+    R.pts[i] = lat << 1 | new
+    R.pts[i + 1] = lon
+    R.n += 1
+    R.k = math.cos(math.radians(lat / 1000000))
+
+def _rt_line(line):
+    """One line written to the track. The last point is always the last position:
+    it moves along until about ROUTE_STEP from the one before (9 millionths of a
+    degree a metre, near enough for spacing: no float), then stays."""
+    R = _Rt
+    a = line.find(",")
+    b = line.find(",", a + 1)
+    z = line.encode()
+    if z[b + 1] == 44 and z[b + 2] == 44:    # no height, no HDOP: an anchor point
+        return
+    s = _kb_time(z, len(z) - 17)
+    if s is None:
+        return
+    d = _rt_day(s)
+    if R.waiting or d > R.day:
+        if d != R.day:
+            _rt_reset(d)
+        R.waiting = False
+    elif d < R.day:
+        return                           # (held over midnight: yesterday's)
+    lat, lon = _e6(line, 0, a), _e6(line, a + 1, b)
+    new = R.n == 0 or (R.last_s is not None and s - R.last_s > NEW_FILE_GAP)
+    if R.trip is not None and line[-17:-1] >= R.trip:
+        R.trip = None
+        new = True
+    R.last_s = s
+    R.moved = R.unsaved = True
+    if new:
+        _rt_add(lat, lon, 1)
+        return
+    p = R.pts
+    i = 2 * (R.n - 1)
+    la, lo = p[i] >> 1, p[i + 1]
+    R.cm += _rt_step(la, lo, lat, lon)
+    if p[i] & 1 or abs(la - (p[i - 2] >> 1)) + abs(lo - p[i - 1]) * 3 // 4 >= 9 * R.step:
+        _rt_add(lat, lon, 0)
+    else:
+        p[i] = lat << 1
+        p[i + 1] = lon
+
+def _rt_bad(e):
+    _tft_t[4] += 1
+    _tft_bad(4, e)
+
+def _rt_feed(batch, k):
+    """The k lines at batch's start just landed in the track. Nothing leaves this:
+    the logging must go on whatever happens here."""
+    if _Rt.pts is None or _tft is None:
+        return
+    try:
+        i = 0
+        while i < k:
+            _rt_line(batch[i])
+            i += 1
+        _tft_t[4] = 0
+    except Exception as e:
+        _rt_bad(e)
+
+def _rt_trip(s=None):
+    """The next line, or the one at s seconds since 2020, starts a new trip."""
+    try:
+        _Rt.trip = _tc() if s is None else _stamp_s(s)[1]
+    except Exception:                    # (no date yet: nothing to split)
+        pass
+
+def _rt_project():
+    """The points, and the position just recorded, to pixels: north up, true aspect,
+    centred, fitted to ROUTE_W x ROUTE_H, not closer than ROUTE_SPAN across. The
+    view changes only here, so an unchanged route redraws nothing."""
+    R = _Rt
+    p, xy, n = R.pts, R.xy, R.n
+    t = R.tail
+    m = n + 1 if t else n
+    if not m:
+        R.view = (xy, 0, 0, R.ver)
+    else:
+        lon0 = p[1] if n else t[1]
+        la0 = la1 = p[0] >> 1 if n else t[0]
+        lo0 = lo1 = 0
+        i = 0
+        while i < m:
+            la = (p[2 * i] >> 1) if i < n else t[0]
+            lo = ((p[2 * i + 1] if i < n else t[1]) - lon0 + 180000000) % 360000000 - 180000000
+            la0, la1 = min(la0, la), max(la1, la)
+            lo0, lo1 = min(lo0, lo), max(lo1, lo)
+            i += 1
+        k = math.cos(math.radians((la0 + la1) / 2000000))
+        w, h = (lo1 - lo0) * k, la1 - la0
+        sc = ROUTE_W / ROUTE_SPAN
+        if w * sc > ROUTE_W:
+            sc = ROUTE_W / w
+        if h * sc > ROUTE_H:
+            sc = ROUTE_H / h
+        ox, oy = (ROUTE_W - w * sc) / 2 + 0.5, (ROUTE_H - h * sc) / 2 + 0.5
+        red = i = 0
+        while i < m:
+            if i < n:
+                v = p[2 * i]
+                la, lo, new = v >> 1, p[2 * i + 1], v & 1
+            else:                        # (a new trip not on the track yet: no line
+                la, lo, new = t[0], t[1], 1 if R.trip is not None or not n else 0
+            xy[2 * i] = int(ox + (((lo - lon0 + 180000000) % 360000000 - 180000000) - lo0) * k * sc)
+            xy[2 * i + 1] = int(oy + (la1 - la) * sc) | new << 7
+            if new:
+                red = i
+            i += 1
+        R.view = (xy, m, red, R.ver)
+    R.ver += 1
+    c = R.cm + 5000                      # 8,6 km; from 100 km on whole km
+    if c < 10000000:
+        R.km = "%d,%d km" % (c // 100000, c // 10000 % 10)
+    else:
+        R.km = "%d km" % ((R.cm + 50000) // 100000)
+
+def _rt_load():
+    """Today's route as last saved. Anything wrong with the file: as if none. Its
+    day counts once a fix proves it (a board without one does not know the date)."""
+    R = _Rt
+    size = struct.calcsize(ROUTE_HEAD)
+    try:
+        with open(ROUTE_FILE, "rb") as f:
+            b = f.read(size + 8 * ROUTE_CAP + 5)
+    except OSError:
+        return False
+    if len(b) < size + 4:
+        return False
+    magic, day, cm, step, last, n = struct.unpack_from(ROUTE_HEAD, b, 0)
+    if (magic != ROUTE_MAGIC or not 0 < n <= ROUTE_CAP or len(b) != size + 8 * n + 4
+            or sum(b[:-4]) != struct.unpack_from("<I", b, len(b) - 4)[0]
+            or step < ROUTE_STEP or cm < 0 or day < 0):
+        return False
+    q = array("i", b[size:size + 8 * n])
+    i = 0
+    while i < 2 * n:
+        R.pts[i] = q[i]
+        i += 1
+    R.day, R.cm, R.step, R.last_s, R.n = day, cm, step, last, n
+    R.k = math.cos(math.radians((R.pts[2 * n - 2] >> 1) / 1000000))
+    R.waiting = R.moved = True
+    return True
+
+def _rt_save(now):
+    """Atomically, as the upload's .pos: a power cut leaves the old file or the new."""
+    R = _Rt
+    R.saved = now
+    R.save_ok = False                    # (a stay retries as seldom as a drive)
+    room = free()
+    if room is None or room < MIN_FREE:  # (the flash's last room is for the tracks)
+        return
+    b = (struct.pack(ROUTE_HEAD, ROUTE_MAGIC, R.day, R.cm, R.step, R.last_s or 0, R.n)
+         + bytes(memoryview(R.pts)[:2 * R.n]))
+    tmp = ROUTE_FILE + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(b)
+        f.write(struct.pack("<I", sum(b)))
+    os.rename(tmp, ROUTE_FILE)
+    R.unsaved = False
+    R.save_ok = True
+
+def _rt_start():
+    """Allocated only here: on the Heltec, once."""
+    R = _Rt
+    R.pts = array("i", bytes(8 * ROUTE_CAP))
+    R.xy = bytearray(2 * (ROUTE_CAP + 1))
+    try:
+        _rt_load()
+    except (ValueError, TypeError):      # (struct, array: a file that makes no sense)
+        R.n = R.cm = 0
+        R.waiting = False
+        R.day = -1
+
+def _rt_tick(now):
+    """Every ROUTE_DRAW: midnight, the current position, the pixels when any of it
+    changed, the file when due. Without a fix the clock runs on from the last one."""
+    R = _Rt
+    if R.pts is None or (R.drawn is not None and _age(now, R.drawn) < ROUTE_DRAW):
+        return
+    R.drawn = now
+    c = log["clock"]
+    if c is not None and _age(now, c[1]) < TICKS_OLD:
+        d = _rt_day(c[0] + _age(now, c[1]) // 1000)
+        if R.waiting or d > R.day:
+            if d != R.day:
+                _rt_reset(d)
+            R.waiting = False
+            R.moved = True
+    if R.waiting or R.day < 0:
+        return                           # (no view: the day is not known)
+    t = None
+    q = log["prev"]
+    if q is not None and has_fix(now) and not log["still"]["active"]:
+        t = (int(q[0] * 1000000), int(q[1] * 1000000))
+    if t != R.tail:
+        R.tail = t
+        R.moved = True
+    if R.moved:
+        R.moved = False
+        _rt_project()
+    if R.unsaved and (R.saved is None or _age(now, R.saved) >= ROUTE_SAVE
+                      or (log["still"]["active"] and R.save_ok)):
+        _rt_save(now)
+    _tft_t[4] = 0
+
 def _tft_state(now):
     """What the display shows: set_state's arguments."""
+    try:
+        _rt_tick(now)
+    except Exception as e:
+        _rt_bad(e)
     fix = bool(has_fix(now))
-    speed = st.get("speed")
-    big = str(int(speed + 0.5)) if fix and speed is not None else "--"
     level = None
     if wifi["state"] == "connected":
         level = _wifi_level(wifi.get("rssi"), _tft_b[2])
@@ -9474,8 +9803,8 @@ def _tft_state(now):
         text = str(left) if left < 10000 else "%dk" % (left // 1000)
     else:
         text = "kész" if up.get("url") else " "
-    return (big, fix, sv_used() or 0, _local_hm(), level, _gps_quality(fix), text,
-            bool(left), _store_state(now))
+    return (_Rt.view, _Rt.km, fix, sv_used() or 0, _local_hm(), level, _gps_quality(fix),
+            text, bool(left), _store_state(now))
 
 def tft_tick(now):
     """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors
