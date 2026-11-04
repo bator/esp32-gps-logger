@@ -1252,7 +1252,7 @@ def _uc_line(p):
 
 _UC_GNSS = {"GP": 0, "GA": 2, "GB": 3, "GQ": 5, "GL": 6}  # NAV-SAT's gnssId
 _UC_SYS = {1: 0, 2: 6, 3: 2, 4: 3, 5: 5}  # GSA's system id -> gnssId
-_uc_sv = {"new": {}, "at": None, "used": []}
+_uc_sv = {"new": {}, "keys": [], "used": []}
 
 def _uc_gsa(f):
     """One GSA: the satellites of its system in the fix (a round's list:
@@ -1267,23 +1267,24 @@ def _uc_gsa(f):
 
 def _uc_gsv(talker, f):
     """One GSV sentence into a round's list (the same satellite on two
-    bands: its strongest). The sentences of a round come in a burst: the
-    first one after a gap closes the last round as st["svs"], the shape of
-    _ubx_frame's NAV-SAT list: (svid, cno, elevation, azimuth, used,
-    unhealthy, gnssId)."""
+    bands: its strongest). A sentence seen in this round already (system,
+    signal, number) starts the next one and closes this as st["svs"], the
+    shape of _ubx_frame's NAV-SAT list: (svid, cno, elevation, azimuth, used,
+    unhealthy, gnssId). Not by a pause: with a fix the receiver spreads a
+    round over the epochs (a list a minute, measured)."""
     g = _UC_GNSS.get(talker)
     if g is None:
         return
-    now = time.ticks_ms()
     u = _uc_sv
-    if u["at"] is None or _age(now, u["at"]) >= 1000:
+    key = "%d,%s,%s" % (g, f[-1], f[2])
+    if key in u["keys"]:
         if u["new"]:
             used = u["used"]
             st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8)
                          for k, v in u["new"].items()]
-            st["svs_at"], st["sv_miss"] = now, 0
-        u["new"] = {}
-    u["at"] = now
+            st["svs_at"], st["sv_miss"] = time.ticks_ms(), 0
+        u["new"], u["keys"] = {}, []
+    u["keys"].append(key)
     for i in range(4, len(f) - 3, 4):
         n = _num(f[i], int)
         if n is None:

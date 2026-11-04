@@ -111,8 +111,13 @@ firmware R6.0.0.0Build3700.
   logger sets it up with Unicore commands (`$CFGNAV`, `$CFGMSG`: 5 Hz, GGA and
   RMC every fix, GST once a second, GSA and GSV every 5 s) at every boot, as a
   power cycle brings its defaults back. The satellite list comes from GSV.
+- **Antennas:** the one in the box goes on the LoRa socket, which the logger
+  does not use. The GNSS works from the board's own antenna, with the GNSS
+  socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
+  fix after a power cycle (the receiver keeps nothing without power).
 - **L5:** every system and band is on by default (`$CFGSYS` `H35155`), but
-  the antenna in the box is L1 only, per Heltec's FAQ.
+  the board's antenna is L1 only, per Heltec's FAQ; an external one takes a
+  moved resistor.
 
 ## Setup
 

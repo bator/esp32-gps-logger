@@ -18074,7 +18074,7 @@ _uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"),
          _nmea("GBGSV,1,1,01,25,75,249,38,1"),
          _nmea("GAGSV,1,1,01,13,42,203,,7"))
 _e1 = hl.st["extra"]
-_clock[0] += 5000
+_clock[0] += 200                         # no pause: spread over the epochs
 _uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # the next round closes this one
 _svs = {(v[6], v[0]): v for v in (hl.st["svs"] or [])}
 check("UC-GSV: one list from a round: a satellite once with its strongest band, "
