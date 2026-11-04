@@ -129,14 +129,14 @@ GPS_STORM_QUIET = 10000                  # ms without a restart (in a storm
 # The Heltec Wireless Tracker (ESP32-S3, boards/GPS_LOGGER_S3): its UC6580 is
 # on the board, UART1 on GPIO34 (TX) / GPIO33 (RX), at 115200 baud, powered
 # by the Vext rail (GPIO3 high: the receiver, its LNA and the TFT). No I2C
-# OLED: the TFT is left dark.
+# OLED: gps_tft.py drives the TFT once the logger runs (dark until then).
 # .env GPS_TX / GPS_RX move the GPS UART (_gps_pins_env, e.g. back to 4/5).
 # main.py keeps the matching boot-bypass pin.
 IS_C6 = "ESP32C6" in getattr(sys.implementation, "_machine", "")
 IS_HELTEC = "Heltec" in getattr(sys.implementation, "_machine", "")
 GPS_UC = IS_HELTEC                       # the UC6580: see "UC6580" below
 HELTEC_VEXT = 3                          # high: the rail of the UC6580
-HELTEC_TFT_BL = 21                       # the TFT's backlight, kept off
+HELTEC_TFT_BL = 21                       # the TFT's backlight (gps_tft.py)
 if IS_C6:
     GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 18, 19, 7, 6
 elif IS_HELTEC:
@@ -9190,6 +9190,129 @@ def draw():
         oled.show()
     _oled_ok(_do)
 
+# --- The Heltec's TFT (gps_tft.py) -------------------------------------------
+TFT_FRAME = 200                          # ms between frames (a row scrolling)
+TFT_STATE = 1000                         # ms between new values
+TFT_MAX_ERR = 3                          # errors in a row, then it stays dark
+PT_BYTES = 7                             # .trb bytes of a moving second
+_tft = None
+_tft_t = [None, None, 0]                 # last values, last frame, errors
+
+def _tft_start():
+    """Only on the Heltec; a failure leaves the logger running without it."""
+    global _tft
+    if not IS_HELTEC or _tft is not None:
+        return
+    try:
+        import gps_tft
+        gps_tft.start()
+        _tft = gps_tft
+    except Exception as e:
+        print("tft", repr(e))
+
+_T_DAYS = (0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4)
+
+def _last_sunday(y, m):
+    """The day of March's or October's (31 days) last Sunday."""
+    yy = y - 1 if m < 3 else y
+    return 31 - (yy + yy // 4 - yy // 100 + yy // 400 + _T_DAYS[m - 1] + 31) % 7
+
+def _local_hm():
+    """"HH:MM" in Hungary from the fix's UTC (CET, CEST from the last Sunday
+    of March to October's, 01:00 UTC), "--:--" without one."""
+    d, t = st["date"], st["time"]
+    if not d or not t:
+        return "--:--"
+    try:
+        y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
+        h = int(t[:2])
+        n = 1
+        if 3 < m < 10:
+            n = 2
+        elif m in (3, 10):
+            ls = _last_sunday(y, m)
+            past = day > ls or (day == ls and h >= 1)
+            n = 2 if past == (m == 3) else 1
+        return "%02d:%s" % ((h + n) % 24, t[3:5])
+    except (ValueError, IndexError):
+        return "--:--"
+
+def _hu_n(n):
+    """1284 -> "1 284"."""
+    s = str(n)
+    return s if len(s) < 4 else s[:-3] + " " + s[-3:]
+
+def _hu_f(v, fmt="%.1f"):
+    return (fmt % v).replace(".", ",")
+
+def _tft_state(now):
+    """What the display shows: set_state's arguments. Kinds: gps_tft's."""
+    b, m, g, a, r = 0, 1, 2, 3, 4
+    fix = has_fix(now)
+    text = status()
+    speed = st.get("speed")
+    big = str(int(speed + 0.5)) if fix and speed is not None else "--"
+    used, seen = sv_used() or 0, sv_seen() or 0
+    clock = _local_hm()
+    if wifi["state"] == "connected":
+        net = ("net", g, [(str(wifi.get("ssid") or "WiFi"), b), ("  ", m),
+                          (str(wifi.get("rssi") or "-"), b), (" dBm  ", m),
+                          (str(wifi.get("ip") or "-"), b), ("  ", m), (clock, b)])
+    else:
+        net = ("net", m, [("nincs WiFi  ", m), (clock, b)])
+    left = up["left"] or 0
+    if left:
+        files = _file_counts()[0]
+        upl = ("up", a, [(_hu_n(left), a), (" pont vár, ", m), (str(files), b),
+                         (" fájl", m)])
+    elif not up.get("url"):
+        upl = ("up", m, [("nincs feltöltés", m)])
+    else:
+        upl = ("up", g, [("minden feltöltve", g)])
+    parts = []
+    hdop = st.get("hdop")
+    if fix and hdop is not None:
+        parts += [(_hu_f(hdop, "%.2f"), b), (" HDOP  ", m)]
+    std = _fresh_std(now)
+    if fix and std is not None:
+        parts += [("±" + _hu_f(std), b), (" m  ", m)]
+    if fix and st.get("alt") is not None:
+        parts += [(str(int(st["alt"] + 0.5)), b), (" m  ", m)]
+    kb = _flash_kb()
+    if kb is not None:
+        parts += [(_hu_f(kb / 1024), b), (" MB  ", m),
+                  (str(kb * 1024 // PT_BYTES // 86400), b), (" nap  ", m)]
+    tc = _temp()
+    if tc is not None:
+        parts += [(str(int(tc)), b), (" °C  ", m)]
+    u = uptime_s() // 60
+    parts += [("%d ó %d" % (u // 60, u % 60), b), (" p", m)]
+    # (no " DGPS": it would not fit)
+    return (big, text[:6] if fix else "nincs fix", g if fix else r,
+            "%d/%d" % (used, seen), [net, upl, ("mem", g, parts)])
+
+def tft_tick(now):
+    """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors
+    in a row turn it off for this boot, the logging goes on."""
+    global _tft
+    if _tft is None:
+        return
+    t = _tft_t
+    try:
+        if t[0] is None or _age(now, t[0]) >= TFT_STATE:
+            t[0] = now
+            _tft.set_state(*_tft_state(now))
+        if t[1] is None or _age(now, t[1]) >= TFT_FRAME:
+            t[1] = now
+            _tft.frame()
+        t[2] = 0
+    except Exception as e:
+        t[2] += 1
+        print("tft", repr(e))
+        if t[2] >= TFT_MAX_ERR:
+            _diag_write("bug tft " + repr(e))
+            _tft = None
+
 # --- Main loop --------------------------------------------------------------
 
 def run():
@@ -9209,6 +9332,7 @@ def run():
         log_reset()
         wifi_reset()
         up_reset()
+        _tft_start()
         env = load_env(ENV_FILE)
         _gps_pins_env(env)               # before the first setup
         _gps_model_env(env)
@@ -9325,6 +9449,7 @@ def _loop():
         web_tick()
         _guarded("ota", ota_tick, time.ticks_ms())
         now = time.ticks_ms()
+        tft_tick(now)
         if (not _boot_ok_done
                 and time.ticks_diff(now, loop_start) >= BOOT_OK_MS):
             _boot_ok()

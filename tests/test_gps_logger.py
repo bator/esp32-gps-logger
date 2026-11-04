@@ -157,10 +157,49 @@ class Pin(object):
         _pin_levels.append((self.n, v, _clock[0]))
         return None
 
+    def __call__(self, v=None):
+        return self.value(v)
+
 
 class I2C(object):
     def __init__(self, *a, **k):
         pass
+
+
+class _TftSpi(object):
+    """The TFT's SPI: what goes out, in order."""
+    out = []
+    fail = False
+
+    def __init__(self, *a, **k):
+        pass
+
+    def write(self, data):
+        if _TftSpi.fail:
+            raise OSError(5)
+        _TftSpi.out.append(bytes(data))
+
+
+class _FakeFramebuf(object):
+    RGB565, MONO_HLSB = 1, 3
+
+    class FrameBuffer(object):
+        def __init__(self, buf, w, h, fmt):
+            self.buf, self.w, self.h, self.fmt = buf, w, h, fmt
+            self.px = {}
+
+        def fill(self, c):
+            self.px = {}
+
+        def fill_rect(self, *a):
+            pass
+
+        def pixel(self, x, y, c):
+            self.px[(x, y)] = c
+
+        def blit(self, src, x, y, key=-1, palette=None):
+            assert src.fmt == 3 and palette is not None
+            assert len(src.buf) == ((src.w + 7) // 8) * src.h
 
 
 class UART(object):
@@ -483,7 +522,9 @@ def _install_mocks():
     machine = types.ModuleType("machine")
     machine.Pin = Pin
     machine.I2C = I2C
+    machine.SPI = _TftSpi
     machine.UART = UART
+    sys.modules["framebuf"] = _FakeFramebuf
     machine.WDT = WDT
     machine.Timer = Timer
     machine.RTC = RTC
@@ -7397,6 +7438,8 @@ def build_run(args, env_extra, dirty=False):
                 os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_tft.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_tft_font.py"), work)
     shutil.copy(os.path.join(ROOT, "web.html"), work)
     fake = os.path.join(work, "fake")
     for d in ("bin", "idf", "mpy/mpy-cross", "mpy/ports/esp32"):
@@ -13986,6 +14029,7 @@ else:
         ("ota error OSError(-202)", "otax"),
         ("web error KeyError('y')", "bug"),
         ("bug upload ValueError('x')", "bug"),
+        ("bug tft OSError(5)", "bug"),
         ("crash up 3600 MemoryError()", "crash"),
         ("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
          "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
@@ -18117,6 +18161,118 @@ check("UC-GSA: the satellites in use of one burst stay together past a second's 
       "boundary; a pause starts the next round's",
       _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._uc_sv["used"] == [30],
       repr((_u1, hl._uc_sv["used"])))
+
+# the display: the values, the fonts, what goes to the panel
+import gps_tft as _ft
+import gps_tft_font as _ff
+_fo = []
+for _f in (_ff.REG, _ff.BOLD, _ff.HERO):
+    _chars, _wd, _of, _dat, _h = _f
+    _end = 0
+    _ok1 = len(_wd) == len(_chars) and len(_of) == 2 * len(_chars)
+    for _i in range(len(_chars)):
+        _o = _of[_i * 2] | _of[_i * 2 + 1] << 8
+        _ok1 = _ok1 and _o == _end
+        _end = _o + ((_wd[_i] + 7) // 8) * _h
+    _fo.append(_ok1 and _end == len(_dat))
+check("TFT-FONT: every glyph's offset and size add up; the accents, ° and ± and "
+      "the header's digits are there",
+      all(_fo) and all(c in _ff.REG[0] and c in _ff.BOLD[0]
+                       for c in "áéíóöőúüűÁÉÍÓÖŐÚÜŰ°±")
+      and _ff.HERO[0] == "0123456789-", repr(_fo))
+_room = 142
+_cyc = _ft.HOLD + (300 + _room) // _ft.STEP + 1
+_ps = [_ft.pos(t, 300, _room) for t in range(_cyc + 1)]
+check("TFT-SCROLL: a row that fits stands; a long one holds, slides out to the "
+      "left past its end, comes in from the right, back at 0",
+      _ft.pos(7, 100, _room) == 0 and _ps[:_ft.HOLD] == [0] * _ft.HOLD
+      and min(_ps) <= -300 + _ft.STEP and max(_ps) > 100 and _ps[_cyc] == 0
+      and all(p >= -300 and p <= _room for p in _ps), repr(_ps[:14]))
+
+hl.reset()
+hl.log_reset()
+hl.wifi_reset()
+hl.up_reset()
+hl.LOG_DIR = os.path.join(diag_dir, "gpx-h")
+os.makedirs(hl.LOG_DIR, exist_ok=True)
+hl.up["url"] = "https://x"
+hl.up["left"] = 1284
+hl.wifi["state"] = "off"
+hl.st.update(date="2026-11-04", time="10:42:10", valid=True, lat=47.1, lon=18.4,
+             pos_at=_clock[0], speed=47.3, hdop=0.968, used=22, view={"GP": 28},
+             alt=182.4, rx=_clock[0], fixtype=3)
+_s1 = hl._tft_state(_clock[0])
+_tx = "".join(p[0] for p in _s1[4][2][2])
+_fix2 = hl.has_fix(_clock[0] + hl.STALE + 1)
+_s2 = hl._tft_state(_clock[0] + hl.STALE + 1)
+hl.wifi.update(state="connected", ssid="krumpli", rssi=-55, ip="192.168.1.60")
+hl.up["left"] = 0
+_s3 = hl._tft_state(_clock[0] + hl.STALE + 1)
+hl.up["url"] = None
+_s4 = hl._tft_state(_clock[0] + hl.STALE + 1)
+check("TFT-STATE: speed rounded and green with a fix, -- and red without; away: "
+      "no WiFi, points waiting with a thin space; at home: name, signal, address; "
+      "decimal commas; no upload set up says so",
+      _s1[:3] == ("47", "3D fix", 2) and _s1[3] == "22/28"
+      and _s1[4][0][2][0][0] == "nincs WiFi  " and _s1[4][0][2][1][0] == "11:42"
+      and _s1[4][1][2][0] == ("1 284", 3) and "0,97 HDOP" in _tx and "182 m" in _tx
+      and not _fix2 and _s2[0] == "--" and _s2[1:3] == ("nincs fix", 4)
+      and [p[0] for p in _s3[4][0][2]][0] == "krumpli"
+      and "192.168.1.60" in [p[0] for p in _s3[4][0][2]]
+      and _s3[4][1][2] == [("minden feltöltve", 2)]
+      and _s4[4][1][2] == [("nincs feltöltés", 1)],
+      repr((_s1, _s2[:3], _s3[4][:2], _s4[4][1])))
+_ls = lambda d, t: hl.st.update(date=d, time=t) or hl._local_hm()
+check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
+      "the switch on the last Sunday at 01:00 UTC, past midnight, no date",
+      _ls("2026-11-04", "10:42:10") == "11:42" and _ls("2026-07-01", "23:10:00") == "01:10"
+      and _ls("2026-03-29", "00:59:00") == "01:59" and _ls("2026-03-29", "01:00:00") == "03:00"
+      and _ls("2026-10-25", "00:59:00") == "02:59" and _ls("2026-10-25", "01:00:00") == "02:00"
+      and _ls(None, None) == "--:--")
+
+# the drawing: start up, a frame draws what changed and only that
+_TftSpi.out[:] = []
+_TftSpi.fail = False
+_ft.start()
+_cmds0 = list(_TftSpi.out)
+_bl = [p[:2] for p in _pin_levels if p[0] == 21][-2:]
+_short = ("net", 2, [("krumpli", 0)])
+_ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), ("mem", 2, [("y", 0)])])
+_TftSpi.out[:] = []
+_ft.frame()
+_f1 = sum(1 for b in _TftSpi.out if b == b"\x2c")
+_TftSpi.out[:] = []
+_ft.frame()
+_f2 = sum(1 for b in _TftSpi.out if b == b"\x2c")
+_long = ("mem", 2, [("0,97 HDOP 4,4 MB 7 nap 37 °C 2 ó 15 p és még sok minden", 0)])
+_ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), _long])
+_TftSpi.out[:] = []
+for _i in range(_ft.HOLD + 3):
+    _ft.frame()
+_f3 = sum(1 for b in _TftSpi.out if b == b"\x2c")
+check("TFT-DRAW: the panel set up to 16 bits and landscape, the backlight last; a "
+      "first frame draws the header and 3 rows, an unchanged one nothing, a long "
+      "row only itself while it slides",
+      b"\x36" in _cmds0 and b"\x68" in _cmds0 and b"\x05" in _cmds0
+      and _bl == [(21, 0), (21, 1)] and _f1 == 4 and _f2 == 0 and 1 <= _f3 < _ft.HOLD + 3,
+      repr((_bl, _f1, _f2, _f3)))
+# a panel gone wrong: dark, the logger goes on
+hl._tft = _ft
+hl._tft_t[:] = [None, None, 0]
+_TftSpi.fail = True
+_dl, _dw = [], hl._diag_write
+hl._diag_write = _dl.append
+_ft._D.drawn = [None, None, None, None]
+for _i in range(hl.TFT_MAX_ERR):
+    hl._tft_t[0] = hl._tft_t[1] = None
+    hl.tft_tick(_clock[0])
+hl._diag_write = _dw
+_TftSpi.fail = False
+check("TFT-FAIL: TFT_MAX_ERR errors in a row turn the display off for the boot, "
+      "said once, nothing leaves tft_tick",
+      hl._tft is None and len(_dl) == 1 and _dl[0].startswith("bug tft "), repr(_dl))
+check("TFT-OTHER: no other board starts it; the C6's firmware does not carry it",
+      not gl.IS_HELTEC and gl._tft is None)
 
 # OTA: each board only its own firmware
 _mf = {"build": 5, "commit": "abc1234", "size": 9, "sha256": "0" * 64,

@@ -105,6 +105,14 @@ module("gps_logger.py", base_path="$OUT")
 module("gps_frozen.py", base_path="$OUT")
 module("gps_boot.py", base_path="$OUT")
 EOF
+# the Heltec's display: on its firmware only
+if [ "$BOARD" = GPS_LOGGER_S3 ]; then
+    cp gps_tft.py gps_tft_font.py "$OUT/"
+    cat >> "$OUT/manifest.py" <<EOF
+module("gps_tft.py", base_path="$OUT")
+module("gps_tft_font.py", base_path="$OUT")
+EOF
+fi
 
 # shellcheck disable=SC1091
 source "$IDF_DIR/export.sh" >/dev/null

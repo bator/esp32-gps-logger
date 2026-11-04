@@ -96,7 +96,7 @@ firmware R6.0.0.0Build3700.
 |----------|------|
 | UC6580 TX → ESP RX / ESP TX → UC6580 RX, 115200 baud (UART1) | 33 / 34 |
 | Vext: high powers the UC6580, its LNA and the TFT | 3 |
-| TFT backlight, kept off (the TFT stays dark) | 21 |
+| TFT (ST7735S, 160×80): SCK / MOSI / CS / DC / RST / backlight | 41 / 42 / 38 / 40 / 39 / 21 |
 | Boot bypass → GND (GPIO0, the button, is the download mode) | 7 |
 | Keep-alive load (optional, `KEEPALIVE_MODE=gpio`) | 6 |
 
@@ -111,6 +111,10 @@ firmware R6.0.0.0Build3700.
   logger sets it up with Unicore commands (`$CFGNAV`, `$CFGMSG`: 5 Hz, GGA and
   RMC every fix, GST once a second, GSA and GSV every 5 s) at every boot, as a
   power cycle brings its defaults back. The satellite list comes from GSV.
+- **Display:** speed, fix and satellites on top, then WiFi and the clock (Hungarian
+  time), what waits for upload, and accuracy, altitude, free space, temperature
+  and uptime; a row too long slides sideways. The backlight is always on.
+  `gps_tft.py`, its fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
   socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
