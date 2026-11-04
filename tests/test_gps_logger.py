@@ -18781,6 +18781,145 @@ check("TFT-WIFI: the icon stands: 20 frames send nothing; a lower level sends on
       _still3 and _sent1 == [288] and _a3 > _a1 > 0 and _off == (0, True),
       repr((_still3, _sent1, _a3, _a1, _off)))
 
+# the fonts: only the rows from the first to the last with ink in any glyph (the
+# font's blank rows were 1/3 of the file), BASE counted from the first kept: put
+# back, they are the bytes the tool wrote before the crop, and a string stays on
+# its rows. A new font or new characters on purpose: new values here
+_font_was = {  # uncropped: HEIGHT, BASE, sha256 of DATA (first 32)
+    "HERO": (47, 37, "f104d736320fb3d4e753dc5d3a05bad9"),
+    "NUM": (22, 17, "d2fed60e2e652f2452c2beb8e569b8e4"),
+    "TXT": (13, 10, "8ad856b704c227df34b62fe578a14bb8"),
+    "LAB": (12, 9, "a556dc2900611d97bcff7c994341e848"),
+    "WORD": (17, 13, "f82a4081a2b77431a6e31a804f4ce2f2"),
+}
+_font_rows = (  # the rows a string's ink takes, against its baseline
+    ("HERO", "47", (-28, -1)), ("HERO", "-", (-14, -10)), ("NUM", "22", (-13, -1)),
+    ("NUM", "-", (-7, -5)), ("TXT", "11:42", (-8, -1)), ("TXT", "k\u00e9sz", (-8, -1)),
+    ("TXT", "<1 \u00f3ra", (-8, -1)), ("LAB", "GPS", (-7, -1)),
+    ("LAB", "m\u0171hold", (-7, -1)), ("LAB", "KM/H", (-7, 0)),
+    ("WORD", "er\u0151s", (-11, -1)), ("WORD", "gyenge", (-8, 2)), ("WORD", "nincs", (-11, -1)),
+)
+
+
+def _font_glyphs(f):
+    """[(the glyph's rows, each (w + 1) // 2 bytes)]: None when OFFS or the
+    size of DATA do not fit HEIGHT."""
+    chars, widths, offs, data, h = f[:5]
+    if len(widths) != len(chars) or len(offs) != 2 * len(chars):
+        return None
+    out, o = [], 0
+    for i, w in enumerate(widths):
+        n = (w + 1) // 2
+        if offs[i * 2] | offs[i * 2 + 1] << 8 != o:
+            return None
+        out.append([data[o + r * n:o + (r + 1) * n] for r in range(h)])
+        o += n * h
+    return out if o == len(data) else None
+
+
+def _font_pad(f, h0, b0):
+    """f with the blank rows back as it had h0 rows, its baseline at b0."""
+    top = b0 - f[5]
+    pad, offs = bytearray(), bytearray()
+    for i, g in enumerate(_font_glyphs(f) or ()):
+        n = (f[1][i] + 1) // 2
+        offs += len(pad).to_bytes(2, "little")
+        pad += bytes(n * max(0, top)) + b"".join(g) + bytes(n * max(0, h0 - top - f[4]))
+    return (f[0], f[1], bytes(offs), bytes(pad), h0, b0)
+
+
+_fnames = ("HERO", "NUM", "TXT", "LAB", "WORD")
+_ffonts = {n: getattr(_ff, n) for n in _fnames}
+_fg = {n: _font_glyphs(f) for n, f in _ffonts.items()}
+_ftight = {n: bool(_fg[n]) and all(any(any(g[r]) for g in _fg[n]) for r in (0, _ffonts[n][4] - 1))
+           for n in _fnames}
+check("TFT-FONT-CROP: no font keeps a row without ink above or below; OFFS and the size "
+      "of DATA fit HEIGHT", all(_fg.values()) and all(_ftight.values()), repr(_ftight))
+_fsha = {n: hashlib.sha256(_font_pad(_ffonts[n], *_font_was[n][:2])[3]).hexdigest()[:32] for n in _fnames}
+check("TFT-FONT-BASE: BASE and HEIGHT say where the crop was: the blank rows back on that "
+      "side give the uncropped bytes",
+      all(_fsha[n] == _font_was[n][2] and 0 <= _font_was[n][1] - _ffonts[n][5]
+          and _font_was[n][1] - _ffonts[n][5] + _ffonts[n][4] <= _font_was[n][0] for n in _fnames),
+      repr((_fsha, [_ffonts[n][4:] for n in _fnames])))
+_fpair = dict(zip(_fnames, (_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD)))
+_frows = []
+for _n, _s, _want in _font_rows:
+    # (the band as gps_tft has it: a string blitted at a row, read back)
+    _fb = _FakeFramebuf.FrameBuffer(bytearray(160 * 64 * 2), 160, 64, _FakeFramebuf.RGB565)
+    _fb.fill(_ft.BG)
+    _ft._text(_fb, _fpair[_n], _s, 2, 40, "txt")
+    _ink = [y - 40 for y in range(64) if any(_fb.pixel(x, y) != _ft.BG for x in range(160))]
+    _frows.append((_n, _s, (_ink[0], _ink[-1]) if _ink else None))
+check("TFT-FONT-ROWS: a string stays on its rows against the baseline",
+      _frows == list(_font_rows), repr(_frows))
+_fstates = (("47", True, 22, "11:42", None, 3, "1284", True),
+            ("--", False, 0, "--:--", 0, 0, "k\u00e9sz", False),
+            ("188", True, 9, "09:05", 2, 2, " ", False, (70, "44 \u00f3ra")),
+            ("-1", True, 40, "23:58", 3, 1, "12k", True, (96, "<1 \u00f3ra")),
+            ("0", True, 1, "06:37", 1, 1, "k\u00e9sz", False, (100, "tele")))
+
+
+def _font_panels():
+    out = []
+    for st in _fstates:
+        _ft._D.top = _ft._D.low = None
+        _ft.set_state(*st)
+        _ft.frame()
+        out.append(dict(_TftSpi.panel))
+    return out
+
+
+_fp1 = _font_panels()
+_fsaved = _ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD
+_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD = [
+    (_font_pad(_ffonts[n], *_font_was[n][:2]), memoryview(_font_pad(_ffonts[n], *_font_was[n][:2])[3]))
+    for n in _fnames]
+_fp2 = _font_panels()
+_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD = _fsaved
+check("TFT-FONT-PANEL: the panel pixel for pixel as with the blank rows back: speeds, "
+      "satellites, clock, WiFi, quality words, upload and the gauge's texts",
+      _fp1 == _fp2 and len(_fp1[0]) == 160 * 80,
+      repr([sum(1 for k in a if a[k] != b.get(k)) for a, b in zip(_fp1, _fp2)]))
+_ft.set_state("47", True, 22, "11:42", None, 3, "k\u00e9sz", False)
+_ft.frame()
+# the tool's crop, on a font small enough to read (importing it writes nothing)
+_mf_path = os.path.join(ROOT, "tools", "make_tft_font.py")
+with open(_mf_path, encoding="utf-8") as f:
+    _mf_src = f.read()
+_mf = {}
+if "def crop(" in _mf_src and '__name__ == "__main__"' in _mf_src:
+    exec(compile(_mf_src, _mf_path, "exec"), {"__name__": "make_tft_font"}, _mf)
+_crop = _mf.get("crop")
+_row0 = b"\x00"
+_tiny = (_row0 + b"\x10" + b"\x20" + _row0                 # width 2: a byte a row
+         + _row0 * 2 + b"\x00\x30" + b"\x40\x00" + _row0 * 2)  # width 3: two
+try:
+    _crop_err = _crop and _crop(b"\x02", b"\x00" * 3, 2, 1)
+except ValueError:
+    _crop_err = "refused"
+check("TFT-FONT-TOOL: crop keeps the rows from the first to the last with ink in any "
+      "glyph, a blank row between them, BASE from the first kept; all blank: one row; "
+      "data of the wrong size refused; importing the tool runs nothing",
+      _crop is not None
+      and _crop(b"\x02\x03", _tiny + b"", 4, 3) == (b"\x00\x00\x02\x00", b"\x10\x20\x00\x30\x40\x00", 2, 2)
+      and _crop(b"\x02", b"\x00\x10\x00\x20", 4, 2) == (b"\x00\x00", b"\x10\x00\x20", 3, 1)
+      and _crop(b"\x02", b"\x00" * 3, 3, 2) == (b"\x00\x00", b"\x00", 1, 2)
+      and _crop_err == "refused" and "main" in _mf, repr(_mf.keys()))
+# what the tool writes is what is committed (needs Pillow and the Inter TTFs)
+_mf_can = importlib.util.find_spec("PIL") is not None and bool(_mf) and os.path.exists(_mf["D"] % "Bold")
+if not _mf_can:
+    print("SKIP  TFT-FONT-REGEN: Pillow or the Inter TTFs are missing")
+else:
+    _mf_td = tempfile.mkdtemp(prefix="font-")
+    _mf_r = subprocess.run([sys.executable, _mf_path], cwd=_mf_td, capture_output=True, text=True)
+    with open(os.path.join(ROOT, "gps_tft_font.py"), "rb") as f:
+        _mf_a = f.read()
+    with open(os.path.join(_mf_td, "gps_tft_font.py"), "rb") as f:
+        _mf_b = f.read()
+    shutil.rmtree(_mf_td, True)
+    check("TFT-FONT-REGEN: tools/make_tft_font.py writes the committed gps_tft_font.py",
+          _mf_r.returncode == 0 and _mf_a == _mf_b, _mf_r.stderr[-200:])
+
 # a panel gone wrong: dark, and each action counted when it runs
 hl._tft = _ft
 hl._tft_t[:] = [None, None, 0, 0]
