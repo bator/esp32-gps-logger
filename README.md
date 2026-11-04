@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml/badge.svg)](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml)
 
-A MicroPython GPS track logger for the ESP32 and ESP32-C6. It records your
+A MicroPython GPS track logger for the ESP32, the ESP32-C6 and the Heltec
+Wireless Tracker (ESP32-S3 with a UC6580 on the board). It records your
 position to the internal flash, offline or on WiFi, and uploads finished
 tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
 
@@ -72,6 +73,8 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
   `GPS_RX=5` in `.env` (or moves the two data wires).
 - The ESP TX → GPS RX wire is needed for the 5 Hz setup. Without it the
   receiver stays at 1 Hz and everything else still works.
+- **Heltec Wireless Tracker** (ESP32-S3FN8, UC6580, no wiring): see
+  [below](#heltec-wireless-tracker).
 - Most GPS and OLED breakouts have their own regulator and I²C pull-ups;
   check yours if you power the GPS from 5 V.
 - On the original ESP32, `https://` uploads are tight on RAM (about 17 kB
@@ -82,6 +85,50 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
   ~230 mA for 0.1 s every 5 s (~5 mA average) is the load a power bank
   looks for, where a WiFi scan costs ~40 mA average. See
   [Power bank keep-alive](#wifi).
+
+### Heltec Wireless Tracker
+
+The receiver is on the board, so nothing is wired. Measured on a board sold as
+V1.2 (Heltec documents up to V1.1; its pins are the same), receiver UC6580I,
+firmware R6.0.0.0Build3700.
+
+| Function | GPIO |
+|----------|------|
+| UC6580 TX → ESP RX / ESP TX → UC6580 RX, 115200 baud (UART1) | 33 / 34 |
+| Vext: high powers the UC6580, its LNA and the TFT | 3 |
+| TFT (ST7735S, 160×80): SCK / MOSI / CS / DC / RST / backlight | 41 / 42 / 38 / 40 / 39 / 21 |
+| Boot bypass → GND (GPIO0, the button, is the download mode) | 7 |
+| Keep-alive load (optional, `KEEPALIVE_MODE=gpio`) | 6 |
+
+- **Build:** `BOARD_DIR=$PWD/boards/GPS_LOGGER_S3 tools/build_firmware.sh`
+  with `--migrate` once, `--flash` after. It needs the S3 toolchain:
+  `~/esp/esp-idf/install.sh esp32s3`. The app (~1.5 MB) fits the same two
+  1792 KB OTA slots, the file system is ~4.4 MB (about 7 days of driving
+  offline).
+- **Its own OTA folder:** give the board its own `OTA_DEST` and `.env`
+  `OTA_URL`. A manifest names its board and is refused by any other.
+- **Not a u-blox:** no UBX, so no NAV-PVT, `GPS_MODEL` or `GPS_PVT`. The
+  logger sets it up with Unicore commands (`$CFGNAV`, `$CFGMSG`: 5 Hz, GGA and
+  RMC every fix, GST once a second, GSA and GSV every 5 s) at every boot, as a
+  power cycle brings its defaults back. The satellite list comes from GSV.
+- **Display:** speed, fix and satellites on top, then WiFi and the clock (Hungarian
+  time), what waits for upload, and HDOP, altitude, free space, temperature
+  and uptime; a row too long slides sideways. The backlight is always on.
+  `gps_tft.py`, its fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
+- **Antennas:** the one in the box goes on the LoRa socket, which the logger
+  does not use. The GNSS works from the board's own antenna, with the GNSS
+  socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
+  fix after a power cycle (the receiver keeps nothing without power).
+- **Accuracy, measured standing outdoors:** half of the fixes within 2.3 m of the
+  middle after two minutes, 95% within 3.8 m, HDOP 0.9, ~26 satellites in use. It
+  starts 15 m off and takes about a minute to reach 5 m, so a fix's first minute
+  counts only above 15 km/h. Its GST does not show this (0.3 m while 4 m off).
+  It refuses SBAS (`$CFGSYS` bit 20: `$FAIL`).
+- **`GPS_SYS`** in `.env`: its `$CFGSYS` mask in hex, set once a boot when the
+  receiver has another (it restarts it); without it the receiver's own stays.
+- **L5:** every system and band is on by default (`$CFGSYS` `H35155`), but
+  the board's antenna is L1 only, per Heltec's FAQ; an external one takes a
+  moved resistor.
 
 ## Setup
 

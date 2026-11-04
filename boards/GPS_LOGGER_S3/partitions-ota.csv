@@ -1,0 +1,8 @@
+# The Heltec Wireless Tracker's ESP32-S3FN8 (8 MB flash): two 1792 KB OTA app
+# slots, as on the C6, the file system after them (~4.4 MB).
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x4000,
+otadata,  data, ota,     0xd000,   0x2000,
+phy_init, data, phy,     0xf000,   0x1000,
+ota_0,    app,  ota_0,   0x10000,  0x1c0000,
+ota_1,    app,  ota_1,   0x1d0000, 0x1c0000,

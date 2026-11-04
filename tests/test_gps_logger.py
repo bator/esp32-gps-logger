@@ -147,6 +147,8 @@ class Pin(object):
             raise ValueError("invalid pin")
         self.n = n
         self._v = 0
+        if "value" in k:
+            _pin_levels.append((n, k["value"], _clock[0]))
 
     def value(self, v=None):
         if v is None:
@@ -155,10 +157,49 @@ class Pin(object):
         _pin_levels.append((self.n, v, _clock[0]))
         return None
 
+    def __call__(self, v=None):
+        return self.value(v)
+
 
 class I2C(object):
     def __init__(self, *a, **k):
         pass
+
+
+class _TftSpi(object):
+    """The TFT's SPI: what goes out, in order."""
+    out = []
+    fail = False
+
+    def __init__(self, *a, **k):
+        pass
+
+    def write(self, data):
+        if _TftSpi.fail:
+            raise OSError(5)
+        _TftSpi.out.append(bytes(data))
+
+
+class _FakeFramebuf(object):
+    RGB565, MONO_HLSB = 1, 3
+
+    class FrameBuffer(object):
+        def __init__(self, buf, w, h, fmt):
+            self.buf, self.w, self.h, self.fmt = buf, w, h, fmt
+            self.px = {}
+
+        def fill(self, c):
+            self.px = {}
+
+        def fill_rect(self, *a):
+            pass
+
+        def pixel(self, x, y, c):
+            self.px[(x, y)] = c
+
+        def blit(self, src, x, y, key=-1, palette=None):
+            assert src.fmt == 3 and palette is not None
+            assert len(src.buf) == ((src.w + 7) // 8) * src.h
 
 
 class UART(object):
@@ -481,7 +522,9 @@ def _install_mocks():
     machine = types.ModuleType("machine")
     machine.Pin = Pin
     machine.I2C = I2C
+    machine.SPI = _TftSpi
     machine.UART = UART
+    sys.modules["framebuf"] = _FakeFramebuf
     machine.WDT = WDT
     machine.Timer = Timer
     machine.RTC = RTC
@@ -7395,6 +7438,8 @@ def build_run(args, env_extra, dirty=False):
                 os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_tft.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_tft_font.py"), work)
     shutil.copy(os.path.join(ROOT, "web.html"), work)
     fake = os.path.join(work, "fake")
     for d in ("bin", "idf", "mpy/mpy-cross", "mpy/ports/esp32"):
@@ -7616,6 +7661,27 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and named[:1] == ["micropython-%s.bin" % man.get("commit")]
           and all(os.path.exists(os.path.join(dest, n)) for n in named),
           repr((rc_dirty, rc_nokey, rc_badkey, rc, man, scp, err[-200:])))
+    # BUILD-PUBLISH-BOARD: a board other than the C6 names itself in the
+    # manifest (signed); a folder holding another board's manifest is refused
+    s3 = os.path.join(ROOT, "boards", "GPS_LOGGER_S3")
+    dest3 = tempfile.mkdtemp(dir=dp_td)
+    penv3 = {"OTA_KEY_FILE": key_file, "OTA_DEST": "fakehost:" + dest3,
+             "BOARD_DIR": s3}
+    rc3, _o, err3, _w, _c = build_run(["--publish"], penv3)
+    try:
+        with open(os.path.join(dest3, "manifest.json")) as f:
+            man3 = json.load(f)
+    except (OSError, ValueError):
+        man3 = {}
+    hmac3 = gl._hmac_hex(b"0123456789abcdef0123456789abcdef", gl._ota_signed(man3)) if man3 else None
+    rc_c6on3 = build_run(["--publish"], {"OTA_KEY_FILE": key_file, "OTA_DEST": "fakehost:" + dest3})[0]
+    rc_s3onc6, _o, err_c6, _w, _c = build_run(["--publish"], dict(penv3, OTA_DEST="fakehost:" + dest, FORCE="1"))
+    check("BUILD-PUBLISH-BOARD: the Heltec's manifest names its board, signed; a "
+          "board's folder takes no other board's firmware, FORCE=1 or not",
+          rc3 == 0 and man3.get("board") == "GPS_LOGGER_S3"
+          and man3.get("hmac") == hmac3 and "board" not in man
+          and rc_c6on3 != 0 and rc_s3onc6 != 0 and "another board" in err_c6,
+          repr((rc3, err3[-200:], man3, rc_c6on3, rc_s3onc6, err_c6[-200:])))
     # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
     # names /web.html.gz alone, made with the board's small window (it
     # inflates it for a client without gzip); an older firmware (after a
@@ -13907,6 +13973,8 @@ else:
         ("gps reset loop 4 banners, no NMEA", "gloop"),
         ("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10", "grx"),
         ("gps rate 100 ms refused", "setup"),
+        ("gps refused CFGMSG,0,7,5", "setup"),
+        ("gps systems h135155", "grx"),
         ("gps pvt no NAV-PVT, NMEA this boot", "pvt"),
         ("gps setup not taken: no NAV-PVT (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -13962,6 +14030,7 @@ else:
         ("ota error OSError(-202)", "otax"),
         ("web error KeyError('y')", "bug"),
         ("bug upload ValueError('x')", "bug"),
+        ("bug tft OSError(5)", "bug"),
         ("crash up 3600 MemoryError()", "crash"),
         ("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
          "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
@@ -17848,6 +17917,450 @@ finally:
     shutil.rmtree(_tb, ignore_errors=True)
     gl.log_reset()
     gl.up_reset()
+
+
+# --- The Heltec Wireless Tracker (UC6580) -----------------------------------
+# The sentences here are the board's, measured 2026-11-04 (receiver UC6580I
+# R6.0.0.0Build3700, indoors: no signal, so the fix sentences are made up).
+def _heltec_logger(machine="Heltec Wireless Tracker with ESP32S3"):
+    saved = getattr(sys.implementation, "_machine", None)
+    sys.implementation._machine = machine
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "gps_logger_heltec", os.path.join(ROOT, "gps_logger.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+    finally:
+        if saved is None:
+            del sys.implementation._machine
+        else:
+            sys.implementation._machine = saved
+    m.DIAG_FILE = os.path.join(diag_dir, "diag-h.log")
+    m.DIAG_OLD = os.path.join(diag_dir, "diag-h.1")
+    m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf-h")
+    m.HIST_DIR = os.path.join(diag_dir, "hist-h")
+    m.HOME_APS_FILE = None
+    m.WEB = False
+    return m
+
+
+class _UcUart(UART):
+    """A UC6580: answers each command ($FAIL for those in bad, nothing while
+    silent), PDTINFO with what the board's receiver says."""
+    PDT = b"$PDTINFO,UC6580I,G1B1L1E1,V00,R6.0.0.0Build3700,2400615000268,20230729000954003*64\r\n"
+
+    def __init__(self, bad=(), silent=False):
+        self.bad, self.silent, self.cmds = bad, silent, []
+
+    def write(self, data):
+        data = bytes(data)
+        self.cmds.append(data)
+        if self.silent:
+            return len(data)
+        body = data[1:].split(b"*")[0].strip().decode()
+        if body == "PDTINFO":
+            _uart_rx.extend(self.PDT)
+        if any(body.startswith(b) for b in self.bad):
+            _uart_rx.extend(b"$FAIL,0*1E\r\n")
+        else:
+            _uart_rx.extend(b"$OK*04\r\n")
+        return len(data)
+
+
+def _uc_feed(m, *lines):
+    for ln in lines:
+        _uart_rx.extend(ln if isinstance(ln, bytes) else ln.encode())
+        _uart_rx.extend(b"\r\n")
+    m.read_uart()
+
+
+def _nmea(body):
+    c = 0
+    for ch in body:
+        c ^= ord(ch)
+    return "$%s*%02X" % (body, c)
+
+
+_pin_levels[:] = []
+_uart_rx[:] = b""
+hl = _heltec_logger()
+check("HELTEC-BOARD: UART1 on 34/33 at 115200, Vext (GPIO3) high and the TFT "
+      "backlight (GPIO21) off, before any UART use; no other board changes",
+      hl.IS_HELTEC and hl.GPS_UC and not hl.IS_C6
+      and (hl.GPS_UART, hl.GPS_TX, hl.GPS_RX, hl.BAUD) == (1, 34, 33, 115200)
+      and [p[:2] for p in _pin_levels if p[0] in (3, 21)] == [(3, 1), (21, 0)]
+      and not gl.GPS_UC and gl.BAUD == 9600,
+      repr((hl.GPS_TX, hl.GPS_RX, hl.BAUD, _pin_levels[:4])))
+check("HELTEC-PINS: only the receiver's and free pins for the GPS UART; a "
+      "keep-alive pin not on the Vext, USB, LoRa or strapping pins",
+      all(hl._gps_pin_ok(n, True) for n in (33, 34, 4, 48))
+      and not any(hl._gps_pin_ok(n, True) for n in (0, 3, 8, 19, 20, 21, 26, 35, 38, 45))
+      and hl.PB_PIN in hl._HELTEC_FREE and not hl._pin_taken(5)
+      and all(hl._pin_taken(n) for n in (0, 3, 7, 18, 19, 21, 33, 34, 45)))
+with open(os.path.join(ROOT, "main.py")) as f:
+    _msrc = f.read()
+check("HELTEC-SKIP: main.py's boot-bypass pin is GPIO7, free and not the "
+      "download-mode button", "7 if \"Heltec\" in _M" in _msrc
+      and 7 not in hl._HELTEC_FREE)
+
+# the setup
+hl.reset()
+hl.uart = _UcUart()
+_uart_rx[:] = b""
+_ha_setup = hl.uart
+hl.gps_setup()
+_cmds = list(_ha_setup.cmds)
+check("UC-SETUP: PDTINFO (no checksum: with one it gets no answer), then CFGNAV "
+      "first (it resets the GSV rate), each with its checksum, no UBX byte; "
+      "GST once a second, GSA and GSV at their pace, text notices off",
+      _cmds[0] == b"$PDTINFO\r\n"
+      and _cmds[1].startswith(b"$CFGNAV,200,200,1000*")
+      and b"$CFGMSG,0,0,1*06\r\n" in _cmds
+      and any(c.startswith(b"$CFGMSG,0,7,5*") for c in _cmds)
+      and any(c.startswith(b"$CFGMSG,0,2,25*") for c in _cmds)
+      and any(c.startswith(b"$CFGMSG,0,3,25*") for c in _cmds)
+      and any(c.startswith(b"$CFGMSG,6,0,0*") for c in _cmds)
+      and not any(b"\xb5" in c for c in _cmds), repr(_cmds))
+check("UC-SETUP: all answered: taken for now, NMEA mode, the receiver's model "
+      "from PDTINFO",
+      hl.st["setup_ok"] is True and hl.st["mode"] == "nmea"
+      and hl.st["checked"] is False
+      and hl.st["gps_ver"] == "UC6580I G1B1L1E1, R6.0.0.0Build3700",
+      repr((hl.st["setup_ok"], hl.st["gps_ver"])))
+_ha_setup.cmds[:] = []
+hl.gps_setup()
+check("UC-SETUP: the model is asked once", not any(
+    c.startswith(b"$PDTINFO") for c in _ha_setup.cmds))
+
+hl.reset()
+hl.uart = _UcUart(silent=True)
+_t0 = _clock[0]
+hl.gps_setup()
+check("UC-SILENT: no answer ends the setup at the first silent command after "
+      "PDTINFO (the loop is not held up), and gps_check retries",
+      hl.st["setup_ok"] is False and hl.st["checked"] is True
+      and len(hl.uart.cmds) == 2 and _clock[0] - _t0 <= 3 * hl.UC_ACK_WAIT,
+      repr((hl.st["setup_ok"], hl.uart.cmds, _clock[0] - _t0)))
+
+hl.reset()
+_hdl, _hdw = [], hl._diag_write
+hl._diag_write = _hdl.append
+hl.uart = _UcUart(bad=("CFGNAV",))
+hl.gps_setup()
+hl._diag_write = _hdw
+_hd = "\n".join(_hdl)
+check("UC-FAIL: a refused rate is said and is no \"not taken\" verdict; the "
+      "rest of the setup goes on",
+      hl.st["setup_ok"] is True and hl.st["rate_nak"] is True
+      and "gps refused CFGNAV,200,200,1000" in _hd
+      and any(c.startswith(b"$CFGMSG,0,7,5") for c in hl.uart.cmds), _hd[-200:])
+
+# a restart: the banner the board prints after a power cycle
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_b0, _e0 = hl.st["gps_boots"], hl.st["err"]
+_uc_feed(hl, "", "UC6580I G1B1L1E1 COM1", "PN 2400615000268",
+         "SN 20230729000954003", "HWVer 00", "FWVer R6.0.0.0Build3700",
+         "Copyright (c), Unicore Communications Inc.", "All rights reserved.")
+check("UC-RESTART: the plain text banner is one restart, not 7 bad lines; the "
+      "setup is due again and asks the model anew, no UBX",
+      hl.st["gps_boots"] == _b0 + 1 and hl.st["err"] == _e0
+      and hl.st["extra"] >= 1 and hl.st["gps_ver"] is None
+      and not any(b"\xb5" in c for c in hl.uart.cmds),
+      repr((hl.st["gps_boots"], hl.st["err"], hl.st["extra"])))
+
+# 5 Hz with a fix: the verdict the u-blox setup gets
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_ok0 = hl.st["ok"]
+for _s in range(5):
+    for _f in range(5):
+        _t = "1200%02d.%02d" % (_s, _f * 20)
+        _uc_feed(hl,
+                 _nmea("GNRMC,%s,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V" % _t),
+                 _nmea("GNGGA,%s,4711.1214,N,01825.6160,E,1,14,0.80,120.5,M,40.0,M,," % _t))
+        if _f == 0:
+            _uc_feed(hl, _nmea("GNGST,%s,0.8,,,,1.4,1.6,2.5" % _t))
+        _clock[0] += 200
+_clock[0] += hl.GPS_VERIFY
+hl._setup_check(_clock[0])
+check("UC-5HZ: GGA, RMC and GST at 5 Hz pass the setup's check (5 fixes a "
+      "second, GST seen), nothing counted as not taken",
+      hl.st["checked"] is True and hl.st["extra"] == 0 and hl.st["hz5"] > 0
+      and hl.st["err"] == 0 and hl.st["std"] is not None and hl.st["ok"] > _ok0,
+      repr((hl.st["checked"], hl.st["extra"], hl.st["hz1"], hl.st["hz5"], hl.st["err"])))
+
+# no fix yet: its RMC carries a date that is not today
+hl.reset()
+hl.uart = _UcUart()
+_uc_feed(hl, _nmea("GNRMC,090328.00,V,,,,,,,170126,,,N,V"),
+         _nmea("GNGGA,090328.00,,,,,0,00,99.99,,,,,,"),
+         _nmea("GNGST,090328.00,0.0,,,,3750000,3750000,3750000"))
+_clock[0] += 1100
+_uc_feed(hl, _nmea("GNRMC,090329.00,V,,,,,,,170126,,,N,V"),
+         _nmea("GNGGA,090329.00,,,,,0,00,99.99,,,,,,"))
+_clock[0] += 1100
+_uc_feed(hl, _nmea("GNRMC,090330.00,V,,,,,,,170126,,,N,V"))
+check("UC-NOFIX: the receiver's made-up date before a fix (17 Jan 2026, no "
+      "position) is not a date or a fix", hl.st["pos_at"] is None
+      and hl.st["date"] is None and hl.st["err"] == 0,
+      repr((hl.st["pos_at"], hl.st["date"], hl.st["err"])))
+
+# the satellite list from GSV: two bands of one satellite, then GSA's used ones
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"),
+         _nmea("GNGSA,A,3,25,,,,,,,,,,,,1.2,0.8,0.9,4"),
+         _nmea("GPGSV,1,1,03,14,77,011,40,17,56,319,35,30,36,201,,1"),
+         _nmea("GPGSV,1,1,03,14,77,011,44,17,56,319,,30,36,201,,8"),
+         _nmea("GBGSV,1,1,01,25,75,249,38,1"),
+         _nmea("GAGSV,1,1,01,13,42,203,,7"))
+_e1 = hl.st["extra"]
+_clock[0] += 200                         # no pause: GSV at 1 Hz with a fix
+_uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # the next round closes this one
+_svs = {(v[6], v[0]): v for v in (hl.st["svs"] or [])}
+_uok = hl.st["ok"]
+_uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,99,1"))
+_clock[0] += hl.GSV_EVERY * 1000 + 1
+_skip = hl.st["ok"] == _uok + 1 and not hl._uc_sv["new"]
+_uc_feed(hl, _nmea("GAGSV,1,1,01,13,42,203,31,7"))      # the end of a round
+_mid = not hl._uc_sv["new"]
+_uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
+_uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
+_again = [v[1] for v in hl.st["svs"]] == [50]
+check("UC-GSV: one list from a round: a satellite once with its strongest band, "
+      "used from GSA, NAV-SAT's shape and gnssIds; GSV is no sentence the "
+      "setup turned off",
+      _svs.get((0, 14)) == (14, 44, 77, 11, True, False, 0)
+      and _svs.get((0, 17)) == (17, 35, 56, 319, True, False, 0)
+      and _svs.get((0, 30)) == (30, 0, 36, 201, False, False, 0)
+      and _svs.get((3, 25)) == (25, 38, 75, 249, True, False, 3)
+      and _svs.get((2, 13)) == (13, 0, 42, 203, False, False, 2)
+      and _e1 == 0 and hl.st["extra"] == 0, repr((_svs, _e1, hl.st["extra"])))
+check("UC-GSV-SKIP: GSV_EVERY s of GSV not decoded after a list (1 Hz with a "
+      "fix); then not from a round's middle, a whole round again",
+      _skip and _mid and _again, repr((_skip, _mid, _again, hl.st["svs"])))
+hl.uart.cmds[:] = []
+hl.sv_poll(_clock[0])
+check("UC-NO-UBX: the satellite poll writes nothing (no UBX to a UC6580)",
+      hl.uart.cmds == [] and hl.st["sv_miss"] == 0, repr(hl.uart.cmds))
+
+# GPS_SYS: a mask set once, only when the receiver has another
+class _UcSys(_UcUart):
+    has = "H35155"
+
+    def write(self, data):
+        n = super().write(data)
+        if bytes(data) == b"$CFGSYS\r\n":
+            del _uart_rx[-8:]
+            _uart_rx.extend(_nmea("CFGSYS," + self.has).encode() + b"\r\n$OK*04\r\n")
+        return n
+
+
+hl.reset()
+hl.UC_SYS = None
+hl._gps_sys_env({"GPS_SYS": "h135155"})
+_w = hl.UC_SYS
+hl._gps_sys_env({"GPS_SYS": "xyz"})
+_bad = hl.UC_SYS
+hl.uart = _UcSys()
+hl.gps_setup()
+_c1 = list(hl.uart.cmds)
+hl.gps_setup()
+_c2 = hl.uart.cmds[len(_c1):]
+hl.reset()
+hl.uart = _UcSys()
+hl.uart.has = "H135155"
+hl.gps_setup()
+_c3 = list(hl.uart.cmds)
+hl.UC_SYS = None
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_c4 = list(hl.uart.cmds)
+_set = lambda cs: [c for c in cs if c.startswith(b"$CFGSYS,")]
+check("UC-SYS: GPS_SYS sets the mask once a boot and only when it differs (it "
+      "restarts the receiver, the setup then comes back); without it none is sent",
+      _w == 0x135155 and _bad == 0x135155 and len(_set(_c1)) == 1
+      and _set(_c1)[0].startswith(b"$CFGSYS,h135155*") and not _set(_c2)
+      and any(c.startswith(b"$CFGNAV") for c in _c2) and not _set(_c3)
+      and any(c.startswith(b"$CFGNAV") for c in _c3)
+      and not any(c.startswith(b"$CFGSYS") for c in _c4), repr((_c1, _c3[:3])))
+
+# the first minute of a fix counts only moving (its GST says 0.3 m while 4 m off)
+hl.reset()
+hl.uart = _UcUart()
+_clock[0] += 1000
+hl.st.update(fix_first=_clock[0], speed=2.0, hdop=0.9, hdop_at=_clock[0], std=0.3,
+             std_at=_clock[0])
+_u0 = hl._usable(_clock[0])
+hl.st["speed"] = 50.0
+_u1 = hl._usable(_clock[0])
+hl.st["speed"] = 2.0
+_u2 = hl._usable(_clock[0] + hl.UC_SETTLE)
+hl.st["hdop_at"] = hl.st["std_at"] = _clock[0] + hl.UC_SETTLE
+_u2 = hl._usable(_clock[0] + hl.UC_SETTLE)
+gl.reset()
+gl.st.update(fix_first=_clock[0], speed=2.0)
+_u3 = gl._usable(_clock[0])
+hl.st["fix_first"] = 5
+_uc_feed(hl, "FWVer R6.0.0.0Build3700")
+_u4 = hl.st["fix_first"]
+check("UC-SETTLE: the first UC_SETTLE after a fix counts only above UC_SETTLE_KMH "
+      "(a car's trip is kept), then all; a restart starts it anew; not other "
+      "receivers", _u0 is False and _u1 is True and _u2 is True and _u3 is True
+      and _u4 is None, repr((_u0, _u1, _u2, _u3, _u4)))
+hl.reset()
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNRMC,120001.00,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V"),
+         _nmea("GNGGA,120001.00,4711.1214,N,01825.6160,E,1,14,0.80,120.5,M,40.0,M,,"))
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNRMC,120002.00,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V"))
+check("UC-SETTLE: the first published fix starts it", hl.st["fix_first"] is not None,
+      repr(hl.st["fix_first"]))
+
+# GSA: a burst is one round, wherever the second's clock falls in it
+hl.reset()
+hl.uart = _UcUart()
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"))
+hl.st["gsa_at"] = _clock[0] - 1000       # the next one a second after the first
+_uc_feed(hl, _nmea("GNGSA,A,3,25,,,,,,,,,,,,1.2,0.8,0.9,4"))
+_u1 = sorted(hl._uc_sv["used"])
+_clock[0] += 200
+_uc_feed(hl, _nmea("GNGSA,A,3,30,,,,,,,,,,,,1.2,0.8,0.9,1"))
+check("UC-GSA: the satellites in use of one burst stay together past a second's "
+      "boundary; a pause starts the next round's",
+      _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._uc_sv["used"] == [30],
+      repr((_u1, hl._uc_sv["used"])))
+
+# the display: the values, the fonts, what goes to the panel
+import gps_tft as _ft
+import gps_tft_font as _ff
+_fo = []
+for _f in (_ff.REG, _ff.BOLD, _ff.HERO):
+    _chars, _wd, _of, _dat, _h = _f
+    _end = 0
+    _ok1 = len(_wd) == len(_chars) and len(_of) == 2 * len(_chars)
+    for _i in range(len(_chars)):
+        _o = _of[_i * 2] | _of[_i * 2 + 1] << 8
+        _ok1 = _ok1 and _o == _end
+        _end = _o + ((_wd[_i] + 7) // 8) * _h
+    _fo.append(_ok1 and _end == len(_dat))
+check("TFT-FONT: every glyph's offset and size add up; the accents, ° and ± and "
+      "the header's digits are there",
+      all(_fo) and all(c in _ff.REG[0] and c in _ff.BOLD[0]
+                       for c in "áéíóöőúüűÁÉÍÓÖŐÚÜŰ°±")
+      and _ff.HERO[0] == "0123456789-", repr(_fo))
+_room = 142
+_cyc = _ft.HOLD + (300 + _room) // _ft.STEP + 1
+_ps = [_ft.pos(t, 300, _room) for t in range(_cyc + 1)]
+check("TFT-SCROLL: a row that fits stands; a long one holds, slides out to the "
+      "left past its end, comes in from the right, back at 0",
+      _ft.pos(7, 100, _room) == 0 and _ps[:_ft.HOLD] == [0] * _ft.HOLD
+      and min(_ps) <= -300 + _ft.STEP and max(_ps) > 100 and _ps[_cyc] == 0
+      and all(p >= -300 and p <= _room for p in _ps), repr(_ps[:14]))
+
+hl.reset()
+hl.log_reset()
+hl.wifi_reset()
+hl.up_reset()
+hl.LOG_DIR = os.path.join(diag_dir, "gpx-h")
+os.makedirs(hl.LOG_DIR, exist_ok=True)
+hl.up["url"] = "https://x"
+hl.up["left"] = 1284
+hl.wifi["state"] = "off"
+hl.st.update(date="2026-11-04", time="10:42:10", valid=True, lat=47.1, lon=18.4,
+             pos_at=_clock[0], speed=47.3, hdop=0.968, used=22, view={"GP": 28},
+             alt=182.4, rx=_clock[0], fixtype=3)
+_s1 = hl._tft_state(_clock[0])
+_tx = "".join(p[0] for p in _s1[4][2][2])
+_fix2 = hl.has_fix(_clock[0] + hl.STALE + 1)
+_s2 = hl._tft_state(_clock[0] + hl.STALE + 1)
+hl.wifi.update(state="connected", ssid="krumpli", rssi=-55, ip="192.168.1.60")
+hl.up["left"] = 0
+_s3 = hl._tft_state(_clock[0] + hl.STALE + 1)
+hl.up["url"] = None
+_s4 = hl._tft_state(_clock[0] + hl.STALE + 1)
+check("TFT-STATE: speed rounded and green with a fix, -- and red without; away: "
+      "no WiFi, points waiting with a thin space; at home: name, signal, address; "
+      "decimal commas; no upload set up says so",
+      _s1[:3] == ("47", "3D fix", 2) and _s1[3] == "22/28"
+      and _s1[4][0][2][0][0] == "nincs WiFi  " and _s1[4][0][2][1][0] == "11:42"
+      and _s1[4][1][2][0] == ("1 284", 3) and "0,97 HDOP" in _tx and "182 m" in _tx
+      and "±" not in _tx
+      and not _fix2 and _s2[0] == "--" and _s2[1:3] == ("nincs fix", 4)
+      and [p[0] for p in _s3[4][0][2]][0] == "krumpli"
+      and "192.168.1.60" in [p[0] for p in _s3[4][0][2]]
+      and _s3[4][1][2] == [("minden feltöltve", 2)]
+      and _s4[4][1][2] == [("nincs feltöltés", 1)],
+      repr((_s1, _s2[:3], _s3[4][:2], _s4[4][1])))
+_ls = lambda d, t: hl.st.update(date=d, time=t) or hl._local_hm()
+check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
+      "the switch on the last Sunday at 01:00 UTC, past midnight, no date",
+      _ls("2026-11-04", "10:42:10") == "11:42" and _ls("2026-07-01", "23:10:00") == "01:10"
+      and _ls("2026-03-29", "00:59:00") == "01:59" and _ls("2026-03-29", "01:00:00") == "03:00"
+      and _ls("2026-10-25", "00:59:00") == "02:59" and _ls("2026-10-25", "01:00:00") == "02:00"
+      and _ls(None, None) == "--:--")
+
+# the drawing: start up, a frame draws what changed and only that
+_TftSpi.out[:] = []
+_TftSpi.fail = False
+_ft.start()
+_cmds0 = list(_TftSpi.out)
+_bl = [p[:2] for p in _pin_levels if p[0] == 21][-2:]
+_short = ("net", 2, [("krumpli", 0)])
+_ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), ("mem", 2, [("y", 0)])])
+_TftSpi.out[:] = []
+_ft.frame()
+_f1 = sum(1 for b in _TftSpi.out if b == b"\x2c")
+_TftSpi.out[:] = []
+_ft.frame()
+_f2 = sum(1 for b in _TftSpi.out if b == b"\x2c")
+_long = ("mem", 2, [("0,97 HDOP 4,4 MB 7 nap 37 °C 2 ó 15 p és még sok minden", 0)])
+_ft.set_state("47", "3D fix", 2, "22/28", [_short, ("up", 2, [("x", 2)]), _long])
+_TftSpi.out[:] = []
+for _i in range(_ft.HOLD + 3):
+    _ft.frame()
+_f3 = sum(1 for b in _TftSpi.out if b == b"\x2c")
+check("TFT-DRAW: the panel set up to 16 bits and landscape, the backlight last; a "
+      "first frame draws the header and 3 rows, an unchanged one nothing, a long "
+      "row only itself while it slides",
+      b"\x36" in _cmds0 and b"\x68" in _cmds0 and b"\x05" in _cmds0
+      and _bl == [(21, 0), (21, 1)] and _f1 == 4 and _f2 == 0 and 1 <= _f3 < _ft.HOLD + 3,
+      repr((_bl, _f1, _f2, _f3)))
+# a panel gone wrong: dark, the logger goes on
+hl._tft = _ft
+hl._tft_t[:] = [None, None, 0]
+_TftSpi.fail = True
+_dl, _dw = [], hl._diag_write
+hl._diag_write = _dl.append
+_ft._D.drawn = [None, None, None, None]
+for _i in range(hl.TFT_MAX_ERR):
+    hl._tft_t[0] = hl._tft_t[1] = None
+    hl.tft_tick(_clock[0])
+hl._diag_write = _dw
+_TftSpi.fail = False
+check("TFT-FAIL: TFT_MAX_ERR errors in a row turn the display off for the boot, "
+      "said once, nothing leaves tft_tick",
+      hl._tft is None and len(_dl) == 1 and _dl[0].startswith("bug tft "), repr(_dl))
+check("TFT-OTHER: no other board starts it; the C6's firmware does not carry it",
+      not gl.IS_HELTEC and gl._tft is None)
+
+# OTA: each board only its own firmware
+_mf = {"build": 5, "commit": "abc1234", "size": 9, "sha256": "0" * 64,
+       "url": "x.bin", "files": []}
+_mfs = dict(_mf, board="GPS_LOGGER_S3")
+check("OTA-BOARD: the Heltec takes only a manifest naming it, the C6 only one "
+      "without a board (as published so far), and the name is signed",
+      hl._ota_manifest_ok(_mfs) and not hl._ota_manifest_ok(_mf)
+      and gl._ota_manifest_ok(_mf) and not gl._ota_manifest_ok(_mfs)
+      and hl._ota_signed(_mfs) == gl._ota_signed(_mf) + b"|board=GPS_LOGGER_S3"
+      and gl._ota_signed(_mf) == hl._ota_signed(_mf))
+_uart_rx[:] = b""
 
 print()
 print("%d passed, %d failed" % (passed, failed))

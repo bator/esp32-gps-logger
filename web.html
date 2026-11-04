@@ -334,7 +334,7 @@ var SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
-var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "prev_uptime", "web_errs",
+var OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
   "track_drop", "write_errs", "q_thin", "pos6"];   // raw status.json only
 
 function esc(v) {
@@ -408,7 +408,7 @@ var EVK = [
   ["wfail", /^wifi fail /, "WiFi connect failed", 2, "warn", "wifi"],
   ["wlost", /^wifi lost /, "WiFi lost", 2, "warn", "wifi"],
   ["low", /^upload low /, "Upload waits for memory", 2, "warn", "up"],
-  ["setup", /^gps (setup not taken|rate )/, "GPS setup refused", 2, "warn", "sat"],
+  ["setup", /^gps (setup not taken|rate |refused )/, "GPS setup refused", 2, "warn", "sat"],
   ["pvt", /^gps pvt /, "NAV-PVT given up", 2, "warn", "sat"],
   ["env", /^(env |upload (API_KEY|GEO_URL) )/, "Config (.env)", 2, "warn", "cfg"],
   ["boot", /^boot cause /, "Boot", 1, "boot", "power"],
@@ -622,7 +622,7 @@ function evGroups(a) {
 var MD = " &middot; ";
 function evDet(k, g) {                  // a group's detail line (HTML)
   var d = g.d, x = (d.x || []).map(esc).join(", ");
-  if (k === "boot") return (d.pw || 0) + " power-on" + MD + (d.rs || 0) + " reset<em>" + MD + "longest run " + dur(d.up * 1000) + "</em>";
+  if (k === "boot") return (d.pw || 0) + " power-on" + MD + (d.rs || 0) + " reset" + (d.up ? "<em>" + MD + "longest run " + dur(d.up * 1000) + "</em>" : "");
   if (k === "ota") {
     var o = evOta(d);
     return (d.o || []).map(esc).join(" &rarr; ") + "<em>" + MD + (o[1] ? o[1] + " rolled back" : o[2] ? "checking" :
