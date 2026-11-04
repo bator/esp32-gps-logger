@@ -21,7 +21,6 @@ XO, YO = 1, 26                           # the panel inside the controller
 BAND_H = 16
 TOP_H, BARS_Y = 41, 46                   # the zones: rows 0-40, rows 46-79
 BL_PIN = 21
-WAVE = 2                                 # frames an arc of the WiFi icon stays
 WIFI_X, WIFI_Y = 113, 28
 N_BARS = 21
 
@@ -39,7 +38,7 @@ BG, DIM = _c(_BG), _c(_DIM_T)
 HEAT = (_c((255, 59, 31)), _c((255, 122, 43)), _c((255, 194, 61)))
 UNUSED, STUB = _c((90, 70, 56)), _c((42, 26, 18))
 # The WiFi icon's four parts, 12x12 MONO_HLSB: the dot and the arcs inner to outer.
-# Level 0-3: that many arcs fill up again and again, None: all dim and still.
+# Level 0-3: that many arcs lit, None: all dim. It changes only with the level.
 WIFI = (b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\x00\x06\x00\x00\x00",
         b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0f\x00\x10\x80\x00\x00\x00\x00\x00\x00\x00\x00",
         b"\x00\x00\x00\x00\x00\x00\x0f\x00\x30\xc0\x40\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
@@ -52,7 +51,6 @@ _pal = {}
 class _D:
     spi = cs = dc = None
     buf = fb = ic = icb = None
-    t = 0
     state = None
     top = bars = lit = None              # what the panel shows
 
@@ -156,12 +154,6 @@ def _text(fb, font, s, x, base, tone):
 def _right(fb, font, s, x1, base, tone):
     _text(fb, font, s, x1 - width(font, s), base, tone)
 
-def wifi_lit(level, t):
-    """Arcs lit in frame t: 0 up to level, held for three steps, again."""
-    n = level + 4
-    s = (t // WAVE) % n
-    return s if s < level else level
-
 def _wifi(fb, lit, col, x, y):
     """The dot always, the arcs up to lit in col, the others dim; dim all when
     lit is None (no WiFi)."""
@@ -170,7 +162,7 @@ def _wifi(fb, lit, col, x, y):
         fb.blit((part, 12, 12, framebuf.MONO_HLSB), x, y, 0, _mono_palette(c))
 
 def _wifi_frame(lit):
-    """Only the icon goes up: a wave would redraw the zone 2.5 times a second."""
+    """Only the icon goes up: a changed level needs no whole zone."""
     _D.ic.fill(BG)
     _wifi(_D.ic, lit, HEAT[1], 0, 0)
     _window(WIFI_X, WIFI_Y, 12, 12)
@@ -218,16 +210,14 @@ def frame():
     s = _D.state
     if s is None:
         return
-    _D.t += 1
     speed, fix, used, clock, level, bars, up, up_on = s
-    lit = None if level is None else wifi_lit(level, _D.t)
-    top = (speed, fix, used, clock, level)
+    top = (speed, fix, used, clock)
     if top != _D.top:
-        _draw_top(speed, fix, used, clock, lit)
-        _D.top, _D.lit = top, lit
-    elif lit != _D.lit:
-        _wifi_frame(lit)
-        _D.lit = lit
+        _draw_top(speed, fix, used, clock, level)
+        _D.top, _D.lit = top, level
+    elif level != _D.lit:
+        _wifi_frame(level)
+        _D.lit = level
     b = (bars, up, up_on)
     if b != _D.bars:
         _draw_bars(bars, up, up_on)

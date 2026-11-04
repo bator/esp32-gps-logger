@@ -9279,10 +9279,11 @@ def draw():
 TFT_FRAME = 200                          # ms between frames (a row scrolling)
 TFT_STATE = 1000                         # ms between new values
 TFT_MAX_ERR = 3                          # errors in a row, then it goes dark
+TFT_WIFI_UP = 3                          # dB past a limit for one more WiFi arc
 _tft = None
 _tft_t = [None, None, 0, 0]              # last values, last frame, the errors
                                          # in a row of each
-_tft_b = [None, b""]                     # the list's stamp, its bars
+_tft_b = [None, b"", None]               # the list's stamp, its bars, WiFi level
 
 def _tft_start():
     """Only on the Heltec; a failure leaves the logger running without it."""
@@ -9339,6 +9340,23 @@ def _tft_bars():
         _tft_b[1] = bytes(b)
     return _tft_b[1]
 
+def _wifi_level(rssi, last):
+    """The arcs of the WiFi icon: down at once, up only TFT_WIFI_UP dB past the
+    limit, so a signal around a limit does not flicker."""
+    if rssi is None:
+        return 0
+    for level, limit in ((3, -60), (2, -70), (1, -80)):
+        if rssi >= limit:
+            break
+    else:
+        level = 0
+    if last is not None and level > last:
+        for up in range(level, last, -1):
+            if rssi >= (-60, -70, -80)[3 - up] + TFT_WIFI_UP:
+                return up
+        return last
+    return level
+
 def _tft_state(now):
     """What the display shows: set_state's arguments."""
     fix = bool(has_fix(now))
@@ -9346,9 +9364,8 @@ def _tft_state(now):
     big = str(int(speed + 0.5)) if fix and speed is not None else "--"
     level = None
     if wifi["state"] == "connected":
-        rssi = wifi.get("rssi")          # the arcs that fill up say the signal
-        level = (0 if rssi is None or rssi < -80 else 1 if rssi < -70
-                 else 2 if rssi < -60 else 3)
+        level = _wifi_level(wifi.get("rssi"), _tft_b[2])
+    _tft_b[2] = level
     left = up["left"] or 0
     if left:
         text = str(left) if left < 10000 else "%dk" % (left // 1000)

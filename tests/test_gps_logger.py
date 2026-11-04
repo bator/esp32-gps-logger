@@ -18471,9 +18471,10 @@ hl.up["left"] = 0
 _s3 = hl._tft_state(_clock[0] + hl.STALE + 1)
 _lv = []
 for _r in (-55, -60, -61, -70, -71, -80, -81, None):
-    hl.wifi["rssi"] = _r
-    _lv.append(hl._tft_state(_clock[0])[4])
-hl.wifi["rssi"] = -55
+    _lv.append(hl._wifi_level(_r, None))
+_hy = [hl._wifi_level(-61, 3), hl._wifi_level(-60, 2), hl._wifi_level(-58, 2), hl._wifi_level(-57, 2),
+       hl._wifi_level(-85, 3), hl._wifi_level(-40, 0), hl._wifi_level(-67, 1), hl._wifi_level(-77, 0)]
+hl._tft_b[2] = None
 hl.up["url"] = None
 _s4 = hl._tft_state(_clock[0])
 hl.up["url"] = "https://x"
@@ -18486,12 +18487,12 @@ hl.st.update(svs=[(14, 44, 77, 11, True, False, 0), (30, 0, 36, 201, False, Fals
 _s6 = hl._tft_state(_clock[0])
 _b6 = _s6[5]
 check("TFT-STATE: speed rounded with a fix, -- without; the clock; WiFi off or its "
-      "level by the signal; what waits, short when long, done or nothing set up; the "
+      "level by the signal, down at once, up only past a margin; what waits, short when long, done or nothing set up; the "
       "bars strongest first with the fix flag",
       _s1[:4] == ("47", True, 22, "11:42") and _s1[4] is None and _s1[6:] == ("1284", True)
       and _s2[0] == "--" and _s2[1] is False
       and _s3[4] == 3 and _s3[6:] == ("kész", False)
-      and _lv == [3, 3, 2, 2, 1, 1, 0, 0]
+      and _lv == [3, 3, 2, 2, 1, 1, 0, 0] and _hy == [2, 2, 2, 3, 0, 3, 2, 1]
       and _s4[6] == " " and _s5[6] == "12k"
       and _b6 == bytes((44, 1, 30, 0, 20, 1, 0, 0)), repr((_s1, _s2, _s3, _lv, _s4, _s5, _b6)))
 _ls = lambda d, t: hl.st.update(date=d, time=t) or hl._local_hm()
@@ -18584,31 +18585,27 @@ check("TFT-ZONES: a frame draws both zones (3 + 3 bands), an unchanged one none;
 check("TFT-NOFIX: no fix: no orange, the satellite count red, stubs, done in grey",
       _nofix == (0, True, 1, True), repr(_nofix))
 
-# the WiFi icon: its arcs fill up to the level, only the icon is sent
-_ft.set_state("47", True, 22, "11:42", 2, _bars, "kész", False)
-_ft._D.t = -1
+# the WiFi icon: still, its arcs by the level; a new level sends only the icon
+_arcs = lambda c: _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, c)
+_ft.set_state("47", True, 22, "11:42", 3, _bars, "kész", False)
 _ft.frame()
-_seen = []
-_sent = []
-for _i in range(2 * (2 + 4) + 2):
-    _TftSpi.out[:] = []
+_a3 = _arcs(_ft.HEAT[1])
+_TftSpi.out[:] = []
+for _i in range(20):
     _ft.frame()
-    _sent.append(sum(len(b) for b in _TftSpi.out if len(b) > 8))
-    _seen.append(_cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.HEAT[1]))
-_ft.set_state("47", True, 22, "11:42", None, _bars, "kész", False)
-_ft.frame()
-_off = (_cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.HEAT[1]),
-        _cnt(_ft.WIFI_X, _ft.WIFI_Y, _ft.WIFI_X + 12, _ft.WIFI_Y + 12, _ft.DIM) > 10)
+_still3 = sum(1 for b in _TftSpi.out if len(b) > 8) == 0
+_ft.set_state("47", True, 22, "11:42", 1, _bars, "kész", False)
 _TftSpi.out[:] = []
 _ft.frame()
+_sent1 = [len(b) for b in _TftSpi.out if len(b) > 8]
+_a1 = _arcs(_ft.HEAT[1])
+_ft.set_state("47", True, 22, "11:42", None, _bars, "kész", False)
 _ft.frame()
-_still = sum(1 for b in _TftSpi.out if len(b) > 8) == 0
-check("TFT-WIFI: the arcs fill up to the level and start again, the rest dim, by "
-      "sending only the 12x12 icon; no WiFi: all dim and still",
-      [_ft.wifi_lit(3, t * _ft.WAVE) for t in range(8)] == [0, 1, 2, 3, 3, 3, 3, 0]
-      and [_ft.wifi_lit(0, t * _ft.WAVE) for t in range(4)] == [0, 0, 0, 0]
-      and len(set(_seen)) == 3 and set(_sent) <= {0, 288} and 288 in _sent
-      and _off == (0, True) and _still, repr((_seen, _sent, _off, _still)))
+_off = (_arcs(_ft.HEAT[1]), _arcs(_ft.DIM) > 10)
+check("TFT-WIFI: the icon stands: 20 frames send nothing; a lower level sends only the "
+      "12x12 icon with fewer arcs lit; no WiFi: all dim",
+      _still3 and _sent1 == [288] and _a3 > _a1 > 0 and _off == (0, True),
+      repr((_still3, _sent1, _a3, _a1, _off)))
 
 # a panel gone wrong: dark, and each action counted when it runs
 hl._tft = _ft
