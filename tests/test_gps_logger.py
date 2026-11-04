@@ -675,6 +675,18 @@ def pts_in(path):
         return sum(1 for line in f if is_point(line))
 
 
+def make_trb(path, n, times=None):
+    """A .trb of n points, as flush writes it in one go."""
+    ls = []
+    for i in range(n):
+        t = (times[i] if times else
+             "2026-10-05T%02d:%02d:%02dZ" % (i // 3600, (i // 60) % 60, i % 60))
+        ls.append(trk_line(52.5 + i * 0.0001, 13.4 + i * 0.0001, t))
+    with builtins.open(path, "wb") as f:
+        f.write(gl.HEADERB.encode() + bytes(gl._kb_encode(ls, n, None))
+                + gl.FOOTER.encode())
+
+
 def make_trk(path, n, extra=b"", times=None):
     parts = [HEADER.encode()]
     for i in range(n):
@@ -753,6 +765,17 @@ def _i7(v):
         q = -q
         return "-%d.%06d" % (q // 1000000, q % 1000000)
     return "%d.%06d" % (q // 1000000, q % 1000000)
+
+
+def hist_add(lines, k):
+    """lines[:k] into the day history as the logger does it: an uploaded .trb
+    batch's (_hist_batch)."""
+    tmp = os.path.join(diag_dir, "hist-batch.trb")
+    with builtins.open(tmp, "wb") as f:
+        f.write(gl.HEADERB.encode() + bytes(gl._kb_encode(lines, k, None))
+                + gl.FOOTER.encode())
+    gl._hist_batch(tmp, 0, os.path.getsize(tmp), None)
+    os.remove(tmp)
 
 
 def setup_cmds():
@@ -1892,7 +1915,7 @@ try:
           repr(gl.log["batch"]))
 
     gl.log_reset()
-    f1 = os.path.join(trk_dir, "flush.trk")
+    f1 = os.path.join(trk_dir, "flush.trb")
     p1 = trk_line(52.5, 13.4, "2026-10-05T12:00:05Z")
     p2 = trk_line(52.6, 13.5, "2026-10-05T12:00:06Z")
     p3 = trk_line(52.7, 13.6, "2026-10-05T12:00:07Z")
@@ -1902,8 +1925,13 @@ try:
     gl.flush()
     with open(f1, "rb") as f:
         raw = f.read()
-    check("TRK-3: flush writes HEADER, point lines, FOOTER; appends keep the footer last",
-          raw == (HEADER + p1 + p2 + p3 + gl.FOOTER).encode(), repr(raw))
+    with builtins.open(f1, "rb") as f:
+        raw_b = f.read()
+    check("TRK-3: flush writes the header, point records, FOOTER; appends keep the "
+          "footer last", raw == (HEADER + p1 + p2 + p3 + gl.FOOTER).encode()
+          and raw_b.startswith(gl.HEADERB.encode())
+          and raw_b.endswith(gl.FOOTER.encode())
+          and raw_b.count(gl.FOOTER.encode()) == 1, repr(raw))
 
     rb = os.path.join(trk_dir, "read.trk")
     with open(rb, "wb") as f:
@@ -3055,7 +3083,7 @@ try:
     def _gpx_pts(path):
         if not os.path.exists(path):
             return 0
-        with orig_open(path, "rb") as f:
+        with open(path, "rb") as f:             # (a .trb as its text)
             return sum(1 for line in f if is_point(line))
 
     orig_open = builtins.open
@@ -3105,8 +3133,8 @@ try:
         return _open
 
     gl.log_reset()
-    close_path = os.path.join(close_dir, "c.trk")
-    make_trk(close_path, 2)
+    close_path = os.path.join(close_dir, "c.trb")
+    make_trb(close_path, 2)
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt])
     builtins.open = _close_wrap(False)
     try:
@@ -3119,7 +3147,7 @@ try:
           "n_pts=%s batch=%s" % (_gpx_pts(close_path), gl.log["batch"]))
 
     # WF-5: LittleFS rollback on append — keep the batch, no lost points
-    make_trk(close_path, 2)
+    make_trb(close_path, 2)
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=os.path.getsize(close_path))
     builtins.open = _close_wrap(True)
@@ -3137,7 +3165,7 @@ try:
           "n_pts=%s" % _gpx_pts(close_path))
 
     # WF-6: create close rollback — file missing, created=False, batch kept
-    new_path = os.path.join(close_dir, "new.trk")
+    new_path = os.path.join(close_dir, "new.trb")
     gl.log.update(file=new_path, created=False, points=0, batch=[extra_pt],
                   err=0, new_seg=False)
     builtins.open = _close_wrap(True)
@@ -3188,8 +3216,8 @@ try:
 
         return _open
 
-    part_path = os.path.join(close_dir, "part.trk")
-    make_trk(part_path, 2)
+    part_path = os.path.join(close_dir, "part.trb")
+    make_trb(part_path, 2)
     good = os.path.getsize(part_path)
     gl.log.update(file=part_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=good)
@@ -3213,7 +3241,7 @@ try:
           and part_body.endswith(gl.FOOTER.encode()),
           "n_pts=%s tail=%r" % (_gpx_pts(part_path), part_body[-80:]))
 
-    create_part = os.path.join(close_dir, "create_part.trk")
+    create_part = os.path.join(close_dir, "create_part.trb")
     gl.log.update(file=create_part, created=False, points=0, batch=[extra_pt],
                   err=0, new_seg=False, good_size=None)
     builtins.open = _partial_open(2, 10)  # header ok, 10 bytes of point
@@ -3232,14 +3260,14 @@ try:
     check("WF-8: create retry rewrites from scratch with a valid header",
           gl.log["created"] is True and gl.log["batch"] == []
           and _gpx_pts(create_part) == 1
-          and create_body.startswith(HEADER.encode())
+          and create_body.startswith(gl.HEADERB.encode())
           and create_body.endswith(gl.FOOTER.encode()),
           "created=%s n_pts=%s head=%r" % (
               gl.log.get("created"), _gpx_pts(create_part), create_body[:80]))
 
     # M7: transient stat/open EIO must not flip created=False (wb would wipe)
-    eio_path = os.path.join(close_dir, "eio.trk")
-    make_trk(eio_path, 112)
+    eio_path = os.path.join(close_dir, "eio.trb")
+    make_trb(eio_path, 112)
     eio_pts = _gpx_pts(eio_path)
     gl.log.update(file=eio_path, created=True, points=112, batch=[extra_pt],
                   err=0, new_seg=False, good_size=os.path.getsize(eio_path))
@@ -3270,8 +3298,8 @@ try:
           _gpx_pts(eio_path) == eio_pts + 1 and gl.log["batch"] == [],
           "n_pts=%s" % _gpx_pts(eio_path))
 
-    gone_path = os.path.join(close_dir, "gone.trk")
-    make_trk(gone_path, 2)
+    gone_path = os.path.join(close_dir, "gone.trb")
+    make_trb(gone_path, 2)
     gl.log.update(file=gone_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=os.path.getsize(gone_path))
     os.remove(gone_path)
@@ -3284,8 +3312,8 @@ try:
           gl.log["created"] is True and _gpx_pts(gone_path) == 1,
           "created=%s n_pts=%s" % (gl.log.get("created"), _gpx_pts(gone_path)))
 
-    trunc_path = os.path.join(close_dir, "trunc.trk")
-    make_trk(trunc_path, 2)
+    trunc_path = os.path.join(close_dir, "trunc.trb")
+    make_trb(trunc_path, 2)
     with orig_open(trunc_path, "rb") as f:
         trunc_raw = f.read()
     with orig_open(trunc_path, "wb") as f:
@@ -3293,13 +3321,14 @@ try:
     gl.log.update(file=trunc_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=len(trunc_raw))
     gl.flush()
-    with orig_open(trunc_path, "rb") as f:
-        trunc_body = f.read()
-    check("WF-10: truncated footer is repaired before append",
-          _gpx_pts(trunc_path) == 3 and gl.log["batch"] == []
-          and trunc_body.endswith(gl.FOOTER.encode())
-          and extra_pt.encode() in trunc_body,
-          "n_pts=%s tail=%r" % (_gpx_pts(trunc_path), trunc_body[-80:]))
+    wf10 = gl.log["file"]
+    gl.flush()
+    gl.log.update(file=None, created=False)
+    check("WF-10: a footer not where it was: no append after a guess, the batch goes "
+          "on in a new file",
+          wf10 != trunc_path and _gpx_pts(wf10) == 1 and gl.log["batch"] == []
+          and _gpx_pts(trunc_path) == 2,
+          "%r n=%s" % (wf10, _gpx_pts(trunc_path)))
 
     # new trip during a write error starts a new track segment
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
@@ -9091,8 +9120,8 @@ def _hok(line):
 try:
     lines = [_hl("20261030", "235958"), _hl("20261030", "235959"),
              _hl("20261031", "000000"), _hl("20261031", "000001")]
-    gl._hist_add(lines + ["not written\n"], 4)
-    gl._hist_add([_hl("20261031", "000002")], 1)
+    hist_add(lines + ["not written\n"], 4)
+    hist_add([_hl("20261031", "000002")], 1)
     h30, h31 = _hread("20261030"), _hread("20261031")
     check("HIST: lines go to their own UTC day's .trb, appended, only "
           "lines[:k]",
@@ -9108,7 +9137,7 @@ try:
     for d_ in range(1, 10):               # 9 old (text) days, then a new one
         with open(os.path.join(gl.HIST_DIR, "202610%02d.trk" % d_), "w") as f:
             f.write(_hl("202610%02d" % d_, "120000"))
-    gl._hist_add([_hl("20261101", "080000")], 1)
+    hist_add([_hl("20261101", "080000")], 1)
     kept = sorted(os.listdir(gl.HIST_DIR))
     check("HIST: a new day's file drops the days beyond HIST_DAYS (.trk "
           "and .trb alike)",
@@ -9118,50 +9147,50 @@ try:
     free_saved = gl.free
     gl.free = lambda: gl.MIN_FREE
     try:
-        gl._hist_add([_hl("20261101", "080001")], 1)
+        hist_add([_hl("20261101", "080001")], 1)
     finally:
         gl.free = free_saved
     check("HIST: nothing written while the flash is nearly full",
           _hread("20261101") == _hl("20261101", "080000"))
     # flush: a .trb's points are on the flash once, in the track file; the
     # history gets them when they are up (they were written twice, and a
-    # day offline filled the flash twice as fast). A .trk (TRK_BIN off, or
-    # from older firmware, already in the history) goes at flush as before
-    for ext in (".trk", gl.TRB):
-        tb_ = ext == gl.TRB
-        online(_hd)
-        gl.LOG_DIR = _hd
-        h0 = _hread("20261101")
-        gl.log["file"] = os.path.join(_hd, "20261101_090000" + ext)
-        gl.log["fmt"] = 2
-        fl = [_hl("20261101", "090000"), _hl("20261101", "090001", 47.186)]
-        gl.log["batch"] = list(fl)
-        gl.flush()
-        check("HIST: flush writes a .trb, not the day history; a .trk and "
-              "the history (%s)" % ext,
-              _hread("20261101") == (h0 if tb_ else h0 + "".join(fl))
-              and gl.log["batch"] == [] and gl.log["points"] == 2,
-              repr(_hread("20261101")))
-        h0 = h0 if tb_ else h0 + "".join(fl)
-        gl.log["file"] = None            # (closed: pending)
-        _post_code[0] = 500
-        pump()
-        check("HIST: a failed upload adds nothing (%s)" % ext,
-              _hread("20261101") == h0, repr(_hread("20261101")))
-        _post_code[0] = 201
-        pump()
-        check("HIST: a .trb's uploaded points go to the day history, once, "
-              "as its records; a .trk's not again (%s)" % ext,
-              _hread("20261101") == h0 + ("".join(fl) if tb_ else "")
-              and not os.path.exists(os.path.join(_hd, "20261101_090000"
-                                                  + ext))
-              and _hraw("20261101").endswith(_hkb(fl) + b"#END\n"),
-              repr(_hraw("20261101")))
-        pump()
-        check("HIST: ... and not again (%s)" % ext,
-              _hread("20261101") == h0 + ("".join(fl) if tb_ else ""))
-        os.remove(os.path.join(gl.HIST_DIR, "20261101.trb"))
-        gl._hist_add([_hl("20261101", "080000")], 1)
+    # day offline filled the flash twice as fast)
+    online(_hd)
+    gl.LOG_DIR = _hd
+    h0 = _hread("20261101")
+    gl.log["file"] = os.path.join(_hd, "20261101_090000" + gl.TRB)
+    fl = [_hl("20261101", "090000"), _hl("20261101", "090001", 47.186)]
+    gl.log["batch"] = list(fl)
+    gl.flush()
+    check("HIST: flush writes the track, not the day history",
+          _hread("20261101") == h0
+          and gl.log["batch"] == [] and gl.log["points"] == 2,
+          repr(_hread("20261101")))
+    gl.log["file"] = None                 # (closed: pending)
+    _post_code[0] = 500
+    pump()
+    check("HIST: a failed upload adds nothing",
+          _hread("20261101") == h0, repr(_hread("20261101")))
+    _post_code[0] = 201
+    pump()
+    check("HIST: a .trb's uploaded points go to the day history, once, as its records",
+          _hread("20261101") == h0 + "".join(fl)
+          and not os.path.exists(os.path.join(_hd, "20261101_090000" + gl.TRB))
+          and _hraw("20261101").endswith(_hkb(fl) + b"#END\n"),
+          repr(_hraw("20261101")))
+    pump()
+    check("HIST: ... and not again", _hread("20261101") == h0 + "".join(fl))
+    # a .trk from older firmware: its points went when written, not again
+    h0 = _hread("20261101")
+    with builtins.open(os.path.join(_hd, "20261101_090100.trk"), "wb") as f:
+        f.write((HEADER + "".join(fl) + gl.FOOTER).encode())
+    pump()
+    check("HIST: an uploaded .trk adds nothing (older firmware's: in the history "
+          "already)", _hread("20261101") == h0
+          and not os.path.exists(os.path.join(_hd, "20261101_090100.trk")),
+          repr(_hread("20261101")))
+    os.remove(os.path.join(gl.HIST_DIR, "20261101.trb"))
+    hist_add([_hl("20261101", "080000")], 1)
     gl.log_reset()
 
     # an uploaded batch across midnight: each day's file gets its part,
@@ -9211,7 +9240,7 @@ try:
              "-0.000001,-0.000001,,1.2,20261104T120002Z\n"]
           + _drive(day, 900, t0=61200, seed=2))
     for i in range(0, len(dl), gl.UPLOAD_BATCH):
-        gl._hist_add(dl[i:i + gl.UPLOAD_BATCH],
+        hist_add(dl[i:i + gl.UPLOAD_BATCH],
                      len(dl[i:i + gl.UPLOAD_BATCH]))
     raw = _hraw(day)
     txt, reps = _hpage(day)
@@ -9239,15 +9268,15 @@ try:
     # keyframe overwrote the footer there)
     day = "20261105"
     pl = _drive(day, 400, t0=30000)
-    gl._hist_add(pl[:200], 200)
+    hist_add(pl[:200], 200)
     gl.HIST_REPLY = 2000
     try:
         st1, h1, b1 = _hget(b"d=%s&o=0" % day.encode())
-        gl._hist_add(pl[200:300], 100)
+        hist_add(pl[200:300], 100)
         t2, r2 = _hpage(day, int(h1["X-Hist-Next"]))
         e2 = r2[-1][2]
         st3, h3, b3 = _hget(b"d=%s&o=%d" % (day.encode(), e2))
-        gl._hist_add(pl[300:], 100)
+        hist_add(pl[300:], 100)
         t4, r4 = _hpage(day, e2)
     finally:
         gl.HIST_REPLY = _hist_saved[2]
@@ -9267,7 +9296,7 @@ try:
     ca = _drive(day, 130, t0=30000)
     cb = _drive(day, 20, t0=40000, seed=3)
     for i in range(0, 130, 50):
-        gl._hist_add(ca[i:i + 50], len(ca[i:i + 50]))
+        hist_add(ca[i:i + 50], len(ca[i:i + 50]))
     craw = _hraw(day)
     last = len(b"#TRKB\n" + _hkb(ca[:50]) + _hkb(ca[50:100]))
     cpath = os.path.join(gl.HIST_DIR, day + ".trb")
@@ -9278,12 +9307,12 @@ try:
         pre = _hpts(craw[:cut])          # (trk2gpx: what the cut part holds)
         k = pre.count("\n")
         t0_, r0_ = _hpage(day)           # (the page, before the next append)
-        gl._hist_add(cb, len(cb))
+        hist_add(cb, len(cb))
         t1_, r1_ = _hpage(day)
         tn_, _ = _hpage(day, r0_[-1][1])
         t1v = "".join(x for x in t1_.splitlines(True) if _hok(x))
         tnv = "".join(x for x in tn_.splitlines(True) if _hok(x))
-        gl._hist_add(ca[:2], 2)          # (the next append: no HIST_SEP)
+        hist_add(ca[:2], 2)          # (the next append: no HIST_SEP)
         ok = (pre == "".join(ca[:k]) and k >= 100
               and "".join(x for x in t0_.splitlines(True) if _hok(x)) == pre
               and t1v == pre + "".join(cb) and tnv == "".join(cb)
@@ -9302,11 +9331,11 @@ try:
     # keyframe holds: nothing decodes there) and the lines after it are read
     day = "20261107"
     el_ = _drive(day, 120, t0=30000)
-    gl._hist_add(el_[:60], 60)
+    hist_add(el_[:60], 60)
     with builtins.open(os.path.join(gl.HIST_DIR, day + ".trb"), "r+b") as f:
         f.seek(-5, 2)
         f.write(b"\xff" * 40000)         # (no footer: the next append's
-    gl._hist_add(el_[60:], 60)           # HIST_SEP ends the block)
+    hist_add(el_[60:], 60)           # HIST_SEP ends the block)
     te, re_ = _hpage(day)
     check("HIST-WEB: an erased block of 40 KB in a day is read in "
           "HIST_REPLY / 4 steps, the lines around it whole",
@@ -9320,7 +9349,7 @@ try:
     day = "20261108"
     ll = _drive(day, 21600, t0=21600, seed=4)
     for i in range(0, len(ll), 600):
-        gl._hist_add(ll[i:i + 600], 600)
+        hist_add(ll[i:i + 600], 600)
     dog = WDT(timeout=gl.WDT_TIMEOUT)
     gl._wdt = dog
     try:
@@ -9361,7 +9390,7 @@ try:
     with open(os.path.join(gl.HIST_DIR, "20261009.trk"), "w") as f:
         f.write(_hl("20261009", "120000"))
     ot = _hraw("20261009", ".trk")
-    gl._hist_add([_hl("20261009", "120001")], 1)
+    hist_add([_hl("20261009", "120001")], 1)
     ta = _hget(b"d=20261009&o=0")
     tb2 = _hget(b"d=20261009&o=10")
     days_ = gl._hist_days()
@@ -14238,7 +14267,7 @@ _hd16 = gl.HIST_DIR
 gl.HIST_DIR = _r16
 with open(os.path.join(_r16, "20261101.trk"), "w") as f:
     f.write("47.100000,18.400000,1,2,1,20261101T100000Z\n47.4979")
-gl._hist_add(["47.200000,18.500000,1,2,1,20261101T100001Z\n"], 1)
+hist_add(["47.200000,18.500000,1,2,1,20261101T100001Z\n"], 1)
 with open(os.path.join(_r16, "20261101.trk")) as f:
     h16 = f.read()
 p16 = os.path.join(_r16, "20261101_100000.trk")
@@ -16236,10 +16265,15 @@ def _tb_drive(n, fmt, seed=1, lat=47.185356, lon=18.426934, step=1,
 
 def _tb_write(path, lines, per=60, fmt=None):
     """lines through flush() into path, per lines a flush (as the logger
-    writes a drive: FLUSH every 60 s)."""
+    writes a drive: FLUSH every 60 s). A .trk: the text track of older firmware
+    with the same lines (its writer is gone)."""
     gl.log_reset()
+    if path.endswith(".trk"):
+        with builtins.open(path, "wb") as f:
+            f.write(("#TRK2\n" if lines[0].count(",") == 5 else HEADER).encode()
+                    + "".join(lines).encode() + gl.FOOTER.encode())
+        return
     gl.log["file"] = path
-    gl.log["fmt"] = fmt or (2 if lines[0].count(",") == 5 else 1)
     for i in range(0, len(lines), per):
         gl.log["batch"] = list(lines[i:i + per])
         gl.flush()
@@ -16953,19 +16987,12 @@ try:
           repr((wmax_, len(dc_))))
     gl.log_reset()
 
-    # the open file's name, and firmware from before TRK_BIN
+    # the open file's name
     gl.st["date"], gl.st["time"] = "2026-11-01", "13:00:00"
     gl.start_file()
     nm1 = gl.log["file"]
-    gl.TRK_BIN = False
-    gl.start_file()
-    nm2 = gl.log["file"]
-    gl.TRK_BIN = True
     gl.log_reset()
-    check("TRKB: new files are .trb (TRK_BIN; False: .trk as before), "
-          "a suffix older firmware does not list",
-          nm1.endswith("20261101_130000.trb") and nm2.endswith(".trk")
-          and not nm1.endswith(".trk"), repr((nm1, nm2)))
+    check("TRKB: new files are .trb", nm1.endswith("20261101_130000.trb"), repr(nm1))
 finally:
     gl.LOG_DIR, gl.HIST_DIR, gl.UPLOAD_BATCH = _tb_saved
     shutil.rmtree(_tb, ignore_errors=True)

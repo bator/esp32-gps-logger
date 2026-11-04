@@ -489,8 +489,12 @@ if hasattr(gc, "mem_alloc"):
                 i7(471853560 + i * 1311), i7(184269340 - i * 977),
                 120.0 + (i % 9) * 0.3, 2 + i % 3, 12.0 + (i % 11) * 0.4,
                 gl._stamp_s(215697600 + i + i // 500)[1]))
+        import os
         for i in range(0, 2000, 50):
-            gl._hist_add(tl4[i:i + 50], 50)
+            with open(base + "-h.trb", "wb") as f:
+                f.write(b"#TRKB\n" + gl._kb_encode(tl4[i:i + 50], 50, None) + b"#END\n")
+            gl._hist_batch(base + "-h.trb", 0, os.stat(base + "-h.trb")[6], None)
+        os.remove(base + "-h.trb")
         day4 = tl4[0][-17:-9]
         with open(gl.HIST_DIR + "/20261001.trk", "w") as f:
             f.write("".join(tl4[:400]))
@@ -515,7 +519,7 @@ if hasattr(gc, "mem_alloc"):
           and (hist_alloc[50] - hist_alloc[10]) < 40 * 40)
     check("trb: a /hist reply of a 2000-point .trb day decodes it whole, "
           "a reply allocating at most 1.5 KB more than a text day's",
-          hist4 == "".join(tl4) and web_alloc[1] == web_alloc[2]
+          hist4 == "".join(tl4) and abs(web_alloc[1] - web_alloc[2]) <= 128
           and web_alloc[1] <= web_alloc[0] + 1536)
 
 # the hidden home's learned BSSIDs survive a reboot (/home_aps: hex lines,

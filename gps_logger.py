@@ -3045,7 +3045,8 @@ def at_home():
     return wifi.get("sleep_home")
 
 # --- GPX logger -------------------------------------------------------------
-# Format (.trk): one point per line, "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ"
+# Format of the lines (older firmware wrote them as they are, .trk; a rejected
+# batch's .bad copy is them too): one point per line, "lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ"
 # (~46 bytes; the old GPX XML was ~112). ele/hdop are empty when unknown; the
 # time is every line's last 16 bytes (see flush).
 # A "#TRK2" file (from an older firmware on another receiver: none is written
@@ -3057,7 +3058,7 @@ def at_home():
 # commits on close, so a power cut leaves either the previous or the new
 # version. A line cut short has no newline and is skipped on read.
 #
-# New files are binary (.trb, "#TRKB" header, TRK_BIN), ~6-8 bytes a point
+# Track files are binary (.trb, "#TRKB" header), ~6-8 bytes a point
 # instead of ~46-51. The lines are the same TRK1/TRK2 text, stored as the
 # difference from the line before: a keyframe "=" + the whole text line,
 # then delta records, each a flag byte (0x80 | bit 0: the time step is not
@@ -3070,17 +3071,13 @@ def at_home():
 # and one follows every KEY_EVERY deltas, so a damaged record costs at
 # most those. A reader resumes from the .pos "offset keyframe-offset". The
 # decoded line is byte for byte the text line: the upload is the same.
-# Firmware from before TRK_BIN does not list .trb files (an OTA rollback
-# keeps them for the next forward update).
 
-HEADER = "#TRK1\n"
 HEADERB = "#TRKB\n"
 FOOTER = "#END\n"
 NEW_SEG = "-\n"
 TRB = ".trb"
 _TRACKS = (".trk", TRB)                  # the track files (pending)
 _BADS = (".trk.bad", ".trb.bad")
-TRK_BIN = True                           # new track files binary (.trb)
 KEY_EVERY = 64                           # deltas between two keyframes
 _KB_MAX = 1 << 28                        # a delta at least this big: keyframe
 _P10 = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000,
@@ -3395,7 +3392,7 @@ def start_file(stamp=None):
     name = stamp or _stamp()
     # (wfail: a write that failed on the previous file must not keep the
     # next one from closing: log_tick)
-    log.update(file=LOG_DIR + "/" + name + (TRB if TRK_BIN else ".trk"),
+    log.update(file=LOG_DIR + "/" + name + TRB,
                created=False, points=0,
                new_seg=False, seg_tc=[], file_at=time.ticks_ms(),
                good_size=None, wfail=False, wfails=0)
@@ -3472,21 +3469,19 @@ def flush(hold=None):
                 while j < len(q) and q[j] is not None and q[j] <= t:
                     j += 1
             i += 1
-    tb = path.endswith(TRB)
-    if tb:
-        # encoded and written KB_CHUNK bytes at a time: one body of the
-        # whole batch needed a contiguous block that grew with every
-        # MemoryError (the batch waited and grew), until MAX_BATCH dropped
-        # its oldest lines. The first chunk is encoded before the file is
-        # opened: out of memory there is no write failure.
-        _kb_start()
-        try:
-            body = _kb_part(batch, k, seg)     # (the segment breaks in it)
-        except MemoryError as e:         # not the flash: the batch waits
-            body = None                  # for the next flush
-            gc.collect()
-            _werr("encode", e)
-            return
+    # encoded and written KB_CHUNK bytes at a time: one body of the whole batch
+    # needed a contiguous block that grew with every MemoryError (the batch
+    # waited and grew), until MAX_BATCH dropped its oldest lines. The first chunk
+    # is encoded before the file is opened: out of memory there is no write
+    # failure.
+    _kb_start()
+    try:
+        body = _kb_part(batch, k, seg)   # (the segment breaks in it)
+    except MemoryError as e:             # not the flash: the batch waits
+        body = None                      # for the next flush
+        gc.collect()
+        _werr("encode", e)
+        return
     # What is left to do once the write landed is worked out first: a
     # MemoryError after it (the last line's time sliced) left the k lines
     # in the batch, and the crash handler's flush wrote them again.
@@ -3496,32 +3491,15 @@ def flush(hold=None):
         last = batch[k - 1][-17:-1]
         while nq < len(q) and q[nq] is not None and q[nq] <= last:
             nq += 1
-    hl = None
-    if not tb and HIST_DAYS:
-        try:
-            hl = batch[:k]               # (for _hist_add, after the del)
-        except MemoryError:
-            pass                         # (the drawing is best effort)
     try:
-        if tb:
-            extra = pts = 0
-        else:
-            extra = len(NEW_SEG) * len(seg) if seg is not None else 0
-            pts = 0
-            i = 0
-            while i < k:
-                pts += len(batch[i])
-                i += 1
+        pts = 0
         if creating:
-            head = HEADERB if tb else HEADER
-            start = len(head)
-            if not tb:
-                expected = len(head) + extra + pts + len(FOOTER)
+            start = len(HEADERB)
             f = open(path, "wb")
-            f.write(head.encode())
+            f.write(HEADERB.encode())
         else:
             f = open(path, "r+b")
-            if not _seek_footer(f, old) and tb:
+            if not _seek_footer(f, old):
                 # the end is not where the last write left it: after a
                 # guessed newline a record could be split, and its half
                 # read as points. The batch goes on in a new file.
@@ -3533,25 +3511,15 @@ def flush(hold=None):
                 start = (old or 0) - len(FOOTER)
                 if start < 0:
                     start = 0
-            if not tb:
-                expected = start + extra + pts + len(FOOTER)
-        if tb:
-            while True:
-                f.write(body)
-                pts += len(body)
-                if _kq[0] >= k:
-                    break
-                body = None
-                body = _kb_part(batch, k, seg)
+        while True:
+            f.write(body)
+            pts += len(body)
+            if _kq[0] >= k:
+                break
             body = None
-            expected = start + pts + len(FOOTER)
-        i = j = 0
-        while i < k and not tb:
-            if seg is not None and j < len(seg) and seg[j] == i:
-                f.write(NEW_SEG.encode())
-                j += 1
-            f.write(batch[i].encode())
-            i += 1
+            body = _kb_part(batch, k, seg)
+        body = None
+        expected = start + pts + len(FOOTER)
         f.write(FOOTER.encode())
         wrote = True
     except (OSError, MemoryError) as e:
@@ -3616,8 +3584,6 @@ def flush(hold=None):
     if log["new_seg"] and q:
         del q[:nq]                       # the breaks written
         log["new_seg"] = bool(q)
-    if hl is not None:
-        _hist_add(hl, k)                 # (a .trb's go when uploaded)
 
 def _werr(what, e=None):
     """Count a track write error (log["err"]). The first one, then one per
@@ -3657,8 +3623,8 @@ def _cut_to_footer(path, good, sz):
             _werr("cut", e)
 
 # The day history (/hist/YYYYMMDD.trb, a UTC day) is a .trb track: the
-# header, then each append (a .trk flush's _hist_add, an uploaded .trb
-# batch's _hist_batch) the records a flush writes, a keyframe first, so an
+# header, then each append (an uploaded batch's _hist_batch) the records a
+# flush writes, a keyframe first, so an
 # append's start is where a read can start (the page asks from one,
 # /hist?o=); one footer at the end, overwritten by the next append, as a
 # track flush overwrites it. ~7 bytes a point instead of ~50 as text. An
@@ -3674,41 +3640,6 @@ def _cut_to_footer(path, good, sz):
 HIST_SEP = b"\xc0" * 32 + b"\n"
 _kh = [None] * 12                        # the day history encoder's state
 _khn = [0]                               # its deltas since the keyframe
-
-def _hist_add(lines, k):
-    """Append lines[:k], the track lines just written, to the day history
-    by each line's own (UTC) date, the same lines as the track file, which
-    is deleted once uploaded. The status page draws the day from it
-    (/hist). Best effort: a failed write costs only the drawing, and it
-    stops while the flash is nearly full. A new day's file drops the oldest
-    beyond HIST_DAYS."""
-    if not HIST_DAYS or not k:
-        return
-    room = free()
-    if room is not None and room < HIST_RESERVE:
-        room = _hist_trim(HIST_RESERVE)
-    if room is not None and room < 2 * MIN_FREE:
-        return
-    i = 0
-    while i < k:
-        day = lines[i][-17:-9]
-        j = i + 1
-        while j < k and lines[j][-17:-9] == day:
-            j += 1
-        if len(day) == 8 and day.isdigit():
-            st = [None, False, False, None]
-            ok = False
-            try:
-                _hist_begin(st, day)
-                while i < j:
-                    bl = lines[i].encode()
-                    _hist_line(st, bl, 0, len(bl))
-                    i += 1
-                ok = True
-            except (OSError, MemoryError):
-                log["herr"] = log.get("herr", 0) + 1
-            _hist_close(st, ok)
-        i = j
 
 def _hist_begin(st, day):
     """Open the day's file for an append into st ([file, made now, text,
@@ -5721,7 +5652,8 @@ def _hist_batch(path, off, end, key):
     commit: at the end of the file the commit deletes it; one that then
     fails sends the batch again, its points in the history twice (a line
     drawn over itself). Not for other files: a .trk's went when written, a
-    .bad's when they left their track. Best effort, as _hist_add."""
+    .bad's when they left their track. Best effort: a failed write costs only
+    the drawing, and it stops while the flash is nearly full."""
     if not HIST_DAYS or not path.endswith(TRB):
         return
     room = free()
