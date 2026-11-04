@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml/badge.svg)](https://github.com/bator/esp32-gps-logger/actions/workflows/ci.yml)
 
-A MicroPython GPS track logger for the ESP32, the ESP32-C6 and the Heltec
-Wireless Tracker (ESP32-S3 with a UC6580 on the board). It records your
-position to the internal flash, offline or on WiFi, and uploads finished
-tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
+A MicroPython GPS track logger for the Heltec Wireless Tracker (ESP32-S3 with a
+UC6580 on the board). It records your position to the internal flash, offline or
+on WiFi, and uploads finished tracks to a [Dawarich](https://dawarich.app) server
+through its Overland API. Tag `c6-last` holds the code for the older hardware
+(ESP32 / ESP32-C6 with a u-blox receiver and an OLED).
 
 - [At a glance](#at-a-glance)
 - [Hardware](#hardware)
@@ -17,21 +18,14 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
 
 ## At a glance
 
-- **One clean point a second.** The u-blox receiver runs at 5 Hz; the five
+- **One clean point a second.** The receiver runs at 5 Hz; the five
   fixes of each second are averaged into one point while slow, and the
   second's first fix is the point above 10 km/h (a mean would lag the
   timestamp). Dawarich stores whole seconds, so more than one point a
   second would zigzag there.
-- **The receiver is tuned too** (UBX-CFG-NAV5): portable filter (car and
-  foot alike), 3D fixes only, satellites below 10° ignored, static hold below 0.5 m/s.
-- **Binary fixes on a u-blox M8/M10.** There the logger reads UBX-NAV-PVT
-  instead of NMEA: positions in integers of 1e-7 degrees (no
-  single-precision grid of ~0.4 m), the receiver's own accuracy estimate
-  (averaged with it as the weight, and uploaded as the point's accuracy),
-  speed. Older receivers (NEO-6M) keep the NMEA path.
 - **Bad fixes are skipped.** Samples with HDOP above 5, or whose own error
-  estimate (GST) is above 20 m, are not used (NAV-PVT: an accuracy estimate
-  above 20 m). This also hides the first, wandering fixes after a cold start.
+  estimate (GST) is above 20 m, are not used, and so is the first minute after a
+  start unless moving: the receiver starts 15 m off.
 - **No zigzag while parked.** A position-based stay filter detects standing
   still. The indoor drift is never written. Away from home the stay shows up
   as one anchor point every 5 minutes; at home nothing is written.
@@ -39,55 +33,14 @@ tracks to a [Dawarich](https://dawarich.app) server through its Overland API.
   50 points, with a byte offset sidecar so nothing is sent twice or lost.
 - **Up to three WiFi networks** (home, phone hotspot, another place). The
   radio is on only until everything is uploaded, then sleeps for an hour.
-- **Power bank friendly:** a short load pulse every 5 s (the radio switched
-  on and off, a WiFi scan, or a GPIO-driven resistor) keeps power banks that
-  switch off at low load awake. The CPU runs at 80 MHz, and the radio is off
-  whenever it has nothing to do, including long upload backoffs.
-- **Runs unattended:** hardware watchdog, crash recovery, boot-loop guard,
-  optional 128×64 OLED (headless without it).
+- **Power bank friendly:** a WiFi scan every 5 s keeps power banks that switch
+  off at low load awake. The CPU runs at 80 MHz, and the radio is off whenever it
+  has nothing to do, including long upload backoffs.
+- **Runs unattended:** hardware watchdog, crash recovery, boot-loop guard.
 
 ## Hardware
 
-| Part | Notes |
-|------|-------|
-| ESP32 or ESP32-C6 board | ESP32: a **WROOM** module (on WROVER, GPIO16/17 belong to the PSRAM). Flash MicroPython **1.29** with **LittleFS** (the default image; on FAT the upload progress is not crash-safe). |
-| GPS module | u-blox NEO-6M / 7M / M8 / M10, UART, 9600 baud (on the board now: a u-blox M10, ROM SPG 5.10) |
-| OLED display | SSD1306, 128×64, I²C (0x3C). Optional. |
-| Push button | Boot bypass, e.g. the centre press of a 5-way joystick. Optional. |
-
-![Wiring schematic](docs/wiring.svg)
-
-| Function | ESP32 | ESP32-C6 |
-|----------|-------|----------|
-| GPS TX → ESP RX (NMEA in) | GPIO16 (UART2 RX) | GPIO19 (UART1 RX) |
-| ESP TX → GPS RX (setup) | GPIO17 (UART2 TX) | GPIO18 (UART1 TX) |
-| OLED SDA / SCL | GPIO21 / GPIO22 | GPIO6 / GPIO7 |
-| Boot bypass button → GND | GPIO25 | GPIO10 |
-| Keep-alive load (optional, `KEEPALIVE_MODE=gpio`) | GPIO26 | GPIO2 |
-| Power | 3V3 and GND to GPS, OLED and button | same |
-
-- The firmware detects the C6 by itself (it has no UART2, and GPIO16/17 are
-  its console). `deploy.sh` detects it too and compiles for `rv32imc`.
-- On the C6 the GPS used GPIO4/5 before; those are strapping (JTAG) pins, so
-  it moved to GPIO18/19. A board still wired to 4/5 sets `GPS_TX=4` and
-  `GPS_RX=5` in `.env` (or moves the two data wires).
-- The ESP TX → GPS RX wire is needed for the 5 Hz setup. Without it the
-  receiver stays at 1 Hz and everything else still works.
-- **Heltec Wireless Tracker** (ESP32-S3FN8, UC6580, no wiring): see
-  [below](#heltec-wireless-tracker).
-- Most GPS and OLED breakouts have their own regulator and I²C pull-ups;
-  check yours if you power the GPS from 5 V.
-- On the original ESP32, `https://` uploads are tight on RAM (about 17 kB
-  largest free IDF block with the logger loaded); the C6 has about 190 kB.
-- **Keep-alive load** (optional): a logic-level N-MOSFET (IRLZ44N, 2N7000,
-  AO3400) switched by the keep-alive GPIO through 100 Ω, with a 100 kΩ
-  pull-down, pulls a 22 Ω / 2 W resistor from the 5 V USB rail to GND:
-  ~230 mA for 0.1 s every 5 s (~5 mA average) is the load a power bank
-  looks for, where a WiFi scan costs ~40 mA average. See
-  [Power bank keep-alive](#wifi).
-
-### Heltec Wireless Tracker
-
+Flash it with the custom firmware (MicroPython **1.29**, [below](#4-custom-firmware-recommended)).
 The receiver is on the board, so nothing is wired. Measured on a board sold as
 V1.2 (Heltec documents up to V1.1; its pins are the same), receiver UC6580I,
 firmware R6.0.0.0Build3700.
@@ -98,19 +51,17 @@ firmware R6.0.0.0Build3700.
 | Vext: high powers the UC6580, its LNA and the TFT | 3 |
 | TFT (ST7735S, 160×80): SCK / MOSI / CS / DC / RST / backlight | 41 / 42 / 38 / 40 / 39 / 21 |
 | Boot bypass → GND (GPIO0, the button, is the download mode) | 7 |
-| Keep-alive load (optional, `KEEPALIVE_MODE=gpio`) | 6 |
 
-- **Build:** `BOARD_DIR=$PWD/boards/GPS_LOGGER_S3 tools/build_firmware.sh`
-  with `--migrate` once, `--flash` after. It needs the S3 toolchain:
-  `~/esp/esp-idf/install.sh esp32s3`. The app (~1.5 MB) fits the same two
-  1792 KB OTA slots, the file system is ~4.4 MB (about 7 days of driving
+- **Build:** `tools/build_firmware.sh` with `--migrate` once, `--flash` after. It
+  needs the S3 toolchain: `~/esp/esp-idf/install.sh esp32s3`. The app (~1.4 MB) fits
+  two 1792 KB OTA slots, the file system is ~4.4 MB (about 7 days of driving
   offline).
 - **Its own OTA folder:** give the board its own `OTA_DEST` and `.env`
-  `OTA_URL`. Its manifest names the board, which the C6 refuses, and it refuses
-  any other (a C6 manifest names none).
-- **Not a u-blox:** no UBX, so no NAV-PVT, `GPS_MODEL` or `GPS_PVT`. The
-  logger sets it up with Unicore commands (`$CFGNAV`, `$CFGMSG`: 5 Hz, GGA and
-  RMC every fix, GST once a second, GSA and GSV every 5 s) at every boot, as a
+  `OTA_URL`. Its manifest names the board (`GPS_LOGGER_S3`), and it refuses any
+  other, or one that names none.
+- **Setup:** the logger sets the receiver up with Unicore commands (`$CFGNAV`,
+  `$CFGMSG`: 5 Hz, GGA and RMC every fix, GST once a second, GSA and GSV every 5 s)
+  at every boot, as a
   power cycle brings its defaults back. With a fix it sends GSV and GSA at 1 Hz
   whatever the rate (~2.3 KB/s). The satellite list comes from GSV, decoded every
   5 s.
@@ -155,9 +106,6 @@ Linux with Python 3:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install mpremote "mpy-cross==1.29.*"
-
-# drivers on the device (skip any already frozen into your firmware)
-.venv/bin/mpremote mip install ssd1306
 ```
 
 The upload has its own small HTTP client, so `requests` is not needed.
@@ -187,10 +135,7 @@ API_KEY=your-dawarich-api-key
 DEVICE_ID=Dawarich-GPS-tracker
 HOSTNAME=Dawarich-GPS-tracker
 # KEEPALIVE=5
-# KEEPALIVE_MODE=scan
 # CPU_MHZ=80
-# GPS_MODEL=0
-# GPS_PVT=auto
 # DIAG=60
 # WEB=1
 # WEB_AWAY=0
@@ -207,22 +152,17 @@ HOSTNAME=Dawarich-GPS-tracker
 | `DEVICE_ID` | Overland tracker id, `[A-Za-z0-9._-]{1,32}` |
 | `HOSTNAME` | DHCP hostname, `[A-Za-z0-9-]{1,32}` (defaults to `DEVICE_ID`) |
 | `KEEPALIVE` | Seconds between power bank keep-alive pulses, 5–600; `0` turns it off (e.g. on a car charger). Default 5. |
-| `KEEPALIVE_MODE` | What a pulse is: `scan` (default: a full WiFi scan, ~2 s), `radio` (the radio switched on and off, ~0.2 s; too little for a bank that averages the load), `gpio` (the keep-alive pin high for 0.1 s, for a load resistor). |
-| `KEEPALIVE_PIN` | GPIO of the `gpio` pulse. Default 26 (C6: 2). A pin the board already uses (GPS TX/RX, I2C, the boot-bypass pin 25 / C6: 10, the C6's USB pins 12/13) or the chip needs (ESP32: strapping pins 0 and 12, UART0 1/3, SPI flash 6–11; C6: strapping pins 4/5, 8/9 and 15, UART0 16/17, SPI flash 24–30) is refused with a console line and the default kept. A pin that cannot be driven falls back to `scan`. |
-| `KEEPALIVE_CONNECTED` | `1`/`0`: pulses also while connected and idle (a power bank at home with the status page on); `scan` or `gpio`, a scan keeps the link. Default 0. |
-| `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240 (C6: 80/160 only); `0` leaves the firmware default. Defaults 80 and 160. |
+| `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
-| `GPS_TX` / `GPS_RX` | The ESP's UART pins to the receiver: `GPS_TX` the ESP's TX (→ GPS RX), `GPS_RX` the ESP's RX (← GPS TX). Default 18 / 19 (ESP32: 17 / 16). A pin the board or chip needs (UART0, USB 12/13, SPI flash, I2C, the boot-bypass pin; C6: strapping 8/9; ESP32: strapping 0 and 12, input-only 34–39 as TX), or both the same, keeps the default with a console line. Read at boot, before the first setup. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `GPS_MODEL` | u-blox dynamic model for NAV5: 0 portable (default), 2 stationary, 3 pedestrian, 4 automotive, 5–8 sea/airborne. Read at boot. |
-| `GPS_PVT` | `auto` (default, also `1`/`true`): on a u-blox M8/M10 (from UBX-MON-VER) fixes come as UBX-NAV-PVT, NMEA off; `0` (or `false`/`off`/`no`): NMEA on every receiver. See [GPS](#gps). Read at boot. |
+| `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
 | `WEB_AWAY` | `1`/`0`: with `WEB` on, the radio stays on for the page on the non-home networks too (e.g. a phone hotspot), instead of sleeping once all is uploaded. Default 0. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE*`, `CPU_MHZ*`, `GPS_MODEL`, `GPS_PVT`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `KEEPALIVE_CONNECTED`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Values may be quoted. On the keys above the comment goes first, then the
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
@@ -248,11 +188,12 @@ DNS=192.168.1.111
 
 ```bash
 ./deploy.sh                      # default port /dev/ttyUSB0
-PORT=/dev/ttyACM0 ./deploy.sh    # the ESP32-C6 board used here
+PORT=/dev/ttyACM0 ./deploy.sh    # the board's USB Serial/JTAG
 ```
 
-The script asks the board which chip it is, compiles `gps_logger.py` to
-`gps_logger.mpy` for it and checks the free flash (it stops with `Not
+The script asks the board what it is (anything but the Heltec is refused:
+`Unsupported board`), compiles `gps_logger.py` to `gps_logger.mpy` when the
+firmware has no frozen logger and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
 It makes `web.html.gz` with `tools/web_min.py` (~27 KB instead of the ~94 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
@@ -287,18 +228,11 @@ HTTPS uploads then fail with `ENOMEM`.
 
 ### 4. Custom firmware (recommended)
 
-Even precompiled, the logger's bytecode sits in the Python heap. On stock
-MicroPython 1.29 the heap starts at 64 KB, grows once at import to about
-124 KB, and any later growth takes the whole ~124 KB block of the IDF heap
-that TLS needs. `tools/build_firmware.sh` builds MicroPython with
-`gps_logger` frozen into the firmware, so the bytecode runs from flash.
-Measured on the C6 board (2026-10-31):
-
-| | Stock firmware + `.mpy` | Frozen firmware |
-|---|---|---|
-| Python heap | 124 KB, 97–116 KB live | 64 KB, 38 KB live |
-| Largest free block in it | 2–20 KB | 12 KB |
-| IDF heap free / largest block | 159 / 144 KB, 31 / 16 KB after a growth | 223 / 212 KB |
+Even precompiled, the logger's bytecode sits in the Python heap, and any growth
+of that heap takes a whole block of the IDF heap that TLS needs.
+`tools/build_firmware.sh` builds MicroPython with `gps_logger` frozen into the
+firmware, so the bytecode runs from flash, and the heap starts at 96 KB in one
+piece (`boards/GPS_LOGGER_S3/mpconfigboard.h`).
 
 It needs ESP-IDF v5.5.2 and a MicroPython v1.29.0 tree (by default
 `~/esp/esp-idf` and `~/esp/micropython`; see MicroPython's
@@ -311,12 +245,12 @@ PORT=/dev/ttyACM0 ./deploy.sh                    # main.py and the page
 ```
 
 Freezing does not stop the Python heap from growing into the IDF heap
-(MicroPython's split heap stays on); it leaves so much of the 64 KB heap
+(MicroPython's split heap stays on); it leaves so much of the 96 KB heap
 free that an allocation rarely has to.
 
 The logger, `gps_boot.py` and the display's modules are compiled with
 `-O3` (`opt=3` in the build's manifest, `-O3` in `deploy.sh`): their line
-numbers stay out of the bytecode, ~10 KB of the logger's ~108 KB. The cost: a
+numbers stay out of the bytecode, ~10 KB of the logger's ~98 KB. The cost: a
 traceback on the USB console no longer says where (each frame reads `line 1`,
 the function names stay); the crash line in `/diag.log` holds `repr(e)` and
 never had a line number. To see them while debugging, build without it.
@@ -357,22 +291,13 @@ write the backup with the `esptool.py` command `--flash` prints, then run
 
 ### 5. Firmware updates over WiFi (OTA)
 
-The firmware is built for `boards/GPS_LOGGER_C6`: MicroPython's
-`ESP32_GENERIC_C6` with two 1792 KB OTA app slots
-(`boards/GPS_LOGGER_C6/partitions-ota.csv`, 16 MB flash; the file system
-takes the ~12.4 MB after them) and the bootloader's rollback on. It leaves
-out what the logger never uses: BLE, ESP-NOW, Ethernet, mDNS queries, the
-SD card and I2S (the mDNS responder stays, for `http://<HOSTNAME>.local/`:
-~33 KB), and of the frozen packages all but the port's own modules
-(asyncio, umqtt, webrepl, mip, requests...). That made the app 1.54 MB
-instead of 2.02 MB, and the BLE controller's ~34 KB of static RAM is free
-for the ESP-IDF heap. The old single-slot app (1984 KB) was 98% full.
-
-Until 2026-11 the slots were 2496 KB (`partitions-8MiBplus-ota.csv`, ~11 MB
-of file system). An OTA never changes the partition table: the slim app
-runs in the old slots too (MicroPython finds the file system after the
-last partition on the board's own table), and the board gets the ~1.4 MB
-more file system only with the move below.
+The firmware is built for `boards/GPS_LOGGER_S3`: MicroPython's
+`ESP32_GENERIC_S3` with two 1792 KB OTA app slots
+(`boards/GPS_LOGGER_S3/partitions-ota.csv`, 8 MB flash; the file system takes
+the ~4.4 MB after them) and the bootloader's rollback on. It leaves out what the
+logger never uses: BLE, ESP-NOW, Ethernet, mDNS queries, the SD card and I2S (the
+mDNS responder stays, for `http://<HOSTNAME>.local/`), and of the frozen packages
+all but the port's own modules (asyncio, umqtt, webrepl, mip, requests...).
 
 **Once, over USB:** `--migrate` moves a board to this table. It erases the
 whole flash, file system included, so first let every point upload and copy
@@ -383,7 +308,7 @@ the files off:
 B=~/.config/gps-logger/migrate-$(date +%Y%m%d); mkdir -p "$B" && chmod 700 "$B"
 .venv/bin/mpremote connect /dev/ttyACM0 cp :/.env "$B/env" + cp -r :/hist "$B/" + reset
 chmod 600 "$B/env"
-PORT=/dev/ttyACM0 tools/build_firmware.sh --migrate   # 16 MB only; backs up the first 4 MB
+PORT=/dev/ttyACM0 tools/build_firmware.sh --migrate   # 8 MB only; backs up the first 4 MB
 # put .env back (with OTA_URL / OTA_KEY added), /hist too, then:
 .venv/bin/mpremote connect /dev/ttyACM0 cp "$B/env" :/.env + cp -r "$B/hist" :/
 PORT=/dev/ttyACM0 ./deploy.sh
@@ -499,25 +424,19 @@ otadata, so that slot boots even after an OTA had switched to the other.
 ## Using it
 
 Power it on: the logger starts by itself, sets up the GPS, connects to WiFi
-and shows the status screen (or runs headless).
-
-**OLED:** connected SSID (never the password), GPS state, mode (`LOG`
-offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
+and shows the route and its state on the display (see [Hardware](#hardware)).
 
 **Serial console** (115200 baud) lines worth knowing:
 
 | Line | Meaning |
 |------|---------|
-| `gps setup ok` / `no ack` / `again` | 5 Hz setup acknowledged, not answered, or sent again |
-| `gps setup pvt ok` / `no ack` | The NAV-PVT setup (u-blox M8/M10) acknowledged or not answered |
-| `gps pvt no NAV-PVT - NMEA` / `gps pvt refused - NMEA` | 10 s after an acknowledged NAV-PVT setup no NAV-PVT came, or the receiver NAKed a message frame twice (a NAK is sent again once: an ACK names only class and id, so a late NAK of the frame before looks like its answer): NMEA for the rest of the boot (also in the diagnostic log as `gps pvt …, NMEA this boot`) |
-| `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an acknowledged setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
-| `gps setup unverified: no fix` | 30 minutes after an acknowledged setup still no fix to check it by: no verdict |
-| `gps rate N ms refused` | The receiver answered the rate (CFG-RATE) with a NAK: it stays at 1 fix a second, the rest of the setup goes on acknowledged, and 1 fix/s is then no "not taken" verdict |
+| `gps setup ok` / `no ack` / `again` | 5 Hz setup answered, not answered, or sent again |
+| `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an answered setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
+| `gps setup unverified: no fix` | 30 minutes after an answered setup still no fix to check it by: no verdict |
+| `gps setup lost: no GST` | No `GST` for 30 s with sentences coming (`UC_GST_LOST`): a restart whose banner was lost; it is set up again |
+| `gps refused <command>` | The receiver answered a command `$FAIL`. A refused rate (`CFGNAV`): it stays at its rate, the rest of the setup goes on, and 1 fix/s is then no "not taken" verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
-| `gps reset loop? N banners, no NMEA in 10 s` | The receiver keeps restarting before it even finishes its banner (seen on the board): check the GPS power and wiring. The diagnostic log gets the first one, then `gps reset loop N more windows` every 5 minutes and when it ends |
 | `gps reset loop? 5 restarts in N s` | The receiver restarted 5 times within 10 minutes, with NMEA in between (seen on the board after a flash): check the GPS power and wiring. While it loops, setups are 30 s apart (`GPS_STORM_WAIT`): each one blocks the loop for seconds. It counts as over after a quiet of twice its last gap between restarts (10-30 s) |
-| `gps nav5 refused` | The receiver NAKed the NAV5 filter settings; the 5 Hz setup goes on without them |
 | `wifi try` / `retry` / `fail` / `ok` | Connect attempts; `fail` carries the raw `status()` code and the time |
 | `wifi lost <ssid> rssi N` / `wifi fail <ssid> status N after N ms` / `wifi back <ssid> after T, N failed tries, rssi N` | Also in the diagnostic log (and on the status page): the link dropping with its last RSSI, a failed try, and the reconnect with how long it was down. One line of a kind per 5 minutes (`WIFI_DIAG_GAP`), the ones in between counted as `(+N more)` |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
@@ -532,7 +451,7 @@ offline, `LOG+UP` on WiFi, `BAD FULL`), free flash and points left to upload.
 | `wifi off until upload retry N s` | Uploads back off for N s (server down, 401): the radio sleeps until then |
 | `cpu freq N …` | The board refused that CPU clock; it runs at the firmware default |
 
-**Boot bypass:** hold the button (GPIO25, C6: GPIO10) while resetting to
+**Boot bypass:** hold GPIO7 low while resetting to
 skip the logger: REPL and `mpremote`, no watchdog. Use it to copy files off
 the device.
 
@@ -598,18 +517,14 @@ To queue a `.bad` again (a `.trb.bad` becomes a `.trk`):
 
 **Diagnostic log:** <a id="diagnostic-log"></a>the console is gone once
 the board is on a power bank, so the logger also appends to `/diag.log` on
-flash: a `boot cause N` line at every start, a `gps <model>` line once
-the receiver says what it is (UBX-MON-VER, e.g. `gps u-blox M10, ROM SPG
-5.10 (7b202e), PROTVER=34.10`; after a receiver restart only if the model
-changed), one status line a minute, a `stay left wifi` line when an away
+flash: a `boot cause N` line at every start, one status line a minute, a `stay left wifi` line when an away
 stay ends without a fix (see [Stays](#stays)), `gps reset loop …` lines
 (when the receiver keeps restarting, so they can be set against where you
 were), `gps setup not taken: …` (at most one per 10 minutes,
-`GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `gps pvt no
-NAV-PVT, NMEA this boot` / `gps pvt refused, NMEA this boot` (NAV-PVT given
-up, see [GPS](#gps)), `gps silent N s, no bytes from the receiver` and
-`gps back after N s` (no byte from the receiver for a minute, `GPS_SILENT`;
-an M10 with its RX held low stays silent until a power cycle), `upload err …`
+`GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `gps setup lost: no
+GST`, `gps refused <command>`, `gps silent N s, no bytes from the receiver` and
+`gps back after N s` (no byte from the receiver for a minute, `GPS_SILENT`),
+`upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
 used, `clock set <UTC>` once a boot when the board clock is set from the
@@ -643,31 +558,28 @@ the *Event log* below; `/status.json` still carries the last 15 lines,
 | `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; exact before a deliberate reset, which writes a status line first; `0` = under a minute, `-` = no log) |
 | `up` | Seconds since boot (summed from tick differences, so it does not wrap after 12.4 days) |
 | `utc` | GPS time, `-` until the receiver has one |
-| `nmea ok/bad` | Valid and broken NMEA sentences so far (they stop growing on the NAV-PVT path, until a receiver restart) |
+| `nmea ok/bad` | Valid and broken NMEA sentences so far |
 | `gpsboots` / `loops` | Receiver restarts and reset-loop warnings so far |
-| `sats seen/used` | Satellites with a signal (from the receiver's satellite list, polled once a minute) and used in the fix |
+| `sats seen/used` | Satellites with a signal (from the receiver's satellite list, its GSV every 5 s) and used in the fix |
 | `fix` | `No_data!`, `Waiting_fix`, `2D_fix`, `3D_fix` |
-| `hdop`, `points`, `sent` | Last HDOP (`None` on the NAV-PVT path: its accuracy is `hacc` in `/status.json`), points logged and uploaded since boot |
+| `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
 | `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`); at home, if it stays low for 5 minutes with tracks waiting, the board reboots cleanly (at most once per 30 minutes) |
-| `ubx G/B` / `hacc` | Only on the NAV-PVT path (u-blox M8/M10), where NMEA stops after the setup and HDOP stays `None`: UBX frames good/bad, and the receiver's horizontal accuracy estimate of the last fix in metres (`-` without a fix). The status page shows the same: `UBX BAD` instead of `NMEA BAD` in the strip, ±hAcc in the event log |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
 `http://192.168.1.60/`) and the same data as JSON at
 `/status.json`: fix, satellites seen/used ("used" from the satellite list:
 GGA stops at 12) and the satellite list with its age (system and number,
-e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`, `SBAS 123`; signal in
-dBHz, elevation, azimuth, used), HDOP, the horizontal accuracy `hacc` (m,
-NAV-PVT only), the fix source `fix_src` (`pvt` / `nmea`), GPS time,
+e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`; signal in
+dBHz, elevation, azimuth, used), HDOP, GPS time,
 position (`position` to 5 decimals, `pos6` to the track line's 6; both
 `null` once the last second is over 3 s old, `NO_DATA`, so a silent
 receiver's last fix is not shown as live), NMEA
-counts, UBX frames `ubx` (good / broken: a bad checksum, or
-a NAV-PVT of a wrong length), the GPS link (`rx_bytes` read since boot,
+counts, the GPS link (`rx_bytes` read since boot,
 wrapping at 2^30,
 `rx_age_s` / `good_age_s`: seconds since the last byte / the last whole
-NMEA sentence or UBX frame, `null` for none yet), the receiver model,
+NMEA sentence, `null` for none yet), the receiver model,
 receiver restarts; points logged, waiting and uploaded,
 quarantined `.bad` files, upload state, `upload_age_s` (seconds since the
 last accepted batch, `null` for none since boot), the day history's
@@ -682,11 +594,10 @@ the accent; green, amber and red only for meaning). On top, a darkened
 grey OSM-carto map (through the homelab Atlas tile proxy,
 `atlas.crusand.org/tiles/geoapify/`, which answers pages on a
 private-network address such as the board's) is
-centred on the position, with a glowing dot, an accuracy ring (NAV-PVT's
-accuracy as it is, else HDOP x 2.5 m) and the coordinates (N/S, E/W) with
+centred on the position, with a glowing dot, an accuracy ring (HDOP x 2.5 m)
+and the coordinates (N/S, E/W) with
 ± that accuracy; without a fix it says `NO FIX`. Over its lower edge a strip
-shows fix, satellites used/seen, `ACC ±N m` (NAV-PVT; amber over 20 m) or
-HDOP, points waiting
+shows fix, satellites used/seen, HDOP, points waiting
 for upload, WiFi signal and the share of bad NMEA sentences. The WiFi cell
 is an arc icon (0–3 arcs lit) and the link quality in per cent, 2 x (RSSI +
 100) capped at 0–100 (-63 dBm = 74 %), with the dBm beside it on a wide
@@ -703,8 +614,7 @@ to fill the column next to *Systems*; signal bars and *Systems* on the right):
     (green, amber with a warning, red with an error), then a row each with
     its detail and `NOMINAL` / `WARN` / `ERROR`: `GPS RECEIVER` (model, fix,
     satellites used/seen; amber without a 3D fix, a failed setup or reset
-    loops), `GPS LINK` (B/s, the last whole frame, the fix source with the
-    UBX counts, restarts, bytes read), `UPLOAD` (state, sent, errors, `.bad`
+    loops), `GPS LINK` (B/s, the last whole frame, restarts, bytes read), `UPLOAD` (state, sent, errors, `.bad`
     files), `MEMORY` (the largest IDF block, red under the 48 KB TLS needs,
     and the Python heap), `FIRMWARE` (the build date, the OTA state);
   - *Storage module*: how long the free flash holds a 1 Hz drive (`≈18
@@ -731,7 +641,7 @@ to fill the column next to *Systems*; signal bars and *Systems* on the right):
     an icon by meaning (red: crash, caught bug, GPS reset loop, GPS silent,
     track write error, flash full, upload error, a rolled back update;
     amber: update check, memory reboot, clock back, WiFi failed / lost,
-    upload waiting for memory, GPS setup refused, NAV-PVT given up, `.env`;
+    upload waiting for memory, GPS setup refused, `.env`;
     cyan / green: boots, updates, WiFi back; grey: receiver start, stay
     ended, other), the count (`(+N more)` and `N more windows` included),
     a detail (e.g. `5 restarts in 3–24 s`, `krumpli · status 201 · 12 s
@@ -807,8 +717,8 @@ to its day's file as its record again, just before the batch is
 committed (a commit that then fails sends the batch again, and its points
 are drawn twice over the same line). So the map shows a trip from when it is
 up: at home about a minute after the track closes, on a hotspot as it
-uploads; points still waiting are not drawn. A `.trk` (`TRK_BIN` off, or
-written by older firmware) goes there when written, as before. A track
+uploads; points still waiting are not drawn. (A `.trk` written by older firmware
+went there when written, and is not added again.) A track
 uploaded after a newer one (held back, retried) lands later in the day
 file; the page puts the points in time order again. The newest 7 days are
 kept (`HIST_DAYS`). The history yields to the tracks: under 1 MB
@@ -850,7 +760,7 @@ read in between; each receive or send may wait 2 s (`WEB_TIMEOUT`) and the
 whole request 5 s (`WEB_DEADLINE`, which also cuts the waits short near
 its end), then the client is dropped, so a slow
 phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
-measured at most every 30 s (also for the OLED) and the waiting files are
+measured at most every 30 s and the waiting files are
 counted at most every 10 s. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
 `WEB=0` in `.env` turns both off. On the other networks the page is up
@@ -869,107 +779,27 @@ console line.
 ### GPS
 
 - **5 Hz with averaging.** At every boot the logger asks the receiver for 5
-  fixes a second (UBX-CFG-RATE) and, to fit 9600 baud, for `RMC` and `GGA`
-  every fix, `GST` once a second, `GSA` every 5 s (`GSA_EVERY`) and no
-  `GSV`, `GLL` or `VTG` (UBX-CFG-MSG). A multi-GNSS receiver (M8, M10) sends
-  one `GSA` per system: once a second that took the M10 to ~104% of the 960
-  B/s, and it dropped sentences and the satellite list; now ~850 B/s. More
-  than 8 `GSA` in a second (`GSA_MAX`) means the receiver did not take the
-  rate, and it is set up again. The setup is not saved in the receiver.
-- **NAV-PVT on a u-blox M8/M10** (`.env` `GPS_PVT=auto`, the default).
-  Once UBX-MON-VER names the receiver (hardware `000A0000` M10 or
-  `00080000` M8, else by `PROTVER`: 23 and later like the M10, 15–22 like
-  the M8, older ones such as the NEO-6M keep NMEA), the setup asks for
-  UBX-NAV-PVT every epoch and turns every NMEA sentence off: 100 bytes a
-  fix, 500 B/s at 5 Hz instead of ~850. An M10 gets one UBX-CFG-VALSET to
-  RAM with the `CFG-MSGOUT-*_UART1` keys (`UBX_NAV_PVT` 1; `NMEA_ID_GGA`,
-  `RMC`, `GSA`, `GST`, `GSV`, `GLL`, `VTG` 0; key ids from the u-blox M10 SPG
-  5.10 interface description, UBX-21035062), an M8 the legacy UBX-CFG-MSG
-  per message; rate and NAV5 frames are the same as on the NMEA path. The
-  boot setup is the NMEA one (the model is not known yet); MON-VER answers
-  within the first second and the NAV-PVT setup follows within 5 s. The
-  check after the setup counts NAV-PVT epochs (they come without a fix
-  too) and needs no `GST`; an NMEA sentence turned off that still comes
-  counts as not taken. No NAV-PVT at all 10 s after an acknowledged setup
-  (`GPS_VERIFY`), or a message frame refused twice (a NAK is sent again
-  once: an M8's CFG-MSG frames all share one class and id, and a late NAK
-  of an earlier one looked like its answer): NAV-PVT is given up for the
-  boot (`gps pvt …, NMEA this boot` in the diagnostic log) and the NMEA setup
-  follows. A receiver that does not answer the rate frame gets the message
-  frames once, blind: on an M8 the NMEA set (one lost NAV-PVT frame among
-  the CFG-MSG ones would leave it silent), on an M10 its one VALSET (all or
-  nothing); the acknowledged NAV-PVT setup follows. A restarted receiver is
-  back at its NMEA defaults: its banner counts as before, its NMEA seconds
-  keep the track going, and the next setup turns NAV-PVT on again. Its
-  model is forgotten and MON-VER asked at once (a module swapped while
-  running is another model): until it answers the setup is the NMEA one,
-  safe on any receiver. The satellite list (UBX-NAV-SAT) and MON-VER polls work the
-  same. Each frame is read with one `struct.unpack_from` on the receive
-  buffer.
-- **The NMEA setup turns NAV-PVT off.** A VALSET to RAM outlives an ESP
-  reset (the receiver keeps its power), so after a NAV-PVT boot a boot with
-  `GPS_PVT=0` (or one that gave NAV-PVT up) found it still coming beside the
-  NMEA, and both overran 9600 baud. Every NMEA setup now ends with a
-  UBX-CFG-MSG for NAV-PVT at rate 0 (legacy CFG-MSG, as the model is not
-  known yet at the first setup; the M8 and the M10 acknowledge it). A NAK of
-  that frame alone (a u-blox 6 has no NAV-PVT) does not fail the setup. A
-  NAV-PVT frame that still comes in the NMEA mode is not used and counts as
-  a message the setup turned off, so the setup is sent again.
-- **Setup retries.** It is sent again while the receiver still sends the
-  sentences it turns off, and also while the setup is not acknowledged (an
-  ACK lost, a silent receiver that took the blind burst), less and less
-  often. 10 s after an acknowledged setup (`GPS_VERIFY`) it is checked: valid
-  seconds still at one fix each, or NMEA but no `GST` (without it the
-  `GPS_MAX_STD` filter is off), count as not taken, and it is sent again.
-  Only valid seconds tell: before the first fix (a setup at boot, indoors,
-  where an M10 may send no `GST` either) the check waits for 3 of them, up
-  to 30 minutes (`GPS_VERIFY_MAX`). It counts as taken only with 5 fixes a
-  second and `GST`.
-- **Receiver filter** (UBX-CFG-NAV5, sent right after the 1 Hz frame):
-  portable dynamic model (`GPS_DYN_MODEL`, `.env` `GPS_MODEL`: 3
-  pedestrian, 4 automotive, …), 3D fixes only
-  (`GPS_FIX_MODE`: a 2D fix guesses the altitude and is tens of metres off
-  horizontally), satellites below 10° ignored (`GPS_MIN_ELEV`, the
-  multipath-prone ones) and static hold below 0.5 m/s (`GPS_STATIC_HOLD`:
-  the receiver freezes its position while parked; a walk at 1.4 m/s is well
-  above). Only these four settings are applied (mask 0x47); the
-  receiver's position masks stay as they are. A receiver that refuses NAV5
-  (`gps nav5 refused`) still gets the 5 Hz setup.
-- **Satellite list without GSV.** `GSV` does not fit next to 5 Hz, so the
-  logger polls the satellite list once a minute (`SV_POLL`) and when a
-  status page is opened and the list is older than 5 s (waiting up to 0.7 s
-  for it). Until the receiver answered one of them it asks for both
-  UBX-NAV-SVINFO (u-blox 6/7/M8, ~210 bytes; numbers only: GPS 1–32, SBAS
-  e.g. EGNOS 120–158) and UBX-NAV-SAT (M8 and later, with the system of
-  each satellite; an M10 knows only this one; elevation `-` while its
-  position is not known yet), then only the one that
-  answered. The binary answer is cut out of the NMEA stream by its length;
-  sync bytes with a bad checksum (junk) are skipped alone, so the NMEA
-  after them is still read. A poll due with a setup goes right after it.
-  UBX-MON-VER is asked for with it until the receiver names its model. A
-  receiver restart (also a module swapped while running) forgets the list,
-  the message and the model, so a new receiver is asked anew.
-- **Reliable setup.** Every frame is sent until the receiver acknowledges it
-  (UBX-ACK, up to 4 tries). It starts with a switch to 1 Hz, and 5 Hz is
-  asked only once every message frame was acknowledged. Reason: at 5 Hz with
-  all sentences on, the receiver's output overruns 9600 baud, and then it
-  drops incoming frames (measured). What is read while it waits for an ACK
-  goes through the normal parser: the NMEA seconds are kept, and a start-up
-  banner counts as a restart (it is set up again).
-- **When it does not answer:** the message frames are sent once without
-  waiting and the rate is left alone. If a frame goes unanswered mid-setup,
-  the rest goes out the same way and it stays at 1 Hz. A setup blocks the
-  loop about 4 s at most (`GPS_SETUP_MAX`): an overrun receiver whose ACKs
-  come seconds late took 10-30 s, so what is not acknowledged by then goes
-  out once without waiting, as if it did not answer.
-- **Retries.** While sentences it turned off keep coming, the setup is sent
-  again: after 5 s, and for a receiver that never answers less and less often
-  (up to 5 minutes). One that acknowledges every setup but keeps sending
-  them gets the second retry after 5 s too, then 10, 20, 40 s and every
-  minute (`GPS_IGNORED_MAX`). A start-up banner (power dip) sets it up again
-  at once and starts that backoff afresh. A receiver that ignores everything
-  (or an unwired ESP TX) stays at 1 Hz, and each second's average is then
-  that one fix.
+  fixes a second and for `RMC` and `GGA` every fix, `GST` once a second, `GSA` and
+  `GSV` every 5 s, and no `GLL` or `VTG` (see [Hardware](#hardware)). More than 8
+  `GSA` in a second (`GSA_MAX`) means the receiver did not take the rate, and it
+  is set up again. The setup is not saved in the receiver.
+- **Setup and retries.** It is sent again while the receiver still sends the
+  sentences it turns off (`GLL`, `VTG`; `GSV` stays on), and also while the setup
+  is not answered, less and less often (up to 5 minutes). Each command waits 300 ms
+  for its `$OK` (`UC_ACK_WAIT`); the first one that gets no answer ends the setup,
+  `$FAIL` is said and the rest goes on. 10 s after an answered setup
+  (`GPS_VERIFY`) it is checked: valid seconds still at one fix each, or NMEA but no
+  `GST` (without it the `GPS_MAX_STD` filter is off), count as not taken, and it
+  is sent again. Only valid seconds tell: before the first fix (a setup at boot,
+  indoors) the check waits for 3 of them, up to 30 minutes (`GPS_VERIFY_MAX`). It
+  counts as taken only with 5 fixes a second and `GST`. One that answers every
+  setup but keeps sending what it turned off gets the second retry after 5 s too,
+  then 10, 20, 40 s and every minute (`GPS_IGNORED_MAX`). A start-up banner (power
+  dip) sets it up again at once and starts that backoff afresh; no `GST` for 30 s
+  with sentences coming (`UC_GST_LOST`) is a restart whose banner was lost.
+- **Satellite list.** From `GSV`, one list a `GSV_EVERY` (5 s): the same satellite
+  on two bands counts once, with its stronger signal; used from `GSA`. A receiver
+  restart forgets the list and the model (`$PDTINFO`), which is asked anew.
 - **Averaging.** The valid `GGA` positions, altitude and HDOP of each UTC
   second are averaged and published when the next second starts (`RMC`
   positions if a second had no `GGA`). `GST` gives the receiver's own error
@@ -987,27 +817,10 @@ console line.
   exponent), at most 90° / 180° with its own hemisphere letters; a number
   field plain decimal (no exponent, `nan` or `inf`). Anything else makes the whole sentence bad
   (counted in `nmea` good / bad), none of it used.
-- **Midnight.** Only `RMC` carries the date. A second that runs back past
-  midnight without its own `RMC` has no date, so it is not a fix rather than
-  a day off.
-- **NAV-PVT averaging.** A NAV-PVT epoch is a fix when `gnssFixOK` is set,
-  `invalidLlh` is not and the fix type is 2D or 3D (as a `GGA` fix is today;
-  NAV5 asks for 3D only, a 2D fix omits the altitude). Its position stays
-  an integer in 1e-7 degrees: the fixes of a second are averaged as integer
-  offsets from its first fix, weighted by 1/hAcc² (the receiver's
-  horizontal accuracy estimate; 0 counts as 1 mm), and fixes above
-  `PVT_MAX_HACC` count only in a second without a better one. Above
-  `AVG_MAX_SPEED` the point is the second's first fix, as on the NMEA path.
-  The second keeps its mean hAcc (or the first fix's), altitude (`hMSL`)
-  and ground speed. Every epoch carries its date (when `validDate`), so
-  midnight needs nothing special. The track line is printed from the
-  integers (rounded half away from zero to 6 decimals), so the
-  single-precision float of the board (~3.8e-6 degrees, ~0.4 m at 47°)
-  no longer quantizes the points.
-- **Clock.** The board clock (for TLS certificate dates) is set from
-  NAV-PVT time only when it is valid and fully resolved and its accuracy is
-  under 1 s (`PVT_MAX_TACC`); then it needs no position fix (indoors at
-  home), unlike the NMEA path.
+- **Midnight.** Only `RMC` carries the date, and only with a fix (before one the
+  UC6580's `RMC` carries a made-up date). A second that runs back past midnight
+  without its own `RMC` has no date, so it is not a fix rather than a day off.
+- **Clock.** The board clock (for TLS certificate dates) is set from a fix.
 
 ### Points and track files
 
@@ -1021,26 +834,22 @@ console line.
 - **Filter.** Skipped: fresh HDOP above 5, or a GST estimate above 20 m (the
   larger of latitude and longitude, 1σ). A cold start can show a good HDOP
   while the position walks in from far away (measured: 230 m, over 65 s); GST
-  catches it. A NAV-PVT second instead: its accuracy estimate above 20 m
-  (`PVT_MAX_HACC`); HDOP and GST apply only to NMEA seconds. 2D fixes omit
+  catches it. The UC6580's does not (0.3 m while 4 m off), so its first minute after
+  a start counts only above 15 km/h (`UC_SETTLE`). 2D fixes omit
   altitude. A fix dated before 2020 or from 2088
   on is not used at all: a receiver past a GPS week rollover reports 1999
   (read as 2099) or 2000. An NMEA fix is a GGA quality of 1–5
   (`GGA_FIX_MAX`) and an RMC mode other than `E`: an estimated (dead
-  reckoning) position is no fix, as on the NAV-PVT path.
-- **Format.** `/gpx/YYYYMMDD_HHMMSS.trk`: a `#TRK1` header, one point per
-  line (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop
-  empty when unknown), `-` for a new segment and an `#END` footer. Reading
-  stops at the footer: bytes after it are left over from a longer write
-  that failed (points the logger had dropped), and the file counts as
-  complete. Older `.gpx` files are still uploaded.
-- **Binary tracks (TRKB).** New files are `/gpx/YYYYMMDD_HHMMSS.trb`
-  (`TRK_BIN`): the same TRK1/TRK2 lines, each stored as its difference from
-  the line before, ~7 bytes a point on a 1 Hz drive (measured in the
-  tests: 7.3 TRK1, 7.0 TRK2, against 47 and 49 as text), so the flash holds
-  about 6-7 times as many. Lossless: every line decodes byte for byte to
-  its text, so the upload JSON, the `.bad` copy and the day history are
-  what a `.trk` gives.
+  reckoning) position is no fix.
+- **Binary tracks (TRKB).** Track files are `/gpx/YYYYMMDD_HHMMSS.trb`: text lines
+  (`lat,lon,ele,hdop,YYYYMMDDTHHMMSSZ`, about 46 bytes; ele and hdop empty when
+  unknown), each stored as its difference from the line before, ~7 bytes a point
+  on a 1 Hz drive (measured in the tests), so the flash holds about 6-7 times as
+  many. Lossless: every line decodes byte for byte to its text, so the upload JSON,
+  the `.bad` copy and the day history take the text. `-` starts a new segment and an
+  `#END` footer ends the file. Reading stops at the footer: bytes after it are left
+  over from a longer write that failed (points the logger had dropped), and the
+  file counts as complete.
   - Records: a `#TRKB` header; a keyframe, `=` + the whole text line; delta
     records, a flag byte (0x80 | bit 0: a time step other than 1 s
     follows, bits 1-5: lat, lon, ele, hdop/acc, speed changed) and one
@@ -1073,21 +882,13 @@ console line.
     cannot outgrow the decode buffer. A `.pos` keyframe of `-1` means none
     was read yet (a damaged first keyframe): the reader goes on from the
     offset and drops deltas up to the next keyframe.
-  - Firmware from before TRK_BIN does not list `.trb` files: after an OTA
-    rollback they wait (and do not block the OTA check from coming back) for
-    the next forward update. `TRK_BIN = False` writes `.trk` again.
-- **TRK2.** A file opened while the fixes come from NAV-PVT has a `#TRK2`
-  header and `lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ` lines (~51 bytes): acc
-  the horizontal accuracy in whole metres, rounded up and at least 1 (see
-  Fields), speed in m/s with one decimal (each empty when unknown). The time stays the last field of every line, as the writer and
-  the readers rely on that. A file keeps its format for life: NMEA seconds
-  in a TRK2 file (a receiver restart) are written with acc = HDOP x 5 and no
-  speed, NAV-PVT seconds in a TRK1 file (opened before the receiver was
-  known) with hdop = acc / 5. Readers (upload, point count, `.bad` copies,
-  `trk2gpx.py`) tell the two by the line itself (4 or 5 commas). The
-  departure ring keeps the fields of both formats and the integer position,
-  so a rebuilt way out is byte for byte the line that would have been
-  written.
+- **Text tracks.** A `.trk` holds the same lines as text (a `#TRK1` header). None
+  is written now, but they are read and uploaded: a `.trb.bad` is text, and it goes
+  up again renamed `.trk`. A `#TRK2` file (`lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ`,
+  an older firmware on another receiver) is read too: readers (upload, point count,
+  `.bad` copies, `trk2gpx.py`) tell the two by the line itself (4 or 5 commas). The
+  departure ring keeps the fields of a line, so a rebuilt way out is byte for byte
+  the line that would have been written.
 - **Power-loss safe.** Points are written in batches every 60 s. Each write
   replaces the footer with the new points plus the footer; LittleFS commits
   on close, so a power cut leaves the old or the new version. A line cut off
@@ -1218,9 +1019,9 @@ tell a stay from a drive, so the stay filter works on positions.
 3. Each try is polled from the main loop (~12 s deadline), so GPS sampling
    goes on. An AP seen at ≥ −75 dBm (a hidden home: one of its learned
    BSSIDs at ≥ −75 dBm, not a stranger's blank AP) gets one immediate retry:
-   on the C6 the first association after a cold boot often fails after
-   ~7.5 s with status 202 although the password is right, and the retry
-   connects within ~1 s. A 202 on an AP the scan saw is retried at any
+   the first association after a cold boot can fail after ~7.5 s with status 202
+   although the password is right (measured on the earlier ESP32-C6, not confirmed
+   on the S3), and the retry connects within ~1 s. A 202 on an AP the scan saw is retried at any
    RSSI: the board's home AP reads −65 to −75 dBm, and a reading just under
    −75 skipped the retry, so the reconnect after a drop failed round after
    round.
@@ -1260,20 +1061,11 @@ tell a stay from a drive, so the stay filter works on positions.
 many power banks count as a load, and they switch off. The 20 Ah bank used
 here switched off after 1 hour; with a scan every 15 s, after 3 hours, so it
 averages the load. Every 5 s (`KEEPALIVE`) one pulse goes out, not while the
-radio is on anyway (unless `KEEPALIVE_CONNECTED=1`), and also without WiFi
-set up at all (no `.env`, no SSID). What the pulse is (`KEEPALIVE_MODE`):
-
-- `scan` (default): the radio is turned on for one scan (~2 s at ~100 mA,
-  about +40 mA on average) and off again. It blocks the main loop for the
-  scan (GPS seconds are queued, not lost). The only pulse measured to keep
-  the 20 Ah bank on longer.
-- `radio`: the radio is turned on and off again, no scan. The start-up
-  alone is a 100–200 mA burst for a fraction of a second, ~5 mA on average:
-  less than the +13 mA that still let the 20 Ah bank switch off after 3 h,
-  so only for banks that react to a burst rather than the average.
-- `gpio`: the keep-alive pin (`KEEPALIVE_PIN`) is high for 0.1 s and drives
-  a load resistor through a MOSFET (see [Hardware](#hardware)): a ~230 mA
-  burst the bank cannot miss, ~5 mA on average, nothing blocked.
+radio is on anyway, and also without WiFi set up at all (no `.env`, no SSID): the
+radio is turned on for one scan (~2 s at ~100 mA, about +40 mA on average) and off
+again. It blocks the main loop for the scan (GPS seconds are queued, not lost). The
+only pulse measured to keep the 20 Ah bank on longer; the same scan watches a stay's
+access points and the home network.
 
 With the status page on (`WEB`), a keep-alive scan that sees a home network
 (a hidden home: one of its learned BSSIDs) at ≥ −85 dBm (`SEEN_MIN_RSSI`:
@@ -1286,10 +1078,9 @@ link that dropped somewhere the scan cannot vouch for (a hotspot with
 for `WEB_SEARCH` instead of waiting for the scan; a round that fails after
 the radio slept on purpose does not count as a drop.
 
-**CPU clock:** the main loop runs at 80 MHz (`CPU_MHZ`), which saves
-15–25 mA on the original ESP32 against its 240 MHz default. A POST runs at
+**CPU clock:** the main loop runs at 80 MHz (`CPU_MHZ`). A POST runs at
 160 MHz (`CPU_MHZ_UP`) so the TLS handshake stays quick, then the clock
-drops back. The UART runs off the fixed APB clock, so 9600 baud is unaffected.
+drops back. The UART runs off the fixed APB clock, so its baud rate is unaffected.
 `CPU_MHZ=0` leaves the firmware default. A failed clock change is tried
 again (3 tries); a clock refused every time is left alone for 30 minutes
 (`FREQ_RETRY`), then tried again, so one passing failure of the drop-back
@@ -1328,12 +1119,9 @@ home.
 - Finished files go oldest first, 50 points per POST, to
   `<GEO_URL>/api/v1/overland/batches`. The file being recorded is never sent.
 - **Fields.** Each point is a GeoJSON feature with `timestamp`, `altitude`,
-  `horizontal_accuracy` and `device_id` properties; a TRK2 point also has
-  `speed` (m/s). `horizontal_accuracy` is HDOP x 5 m (`HDOP_M`) for a TRK1
-  line and the receiver's own estimate for a TRK2 line, in whole metres,
-  rounded up and at least 1: Dawarich keeps `accuracy` as an integer, and
-  the M10's 0.4-0.5 m estimate with SBAS was stored as 0 (on a walk the
-  track was ~5 m off the phone's). Dawarich's Overland
+  `horizontal_accuracy` and `device_id` properties; a TRK2 line of an older track
+  also has `speed` (m/s). `horizontal_accuracy` is HDOP x 5 m (`HDOP_M`), on a TRK2
+  line the receiver's estimate it holds. Dawarich's Overland
   importer (`app/services/overland/params.rb`) stores `horizontal_accuracy`
   as `accuracy`, `speed` as `velocity`, `altitude` and `vertical_accuracy`;
   a `course` would land only in the raw data, so it is not stored or sent
@@ -1451,40 +1239,32 @@ home.
 - An uncaught exception is printed, the batch is flushed (without the drift
   held for a stay), and the board resets after ~1 s.
 - The [boot loop guard](#using-it) stops repeated crashes (and retries
-  every 30 minutes); a missing or failing OLED is switched off instead of
-  crashing.
+  every 30 minutes); a failing display goes dark instead of crashing.
 
 ## Configuration
 
-Constants at the top of `gps_logger.py`. Defaults are tuned on the ESP32-C6
-with a NEO-6M; most never need changing.
+Constants at the top of `gps_logger.py`; most never need changing.
 
 **GPS and points**
 
 | Constant | Default | Meaning |
 |----------|---------|---------|
 | `GPS_HZ` | 5 | Fixes a second asked from the receiver, averaged into one point |
-| `GPS_DYN_MODEL` / `GPS_FIX_MODE` | 0 (portable) / 2 (3D only) | UBX-CFG-NAV5 dynamic platform model and fix mode |
-| `GPS_MIN_ELEV` / `GPS_STATIC_HOLD` | 10° / 50 cm/s | NAV5 elevation mask and static hold threshold (0 = off) |
-| `GPS_LOOP_WINDOW` / `GPS_LOOP_BANNERS` | 10 s / 3 | Banner starts with no NMEA in this window = `gps reset loop?` |
+| `GPS_LOOP_WINDOW` | 10 s | How often the receiver's stamps are looked at (`_stamps_old`) |
+| `UC_SETTLE` / `UC_SETTLE_KMH` | 60 s / 15 km/h | How long after a start a fix counts only at this speed |
 | `GPS_FLAP_WINDOW` / `GPS_FLAP_RESTARTS` | 10 min / 5 | Full restarts within this window, NMEA or not = `gps reset loop?` |
 | `GPS_STORM_WAIT` / `GPS_STORM_QUIET` | 30 s / 10 s | Least time between setups while the receiver keeps restarting; quiet this long after a restart (in a storm twice its last gap, up to `GPS_STORM_WAIT`) and it is set up within `GPS_RETRY` |
 | `AVG_MAX_SPEED` | 10 km/h | Faster than this a second's point is its first fix, not the mean |
-| `GPS_ACK_WAIT` / `GPS_ACK_TRIES` | 1 s / 4 | Wait for a UBX-ACK, and tries per frame |
-| `GPS_SETUP_MAX` | 4 s | Longest a setup blocks the loop; frames not acknowledged by then go out once without waiting |
+| `UC_ACK_WAIT` / `UC_GST_LOST` | 300 ms / 30 s | Wait for a command's `$OK`; no `GST` this long with sentences coming: set up again |
 | `GPS_RETRY` / `GPS_RETRY_MAX` | 5 s / 5 min | Setup sent again while turned-off sentences keep coming (doubling while it does not answer) |
-| `GPS_IGNORED_MAX` / `GPS_VERIFY` | 60 s / 10 s | Cap on the doubling wait for a receiver that acknowledges but ignores the setup; when an acknowledged setup is checked (still 1 fix/s or no `GST` = not taken) |
+| `GPS_IGNORED_MAX` / `GPS_VERIFY` | 60 s / 10 s | Cap on the doubling wait for a receiver that answers but ignores the setup; when an answered setup is checked (still 1 fix/s or no `GST` = not taken) |
 | `GPS_VERIFY_MAX` / `GPS_NOT_TAKEN_SAY` | 30 min / 10 min | Longest the check waits for 3 valid seconds; least time between `gps setup not taken` lines in the diagnostic log |
-| `GPS_LOOP_SAY` | 5 min | Least time between reset-loop lines in the diagnostic log (the windows between are counted) |
 | `SECONDS_Q` | 8 | Averaged seconds queued for the logger |
-| `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP (NMEA) |
+| `MAX_HDOP` | 5 | Skip samples with a worse fresh HDOP |
 | `GGA_FIX_MAX` | 5 | Highest GGA quality that is a fix (6, estimated, is not) |
-| `GPS_MAX_STD` / `GST_HOLD` | 20 m / 6 s | Skip samples with a worse GST error estimate (NMEA); how long the last estimate covers seconds without one |
-| `GPS_PVT` | `True` (auto) | UBX-NAV-PVT instead of NMEA on a u-blox M8/M10 (`.env` `GPS_PVT`: `auto` / `0`) |
-| `PVT_MAX_HACC` | 20 m | Skip NAV-PVT seconds with a worse horizontal accuracy estimate; fixes above it count in a second's mean only when it has no better one |
-| `PVT_MAX_TACC` | 1 s | NAV-PVT time at least this accurate (and valid, fully resolved) sets the board clock |
-| `HDOP_M` | 5 m | Metres per HDOP unit: TRK1 `horizontal_accuracy`, and the conversion between a TRK1 hdop and a TRK2 acc |
-| `MIN_MOVE` | 1 m | Distance from the last point before a new one (`.env` `MIN_MOVE`). Standing still the receiver's static hold (below 0.5 m/s) and the 5-fix average keep the position from creeping past it |
+| `GPS_MAX_STD` / `GST_HOLD` | 20 m / 6 s | Skip samples with a worse GST error estimate; how long the last estimate covers seconds without one |
+| `HDOP_M` | 5 m | Metres per HDOP unit: `horizontal_accuracy` of a TRK1 line |
+| `MIN_MOVE` | 1 m | Distance from the last point before a new one (`.env` `MIN_MOVE`) |
 | `SAMPLE` | 1 s | Sampling interval when no averaged second is available (tests) |
 
 **Track files**
@@ -1530,7 +1310,6 @@ with a NEO-6M; most never need changing.
 | `WIFI_SLEEP` / `WIFI_IDLE` | 1 h / 10 s | Radio-off time once all is uploaded; how often that is checked |
 | `WIFI_WAKE_WAIT` | 60 s | A new stay away waits this long for its WiFi round |
 | `PB_KEEPALIVE` | 5 s | Keep-alive pulse interval while the radio sleeps (`.env` `KEEPALIVE`) |
-| `PB_MODE` / `PB_PIN` / `PB_PULSE_MS` | `scan` / 26 (C6: 2) / 100 ms | Pulse kind, gpio and pulse length (`.env` `KEEPALIVE_MODE`, `KEEPALIVE_PIN`) |
 | `WIFI_OFF_WAIT` | 60 s | An upload backoff at least this long turns the radio off until it is due |
 | `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
 | `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
@@ -1579,13 +1358,12 @@ with a NEO-6M; most never need changing.
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
 | `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
 | `WEB_PAGE_GZ` / `WEB_GZ_WBITS` / `WEB_PAGE` / `WEB_REFRESH` | `/web.html.gz` / 12 / `/web.html` / 15 s | The page on the board, kept only gzipped (as is to clients accepting gzip, inflated for the others); its window (2^12 = 4 KB of heap to inflate; `deploy.sh` and `--publish` use it); an older board's plain page, served while it is there; how often the page polls `/status.json` |
-| `TRK_BIN` / `KEY_EVERY` | on / 64 | New tracks as binary `.trb` (off: `.trk` text); delta records between two keyframes |
+| `KEY_EVERY` | 64 | Delta records between two keyframes of a `.trb` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply (and bytes at most per `/diag` reply) |
 | `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
-| `SV_POLL` / `SV_FRESH` / `SV_WAIT` | 60 s / 5 s / 0.7 s | Satellite list poll interval, how old it may be for a page, how long a page waits for it |
-| `SV_MISS` | 2 | Unanswered list polls after which a page no longer waits |
+| `SV_POLL` | 60 s | A satellite list younger than two of these gives the used count (else GGA) |
 | `GSA_EVERY` / `GSA_MAX` | 5 s / 8 | GSA round interval; more GSA a second means the rate was not taken |
-| `PB_CONNECTED` / `SEEN_WAIT` | off / 60 s | Pulses while connected (`.env` `KEEPALIVE_CONNECTED`); least time between home-seen wakes |
+| `SEEN_WAIT` | 60 s | Least time between home-seen wakes |
 | `WEB_REQ_MAX` / `WEB_CHUNK` | 2 KB / 1 KB | Request head read by the status page; reply bytes per send |
 | `DEVICE_ID` / `HOSTNAME` | `Dawarich-GPS-tracker` | Overland id and DHCP hostname (set in `.env`) |
 
@@ -1621,10 +1399,10 @@ every pull request:
   - `tools/build_firmware.sh` with a fake ESP-IDF, MicroPython tree,
     `esptool.py`, `mpremote`, `scp` and `ssh`: the `gps_frozen` marker,
     `--flash` touching nothing on the board before a successful write,
-    `--migrate`'s 16 MB check and private backup, `--publish` moving each
+    `--migrate`'s flash size check and private backup, `--publish` moving each
     file in from a `.tmp` and refusing a build not newer than the published
     one.
-- `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
+- `mpy-cross` 1.29 for `xtensawin`.
 - `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`, `tools/web_min.py`,
   `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
