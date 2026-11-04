@@ -112,13 +112,18 @@ firmware R6.0.0.0Build3700.
   RMC every fix, GST once a second, GSA and GSV every 5 s) at every boot, as a
   power cycle brings its defaults back. The satellite list comes from GSV.
 - **Display:** speed, fix and satellites on top, then WiFi and the clock (Hungarian
-  time), what waits for upload, and accuracy, altitude, free space, temperature
+  time), what waits for upload, and HDOP, altitude, free space, temperature
   and uptime; a row too long slides sideways. The backlight is always on.
   `gps_tft.py`, its fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
   socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
   fix after a power cycle (the receiver keeps nothing without power).
+- **Accuracy, measured standing outdoors:** half of the fixes within 2.3 m of the
+  middle after two minutes, 95% within 3.8 m, HDOP 0.9, ~26 satellites in use. It
+  starts 15 m off and takes about a minute to reach 5 m, so a fix's first minute
+  counts only above 15 km/h. Its GST does not show this (0.3 m while 4 m off).
+  It refuses SBAS (`$CFGSYS` bit 20: `$FAIL`).
 - **`GPS_SYS`** in `.env`: its `$CFGSYS` mask in hex, set once a boot when the
   receiver has another (it restarts it); without it the receiver's own stays.
 - **L5:** every system and band is on by default (`$CFGSYS` `H35155`), but

@@ -431,7 +431,7 @@ def reset():
               storm_at=None, boot_at=None, boot_last=None, boot_gap=0,
               svs=None, svs_at=None, sv_poll_at=None, sv_msg=None,
               gps_ver=None, sv_miss=0, gsa_at=None, gsa_n=0, uc_ok=0, uc_fail=0, uc_sys=None,
-              uc_sys_sent=False,
+              uc_sys_sent=False, fix_first=None,
               ack_id=None, ack=None, ack_n=0, rate_nak=False, checked=True,
               hz1=0, hz5=0,
               set_ok=0, gst_at=None, loop_more=0, loop_said=None,
@@ -562,6 +562,8 @@ def _publish():
         return
     a = ep["g"] or ep["r"]
     st["valid"] = a is not None
+    if a is not None and st.get("fix_first") is None:
+        st["fix_first"] = now
     st["epochs"] = a[4] if a else 0
     st["lat_i"] = st["lon_i"] = st["hacc"] = st["mps"] = None
     if a is None:
@@ -853,7 +855,7 @@ def _gps_restarted():
     # MON-VER answers the setup is the NMEA one, safe on any, then
     # (the other mode due: gps_check) the PVT one
     st.update(svs=None, svs_at=None, sv_msg=None, gps_ver=None,
-              gps_kind=None)
+              gps_kind=None, fix_first=None)
     if GPS_UC:
         return                           # (no UBX: _uc_setup asks PDTINFO)
     try:
@@ -1183,6 +1185,8 @@ def _ubx_ack(frame, t0):
 # text banner at start-up. Its GSV carries the satellite list (NAV-SAT on a
 # u-blox), one sentence set per signal.
 UC_ACK_WAIT = 300                        # ms for a command's $OK
+UC_SETTLE = 60000                        # ms after its first fix (_usable)
+UC_SETTLE_KMH = 15                       # at this speed a point counts at once
 UC_SYS = None                            # .env GPS_SYS: its systems and bands
                                          # (CFGSYS mask, hex), None = its own
 GSV_EVERY = 5                            # s between satellite lists
@@ -1535,7 +1539,7 @@ def _not_taken(now, why):
 
 _STAMPS = ("rx", "good", "pos_at", "hdop_at", "std_at", "gsa_at",
            "gst_at", "boot_at", "boot_last", "loop_said", "nt_said",
-           "pvt_at", "t_at")
+           "pvt_at", "t_at", "fix_first")
 
 def _stamps_old(now):
     """ticks_ms wraps every 2**30 ms, so a timestamp left alone for 12.4
@@ -4785,10 +4789,18 @@ def _usable(now):
     receiver's own error estimate at most GPS_MAX_STD (each when known).
     The estimate catches a cold start converging: measured on the board, a
     good HDOP (1.2-3) while the position walked in from 230 m away. A
-    NAV-PVT second: its horizontal accuracy at most PVT_MAX_HACC."""
+    NAV-PVT second: its horizontal accuracy at most PVT_MAX_HACC. A UC6580's
+    estimate does not catch it (0.3 m while 4 m off, measured), so its first
+    UC_SETTLE after a start count only moving: 15 m off at first, 5 m after
+    a minute (measured), which standing still draws as a walk."""
     if st.get("lat_i") is not None:
         h = st.get("hacc")
         return h is not None and h <= PVT_MAX_HACC
+    if GPS_UC:
+        a = st.get("fix_first")
+        if (a is not None and _age(now, a) < UC_SETTLE
+                and (st.get("speed") or 0) < UC_SETTLE_KMH):
+            return False
     hdop = _fresh_hdop(now)
     if hdop is not None and hdop > MAX_HDOP:
         return False
@@ -9307,9 +9319,6 @@ def _tft_state(now):
     hdop = st.get("hdop")
     if fix and hdop is not None:
         parts += [(_hu_f(hdop, "%.2f"), b), (" HDOP  ", m)]
-    std = _fresh_std(now)
-    if fix and std is not None:
-        parts += [("±" + _hu_f(std), b), (" m  ", m)]
     if fix and st.get("alt") is not None:
         parts += [(str(int(st["alt"] + 0.5)), b), (" m  ", m)]
     kb = _flash_kb()

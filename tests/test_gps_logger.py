@@ -18190,6 +18190,38 @@ check("UC-SYS: GPS_SYS sets the mask once a boot and only when it differs (it "
       and any(c.startswith(b"$CFGNAV") for c in _c3)
       and not any(c.startswith(b"$CFGSYS") for c in _c4), repr((_c1, _c3[:3])))
 
+# the first minute of a fix counts only moving (its GST says 0.3 m while 4 m off)
+hl.reset()
+hl.uart = _UcUart()
+_clock[0] += 1000
+hl.st.update(fix_first=_clock[0], speed=2.0, hdop=0.9, hdop_at=_clock[0], std=0.3,
+             std_at=_clock[0])
+_u0 = hl._usable(_clock[0])
+hl.st["speed"] = 50.0
+_u1 = hl._usable(_clock[0])
+hl.st["speed"] = 2.0
+_u2 = hl._usable(_clock[0] + hl.UC_SETTLE)
+hl.st["hdop_at"] = hl.st["std_at"] = _clock[0] + hl.UC_SETTLE
+_u2 = hl._usable(_clock[0] + hl.UC_SETTLE)
+gl.reset()
+gl.st.update(fix_first=_clock[0], speed=2.0)
+_u3 = gl._usable(_clock[0])
+hl.st["fix_first"] = 5
+_uc_feed(hl, "FWVer R6.0.0.0Build3700")
+_u4 = hl.st["fix_first"]
+check("UC-SETTLE: the first UC_SETTLE after a fix counts only above UC_SETTLE_KMH "
+      "(a car's trip is kept), then all; a restart starts it anew; not other "
+      "receivers", _u0 is False and _u1 is True and _u2 is True and _u3 is True
+      and _u4 is None, repr((_u0, _u1, _u2, _u3, _u4)))
+hl.reset()
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNRMC,120001.00,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V"),
+         _nmea("GNGGA,120001.00,4711.1214,N,01825.6160,E,1,14,0.80,120.5,M,40.0,M,,"))
+_clock[0] += 1000
+_uc_feed(hl, _nmea("GNRMC,120002.00,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V"))
+check("UC-SETTLE: the first published fix starts it", hl.st["fix_first"] is not None,
+      repr(hl.st["fix_first"]))
+
 # GSA: a burst is one round, wherever the second's clock falls in it
 hl.reset()
 hl.uart = _UcUart()
@@ -18259,6 +18291,7 @@ check("TFT-STATE: speed rounded and green with a fix, -- and red without; away: 
       _s1[:3] == ("47", "3D fix", 2) and _s1[3] == "22/28"
       and _s1[4][0][2][0][0] == "nincs WiFi  " and _s1[4][0][2][1][0] == "11:42"
       and _s1[4][1][2][0] == ("1 284", 3) and "0,97 HDOP" in _tx and "182 m" in _tx
+      and "±" not in _tx
       and not _fix2 and _s2[0] == "--" and _s2[1:3] == ("nincs fix", 4)
       and [p[0] for p in _s3[4][0][2]][0] == "krumpli"
       and "192.168.1.60" in [p[0] for p in _s3[4][0][2]]
