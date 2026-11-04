@@ -342,7 +342,7 @@ built before the SHA was recorded) it stops and asks for
 and the page anyway. A logger change means building and flashing the
 firmware again. In an emergency `FORCE_MPY=1 ./deploy.sh` installs
 `gps_logger.mpy` on a frozen firmware too, with a warning: it shadows the
-frozen module and takes its ~60 KB of Python heap again. To roll back,
+frozen module and takes its ~100 KB of Python heap again. To roll back,
 write the backup with the `esptool.py` command `--flash` prints, then run
 `./deploy.sh`.
 
@@ -1610,7 +1610,7 @@ every pull request:
     file in from a `.tmp` and refusing a build not newer than the published
     one.
 - `mpy-cross` 1.29 for `xtensawin` (ESP32) and `rv32imc` (ESP32-C6).
-- `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`,
+- `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`, `tools/web_min.py`,
   `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
 
@@ -1618,7 +1618,7 @@ The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
-.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tests/mpy_unix_logger.py tests/web_loopback.py
+.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tools/web_min.py tests/mpy_unix_logger.py tests/web_loopback.py
 shellcheck deploy.sh tools/build_firmware.sh
 .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
 MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \

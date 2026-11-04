@@ -11,7 +11,7 @@
 # main.py and the page go up, and only if the frozen logger is this
 # gps_logger.py (same SHA-256; FORCE=1 deploys them anyway). FORCE_MPY=1
 # installs gps_logger.mpy even there (an emergency: it shadows the frozen
-# logger and brings its ~60 KB back into the Python heap).
+# logger and brings its ~100 KB back into the Python heap).
 #
 # The files are copied next to the old ones (<name>.dpl), checked (size and
 # SHA-256 on the board) and only then renamed over them: a copy cut short
@@ -88,7 +88,7 @@ echo "Board: $MACHINE ($ARCH)"
 
 # A firmware built by tools/build_firmware.sh has the logger frozen in (and
 # a gps_frozen marker with the SHA-256 of the gps_logger.py it was built
-# from): a gps_logger.mpy on flash would shadow it and bring its ~60 KB back
+# from): a gps_logger.mpy on flash would shadow it and bring its ~100 KB back
 # into the Python heap, so only main.py and the page go up. Only an
 # explicit answer counts: anything else (a garbled or missing reply) stops.
 FROZEN=$($MPREMOTE connect "$PORT" exec "
@@ -104,7 +104,7 @@ case "$FROZEN" in
         if [ "${FORCE_MPY:-0}" = 1 ]; then
             KEEP_MPY=1
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
-            echo "WARNING: it shadows the frozen one and takes ~60 KB of the Python heap again;"
+            echo "WARNING: it shadows the frozen one and takes ~100 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
             $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
         else

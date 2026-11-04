@@ -1,16 +1,17 @@
 #!/bin/bash
 # Build MicroPython with gps_logger frozen into the firmware, and optionally
 # flash or publish it. Frozen, the logger's bytecode runs from flash instead
-# of taking ~60 KB of the Python heap: the heap starts at 64 KB with ~38 KB
-# live, so far fewer allocations fail to fit and grow it into the ESP-IDF
-# heap that TLS uploads need (it still can: MicroPython's split heap stays on).
+# of taking ~100 KB of the Python heap: the heap starts at 96 KB on the Heltec
+# (64 KB on the C6, ~38 KB live there), so far fewer allocations fail to fit and
+# grow it into the ESP-IDF heap that TLS uploads need (it still can:
+# MicroPython's split heap stays on).
 #
 # Needs ESP-IDF (v5.5.2 for MicroPython 1.29) and a MicroPython v1.29.0 tree:
 #   IDF_DIR=~/esp/esp-idf  MPY_DIR=~/esp/micropython  (defaults)
-# The board is boards/GPS_LOGGER_C6: ESP32_GENERIC_C6 with two OTA app slots
-# (partitions-ota.csv, 16 MB flash). BOARD_DIR picks another, its chip and
-# flash size read from it: boards/GPS_LOGGER_S3 is the Heltec Wireless Tracker
-# (ESP32-S3, 8 MB).
+# BOARD_DIR picks the board, its chip and flash size read from it. The one in
+# use: BOARD_DIR=$PWD/boards/GPS_LOGGER_S3, the Heltec Wireless Tracker (ESP32-S3,
+# 8 MB). Without BOARD_DIR: boards/GPS_LOGGER_C6, the earlier board,
+# ESP32_GENERIC_C6 with two OTA app slots (partitions-ota.csv, 16 MB flash).
 # Usage:
 #   tools/build_firmware.sh                    build only
 #   PORT=/dev/ttyACM0 tools/build_firmware.sh --flash
@@ -96,10 +97,6 @@ if [ -n "$DIRTY" ] || [ "$MODE" = --flash ]; then
 fi
 SHA=$(sha256sum "$OUT/gps_logger.py" | cut -d" " -f1)
 printf 'COMMIT = "%s"\nSHA = "%s"\nBUILD = %s\n' "$COMMIT" "$SHA" "$BUILD" > "$OUT/gps_frozen.py"
-# the display's code too on the board that has it: deploy.sh compares both
-if [ "$BOARD" = GPS_LOGGER_S3 ]; then
-    printf 'TFT = "%s"\n' "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d" " -f1)" >> "$OUT/gps_frozen.py"
-fi
 # only the port's own modules (_boot.py mounts the file system) with the
 # logger's: not boards/manifest.py's asyncio, umqtt, webrepl, mip,
 # requests... (~25 KB the logger never imports). opt=3 leaves the line numbers
@@ -111,8 +108,10 @@ module("gps_logger.py", base_path="$OUT", opt=3)
 module("gps_frozen.py", base_path="$OUT")
 module("gps_boot.py", base_path="$OUT", opt=3)
 EOF
-# the Heltec's display: on its firmware only
+# the Heltec's display: on its firmware only, and in the marker (deploy.sh
+# compares both)
 if [ "$BOARD" = GPS_LOGGER_S3 ]; then
+    printf 'TFT = "%s"\n' "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d" " -f1)" >> "$OUT/gps_frozen.py"
     cp gps_tft.py gps_tft_font.py "$OUT/"
     cat >> "$OUT/manifest.py" <<EOF
 module("gps_tft.py", base_path="$OUT", opt=3)
