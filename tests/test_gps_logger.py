@@ -19318,6 +19318,43 @@ check("RB-TFT: no glyph blitted outside its band; x still follows; the panel "
       and _rb_x[0] == _rb_x[1] and len(_rb_new[0]) == 160 * 80,
       repr((_rb_diff, _rb_edge, _rb_blit, _rb_x)))
 
+# RB-HITS: an OTA download the guard aborted raises the same counter: the
+# next failed POST said "upload aborted" though nothing of it was
+
+
+def _rb_guard_hit():
+    """As _raw_get's guard fires: the deadline over, its socket closed."""
+    gl._guard_start(_RbConn(), 100)
+    _clock[0] += 200
+    gl._guard_cb(None)
+    gl._guard_stop()
+
+
+gl.DIAG = 60000
+diag_clear()
+gl.up["url"], gl.up["key"] = "https://x", "k"
+_rb_hits0 = gl._guard["hits"]
+_rb_guard_hit()
+_post_raise[0] = OSError(-202)
+gl._http_post(10)
+_rb_l1 = [l for l in diag_lines() if l.startswith("upload")]
+diag_clear()
+# a POST the guard did abort still says so
+_rb_saved = gl.HTTP_POST
+def _rb_aborted(url, data, headers, timeout):
+    gl._guard["hits"] += 1
+    raise OSError(9)
+gl.HTTP_POST = _rb_aborted
+_post_raise[0] = None
+gl._http_post(10)
+gl.HTTP_POST = _rb_saved
+_rb_l2 = [l for l in diag_lines() if l.startswith("upload aborted")]
+check("RB-HITS: an aborted OTA download is no 'upload aborted' for the next failed "
+      "POST; a POST the guard aborted is",
+      gl._guard["hits"] > _rb_hits0 + 1 and _rb_l1 == ["upload err OSError(-202)"]
+      and len(_rb_l2) == 1, repr((_rb_l1, _rb_l2)))
+diag_clear()
+
 shutil.rmtree(_rb_dir, ignore_errors=True)
 
 print()

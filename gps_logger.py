@@ -7317,6 +7317,9 @@ def _http_post(size):
     r = None
     code, retry = None, None
     _post_phase[0] = None
+    # only a hit during this POST is its abort: not the OTA download's (that
+    # shares the guard), or one in the headers of the last, 2xx POST
+    up["guard_hits"] = _guard["hits"]
     try:
         r = HTTP_POST("%s/api/v1/overland/batches" % up["url"],
                       memoryview(_body)[:size],
@@ -7334,9 +7337,6 @@ def _http_post(size):
             code = None
         up["enomem"] = 0
         up["last_err"] = None
-        # the guard may have closed the socket while the headers were read
-        # (the status kept): not a sign of the next error's abort
-        up["guard_hits"] = _guard["hits"]
     except MemoryError:
         up["enomem"] = up.get("enomem", 0) + 1
         raise
