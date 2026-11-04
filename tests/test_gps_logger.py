@@ -14568,10 +14568,33 @@ else:
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
           and v.get("svh") == "Satellite table &middot; 3"
           and v.get("tile", {}).get("x") == 72235
-          and v.get("tile", {}).get("y") == 46048, repr(v.get("tile")))
+          and v.get("tile", {}).get("y") == 46048
+          and abs(v.get("tile", {}).get("mpp", 0) - 0.8130) < 0.0001, repr(v.get("tile")))
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "web.html")) as f:
     page_src = f.read()
+# PAGE-DEAD: no rule without an element, no second copy of the maths. A rule
+# for a class neither the markup nor the script names is dead; q-* and t-* are
+# put together in the script
+_pd_css = page_src[page_src.index("<style>"):page_src.index("</style>")]
+_pd_rest = page_src[page_src.index("</style>"):]
+_pd_sel = re.sub(r"\{[^}]*\}", "{}", re.sub(r"/\*.*?\*/", "", _pd_css, flags=re.S))
+_pd_dead = sorted(c for c in set(re.findall(r"\.([a-zA-Z][\w-]*)", _pd_sel))
+                  if not re.match(r"[qt]-", c)
+                  and not re.search(r"(?<![\w-])" + re.escape(c) + r"(?![\w-])", _pd_rest))
+_pd_gone = [w_ for w_ in (".grid", 'class="grid"', ".r .u", ".sx-big.bad", ".gt-dg svg", "var SHOWN",
+                          "var OTHER", "function tile(", "Math.cos(pts[i][1]")
+            if w_ in page_src]
+_pd_one = {w_: page_src.count(w_) for w_ in (
+    ".gt-ax{", "Math.log(Math.tan(r)", "<path d=\"M12 7v5l3 2\"/>", "Math.sqrt(Math.pow(",
+    "String(d.position || \"\").split", "d.hdop * UERE", "<em>min</em>\" : Math.floor(")}
+_pd_null = re.findall(r"(\w[\w.]*) [!=]== null (?:\|\||&&) \1 [!=]== undefined", page_src)
+check("PAGE-DEAD: every CSS class is in the markup or the script; the dead rules and the "
+      "test-only lists gone; one copy each of the Mercator, metres, the position and the "
+      "accuracy; == null, not both tests; the classes the tests read still drawn",
+      not _pd_dead and not _pd_gone and set(_pd_one.values()) == {1} and not _pd_null
+      and all(w_ in page_src for w_ in ('"now top"', '"st" : "end"', '"fa"')),
+      repr((_pd_dead, _pd_gone, _pd_one, _pd_null)))
 # WEB-MIN: tools/web_min.py strips the page at build time (a // in a string or
 # a regex is no comment: the page has both); web.html keeps its comments
 _wm_js = (

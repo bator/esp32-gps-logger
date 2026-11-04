@@ -13,10 +13,17 @@ vm.runInContext(src, ctx);
 const text = fs.readFileSync(0, "utf8");
 const d = JSON.parse(text);
 const v = ctx.view(d);
-const labeled = new Set(ctx.OTHER);
-for (const k of ctx.SHOWN) labeled.add(k);
+// every status.json key: the page shows it, or it is for the raw JSON only
+const SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
+  "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
+  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
+const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
+  "track_drop", "write_errs", "q_thin", "pos6"];
+const labeled = new Set(OTHER);
+for (const k of SHOWN) labeled.add(k);
 v.unlabeled = Object.keys(d).filter((k) => !labeled.has(k));
-v.tile = ctx.tile(47.1, 18.4, 17);
+const wp = ctx.wpx(47.1, 18.4, 17);
+v.tile = {x: Math.floor(wp[0] / 256), y: Math.floor(wp[1] / 256), mpp: ctx.mpp(47.1, 17)};
 v.wq = [-40, -60, -63, -67, -68, -80, -81, -100, -110, null].map((r) => ctx.wifiQ(r));
 v.esc = ctx.esc("<a href=\"x\" title='y'>&</a>");
 v.coordSW = ctx.view({position: "-33.85678, -151.21530", hdop: 1}).coord;
