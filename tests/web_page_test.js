@@ -14,7 +14,7 @@ const text = fs.readFileSync(0, "utf8");
 const d = JSON.parse(text);
 const v = ctx.view(d);
 // every status.json key: the page shows it, or it is for the raw JSON only
-const SHOWN = ("fix sats hdop hacc fix_src ubx utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
+const SHOWN = ("fix sats hdop utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
@@ -108,7 +108,7 @@ p = page(1600);
 const now = Date.now(), mid = new Date(now);
 mid.setHours(0, 0, 0, 0);
 p.c.Date = Date;
-p.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: "47.18536, 18.42730", hacc: 2});
+p.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: "47.18536, 18.42730", hdop: 0.8});
 p.xhrs[0].onload();
 let hx = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
 hd.firstUrls = hx.map((x) => x.url);
@@ -270,7 +270,7 @@ ft.now = (() => {
   out.headN = Math.round(c.heading(go));
   out.headE = Math.round(c.heading([[0, 47, 18], [1, 47, 18.001]]));
   out.headNone = c.heading([[0, 47, 18], [1, 47.0001, 18]]);
-  out.card = c.nowCard({hacc: 3.6, good_age_s: 2}, out.addr, {ms: 7200000, kmh: 0}, "47.18000&deg; N");
+  out.card = c.nowCard({hdop: 1.44, good_age_s: 2}, out.addr, {ms: 7200000, kmh: 0}, "47.18000&deg; N");
   out.bare = c.nowCard({hdop: 2}, null, {ms: null, kmh: null}, "47.18000&deg; N");
   // the address requests
   const asks = () => q.xhrs.filter((x) => x.url.indexOf(c.ADDR) === 0).length;
@@ -294,7 +294,7 @@ ft.now = (() => {
   // the dot moving: the cone on, turned the way it goes
   c.hist = c.histNew(null);
   go.forEach((g) => c.hist.pts.push(g));
-  c.placeMap({position: (47.18 + 60 * 0.00009).toFixed(5) + ", 18.42000", hacc: 3});
+  c.placeMap({position: (47.18 + 60 * 0.00009).toFixed(5) + ", 18.42000", hdop: 1.2});
   out.cone = [q.doc.getElementById("cone").className, q.doc.getElementById("cone").style.transform];
   return out;
 })();
@@ -592,11 +592,11 @@ const evS = (m, fix, sv) => {
 };
 function two2(n) { return (n < 10 ? "0" : "") + n; }
 const evAfter = {
-  "-1": ["boot cause 1 prev_up 26731 mhz 160 mem 12912", "gps u-blox 6, 7.03 (45969)"],
+  "-1": ["boot cause 1 prev_up 26731 mhz 160 mem 12912", "gps systems h135155"],
   30: ["wifi fail krumpli status 201 after 12000 ms", "wifi fail krumpli status 201 after 12010 ms (+2 more)"],
   45: ["gps reset loop 5 restarts in 6 s", "gps reset loop 3 more windows"],
   60: ["ota a3f2271 installed (was 2e8bc6e), rebooting", "boot cause 2 prev_up 3700 mhz 160 mem 9760",
-    "gps u-blox 6, 7.03 (45969)", evS(null, "Waiting_fix", "3/0"), evS(null, "Waiting_fix", "5/0"),
+    "gps systems h135155", evS(null, "Waiting_fix", "3/0"), evS(null, "Waiting_fix", "5/0"),
     "ota a3f2271 booted, checking"],
   70: ["ota a3f2271 ok"],
   80: ["gps silent 60 s, no bytes from the receiver"], 82: ["gps back after 125 s"],
@@ -605,13 +605,13 @@ const evAfter = {
     "upload err OSError(113)", "upload aborted after 120 s", "upload ca err OSError(5)",
     "track full 20261102T1000-20261102T1005 drop 3", "time back 20261102T100500Z 20261102T100400Z",
     "track write failing 20261102_100000.trk new 20261102_100100.trk", "reboot tls memory 3",
-    "gps setup not taken: no NAV-PVT (2 more)", "gps rate 100 ms refused", "gps pvt no NAV-PVT, NMEA this boot",
+    "gps setup not taken: no GST (2 more)", "gps refused CFGNAV,200,200,1000", "gps setup lost: no GST",
     "wifi lost krumpli rssi -62", "wifi back krumpli after 2 min 05 s, 3 failed tries, rssi -60",
     "clock set 2026-11-02T11:38:31Z", "heap grew in connect to 66 KB", "ota error OSError(-202)",
     "env SSID2: an SSID already set above, ignored", "upload API_KEY in .env: a space, control or non-ASCII character",
     "stay left wifi aps 3 scans 6", "upload low idf 40 KB"],
   130: ["ota 69f8c15 installed (was a3f2271), rebooting", "ota 69f8c15 no fix in 900 s, rolling back, bad"],
-  179: ["boot cause 2 prev_up 244 mhz 160 mem 10256", "gps u-blox 6, 7.03 (45969)"]
+  179: ["boot cause 2 prev_up 244 mhz 160 mem 10256", "gps systems h135155"]
 };
 const evLog = [];
 for (const l of evAfter["-1"]) evLog.push(l);

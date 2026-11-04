@@ -99,6 +99,15 @@ def check(name, ok):
         fails.append(name)
 
 
+def i7(v):
+    """1e-7 degrees as "%.6f" prints them, for lines of an older NAV-PVT track."""
+    q = (v + 5) // 10 if v >= 0 else -((5 - v) // 10)
+    if q < 0:
+        q = -q
+        return "-%d.%06d" % (q // 1000000, q % 1000000)
+    return "%d.%06d" % (q // 1000000, q % 1000000)
+
+
 def nm(body):
     c = 0
     for ch in body.encode():
@@ -180,17 +189,13 @@ check("NMEA read: under %d B allocated a sentence" % NMEA_BUDGET,
       nmea_alloc <= NMEA_BUDGET * n_sent)
 gl.reset()
 
-pl = bytearray(8)
-pl[5] = 2
-for gnss, sv, cno, el, flags in ((0, 7, 41, 60, 0x1F), (2, 11, 0, -91, 0)):
-    pl += bytes((gnss, sv, cno, el & 255, 10, 0, 0, 0, flags, 0, 0, 0))
-gl._ubx_frame(gl._ubx(0x01, 0x35, bytes(pl)))
-svs = gl.st["svs"]
-check("NAV-SAT parsed", svs is not None and len(svs) == 2
-      and svs[0][6] == 0 and svs[1][2] is None and svs[0][4])
-ver = (b"ROM SPG 5.10 (7b202e)" + b"\0" * 9 + b"000A0000\0\0"
-       + b"PROTVER=34.10" + b"\0" * 17)   # (no bytes.ljust in MicroPython)
-check("MON-VER model", gl._gps_ver(ver).startswith("u-blox M10, ROM SPG"))
+# the satellite list from GSV, closed by the next round's first sentence
+gl.handle(nm("GNGSA,A,3,07,,,,,,,,,,,,1.5,0.9,1.2,1"))
+gl.handle(nm("GPGSV,1,1,02,07,60,010,41,11,,,,1"))
+gl.handle(nm("GPGSV,1,1,00,1"))
+svs = {v[0]: v for v in gl.st["svs"] or ()}
+check("GSV list parsed", len(svs) == 2 and svs[7][:5] == (7, 41, 60, 10, True)
+      and svs[11][2] is None)
 
 gl.log["still"] = sl = gl._still_state()
 sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
@@ -278,89 +283,39 @@ check("departure ring keeps times after 2088", ok)
 gl.log_reset()
 
 
-# UBX-NAV-PVT: one struct.unpack_from on the frame's memoryview (as
-# read_uart hands it over), the weighted integer mean, and track lines
-# written from the integers: on single precision 47.4979123 is a float
-# ~0.4 m off, the line still says 47.497912
-import struct
-
 saved_svs = gl.st["svs"]
 
 
-def pvt_frame(sec, nano, lat_i, lon_i, hacc_mm, mps=0.0):
-    p = struct.pack("<IHBBBBBBIiBBBBiiiiIIiiiiiIIHH4xihH",
-                    0, 2026, 10, 31, 12, 0, sec, 7, 40, nano, 3, 1, 0, 14,
-                    lon_i, lat_i, 140000, 123460, hacc_mm, 2500, 0, 0, 0,
-                    int(mps * 1000), 0, 300, 500000, 120, 0, 0, 0, 0)
-    return gl._ubx(0x01, 0x07, p)
-
-
-gl.reset()
-gl.log_reset()
-for k in range(5):
-    gl._ubx_frame(memoryview(pvt_frame(0, k * 200000000, 474979123 + k,
-                                       -3141593 - k, 1250 + 250 * k, 1.44)))
-gl._ubx_frame(memoryview(pvt_frame(1, 0, 474979123, -3141593, 1500)))
-ws = [1.0 / ((1250 + 250 * k) / 1000.0) ** 2 for k in range(5)]
-want_i = 474979123 + gl._round(sum(w * k for k, w in zip(range(5), ws))
-                               / sum(ws))
-check("NAV-PVT parsed from a memoryview (one unpack_from)",
-      gl.st["valid"] and gl.st["lat_i"] == want_i
-      and gl.st["lon_i"] == -3141593 - (want_i - 474979123)
-      and gl.st["epochs"] == 5 and gl.st["used"] == 14
-      and abs(gl.st["hacc"] - 1.75) < 1e-6)
-s = gl._sample_line(time.ticks_ms(), None, None)
-check("NAV-PVT line from the integers (no float grid)", s is not None
-      and s[1] == "47.497912,-0.314159,123.5,2,1.4,20261031T120000Z\n")   # acc 1.75 up
-if s is not None:
-    print("pvt line", repr(s[1]))
-check("integer coordinates: halves away from zero, no -0",
-      [gl._i7(v) for v in (-5, -4, 5, 474979125, -1512152967)]
-      == ["-0.000001", "0.000000", "0.000001", "47.497913", "-151.215297"])
-
-
-# the departure ring with NAV-PVT seconds (integers) and NMEA ones mixed,
-# rebuilt into a TRK2 and a TRK1 file: the very lines _sample_line wrote
-def ring_mixed(fmt):
+# the departure ring rebuilt: the very lines _sample_line wrote
+def ring_lines():
     gl.reset()
     gl.log_reset()
-    gl.log["fmt"] = fmt
-    gl.log["batch"] = ["x"]
     gl.log["still"] = sl = gl._still_state()
     sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
     want = []
     for k in range(gl.STILL_DEP_MAX + 7):
         now = time.ticks_ms()
         tm = "10:%02d:%02d" % (k // 60, k % 60)
-        if k % 3:
-            li, lo = 474979123 + 271 * k, -3141593 - 314 * k
-            gl.st.update(valid=True, date="2026-10-31", time=tm, fixtype=3,
-                         lat_i=li, lon_i=lo, lat=li / 10000000,
-                         lon=lo / 10000000, hacc=0.45 + k % 7 * 1.25,
-                         mps=(k % 5 * 0.45) or None, alt=123.45 + k,
-                         hdop=None, std=None)
-        else:
-            gl.st.update(valid=True, date="2026-10-31", time=tm, fixtype=3,
-                         lat_i=None, lon_i=None, hacc=None, mps=None,
-                         lat=47.49791234567 + k * 0.0000271828,
-                         lon=-0.31415 - k * 0.0000314159, alt=-0.04,
-                         hdop=1.25 + k % 3, hdop_at=now, std=None)
+        gl.st.update(valid=True, date="2026-10-31", time=tm, fixtype=3,
+                     lat=47.49791234567 + k * 0.0000271828,
+                     lon=-0.31415 - k * 0.0000314159,
+                     alt=-0.04 if k % 3 else 123.45 + k,
+                     hdop=1.25 + k % 3 if k % 5 else None, hdop_at=now, std=None)
         want.append(gl._sample_line(now, None, None)[1])
         gl._ring_add(sl, now, (gl.st["lat"], gl.st["lon"]), 10.0 + k)
     gl.log["batch"] = []
-    gl.log["file"] = "/nonexistent-gps-logger-smoke/x.trk"
+    gl.log["file"] = "/nonexistent-gps-logger-smoke/x.trb"
     gl._still_leave()
     got = gl.log["batch"]
     want = want[-gl.STILL_DEP_MAX:]
     bad = [(w, g) for w, g in zip(want, got) if w != g]
     if bad or len(got) != len(want):
-        print("ring mixed", fmt, len(got), len(want), bad[:2])
+        print("ring", len(got), len(want), bad[:2])
     gl.log_reset()
     return not bad and len(got) == len(want)
 
 
-check("departure ring rebuilds NAV-PVT (TRK2) and mixed lines exactly",
-      ring_mixed(2) and ring_mixed(1))
+check("departure ring rebuilds its lines exactly (single precision)", ring_lines())
 gl.reset()
 gl.st["svs"] = saved_svs
 
@@ -407,7 +362,7 @@ for i in range(130):
     la += 1350 - i * 7
     lo -= 800 + i
     tl.append("%s,%s,%.1f,%d,%.1f,%s\n" % (
-        gl._i7(la), gl._i7(lo), 120.0 + i * 0.3 - (i % 7), 2 + i % 3,
+        i7(la), i7(lo), 120.0 + i * 0.3 - (i % 7), 2 + i % 3,
         12.0 + (i % 11) * 0.4, gl._stamp_s(215611200 + i + i // 40 * 30)[1]))
 tl.append("-12.5,-0.000001,,1.2,20261101T090000Z\n")
 base = "/tmp/gps-logger-smoke-%d" % time.ticks_ms()
@@ -530,7 +485,7 @@ if hasattr(gc, "mem_alloc"):
         tl4 = []
         for i in range(2000):
             tl4.append("%s,%s,%.1f,%d,%.1f,%s\n" % (
-                gl._i7(471853560 + i * 1311), gl._i7(184269340 - i * 977),
+                i7(471853560 + i * 1311), i7(184269340 - i * 977),
                 120.0 + (i % 9) * 0.3, 2 + i % 3, 12.0 + (i % 11) * 0.4,
                 gl._stamp_s(215697600 + i + i // 500)[1]))
         for i in range(0, 2000, 50):

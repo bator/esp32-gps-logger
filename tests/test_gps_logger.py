@@ -139,16 +139,8 @@ _timers = []
 _hostnames = []
 _oled_inits = []
 _reset_cause = [1]
-_uart_sv = [None]                       # NAV-SVINFO answer to a poll
-_uart_sat = [None]                      # NAV-SAT answer to a poll (M10)
-_uart_ver = [None]                      # MON-VER answer to a poll
 _uart_tx = []
 _uart_rx = bytearray()
-_uart_ack = [True]
-_uart_drop = [0]
-_uart_nak = set()
-_uart_nak_frames = set()                 # whole frames refused (NAK)
-_uart_silent = set()
 _freqs = [240000000]
 
 
@@ -288,32 +280,6 @@ class UART(object):
         buf[:len(out)] = out
         return len(out)
 
-    def write(self, data):
-        data = bytes(data)
-        _uart_tx.append(data)
-        if data[:4] == b"\xb5\x62\x01\x30" and _uart_sv[0]:
-            _uart_rx.extend(_uart_sv[0])
-        if data[:4] == b"\xb5\x62\x01\x35" and _uart_sat[0]:
-            _uart_rx.extend(_uart_sat[0])
-        if data[:4] == b"\xb5\x62\x0a\x04" and _uart_ver[0]:
-            _uart_rx.extend(_uart_ver[0])
-        # a u-blox acknowledges a UBX-CFG frame (unless told to drop it)
-        if _uart_ack[0] and data[:3] == b"\xb5\x62\x06":
-            if _uart_drop[0]:
-                _uart_drop[0] -= 1
-            elif (data[2], data[3]) in _uart_silent:
-                pass
-            else:
-                kind = (0x00 if (data[2], data[3]) in _uart_nak
-                        or data in _uart_nak_frames else 0x01)
-                ack = bytes((0x05, kind, 2, 0, data[2], data[3]))
-                ca = cb = 0
-                for x in ack:
-                    ca = (ca + x) & 255
-                    cb = (cb + ca) & 255
-                _uart_rx.extend(b"\xb5\x62" + ack + bytes((ca, cb)))
-        return len(data)
-
 
 class _UcUart(UART):
     """The Heltec's UC6580 on the UART: answers each command ($FAIL for those
@@ -326,8 +292,6 @@ class _UcUart(UART):
 
     def write(self, data):
         data = bytes(data)
-        if data[:2] == b"\xb5\x62":     # (the u-blox path's checks)
-            return UART.write(self, data)
         self.cmds.append(data)
         _uart_tx.append(data)
         if self.silent:
@@ -841,6 +805,15 @@ def online(tmpdir):
 def pump():
     gl.up["next_at"] = _clock[0]
     gl.upload_tick()
+
+
+def _i7(v):
+    """1e-7 degrees as "%.6f" prints them: an older NAV-PVT track's coordinates."""
+    q = (v + 5) // 10 if v >= 0 else -((5 - v) // 10)
+    if q < 0:
+        q = -q
+        return "-%d.%06d" % (q // 1000000, q % 1000000)
+    return "%d.%06d" % (q // 1000000, q % 1000000)
 
 
 def setup_cmds():
@@ -3825,8 +3798,7 @@ try:
           gl.st["valid"] is False and gl.st["pos_at"] == fix_at)
 
     # NMEA-DR: GGA quality 6 and RMC mode E are an estimate (dead
-    # reckoning, the last fix carried on) and were a fix; NAV-PVT's
-    # DR-only fix is not one (PVT-FILTER). DGPS (2) still is
+    # reckoning, the last fix carried on) and were a fix. DGPS (2) still is
     def dr_case(q, mode, gga=True, rmc=True):
         gl.reset()
         for t in ("120040.00", "120041.00", "120042.00"):
@@ -3964,98 +3936,11 @@ try:
         gl.LOG_DIR = saved_dir
         shutil.rmtree(q_dir, ignore_errors=True)
 
-    # UBX: the setup frames (checked against u-blox reference frames)
-    gl.GPS_UC = False  # >>>UBLOX
-    _uart_tx[:] = []
-    gl.gps_setup()
-    frames = [f.hex() for f in _uart_tx]
-    check("UBX: CFG-MSG turns GSV off (b562 0601 0300 f00300 fd15)",
-          "b56206010300f00300fd15" in frames, repr(frames[:2]))
-    check("UBX: CFG-RATE asks for 200 ms (b562 0608 ... de6a)",
-          frames[-1] == "b56206080600c800010001" + "00de6a", frames[-1])
-    check("UBX: GSA every GSA_EVERY s, RMC and GGA every fix",
-          gl._ubx(6, 1, bytes((0xF0, 2, gl.GPS_HZ * gl.GSA_EVERY))).hex()
-          in frames
-          and gl._ubx(6, 1, bytes((0xF0, 0, 1))).hex() in frames
-          and gl._ubx(6, 1, bytes((0xF0, 4, 1))).hex() in frames)
-    nav5 = gl._nav5()
-    pl = nav5[6:-2]
-    check("UBX: CFG-NAV5 (36 B) sets the model, 3D only, 10 deg, static hold",
-          nav5[2:4] == b"\x06\x24" and len(pl) == 36
-          and pl[1] == 0 and pl[2] == gl.GPS_DYN_MODEL
-          and pl[3] == gl.GPS_FIX_MODE and pl[12] == gl.GPS_MIN_ELEV
-          and pl[22] == gl.GPS_STATIC_HOLD and nav5.hex() in frames
-          and frames.index(nav5.hex()) == 1, nav5.hex())
-    # u-blox CFG-NAV5 mask: 0x01 dyn, 0x02 minEl, 0x04 fixMode, 0x08 drLim,
-    # 0x10 posMask, 0x20 timeMask, 0x40 staticHoldMask
-    check("UBX: NAV5 mask applies dyn, minEl, fixMode and static hold only",
-          pl[0] == 0x01 | 0x02 | 0x04 | 0x40 and not pl[0] & 0x10
-          and not pl[0] & 0x20, "mask=0x%02x" % pl[0])
-    check("UBX: the default dynamic model is portable (car and foot alike)",
-          gl.GPS_DYN_MODEL == 0)
-    # NAV5 refused (NAK) -> the 5 Hz setup goes on; silent -> stays at 1 Hz
-    _uart_tx[:] = []
-    _uart_nak.add((0x06, 0x24))
-    try:
-        gl.gps_setup()
-    finally:
-        _uart_nak.discard((0x06, 0x24))
-    check("UBX: a NAV5 NAK does not stop the 5 Hz setup",
-          gl.st["setup_ok"] is True and gl.st["nav5_ok"] is False
-          and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex(),
-          "ok=%s nav5=%s" % (gl.st["setup_ok"], gl.st["nav5_ok"]))
-    _uart_tx[:] = []
-    _uart_silent.add((0x06, 0x24))
-    t0 = _clock[0]
-    try:
-        gl.gps_setup()
-    finally:
-        _uart_silent.discard((0x06, 0x24))
-    check("UBX: a receiver silent at NAV5 stays at 1 Hz, ~4 s block",
-          gl.st["setup_ok"] is False
-          and gl._rate(1000 // gl.GPS_HZ).hex()
-          not in [f.hex() for f in _uart_tx]
-          and _clock[0] - t0 <= 2 * gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT,
-          "ms=%d" % (_clock[0] - t0))
-    _uart_tx[:] = []
-    gl.gps_setup()
-    check("UBX: setup acknowledged again afterwards (NAV5 accepted)",
-          gl.st["setup_ok"] is True and gl.st["nav5_ok"] is True)
-    # GPS_MODEL from .env, read before the first setup
-    saved_model = gl.GPS_DYN_MODEL
-    try:
-        gl._gps_model_env({"GPS_MODEL": "3  # on foot"})
-        m3 = gl.GPS_DYN_MODEL
-        gl._gps_model_env({"GPS_MODEL": "1"})
-        m_bad = gl.GPS_DYN_MODEL
-        gl._gps_model_env({"GPS_MODEL": "car"})
-        m_bad2 = gl.GPS_DYN_MODEL
-        gl.GPS_DYN_MODEL = 4
-        gl_nav = gl._nav5()[6 + 2]
-    finally:
-        gl.GPS_DYN_MODEL = saved_model
-    import inspect
-    run_src = inspect.getsource(gl.run)
-    check("UBX: .env GPS_MODEL sets the model (invalid kept), before the setup",
-          m3 == 3 and m_bad == 3 and m_bad2 == 3 and gl_nav == 4
-          and run_src.index("_gps_model_env") < run_src.index("gps_setup()"),
-          "%s %s %s %s" % (m3, m_bad, m_bad2, gl_nav))
-    gl.GPS_UC = True  # <<<UBLOX
     # reset loop: restarts over and over -> warned and counted
     out = []
     real_print = gl.print if hasattr(gl, "print") else None
     gl.print = lambda *a, **k: out.append(" ".join(str(x) for x in a))
     try:
-        # >>>UBLOX
-        gl.reset()
-        for _ in range(4):
-            _uart_rx.extend(b"$GPTXT,01,01,02,u\xff\xff\xff" * 3)
-            gl.read_uart()
-            _clock[0] += gl.GPS_LOOP_WINDOW // 4 + 10
-            gl.gps_check(_clock[0])
-        looped = gl.st["loops"]
-        warned = any("gps reset loop" in o for o in out)
-        # <<<UBLOX
         banner = b"FWVer R6.0.0.0Build3700\r\n"
         gl.reset()
         _uart_rx.extend(banner)
@@ -4097,10 +3982,6 @@ try:
             del gl.print
         else:
             gl.print = real_print
-    # >>>UBLOX
-    check("LOOP: banner starts and no NMEA for a window -> 'gps reset loop?'",
-          looped == 1 and warned, "loops=%d out=%s" % (looped, out[-2:]))
-    # <<<UBLOX
     check("LOOP: one start-up banner followed by NMEA is not a loop",
           normal == 0, "loops=%d" % normal)
     check("LOOP: GPS_FLAP_RESTARTS restarts with NMEA in between -> warned",
@@ -4111,53 +3992,7 @@ try:
           "%d %d" % (flap_again, flap_twice))
     check("LOOP: restarts spread wider than GPS_FLAP_WINDOW are no loop",
           flap_slow == 0, "loops=%d" % flap_slow)
-    # ACK: 1 Hz first, every frame until acknowledged, stop if nobody answers
-    gl.GPS_UC = False  # >>>UBLOX
-    _uart_tx[:] = []
-    gl.gps_setup()
-    rate1000 = gl._rate(1000).hex()
-    check("ACK: the setup starts at 1 Hz and ends at GPS_HZ, all acknowledged",
-          _uart_tx[0].hex() == rate1000
-          and _uart_tx[-1].hex() == gl._rate(1000 // gl.GPS_HZ).hex()
-          and len(_uart_tx) == len(gl.GPS_MSGS) + 4   # + the NAV-PVT stop
-          and gl.st["setup_ok"] is True)
-    _uart_tx[:] = []
-    _uart_drop[0] = 2                               # two frames lost
-    gl.gps_setup()
-    check("ACK: a dropped frame is sent again until acknowledged",
-          len(_uart_tx) == len(gl.GPS_MSGS) + 6
-          and _uart_tx[0] == _uart_tx[1] == _uart_tx[2]
-          and gl.st["setup_ok"] is True, "frames=%d" % len(_uart_tx))
-    _uart_tx[:] = []
-    _uart_ack[0] = False
-    t0 = _clock[0]
-    try:
-        gl.gps_setup()
-    finally:
-        _uart_ack[0] = True
-    rates = (rate1000, gl._rate(1000 // gl.GPS_HZ).hex())
-    check("ACK: no answer -> GPS_ACK_TRIES tries, then the message frames once",
-          [f.hex() for f in _uart_tx[:gl.GPS_ACK_TRIES]]
-          == [rate1000] * gl.GPS_ACK_TRIES
-          and len(_uart_tx) == gl.GPS_ACK_TRIES + len(gl.GPS_MSGS) + 1
-          and not any(f.hex() in rates for f in _uart_tx[gl.GPS_ACK_TRIES:])
-          and gl.st["setup_ok"] is False
-          and _clock[0] - t0 <= gl.GPS_ACK_TRIES * gl.GPS_ACK_WAIT + 400,
-          "frames=%d ms=%d" % (len(_uart_tx), _clock[0] - t0))
-    check("ACK: GST is asked once a second",
-          gl._ubx(6, 1, bytes((0xF0, 7, gl.GPS_HZ))).hex()
-          in [f.hex() for f in (_uart_tx or [])] or (0x07, gl.GPS_HZ)
-          in gl.GPS_MSGS)
-    gl.GPS_UC = True  # <<<UBLOX
 
-    # TXT: a u-blox start-up banner counts a receiver restart
-    gl.GPS_UC = False  # >>>UBLOX
-    gl.reset()
-    gl.handle(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
-    gl.handle(nmea("GPTXT,01,01,02,ANTSTATUS=OK"))
-    check("TXT: the u-blox banner counts one receiver restart",
-          gl.st["gps_boots"] == 1)
-    gl.GPS_UC = True  # <<<UBLOX
     import inspect
     run_src = inspect.getsource(gl.run)
     check("HOLD: Ctrl-C / crash flushes keep the held drift out",
@@ -6434,232 +6269,6 @@ try:
           jd3["satellites"] == [] and jd3["satellites_age_s"] is None
           and _clock[0] == t0, repr((jd3["satellites"], _clock[0] - t0)))
 
-    # >>>UBLOX
-    gl.GPS_UC = False
-    import struct
-
-    def svinfo(chans):
-        pl = struct.pack("<IBBH", 1000, len(chans), 0, 0)
-        for k, (svid, flags, cno, el, az) in enumerate(chans):
-            pl += struct.pack("<BBBBBbhi", k, svid, flags, 4, cno, el, az, 0)
-        return gl._ubx(0x01, 0x30, pl)
-
-    chans = [(12, 0x01, 38, 54, 10),         # used; azimuth 10 = a 0x0A byte
-             (5, 0x01, 44, 71, 200),
-             (25, 0x00, 0, 8, 300),          # no signal
-             (123, 0x10, 33, 30, 160)]       # SBAS, unhealthy
-    frame = svinfo(chans)
-    gl.reset()
-    _uart_rx[:] = []
-    rmc = nmea("GPRMC,120500.00,V,,,,,,,171026,,,N") + b"\r\n"
-    data = rmc + frame + rmc
-    half = len(rmc) + len(frame) // 2
-    _uart_rx.extend(data[:half])
-    gl.read_uart()
-    _uart_rx.extend(data[half:])
-    gl.read_uart()
-    check("SATS: NAV-SVINFO is read out of the NMEA stream, 0x0A and all",
-          b"\n" in frame[6:-2] and gl.st["svs"] is not None
-          and [v[0] for v in gl.st["svs"]] == [12, 5, 25, 123]
-          and gl.st["svs"][0] == (12, 38, 54, 10, True, False, 0)
-          and gl.st["svs"][3][5] is True
-          and gl.st["ok"] == 2 and gl.st["err"] == 0,
-          "svs=%r ok=%d err=%d" % (gl.st["svs"], gl.st["ok"], gl.st["err"]))
-    check("SATS: seen counts the channels with a signal",
-          gl.sv_seen() == 3, gl.sv_seen())
-    bad = bytearray(frame)
-    bad[-1] ^= 0xFF
-    old_svs = gl.st["svs"]
-    ack = b"\xb5\x62\x05\x01\x02\x00\x06\x01\x0f\x38"
-    _uart_rx.extend(bytes(bad) + ack + rmc)
-    gl.read_uart()
-    check("SATS: a broken frame is an error, a late ACK is just dropped",
-          gl.st["svs"] is old_svs and gl.st["err"] == 1 and gl.st["ok"] == 3,
-          "err=%d ok=%d" % (gl.st["err"], gl.st["ok"]))
-
-    gl.reset()
-    gl.handle(gsv_line)
-    seen_gsv = gl.sv_seen()
-    _uart_tx[:] = []
-    gl.gps_setup()
-    check("SATS: before the setup GSV counts; a good setup drops that count",
-          seen_gsv == 12 and gl.st["view"] == {} and gl.sv_seen() == 0,
-          "%d %r" % (seen_gsv, gl.st["view"]))
-
-    def polls():
-        return len([f for f in _uart_tx if f[:4] == b"\xb5\x62\x01\x30"])
-
-    _uart_tx[:] = []
-    for _ in range(3):
-        gl.gps_check(_clock[0])
-        _clock[0] += gl.SV_POLL // 2
-    p_ok = polls()
-    gl.st["setup_ok"] = False
-    _uart_tx[:] = []
-    _clock[0] += gl.SV_POLL
-    gl.gps_check(_clock[0])
-    p_nosetup = polls()
-    gl.st["setup_ok"] = True
-    check("SATS: polled every SV_POLL, also while the setup is not acked",
-          p_ok == 2 and p_nosetup == 1, "%d %d" % (p_ok, p_nosetup))
-    check("SATS: the poll frame has a valid checksum",
-          gl._ubx(0x01, 0x30, b"") == b"\xb5\x62\x01\x30\x00\x00\x31\x94")
-
-    gl.reset()
-    gl.st["setup_ok"] = True
-    _uart_rx[:] = []
-    _uart_tx[:] = []
-    _uart_sv[0] = frame
-    try:
-        c = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
-        gl._web_reply(c, c.req)
-        jd0 = json.loads(c.sent.partition(b"\r\n\r\n")[2])
-        p_page = polls()
-        c2 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
-        gl._web_reply(c2, c2.req)
-        p_again = polls()
-        jd = json.loads(c2.sent.partition(b"\r\n\r\n")[2])
-        _uart_sv[0] = None
-        gl.reset()
-        t0 = _clock[0]
-        c3 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
-        gl._web_reply(c3, c3.req)
-        waited = _clock[0] - t0
-        jd3 = json.loads(c3.sent.partition(b"\r\n\r\n")[2])
-    finally:
-        _uart_sv[0] = None
-    names = [v["name"] for v in jd0["satellites"]]
-    check("SATS: a page poll asks the receiver and lists the satellites",
-          p_page == 1 and jd0["satellites_age_s"] == 0
-          and names == ["GPS 5", "GPS 12", "SBAS 123", "GPS 25"]
-          and jd0["satellites"][2]["unhealthy"] is True, repr(names))
-    check("SATS: a list younger than SV_FRESH is not asked for again; JSON",
-          p_again == 1 and jd["satellites"][0]["name"] == "GPS 5"
-          and jd["satellites"][1] == {"name": "GPS 12", "system": "GPS",
-                                      "svid": 12, "cno": 38, "elev": 54,
-                                      "azim": 10, "used": True,
-                                      "unhealthy": False}
-          and len(jd["satellites"]) == 4, repr(jd.get("satellites"))[:300])
-    check("SATS: a silent receiver costs at most SV_WAIT, the list is empty",
-          waited <= gl.SV_WAIT + 100 and jd3["satellites"] == []
-          and jd3["satellites_age_s"] is None, "waited=%d" % waited)
-
-    # M10: no NAV-SVINFO on a u-blox M10 (seen 2026-10-29: SPG 5.10 does
-    # not answer it, the page kept the old receiver's list); NAV-SAT instead,
-    # names per system, the receiver model from MON-VER
-    def navsat(svs):
-        pl = struct.pack("<IBBH", 2000, 1, len(svs), 0)
-        for gnss, svid, cno, el, az, flags in svs:
-            pl += struct.pack("<BBBbhhI", gnss, svid, cno, el, az, 0, flags)
-        return gl._ubx(0x01, 0x35, pl)
-
-    def monver(sw, hw, ext):
-        pl = sw.ljust(30, b"\0") + hw.ljust(10, b"\0")
-        for e in ext:
-            pl += e.ljust(30, b"\0")
-        return gl._ubx(0x0A, 0x04, pl)
-
-    m10 = [(0, 7, 41, 60, 270, 0x1F),       # GPS, used (bit 3), healthy
-           (2, 11, 37, 45, 120, 0x1F),      # Galileo, used
-           (3, 22, 30, 20, 10, 0x2C),       # BeiDou, used, unhealthy
-           (6, 3, 0, 5, 300, 0x10),         # GLONASS, no signal
-           (3, 33, 0, -91, 0, 0x10)]        # BeiDou, position not known
-    sat_frame = navsat(m10)
-    ver_frame = monver(b"ROM SPG 5.10 (7b202e)", b"000A0000",
-                       [b"FWVER=SPG 5.10", b"PROTVER=34.10",
-                        b"GPS;GLO;GAL;BDS", b"SBAS;QZSS"])
-
-    def polls_of(mid):
-        return len([f for f in _uart_tx if f[:4] == b"\xb5\x62" + mid])
-
-    gl.reset()
-    gl.st["setup_ok"] = True
-    _uart_rx[:] = []
-    _uart_tx[:] = []
-    _uart_sat[0], _uart_ver[0] = sat_frame, ver_frame
-    try:
-        c = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
-        gl._web_reply(c, c.req)
-        for _ in range(3):                  # the answers after SV_WAIT too
-            gl.read_uart()
-        first = (polls_of(b"\x01\x30"), polls_of(b"\x01\x35"),
-                 polls_of(b"\x0a\x04"))
-        _uart_tx[:] = []
-        _clock[0] += gl.SV_POLL
-        gl.gps_check(_clock[0])
-        later = (polls_of(b"\x01\x30"), polls_of(b"\x01\x35"),
-                 polls_of(b"\x0a\x04"))
-        gl.read_uart()
-        c2 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
-        _clock[0] += gl.SV_FRESH
-        gl._web_reply(c2, c2.req)
-        jd = json.loads(c2.sent.partition(b"\r\n\r\n")[2])
-        m10_svs = gl.st["svs"]
-        seen_m10 = gl.sv_seen()
-        try:
-            with open(gl.DIAG_FILE) as f:
-                diag_m10 = f.read()
-        except OSError:
-            diag_m10 = ""
-        # a receiver restart (or swap) forgets the list and the model
-        gl.handle(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
-        after_boot = (gl.st["svs"], gl.st.get("sv_msg", "-"),
-                      gl.st.get("gps_ver", "-"))
-    finally:
-        _uart_sat[0] = _uart_ver[0] = None
-    check("M10: no SVINFO answer -> NAV-SAT is read; per-system satellites",
-          m10_svs is not None and [(v[6], v[0]) for v in m10_svs]
-          == [(0, 7), (2, 11), (3, 22), (6, 3), (3, 33)]
-          and m10_svs[4][2] is None
-          and m10_svs[2][4] is True and m10_svs[2][5] is True
-          and m10_svs[3][4] is False and m10_svs[0][5] is False
-          and seen_m10 == 3, "%r seen=%r" % (m10_svs, seen_m10))
-    m10_names = [(v["name"], v["unhealthy"], v["elev"])
-                 for v in jd["satellites"]]
-    check("M10: JSON lists GPS/Galileo/BeiDou/GLONASS names",
-          m10_names == [("GPS 7", False, 60), ("Galileo 11", False, 45),
-                        ("BeiDou 22", True, 20), ("BeiDou 33", False, None),
-                        ("GLONASS 3", False, 5)], repr(m10_names))
-    check("M10: the receiver model from MON-VER is in the JSON",
-          jd.get("receiver") == "u-blox M10, ROM SPG 5.10 (7b202e), "
-                                    "PROTVER=34.10"
-          and jd["satellites"][1]["system"] == "Galileo"
-          and "gps u-blox M10, ROM SPG 5.10" in diag_m10,
-          repr(jd.get("receiver")))
-    check("M10: first both list polls and MON-VER, then NAV-SAT only",
-          first == (1, 1, 1) and later == (0, 1, 0),
-          "first=%r later=%r" % (first, later))
-    check("M10: a receiver restart forgets the list and the model",
-          after_boot == (None, None, None), repr(after_boot))
-
-    # M10-VER: MON-VER is asked for again after every receiver restart, and
-    # each answer wrote a diag line (a reset storm: one per restart); now
-    # one only when the model changed
-    def ver_diag():
-        try:
-            with open(gl.DIAG_FILE) as f:
-                return [ln for ln in f.read().splitlines()
-                        if ln.startswith("gps u-blox") or ln.startswith("gps hw")]
-        except OSError:
-            return []
-
-    saved_d = gl.DIAG
-    gl.DIAG = 60000
-    gl.reset()
-    v0 = len(ver_diag())
-    other = monver(b"ROM SPG 5.10 (7b202e)", b"00190000", [b"PROTVER=18.00"])
-    for fr in (ver_frame, ver_frame, ver_frame, other, ver_frame):
-        gl._ubx_frame(fr)
-        gl.handle(nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com"))
-    ver_lines = ver_diag()[v0:]
-    gl.DIAG = saved_d
-    check("M10-VER: a diag line for MON-VER only when the model changed",
-          len(ver_lines) == 3 and ver_lines[0] == ver_lines[2]
-          and ver_lines[0].startswith("gps u-blox M10, ROM SPG 5.10")
-          and ver_lines[1] != ver_lines[0], repr(ver_lines))
-
-    gl.GPS_UC = True
-    # <<<UBLOX
     # OFF: while uploads back off for WIFI_OFF_WAIT or more (server down,
     # 401) the radio goes off until the retry is due, then a round
     # reconnects and the upload goes on; a short backoff keeps it on
@@ -8230,8 +7839,7 @@ def diag_clear():
             pass
 
 
-# GPS-SILENT: a receiver that sends nothing (the M10 with its RX held low
-# goes silent until a power cycle) was only "No data!" on the screen and a
+# GPS-SILENT: a receiver that sends nothing was only "No data!" on the screen and a
 # banner on the page: the diag log, read after a walk, said nothing. Its
 # start and its end are diag lines now, once each
 diag_clear()
@@ -8749,31 +8357,6 @@ check("SETUP-BACKOFF-CAP: the shift is capped, the wait GPS_IGNORED_MAX",
       cap_waits == [2 * gl.GPS_RETRY, 8 * gl.GPS_RETRY]
       + [gl.GPS_IGNORED_MAX] * 3, repr(cap_waits))
 
-# >>>UBLOX
-gl.GPS_UC = False
-# SATS-ORDER: a satellite poll and a setup due in the same gps_check: the
-# setup first, the poll right after it (before, its answer was lost in the
-# setup and counted as a miss)
-gl.reset()
-_uart_rx[:] = []
-_uart_tx[:] = []
-pl = bytearray(8)
-pl[5] = 1
-pl += bytes((0, 7, 41, 60, 10, 0, 0, 0, 0x1F, 0, 0, 0))
-_uart_sat[0] = gl._ubx(0x01, 0x35, bytes(pl))
-try:
-    gl.st["setup_at"] = _clock[0] - 60000      # not acknowledged: due
-    gl.gps_check(_clock[0])
-    gl.read_uart()
-finally:
-    _uart_sat[0] = None
-cfg = [k for k, f in enumerate(_uart_tx) if f[2:3] == b"\x06"]
-poll = [k for k, f in enumerate(_uart_tx) if f[:4] == b"\xb5\x62\x01\x35"]
-check("SATS-ORDER: the poll goes after a setup due at the same time",
-      cfg and poll and poll[0] > cfg[-1] and gl.st["svs"] is not None
-      and gl.st["sv_miss"] == 0, "cfg=%r poll=%r" % (cfg[-1:], poll[:1]))
-gl.GPS_UC = True
-# <<<UBLOX
 
 # GPS-19: the rotation's first line is no status line: look in diag.1
 diag_clear()
@@ -8832,14 +8415,14 @@ try:
 finally:
     del gl.open
 with open(gl.DIAG_FILE, "w") as f:
-    f.write("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10\n")
+    f.write("gps setup not taken: no GST\n")
 page = gl._web_diag()
 check("DIAG-TAIL: WEB_DIAG lines of ~180 B, read in small pieces",
       len(st_line(79)) > 175 and tail == [st_line(k) for k in range(65, 80)]
       and reads and all(0 < n <= 1024 for n in reads),
       "%d lines, reads %r" % (len(tail), reads))
 check("DIAG-TAIL: just after a rotation the page fills up from diag.1",
-      len(page) == gl.WEB_DIAG and page[-1].startswith("gps u-blox M10")
+      len(page) == gl.WEB_DIAG and page[-1].startswith("gps setup not taken")
       and page[0] == st_line(26) and page[-2] == st_line(39),
       "%d %r" % (len(page), page[:1]))
 
@@ -8887,7 +8470,7 @@ check("DIAG-TAIL-EDGE: a line starting right at the window is not dropped",
 diag_clear()
 
 # DIAG-24H: the two diag files hold a day of status lines (~220 B a minute
-# with ubx/hacc on NAV-PVT): the page's Event log aggregates all of it
+# at most): the page's Event log aggregates all of it
 check("DIAG-24H: DIAG_FILE + DIAG_OLD hold 24 h of 220 B status lines",
       2 * gl.DIAG_MAX >= 24 * 60 * 220 and gl.DIAG_MAX <= 256 * 1024,
       repr(gl.DIAG_MAX))
@@ -9106,20 +8689,6 @@ gl.read_uart()
 check("GPS: a start-up banner split across two reads is one restart",
       gl.st["gps_boots"] == 1, gl.st["gps_boots"])
 
-# >>>UBLOX
-# UBX-JUNK: sync bytes in junk with a plausible length are no frame: the
-# bad checksum skips only them, and the NMEA they would have swallowed
-# (up to ~1 KB) is read
-gl.reset()
-_uart_rx[:] = []
-rmcs = b"".join(rv_nmea("GPRMC,1207%02d.00,V,,,,,,,171026,,,N" % k) + b"\r\n"
-                for k in range(3))
-_uart_rx.extend(b"\xff\xb5\x62\x01\x02\x40\x00" + rmcs)
-gl.read_uart()
-check("UBX-JUNK: a false UBX sync costs one error, not the NMEA behind it",
-      gl.st["ok"] == 3 and gl.st["err"] == 1,
-      "ok=%d err=%d" % (gl.st["ok"], gl.st["err"]))
-# <<<UBLOX
 
 # RXBUF: lines are read in place from one preallocated buffer (a bytes buffer
 # grown per read and sliced per line copied ~1 KB at a time); a line split over
@@ -9142,48 +8711,62 @@ check("RXBUF: a preallocated buffer, lines across 7-byte reads, junk dropped",
       and rx_ok == (6, 0) and gl.st["ok"] == 9,
       "%r ok=%d" % (rx_ok, gl.st["ok"]))
 
-# >>>UBLOX
-# RXBUF-BANNER: a reset loop's banner start cut off right at the RX_LINE
-# junk reset ("$GPTXT,01,01,02," last, its "u" in the next read) went with
-# the junk, and the reset loops came up short (125 of 3000 fuzz runs); a
-# banner start at the end of the junk stays now
+
+
+# RX-B562: nothing is framed. A garbled stream can hold 0xB5 0x62 by chance (it
+# has no meaning to a UC6580): before a sentence it is what ran into it, with a
+# plausible "length" behind it it holds nothing back, in a sentence that one
+# sentence is bad and no other
 gl.reset()
+gl._rx_n = gl._rx_s = 0
 _uart_rx[:] = []
-_uart_rx.extend(b"\xff" * (gl.RX_LINE + 40 - 16) + b"$GPTXT,01,01,02,")
+_uart_rx.extend(b"\xff\xb5\x62\x01\x02\x40\x00" + rmcs)
 gl.read_uart()
-_uart_rx.extend(b"u" + b"\xff" * 30)
+b62_a = (gl.st["ok"], gl.st["err"], gl._rx_n)
+gl.reset()
+_uart_rx.extend(b"\xb5\x62\x01\x07\xff\x03" + rmcs)
 gl.read_uart()
-cut_ban = gl.st["banners"]
-import random
-b_rnd = random.Random(3)
-b_bad = 0
-for _ in range(400):
-    gl.reset()
+b62_b = (gl.st["ok"], gl.st["err"], gl._rx_n)
+gl.reset()
+_uart_rx.extend(b"$GNRMC,120700.00,V,\xb5\x62\x01\x07\xff\x03,,,,171026,,,N*00\r\n" + rmcs)
+gl.read_uart()
+b62_c = (gl.st["ok"], gl.st["err"], gl._rx_n)
+check("RX-B562: 0xB5 0x62 in junk is not a frame: no sentence lost or held back",
+      b62_a == (3, 0, 0) and b62_b == (3, 0, 0) and b62_c == (3, 1, 0),
+      repr((b62_a, b62_b, b62_c)))
+
+# RX-TORN: however the UART cuts the stream, each line reaches handle() whole and
+# in order, also across a junk drop; the buffer's bounds hold
+import random as _rnd2
+_tr = _rnd2.Random(7)
+_tr_real = gl.handle
+_tr_bad = []
+_tr_max = [0]
+for _ in range(120):
+    _ls = [rv_nmea("GNRMC,12%04d.00,V,,,,,,,171026,,,N" % _tr.randrange(9999))
+           for _k in range(_tr.randrange(1, 40))]
+    _d = b"\r\n".join(_ls) + b"\r\n"
+    _seen = []
+    gl.handle = lambda b, a, e: _seen.append(bytes(b[a:e]))
+    gl._rx_n = gl._rx_s = 0
     _uart_rx[:] = []
-    b_data, b_n = b"", 0
-    for _ in range(b_rnd.randrange(1, 30)):
-        if b_rnd.random() < 0.4:
-            b_data += b"$GPTXT,01,01,02,u" + b"\xff" * b_rnd.randrange(400)
-            b_n += 1
-        else:
-            b_data += rv_nmea("GNRMC,120000.00,V,,,,,,,311026,,,N") + b"\r\n"
-    k = 0
-    while k < len(b_data):
-        step = b_rnd.choice((1, 3, 13, 14, 64, 256, 300))
-        _uart_rx.extend(b_data[k:k + step])
-        k += step
-        if b_rnd.random() < 0.5:
-            gl.read_uart()
-    gl.read_uart()
-    if gl.st["banners"] != b_n:
-        b_bad += 1
-check("RXBUF-BANNER: a banner start cut off by the junk reset is counted",
-      cut_ban == 1 and b_bad == 0,
-      "cut=%d, %d of 400 random streams miscounted" % (cut_ban, b_bad))
-# <<<UBLOX
+    _o = 0
+    while _o < len(_d):
+        _s = _tr.choice((1, 2, 3, 13, 63, 64, 255, 256, 257, 700))
+        _uart_rx.extend(_d[_o:_o + _s])
+        _o += _s
+        gl.read_uart()
+        _tr_max[0] = max(_tr_max[0], gl._rx_n)
+    if _seen != _ls or gl._rx_n or gl._rx_s:
+        _tr_bad.append((_seen[:2], _ls[:2]))
+gl.handle = _tr_real
+gl._rx_n = gl._rx_s = 0
+gl.reset()
+check("RX-TORN: lines whole and in order across any reads, the buffer within its "
+      "RX_LINE + RX_READ", not _tr_bad and _tr_max[0] <= gl.RX_LINE
+      and len(gl._rx) == gl.RX_LINE + gl.RX_READ, repr((_tr_bad[:1], _tr_max)))
 
-
-# RXBUF-FIND: line ends, UBX sync and banners are found with bytearray.find
+# RXBUF-FIND: line ends are found with bytearray.find
 # (C), not a Python loop over every byte (~0.17 us/B on the unix port)
 class IdxCount(bytearray):
     n = 0
@@ -9218,7 +8801,7 @@ check("RXBUF-FIND: no per-byte Python loop over what the UART delivers",
 # no copy) and decodes only the types it reads; it counts and parses as the
 # copying one did (here as it was, the reference) on random sentences: bad
 # checksums, odd hex, junk and blanks around, unknown types, other address
-# lengths, bytes over 0x7F, the PVT mode's "turned off" count
+# lengths, bytes over 0x7F
 
 
 def old_handle(line):
@@ -9246,8 +8829,6 @@ def old_handle(line):
         fn = gl.HANDLERS.get(f[0][2:])
         if fn:
             fn(f[0][:2], f)
-            if gl.st.get("mode") == "pvt" and f[0][2:] in gl._PVT_OFF:
-                gl._extra(f[0][:2], f)
         gl.st["ok"] += 1
     except (ValueError, IndexError, UnicodeError):
         gl.st["err"] += 1
@@ -9282,11 +8863,10 @@ for n_ in range(1500):
     if ip_rnd.random() < 0.2:
         line += ip_rnd.choice((b" ", b"\r", b"*", b"$"))
     pad = bytearray(b"xx\n" + line + b"\r\n12")
-    mode = "pvt" if n_ % 3 == 0 else "nmea"
     got = []
     for run in range(2):
         gl.reset()
-        gl.st.update(mode=mode, setup_at=_clock[0] - 5000)
+        gl.st["setup_at"] = _clock[0] - 5000
         if run:
             gl.handle(pad, 3, 3 + len(line))
         else:
@@ -9334,18 +8914,18 @@ class SetCount(object):
 
 
 saved_rxv = gl._rxv
-gl._rx[:600] = bytes(range(256)) * 2 + bytes(range(88))
-d_want = bytes(gl._rx[100:600])
+gl._rx[:500] = bytes(range(256)) + bytes(range(244))
+d_want = bytes(gl._rx[100:500])
 sc = SetCount(memoryview(gl._rx))
-gl._rxv, gl._rx_n = sc, 600
+gl._rxv, gl._rx_n = sc, 500
 try:
     gl._rx_drop(100)
-    dropped = (bytes(gl._rx[:500]) == d_want, gl._rx_n, sc.sets)
+    dropped = (bytes(gl._rx[:400]) == d_want, gl._rx_n, sc.sets)
 finally:
     gl._rxv = saved_rxv
     gl._rx_n = gl._rx_s = 0
 check("RXBUF-DROP: the rest moves to the front in one slice store",
-      dropped == (True, 500, 1), repr(dropped))
+      dropped == (True, 400, 1), repr(dropped))
 
 # RXBUF-COMMIT: _rx_n was set before the loop, the drop of what was read
 # only after it: an exception in a handler (MemoryError while publishing)
@@ -9381,31 +8961,6 @@ for rc_err in (MemoryError, RuntimeError):
         gl.HANDLERS["GGA"] = rc_gga
     rc_got.append((rc_raised, rc_calls[0], [s[9] for s in gl.st["q"]],
                    gl.st["err"], gl._rx_n))
-# >>>UBLOX
-rc_ubx = gl._ubx_frame
-gl.reset()
-gl._rx_n = gl._rx_s = 0
-_uart_rx[:] = []
-_uart_rx.extend(gl.MON_VER + rc_list[0] + rc_list[1])
-
-
-def rc_ubx_boom(fr):
-    raise MemoryError("in _ubx_frame")
-
-
-gl._ubx_frame = rc_ubx_boom
-try:
-    try:
-        gl.read_uart()
-        rc_u = None
-    except Exception as e:
-        rc_u = type(e).__name__
-finally:
-    gl._ubx_frame = rc_ubx
-rc_u = (rc_u, gl.st["err"], gl._rx_n, gl.st["ok"])
-check("RXBUF-COMMIT-UBX: a frame handler's error counts it",
-      rc_u == (None, 1, 0, 2), repr(rc_u))
-# <<<UBLOX
 gl.reset()
 gl._rx_n = gl._rx_s = 0
 _uart_rx[:] = []
@@ -9413,200 +8968,6 @@ check("RXBUF-COMMIT: a handler's error counts the line, nothing handled twice",
       rc_got == [(None, 4, ["10:00:00", "11:00:00"], 1, 0)] * 2, repr(rc_got))
 
 
-# >>>UBLOX
-# PVT: UBX-NAV-PVT on a u-blox M8/M10 (new feature, 2026-10-31): parsing,
-# the weighted integer mean, float-free track lines (#TRK2), the setup per
-# receiver kind with its NMEA fallback, upload fields
-import struct as _struct
-
-
-def pvt_frame(ymdhms, lat, lon, hacc=1.5, fix=3, flags=0x01, flags3=0,
-              valid=0x07, tacc=50, nano=0, hmsl=100.0, mps=0.0, head=0.0,
-              vacc=2.5, nsv=12, pdop=1.2, sacc=0.3, hacc_mm=None):
-    """A UBX-NAV-PVT frame (92-byte payload, u-blox M10 layout). lat/lon
-    are degrees, or ints already in 1e-7 degrees."""
-    y, mo, d, h, mi, s = ymdhms
-    li = lat if isinstance(lat, int) else int(round(lat * 1e7))
-    lo = lon if isinstance(lon, int) else int(round(lon * 1e7))
-    p = _struct.pack("<IHBBBBBBIiBBBBiiiiIIiiiiiIIHH4xihH",
-                     0, y, mo, d, h, mi, s, valid, tacc, nano, fix, flags,
-                     0, nsv, lo, li, int(hmsl * 1000) + 40000,
-                     int(round(hmsl * 1000)),
-                     int(round(hacc * 1000)) if hacc_mm is None else hacc_mm,
-                     int(round(vacc * 1000)), 0, 0, 0, int(round(mps * 1000)),
-                     int(round(head * 100000)), int(round(sacc * 1000)),
-                     500000, int(round(pdop * 100)), flags3, 0, 0, 0)
-    return gl._ubx(0x01, 0x07, p)
-
-
-def pvt_second(ymdhms, n=5, **kw):
-    """n epochs of one second (0.2 s apart): kw values may be lists."""
-    for k in range(n):
-        a = dict((key, v[k] if isinstance(v, list) else v)
-                 for key, v in kw.items())
-        lat, lon = a.pop("lat", 47.5), a.pop("lon", 19.0)
-        gl._ubx_frame(pvt_frame(ymdhms, lat, lon, nano=k * 200000000, **a))
-
-
-def pvt_monver(hw, protver):
-    pl = b"ROM SPG 5.10 (7b202e)".ljust(30, b"\0") + hw.ljust(10, b"\0")
-    pl += protver.ljust(30, b"\0")
-    return gl._ubx(0x0A, 0x04, pl)
-
-
-T0 = (2026, 10, 31, 12, 0, 0)
-
-
-def t_at(s, base=T0):
-    return base[:5] + (base[5] + s,)
-
-
-# PVT-PARSE: one unpack_from per frame fills the fields GGA/RMC fill
-gl.reset()
-pvt_second(T0, lat=-33.8567844, lon=-151.2152967, hacc=2.0, mps=1.5,
-           head=271.5, hmsl=58.6, vacc=3.0, nsv=17, pdop=1.4, sacc=0.4)
-pre = (gl.st["seq"], gl.st["valid"])
-pvt_second(t_at(1), n=1)
-check("PVT-PARSE: a second is published when the next one starts",
-      pre == (0, False) and gl.st["seq"] == 1 and gl.st["valid"] is True
-      and gl.st["time"] == "12:00:00" and gl.st["date"] == "2026-10-31"
-      and gl.st["fix_src"] == "pvt", repr((pre, gl.st["time"])))
-check("PVT-PARSE: negative lat/lon kept as 1e-7 ints, accuracy, elevation",
-      gl.st["lat_i"] == -338567844 and gl.st["lon_i"] == -1512152967
-      and abs(gl.st["lat"] + 33.8567844) < 1e-9
-      and abs(gl.st["hacc"] - 2.0) < 1e-9 and abs(gl.st["alt"] - 58.6) < 1e-9
-      and abs(gl.st["mps"] - 1.5) < 1e-9 and gl.st["epochs"] == 5,
-      repr((gl.st["lat_i"], gl.st["lon_i"], gl.st["hacc"], gl.st["alt"])))
-pvt_second(T0, n=1, lat=47.5, lon=19.0, mps=2.0, head=12.5, vacc=3.5,
-           nsv=9, pdop=1.8, sacc=0.6)    # (an old second: still parsed)
-gl.st["rx"] = _clock[0]
-check("PVT-PARSE: latest epoch's speed, sats, fix type",
-      gl.st["used"] == 9 and gl.st["fixtype"] == 3 and gl.st["quality"] == 1
-      and abs(gl.st["speed"] - 7.2) < 1e-9 and gl.status() == "3D fix",
-      repr((gl.st["used"], gl.st["speed"])))
-# (PDOP, course, gSpeed, sAcc, vAcc, tAcc, RMC status: stored every frame /
-# sentence, read by nothing: not in st)
-gl.handle(rv_nmea("GPRMC,120001.00,A,4730.000,N,01900.000,E,0.1,12.5,"
-                  "311026,,,A"))
-gl.handle(rv_nmea("GPGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2"))
-pp_dead = [k for k in ("pdop", "course", "head", "gspeed", "sacc", "vacc",
-                       "tacc", "status") if k in gl.st]
-check("PVT-PARSE: no store nothing reads (PDOP, course, accuracies, status)",
-      pp_dead == [] and gl.st["fixtype"] == 3, repr(pp_dead))
-
-
-def pvt_case(**kw):
-    gl.reset()
-    pvt_second(T0, **kw)
-    pvt_second(t_at(1), n=1, **kw)
-    gl.st["rx"] = _clock[0]
-    return (gl.st["valid"],
-            bool(gl.has_fix(_clock[0])) and gl._usable(_clock[0]))
-
-
-c_llh = pvt_case(flags3=1)
-c_nofix = pvt_case(flags=0)
-c_2d = pvt_case(fix=2)
-ele_2d = gl._fields(_clock[0])[0]
-c_dr = pvt_case(fix=5)                    # time only
-c_far = pvt_case(hacc=25.0)
-c_edge = pvt_case(hacc=20.0)
-c_none = pvt_case(hacc_mm=0xFFFFFFFF)     # "unknown": ~2**32 mm
-check("PVT-FILTER: invalidLlh, no gnssFixOK, time-only -> no fix",
-      c_llh == (False, False) and c_nofix == (False, False)
-      and c_dr == (False, False), repr((c_llh, c_nofix, c_dr)))
-check("PVT-FILTER: 2D is a fix as GGA's is (no elevation in the line)",
-      c_2d == (True, True) and ele_2d == "", repr((c_2d, ele_2d)))
-check("PVT-FILTER: hAcc over PVT_MAX_HACC (or unknown) is a fix, not usable",
-      c_far == (True, False) and c_edge == (True, True)
-      and c_none == (True, False) and gl.PVT_MAX_HACC == 20,
-      repr((c_far, c_edge, c_none)))
-
-# PVT-FRAME: a cut NAV-PVT (another protocol's 84-byte payload) and a broken
-# checksum are counted bad, not read
-gl.reset()
-_uart_rx[:] = []
-good = pvt_frame(T0, 47.5, 19.0)
-short = gl._ubx(0x01, 0x07, bytes(good[6:6 + 84]))
-broken = bytearray(good)
-broken[-1] ^= 0xFF
-_uart_rx.extend(short + bytes(broken) + good)
-gl.read_uart()
-check("PVT-FRAME: truncated and bad-checksum frames counted, the good read",
-      gl.st["ubx_bad"] == 2 and gl.st["ubx_ok"] == 1 and gl.ep["pn"] == 1,
-      "bad=%d ok=%d pn=%d" % (gl.st["ubx_bad"], gl.st["ubx_ok"],
-                              gl.ep["pn"]))
-_uart_rx[:] = []
-
-# PVT-AVG: integer offsets from the second's first fix weighted by 1/hAcc^2
-gl.reset()
-lats = [475000000, 475000010, 475000030, 475000005, 474999990]
-lons = [190000000, 190000020, 189999990, 190000000, 190000013]
-haccs = [1.0, 2.0, 4.0, 1.0, 0.0]          # (0: counted as 1 mm)
-pvt_second(T0, lat=lats, lon=lons, hacc=haccs)
-pvt_second(t_at(1), n=1)
-ws = [1 / max(h, 0.001) ** 2 for h in haccs]
-
-
-def wmean(v):
-    return v[0] + gl._round(sum(w * (x - v[0]) for w, x in zip(ws, v))
-                            / sum(ws))
-
-
-check("PVT-AVG: the mean is weighted by 1/hAcc^2 (hAcc 0 guarded)",
-      gl.st["lat_i"] == wmean(lats) and gl.st["lon_i"] == wmean(lons)
-      and gl.st["lat_i"] == 474999990 and gl.st["epochs"] == 5,
-      repr((gl.st["lat_i"], gl.st["lon_i"], wmean(lats), wmean(lons))))
-gl.reset()
-pvt_second(T0, lat=[475000000, 475000500, 475000510, 475000520, 475000530],
-           hacc=[30.0, 2.0, 2.0, 2.0, 2.0])
-pvt_second(t_at(1), n=1)
-over = (gl.st["lat_i"], gl.st["epochs"])
-gl.reset()
-pvt_second(T0, lat=[475000000, 475000500, 475000510, 475000520, 475000530],
-           hacc=[2.0, 2.0, 30.0, 2.0, 2.0])
-pvt_second(t_at(1), n=1)
-over2 = (gl.st["lat_i"], gl.st["epochs"], round(gl.st["hacc"], 3))
-check("PVT-AVG: a fix over PVT_MAX_HACC is left out of a second with good "
-      "ones (before or after them)",
-      over == (475000515, 4) and over2 == (475000388, 4, 2.0),
-      repr((over, over2)))
-gl.reset()
-pvt_second(T0, lat=lats, mps=[1.0, 1.0, 5.0, 1.0, 1.0],
-           hacc=[3.0, 1.0, 1.0, 1.0, 1.0])
-pvt_second(t_at(1), n=1)
-check("PVT-AVG: above AVG_MAX_SPEED the point is the second's first fix",
-      gl.st["lat_i"] == lats[0] and abs(gl.st["hacc"] - 3.0) < 1e-9
-      and abs(gl.st["mps"] - 1.0) < 1e-9,
-      repr((gl.st["lat_i"], gl.st["hacc"], gl.st["mps"])))
-
-# PVT-I7: integer coordinates printed without a float, as "%.6f" would
-i7 = [gl._i7(v) for v in (474979123, 474979125, -5, -4, 5, 4, 0, -15, 15,
-                          -1512152967, 1799999995, -1799999995, -10, 9)]
-# PVT-ACC: Dawarich keeps horizontal_accuracy as an integer; the M10's
-# 0.4-0.5 m (SBAS) was stored as 0: acc goes in whole metres, rounded up,
-# at least 1 (hdop keeps acc / HDOP_M)
-
-
-def acc_field(h):
-    gl.st.update(lat_i=475000000, lon_i=190000000, hacc=h, mps=1.0,
-                 alt=None)
-    f = gl._fields(_clock[0])
-    return f[2], f[1]
-
-
-acc_got = [acc_field(h) for h in (0.0, 0.4, 0.999, 1.0, 1.001, 2.5, 20.0)]
-gl.reset()
-check("PVT-ACC: acc in whole metres, rounded up, at least 1",
-      [a for a, _ in acc_got] == ["1", "1", "1", "1", "2", "3", "20"]
-      and acc_got[1][1] == "0.1", repr(acc_got))
-
-check("PVT-I7: 1e-7 ints -> 6 decimals, halves away from zero, no -0",
-      i7 == ["47.497912", "47.497913", "-0.000001", "0.000000", "0.000001",
-             "0.000000", "0.000000", "-0.000002", "0.000002", "-151.215297",
-             "180.000000", "-180.000000", "-0.000001", "0.000001"], repr(i7))
-
-# <<<UBLOX
 # SECONDS: 5 Hz epochs, one point a second; midnight; seconds queued behind a
 # blocking call
 def sec_epochs(hhmmss, date="311026", n=5, lat="4730.0000"):
@@ -9890,10 +9251,10 @@ def _drive(day, n, t0=36000, fmt=2, seed=1):
         s = gl._stamp_s(t)[1]
         if fmt == 2:
             out.append("%s,%s,%.1f,%.1f,%.1f,%s\n" % (
-                gl._i7(la), gl._i7(lo), el / 10, acc / 10, v * 3.6, s))
+                _i7(la), _i7(lo), el / 10, acc / 10, v * 3.6, s))
         else:
             out.append("%s,%s,%.1f,%.1f,%s\n" % (
-                gl._i7(la), gl._i7(lo), el / 10, acc / 10, s))
+                _i7(la), _i7(lo), el / 10, acc / 10, s))
         t += 2 if r.random() < 0.03 else 1
     return out
 
@@ -10243,387 +9604,6 @@ finally:
     shutil.rmtree(_hd, ignore_errors=True)
     gl.reset()
 
-# >>>UBLOX
-gl.GPS_UC = False
-# PVT-SETUP: the receiver's kind (MON-VER) picks the setup: M10 one
-# CFG-VALSET (RAM) with NAV-PVT on and every NMEA sentence off, M8 legacy
-# CFG-MSG, u-blox 6/7 NMEA as before
-
-
-def pvt_setup(kind_frame, gps_pvt=True):
-    saved = gl.GPS_PVT
-    gl.GPS_PVT = gps_pvt
-    try:
-        gl.reset()
-        _uart_rx[:] = []
-        if kind_frame is not None:
-            gl._ubx_frame(kind_frame)
-        _uart_tx[:] = []
-        gl.gps_setup()
-        return [f for f in _uart_tx if f[2:3] == b"\x06"]
-    finally:
-        gl.GPS_PVT = saved
-
-
-def nmea_set(frames):
-    return [f for f in frames if f[2:4] == b"\x06\x01" and f[6] == 0xF0]
-
-
-M10_VER = pvt_monver(b"000A0000", b"PROTVER=34.10")
-M8_VER = pvt_monver(b"00080000", b"PROTVER=18.00")
-U6_VER = pvt_monver(b"00040007", b"PROTVER 7.03")
-F9_VER = pvt_monver(b"00190000", b"PROTVER=27.11")
-fr10 = pvt_setup(M10_VER)
-# CFG-VALSET payload by hand: version 0, layers 0x01 (RAM), 2 reserved,
-# then key (U4 LE) + U1 value per item; keys from the u-blox M10 SPG 5.10
-# interface description / SparkFun u-blox_config_keys.h
-vs = bytes((0, 1, 0, 0))
-for key, val in ((0x20910007, 1), (0x209100BB, 0), (0x209100AC, 0),
-                 (0x209100C0, 0), (0x209100D4, 0), (0x209100C5, 0),
-                 (0x209100CA, 0), (0x209100B1, 0)):
-    vs += _struct.pack("<IB", key, val)
-vs_frame = gl._ubx(0x06, 0x8A, vs)
-check("PVT-SETUP: M10 - one CFG-VALSET (RAM): NAV-PVT on, GGA/RMC/GSA/GST/"
-      "GSV/GLL/VTG off, between the 1 Hz and 5 Hz rate frames",
-      gl.st["mode"] == "pvt" and gl.st["setup_ok"] is True
-      and vs_frame in fr10 and not nmea_set(fr10)
-      and fr10[0] == gl._rate(1000) and fr10[-1] == gl._rate(200)
-      and fr10.index(vs_frame) == 2 and len(fr10) == 4,
-      repr([f.hex() for f in fr10]))
-fr8 = pvt_setup(M8_VER)
-want8 = ([gl._ubx(6, 1, bytes((0x01, 0x07, 1)))]
-         + [gl._ubx(6, 1, bytes((0xF0, m, 0)))
-            for m in (0x00, 0x04, 0x02, 0x07, 0x03, 0x01, 0x05)])
-check("PVT-SETUP: M8 - legacy CFG-MSG: NAV-PVT every epoch, NMEA off",
-      gl.st["mode"] == "pvt" and fr8[2:-1] == want8
-      and not any(f[2:4] == b"\x06\x8a" for f in fr8),
-      repr([f.hex() for f in fr8]))
-fr6 = pvt_setup(U6_VER)
-fr_unknown = pvt_setup(None)
-want_nmea = [gl._ubx(6, 1, bytes((0xF0, m, r))) for m, r in gl.GPS_MSGS]
-# CFG-MSG class 0x01 id 0x07 (NAV-PVT) rate 0, by hand: the NMEA setup's
-# last message frame
-pvt_stop = b"\xb5\x62\x06\x01\x03\x00\x01\x07\x00\x12\x50"
-check("PVT-SETUP: u-blox 6 (and an unknown receiver) keep the NMEA setup",
-      gl.st["mode"] == "nmea" and fr6[2:-1] == want_nmea + [pvt_stop]
-      and fr_unknown[2:-1] == want_nmea + [pvt_stop],
-      repr([f.hex() for f in fr6]))
-fr_off = pvt_setup(M10_VER, gps_pvt=False)
-check("PVT-SETUP: GPS_PVT=0 keeps NMEA on an M10",
-      gl.st["mode"] == "nmea" and fr_off[2:-1] == want_nmea + [pvt_stop])
-fr9 = pvt_setup(F9_VER)
-check("PVT-SETUP: kinds - protocol 23+ VALSET, 15-22 CFG-MSG, older NMEA",
-      vs_frame in fr9
-      and gl._gps_kind(pvt_monver(b"00000000", b"PROTVER=15.00")[6:-2])
-      == "m8"
-      and gl._gps_kind(pvt_monver(b"00070000", b"PROTVER 14.00")[6:-2])
-      is None, repr([f.hex() for f in fr9]))
-pv_env = []
-saved = gl.GPS_PVT
-for v_ in ("0 # nmea", "auto", "1", "x", None):
-    gl.GPS_PVT = True if v_ != "auto" else False
-    gl._gps_pvt_env({"GPS_PVT": v_} if v_ is not None else {})
-    pv_env.append(gl.GPS_PVT)
-gl.GPS_PVT = saved
-import inspect as _inspect
-run_src = _inspect.getsource(gl.run)
-check("PVT-SETUP: .env GPS_PVT auto/1/0 (comment-safe), read before setup",
-      pv_env == [False, True, True, True, True]
-      and run_src.index("_gps_pvt_env") < run_src.index("gps_setup()"),
-      repr(pv_env))
-
-# PVT-BOOT: the boot setup is NMEA (model unknown); MON-VER naming an M10
-# makes the PVT setup due (within GPS_RETRY), not a second NMEA one
-gl.reset()
-_uart_rx[:] = []
-gl.gps_setup()
-mode0 = gl.st["mode"]
-_uart_ver[0] = M10_VER
-_uart_tx[:] = []
-try:
-    gl.gps_check(_clock[0])               # polls MON-VER: the answer
-    gl.read_uart()
-    for _ in range(8):
-        _clock[0] += 1000
-        gl.gps_check(_clock[0])
-finally:
-    _uart_ver[0] = None
-check("PVT-BOOT: MON-VER of an M10 after an NMEA setup -> the PVT setup",
-      mode0 == "nmea" and gl.st["mode"] == "pvt" and gl.st["gps_kind"] == "m10"
-      and vs_frame in _uart_tx and gl.st["ack_n"] == 0,
-      "%r %r" % (mode0, gl.st["mode"]))
-
-# PVT-CHECK: _setup_check counts NAV-PVT epochs (no fix needed, no GST);
-# one a second is not taken; none at all by GPS_VERIFY: NMEA for this boot
-
-
-def pvt_verify(n_per_s, secs=12, frames=True):
-    pvt_setup(M10_VER)
-    _uart_tx[:] = []
-    for k in range(secs):
-        if frames:
-            pvt_second(t_at(k), n=n_per_s, flags=0, fix=0)   # no fix
-        else:
-            gl.handle(rv_nmea("GPRMC,1200%02d.00,V,,,,,,,311026,,,N" % k))
-        _clock[0] += 1000
-        gl.gps_check(_clock[0])
-    return [f for f in _uart_tx if f[2:3] == b"\x06"]
-
-
-diag_clear()
-gl.DIAG = 60000
-try:
-    v5 = pvt_verify(5)
-    v5_state = (gl.st["checked"], gl.st["extra"], gl.st["pvt_bad"])
-    v1 = pvt_verify(1)
-    v1_state = (gl.st["extra"] > 0 or bool(v1), gl.st["pvt_bad"])
-    vn = pvt_verify(5, secs=25, frames=False)
-    vn_state = (gl.st["pvt_bad"], gl.st["mode"])
-    fb_lines = [l for l in diag_lines() if l.startswith("gps pvt")]
-finally:
-    gl.DIAG = 0
-check("PVT-CHECK: 5 NAV-PVT epochs a second without a fix -> taken, no GST",
-      v5 == [] and v5_state == (True, 0, False), repr((v5, v5_state)))
-check("PVT-CHECK: one NAV-PVT a second -> not taken, set up again",
-      v1_state == (True, False) and vs_frame in v1, repr(v1_state))
-check("PVT-CHECK: no NAV-PVT by GPS_VERIFY -> NMEA setup, PVT off this boot",
-      vn_state == (True, "nmea") and nmea_set(vn)[-len(want_nmea):]
-      == want_nmea and fb_lines == ["gps pvt no NAV-PVT, NMEA this boot"],
-      repr((vn_state, fb_lines)))
-pvt_setup(M10_VER)
-gl.st["pvt_bad"] = True                   # (given up earlier this boot)
-_uart_tx[:] = []
-gl.gps_setup()
-check("PVT-CHECK: given up -> NMEA setups for the rest of the boot",
-      gl.st["mode"] == "nmea" and vs_frame not in _uart_tx)
-
-# NMEA-PVT-STOP: an ESP reset leaves the receiver powered, NAV-PVT on from
-# the NAV-PVT boot before (a RAM VALSET). GPS_PVT=0: the NMEA setup turns
-# it off (CFG-MSG, the model not known yet); a NAK of that frame alone (a
-# u-blox 6 has no NAV-PVT) is no failed setup; a NAV-PVT frame while in
-# the NMEA mode is not used and makes the setup due again
-_uart_nak_frames.add(pvt_stop)
-try:
-    fr_u6nak = pvt_setup(U6_VER, gps_pvt=False)
-    u6nak = (gl.st["setup_ok"], gl.st["mode"])
-finally:
-    _uart_nak_frames.discard(pvt_stop)
-check("NMEA-PVT-STOP: a NAK of the NAV-PVT stop alone -> setup ok, 5 Hz",
-      u6nak == (True, "nmea") and fr_u6nak[-2] == pvt_stop
-      and fr_u6nak[-1] == gl._rate(1000 // gl.GPS_HZ),
-      repr((u6nak, [f.hex() for f in fr_u6nak[-2:]])))
-pvt_setup(None, gps_pvt=False)            # boot: model unknown
-gl.st["checked"] = True
-_clock[0] += 2000
-ubx0 = gl.st["ubx_ok"]
-pvt_second(t_at(0), lat=47.6, lon=19.1)    # still on in the receiver
-left_on = (gl.st["valid"], gl.st["lat_i"], gl.st["fix_src"], gl.st["extra"],
-           gl.st["ubx_ok"] - ubx0)
-_uart_tx[:] = []
-for _ in range(gl.GPS_RETRY // 1000 + 1):
-    _clock[0] += 1000
-    gl.gps_check(_clock[0])
-check("NMEA-PVT-STOP: NAV-PVT in the NMEA mode -> not used, set up again",
-      left_on[:3] == (False, None, None) and left_on[3] == 5
-      and left_on[4] == 5 and pvt_stop in _uart_tx
-      and gl.st["mode"] == "nmea", repr(left_on))
-_uart_nak.add((0x06, 0x8A))
-try:
-    fr_nak = pvt_setup(M10_VER)
-    nak_state = (gl.st["pvt_bad"], gl.st["setup_ok"])
-    _uart_tx[:] = []
-    _clock[0] += gl.GPS_RETRY + 1000
-    gl.gps_check(_clock[0])
-finally:
-    _uart_nak.discard((0x06, 0x8A))
-check("PVT-CHECK: a NAK of the CFG-VALSET -> PVT off, the NMEA setup next",
-      nak_state == (True, False) and gl.st["mode"] == "nmea"
-      and nmea_set(_uart_tx) == want_nmea, repr(nak_state))
-
-# PVT-NAK-STOP: an M8 that refused a frame of its NAV-PVT setup (or stopped
-# answering) got the frames after it anyway, blind: the NMEA-off ones left
-# it silent, no NMEA and no NAV-PVT, until the next setup (a running
-# backoff: minutes). Now the setup stops there, and a NAK makes the NMEA
-# setup due within GPS_RETRY
-
-
-def m8_stop(nak=None, silent=None):
-    saved = gl.GPS_PVT
-    gl.GPS_PVT = True
-    gl.reset()
-    _uart_rx[:] = []
-    gl._ubx_frame(M8_VER)
-    gl.st["setup_wait"] = gl.GPS_RETRY_MAX       # a backoff running
-    _uart_nak_frames.add(nak)
-    _uart_silent.add(silent)
-    try:
-        _uart_tx[:] = []
-        gl.gps_setup()
-        sent = [f for f in _uart_tx if f[2:3] == b"\x06"]
-        state = (gl.st["pvt_bad"], gl.st["setup_ok"], gl.st["setup_wait"])
-    finally:
-        _uart_nak_frames.discard(nak)
-        _uart_silent.discard(silent)
-        gl.GPS_PVT = saved
-    _uart_tx[:] = []
-    _clock[0] += gl.GPS_RETRY + 1000
-    gl.gps_check(_clock[0])
-    return sent, state, list(_uart_tx)
-
-
-s_on, st_on, again_on = m8_stop(nak=want8[0])
-s_gsa, st_gsa, _ = m8_stop(nak=want8[3])
-s_sil, st_sil, _ = m8_stop(silent=(0x06, 0x01))
-check("PVT-NAK-STOP: M8 NAK of NAV-PVT on -> no NMEA-off frame, NMEA setup "
-      "within GPS_RETRY",
-      want8[0] in s_on and not any(f in s_on for f in want8[1:])
-      and gl._rate(200) not in s_on
-      and st_on == (True, False, gl.GPS_RETRY)
-      and nmea_set(again_on) == want_nmea,
-      repr((st_on, [f.hex() for f in s_on])))
-check("PVT-NAK-STOP: a NAK (or silence) mid-way -> the frames after it not "
-      "sent",
-      all(f in s_gsa for f in want8[:4])
-      and not any(f in s_gsa for f in want8[4:]) and st_gsa[:2] == (True, False)
-      and want8[0] in s_sil and not any(f in s_sil for f in want8[1:])
-      and st_sil[:2] == (False, False),
-      repr((st_gsa, st_sil, [f.hex() for f in s_sil])))
-
-# PVT-BLIND: CFG-RATE unanswered (an overrun or booting receiver) sends the
-# message frames once, blind. An M8's NAV-PVT setup is a row of CFG-MSG:
-# one dropped NAV-PVT-on frame with the NMEA-off ones taken left it silent
-# until a retry (checked=True skipped the "no NAV-PVT" check). Now the
-# blind burst is the NMEA set, and the PVT setup follows acknowledged; an
-# M10's one VALSET (all or nothing) still goes blind
-saved = gl.GPS_PVT
-gl.GPS_PVT = True
-_uart_silent.add((0x06, 0x08))
-try:
-    blind8 = pvt_setup(M8_VER)
-    b8_state = (gl.st["mode"], gl.st["setup_ok"])
-    blind10 = pvt_setup(M10_VER)
-    b10_state = (gl.st["mode"], gl.st["setup_ok"])
-    blind8b = pvt_setup(M8_VER)
-finally:
-    _uart_silent.discard((0x06, 0x08))
-try:
-    _uart_tx[:] = []
-    _clock[0] += gl.GPS_RETRY + 1000
-    gl.gps_check(_clock[0])
-    b8_next = (gl.st["mode"], gl.st["setup_ok"], gl.st["pvt_bad"],
-               [f for f in _uart_tx if f[2:3] == b"\x06"])
-finally:
-    gl.GPS_PVT = saved
-check("PVT-BLIND: M8, CFG-RATE unanswered -> the NMEA set blind, no NAV-PVT "
-      "on; the acknowledged PVT setup next",
-      b8_state == ("nmea", False) and want8[0] not in blind8
-      and nmea_set(blind8) == want_nmea and pvt_stop in blind8
-      and want8[0] not in blind8b
-      and b8_next[:3] == ("pvt", True, False) and b8_next[3][2:-1] == want8
-      and b10_state == ("pvt", False) and vs_frame in blind10,
-      repr((b8_state, b10_state, [f.hex() for f in blind8], b8_next[:3])))
-
-# PVT-NAK-LATE: an ACK / NAK names only class and id, and an M8's CFG-MSG
-# frames are all 06 01: a late NAK of an earlier one, read as the answer
-# to this one, gave PVT up for the whole boot. Now a NAK in the PVT setup
-# is sent again once: refused twice is refused
-nl_once = set([want8[2]])
-nl_write = UART.write
-
-
-def nl_nak_once(self, data):
-    d = bytes(data)
-    if d in nl_once:                      # this send: a NAK (a late one of
-        nl_once.discard(d)                # the frame before), then ACKs
-        _uart_nak_frames.add(d)
-        try:
-            return nl_write(self, data)
-        finally:
-            _uart_nak_frames.discard(d)
-    return nl_write(self, data)
-
-
-UART.write = nl_nak_once
-try:
-    nl_sent = pvt_setup(M8_VER)
-    nl_state = (gl.st["mode"], gl.st["setup_ok"], gl.st["pvt_bad"])
-finally:
-    UART.write = nl_write
-s_nak2, st_nak2, _ = m8_stop(nak=want8[2])
-check("PVT-NAK-LATE: one NAK in the M8 PVT setup -> sent again, PVT kept; "
-      "two -> PVT off",
-      nl_state == ("pvt", True, False) and nl_sent.count(want8[2]) == 2
-      and nl_sent[2:-1] == want8[:3] + want8[2:]
-      and s_nak2.count(want8[2]) == 2 and st_nak2[:2] == (True, False),
-      repr((nl_state, [f.hex() for f in nl_sent])))
-
-# PVT-RESTART: a restarted receiver is back at NMEA: its banner counts, its
-# NMEA positions keep the track going, and the setup turns PVT on again
-# (the restarted M10 answers MON-VER: PVT-SWAP)
-pvt_setup(M10_VER)
-gl.st["checked"] = True
-_uart_tx[:] = []
-_uart_rx[:] = []
-_uart_ver[0] = M10_VER
-try:
-    _uart_rx.extend(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
-                    + b"\r\n")
-    for k in range(3):
-        _uart_rx.extend(rv_nmea("GPGGA,1200%02d.00,4730.000,N,01900.000,E,"
-                                "1,08,1.0,100.0,M,40.0,M,," % k) + b"\r\n")
-        _uart_rx.extend(rv_nmea("GPRMC,1200%02d.00,A,4730.000,N,01900.000,"
-                                "E,0.1,,311026,,,A" % k) + b"\r\n")
-    gl.read_uart()
-    restart = (gl.st["gps_boots"], gl.st["fix_src"], gl.st["valid"],
-               gl.st["extra"] > 0)
-    for _ in range(gl.GPS_RETRY // 1000 + 1):
-        _clock[0] += 1000
-        gl.gps_check(_clock[0])
-finally:
-    _uart_ver[0] = None
-check("PVT-RESTART: banner counted, NMEA fixes used, PVT set up again",
-      restart == (1, "nmea", True, True) and vs_frame in _uart_tx
-      and gl.st["mode"] == "pvt" and gl.st["gps_kind"] == "m10",
-      repr(restart))
-_uart_rx[:] = []
-gl.reset()
-
-# PVT-SWAP: the receiver's kind was kept over a restart, so a receiver
-# swapped while running got the old model's setup (an M8 the M10's VALSET:
-# a NAK, PVT off for the boot). Now a banner forgets the kind and asks
-# MON-VER at once: the setup is the new model's, or the NMEA one (safe on
-# any) until it answers
-swap = []
-for sw_ver in (M8_VER, None):
-    pvt_setup(M10_VER)
-    gl.st["checked"] = True
-    _uart_tx[:] = []
-    _uart_rx[:] = []
-    _uart_ver[0] = sw_ver
-    try:
-        _uart_rx.extend(rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
-                        + b"\r\n")
-        gl.read_uart()
-        sw_polled = gl.MON_VER in _uart_tx
-        for _ in range(gl.GPS_RETRY // 1000 + 1):
-            _clock[0] += 1000
-            gl.gps_check(_clock[0])
-    finally:
-        _uart_ver[0] = None
-    sw_cfg = [f for f in _uart_tx if f[2:3] == b"\x06"]
-    swap.append((sw_polled, gl.st["gps_kind"], gl.st["mode"],
-                 vs_frame in sw_cfg, sw_cfg[2:-1] == want8,
-                 nmea_set(sw_cfg) == want_nmea))
-_uart_rx[:] = []
-gl.reset()
-check("PVT-SWAP: a banner asks MON-VER at once; a swapped M8 gets its own "
-      "setup, an unanswered one the NMEA setup, never the M10 VALSET",
-      swap == [(True, "m8", "pvt", False, True, False),
-               (True, None, "nmea", False, False, True)], repr(swap))
-
-
-gl.GPS_UC = True
-# <<<UBLOX
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
 rv_td = tempfile.mkdtemp(prefix="rev29-")
 
@@ -12862,32 +11842,6 @@ check("RTC: upload_tick sets the clock before the POST (one diag line)",
       rtc_res[2] == ([(2026, 10, 31, wd, 12, 0, 0, 0)], 1,
                      ["clock set 2026-10-31T12:00:00Z"]), repr(rtc_res[2]))
 
-# >>>UBLOX
-# RTC-PVT (new feature): NAV-PVT time sets the clock when it is valid, fully
-# resolved and tAcc < PVT_MAX_TACC, a position fix or not (indoors at home)
-
-
-def rtc_pvt(**kw):
-    gl.reset()
-    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
-    gl._rtc_set[0] = False
-    pvt_second((2026, 10, 31, 12, 0, 0), flags=0, fix=0, **kw)
-    pvt_second((2026, 10, 31, 12, 0, 1), n=1, flags=0, fix=0, **kw)
-    gl._rtc_sync(_clock[0])
-    return RTC.sets[:]
-
-
-rp_ok = rtc_pvt()
-rp_tacc = rtc_pvt(tacc=gl.PVT_MAX_TACC + 1)
-rp_unres = rtc_pvt(valid=0x03)
-rp_nodate = rtc_pvt(valid=0x06)
-gl.reset()
-check("RTC-PVT: valid, fully resolved NAV-PVT time sets the clock, no fix "
-      "needed", rp_ok == [(2026, 10, 31, wd, 12, 0, 0, 0)], repr(rp_ok))
-check("RTC-PVT: tAcc too large, not fully resolved or no valid date: not",
-      rp_tacc == [] and rp_unres == [] and rp_nodate == [],
-      repr((rp_tacc, rp_unres, rp_nodate)))
-# <<<UBLOX
 
 # TLS out of memory TLS_REBOOT_N times in a row at home: a clean reboot
 for n_ in os.listdir(up_td):
@@ -13355,7 +12309,7 @@ check("POST-5: a guard hit on a 2xx is no 'aborted' line for the next error",
 # GPS-STORM: while it loops, setups are GPS_STORM_WAIT apart; diag lines
 diag_clear()
 gl.reset()
-banner = rv_nmea("GPTXT,01,01,02,u-blox ag - www.u-blox.com")
+banner = b"FWVer R6.0.0.0Build3700"
 gl.handle(banner)
 calm = gl.st["setup_wait"]
 for _ in range(gl.GPS_FLAP_RESTARTS):
@@ -13665,28 +12619,6 @@ check("HEAP: free and size of the Python heap without the IDF block",
       and " mem %d " % ph[0] in lines[0] and lines[0].endswith(" heap 83")
       and " idf 157/100 " in lines[0] and st_mem == ph[0],
       "%r %r" % (ph, lines))
-lines = []
-real_dw = gl._diag_write
-gl._diag_write = lines.append
-saved_pvt = (gl.st["mode"], gl.st["hacc"], gl.st["lat_i"], gl.st["ubx_ok"],
-             gl.st["ubx_bad"])
-try:
-    gl.st.update(mode="pvt", hacc=2.34, lat_i=471000000, ubx_ok=646,
-                 ubx_bad=1)
-    gl._diag(_clock[0])
-    gl.st["lat_i"] = None                # no fix this second
-    gl._diag(_clock[0])
-    gl.st["mode"] = "nmea"
-    gl._diag(_clock[0])
-finally:
-    (gl.st["mode"], gl.st["hacc"], gl.st["lat_i"], gl.st["ubx_ok"],
-     gl.st["ubx_bad"]) = saved_pvt
-    gl._diag_write = real_dw
-check("DIAG-PVT: on NAV-PVT the minute line adds ubx good/bad and hAcc",
-      lines[0].endswith(" ubx 646/1 hacc 2.3")
-      and lines[1].endswith(" ubx 646/1 hacc -")
-      and " ubx " not in lines[2] and " hacc " not in lines[2],
-      repr(lines))
 check("HEAP-B: the IDF block comes off to the byte, not KB-floored",
       ph[0] == 123456 - 103100, "%r" % (ph,))
 
@@ -13940,36 +12872,6 @@ finally:
 check("WRAP-GPS: storm mark, restart times, satellite list end, not wrap",
       wrapped == (gl.GPS_RETRY, 0, 7), repr(wrapped))
 
-# >>>UBLOX
-# LOOP-DIAG: a banner-only reset loop wrote a diag line every
-# GPS_LOOP_WINDOW (12.6 KB an hour): now the first warning, a count every
-# GPS_LOOP_SAY and one when it ends; every window is still counted
-diag_clear()
-gl.DIAG = 60000
-gl.reset()
-_uart_rx[:] = []
-for _ in range(40):
-    for _ in range(3):
-        _uart_rx.extend(b"$GPTXT,01,01,02,u\xff\xff\xff")
-        gl.read_uart()
-    _clock[0] += gl.GPS_LOOP_WINDOW
-    gl.gps_check(_clock[0])
-for k in range(3):
-    _uart_rx.extend(rv_nmea("GPRMC,1208%02d.00,V,,,,,,,171026,,,N" % k)
-                    + b"\r\n")
-gl.read_uart()
-_clock[0] += gl.GPS_LOOP_WINDOW
-gl.gps_check(_clock[0])
-loop_lines = [l for l in diag_lines() if l.startswith("gps reset loop")]
-check("LOOP-DIAG: first warning, then one line per GPS_LOOP_SAY and at the end",
-      gl.st["loops"] == 40 and loop_lines
-      == ["gps reset loop 3 banners, no NMEA",
-          "gps reset loop 30 more windows", "gps reset loop 9 more windows"],
-      "loops=%d %d lines %r" % (gl.st["loops"], len(loop_lines),
-                                loop_lines[:3]))
-gl.DIAG = 0
-diag_clear()
-# <<<UBLOX
 
 
 # PAGE: web.html draws the boxes from /status.json (node runs its view())
@@ -13998,26 +12900,22 @@ gl.st["valid"] = False
 gl.wifi.update(state="off", ssid=None, rssi=None)
 gl.st["svs"] = None
 page_json2 = gl._web_json()
-# a NAV-PVT second (new feature): hAcc, the fix source, UBX frame counts
+# no HDOP yet (no GGA in the last STALE ms)
 gl.st.update(pos_at=_clock[0], valid=True, fixtype=3, quality=1, hdop=None, lat=47.1,
-             lon=18.4, lat_i=471000000, lon_i=184000000, hacc=30.04,
-             fix_src="pvt", ubx_ok=500, ubx_bad=2)
+             lon=18.4)
 gl._web_diag = lambda: ["up 120 utc 20261031T130241Z nmea 72/0 gpsboots 0 "
                          "loops 0 sats 22/15 fix 3D_fix hdop None points 0 "
                          "sent 0 wifi connected pulses 0 mem 19280 idf "
-                         "221/208 heap 62 ubx 646/0 hacc 2.3"]
+                         "221/208 heap 62"]
 page_json3 = gl._web_json()
 gl._web_diag = _diag_saved
 jd1, jd3 = json.loads(page_json), json.loads(page_json3)
 check("PAGE: JSON is generated piece by piece (no list in RAM)",
       not isinstance(gl._web_json_parts(), (list, tuple))
       and jd1["hdop"] == 0.88199996)
-check("PAGE-PVT: status JSON hacc (m), fix_src and ubx ok / bad; nmea kept",
-      jd3["hacc"] == 30.0 and jd3["fix_src"] == "pvt"
-      and jd3["ubx"] == "500 / 2" and jd3["hdop"] is None
-      and "nmea" in jd3 and jd1["hacc"] is None and jd1["ubx"] == "0 / 0",
-      repr((jd3.get("hacc"), jd3.get("fix_src"), jd3.get("ubx"),
-            jd1.get("hacc"))))
+check("PAGE: status JSON has no field of the receiver this board does not have",
+      not any(k in jd1 for k in ("hacc", "fix_src", "ubx")) and "nmea" in jd1
+      and jd3["hdop"] is None, repr(sorted(jd1)))
 gl.reset()
 import re
 import shutil
@@ -14042,23 +12940,15 @@ else:
     v, v2, v3 = out
     tm, tm2 = v.get("tm", ""), v2.get("tm", "")
     tm3, sy3 = v3.get("tm", ""), v3.get("sys", "")
-    check("PAGE-PVT: telemetry shows +-hAcc m (amber over PVT_MAX_HACC), "
-          "HDOP without it",
-          '<div class="warn"><small>ACC</small><b>&plusmn;30.0<em>m</em>'
-          '</b></div>' in tm3 and "<small>HDOP</small>" not in tm3
-          and "<small>ACC</small>" not in tm and "<small>HDOP</small>" in tm,
+    check("PAGE: telemetry shows HDOP, a dash without one, and NMEA BAD",
+          "<small>HDOP</small><b>-</b>" in tm3 and "<small>ACC</small>" not in tm3
+          and "<small>HDOP</small>" in tm and "<small>NMEA BAD</small>" in tm3,
           tm3[:400])
-    check("PAGE-PVT: map ring from hAcc as it is, coordinates +-hAcc m",
-          v3.get("dom", {}).get("acc") == "74px"
-          and v3.get("coord", "").endswith("&plusmn;30.0 m")
+    check("PAGE: map ring from HDOP * UERE, coordinates +-that in m",
+          v3.get("dom", {}).get("acc") == "36px"
           and v.get("coord", "").endswith("&plusmn;2.2 m"),
           repr((v3.get("dom", {}).get("acc"), v3.get("coord"),
                 v.get("coord"))))
-    check("PAGE-PVT: on NAV-PVT the strip shows UBX BAD, not the frozen "
-          "NMEA count",
-          "<small>UBX BAD</small><b>0.40<em>%</em>" in tm3
-          and "NMEA BAD" not in tm3 and "<small>NMEA BAD</small>" in tm,
-          tm3[-300:])
     # BOOT: when this run started (local time) and how long the one before
     # it lasted, until when; FIRMWARE: the build date, the commit after it
     jb = json.loads(page_json)
@@ -14090,9 +12980,9 @@ else:
           and "health &middot; 86fb9c8</p>" in syb
           and json.loads(rb_.stdout).get("unlabeled") == [],
           syb[syb.find("Firmware"):syb.find("Chip")])
-    check("PAGE-PVT: Systems shows the fix source and the UBX frame counts",
-          "&middot; NAV-PVT 500/2 ubx" in sy3 and v3.get("unlabeled") == []
-          and " ubx" not in v.get("sys", ""), sy3[:1500])
+    check("PAGE: Systems labels every row, no UBX or fix source",
+          v3.get("unlabeled") == [] and " ubx" not in sy3
+          and "NAV-PVT" not in sy3, sy3[:1500])
     check("PAGE: telemetry strip - fix, sats, HDOP, uplink, WiFi, NMEA bad",
           '<div class="ok"><small>FIX</small><b>3D</b></div>' in tm
           and "<small>SATS</small><b>1<em>/2</em>" in tm
@@ -14168,13 +13058,13 @@ else:
               '</em></b>' in evk, evk)
     ev_n = {"crash": 1, "bug": 2, "gloop": 4, "gsil": 2, "track": 1,
             "full": 1, "upl": 3, "ota": 2, "otax": 1, "reboot": 1,
-            "tback": 1, "wfail": 4, "wlost": 1, "low": 1, "setup": 4,
-            "pvt": 1, "env": 2, "boot": 2, "wback": 1, "stay": 1, "grx": 2,
+            "tback": 1, "wfail": 4, "wlost": 1, "low": 1, "setup": 5,
+            "env": 2, "boot": 2, "wback": 1, "stay": 1, "grx": 2,
             "other": 2}
     # the latest first; at the same last time by severity, then count
     ev_order = ["boot", "grx", "ota", "upl", "bug", "crash", "track", "full",
                 "setup", "env", "otax", "reboot", "tback", "wlost", "low",
-                "pvt", "wback", "stay", "other", "gsil", "gloop", "wfail"]
+                "wback", "stay", "other", "gsil", "gloop", "wfail"]
     lms = ev.get("lastMs") or []
     check("PAGE-EV: groups - counts by kind ('(+N more)', '(N more)' and "
           "'N more windows' counted, an update once however many lines), "
@@ -14249,7 +13139,7 @@ else:
     check("PAGE-EV: the grouped table - a header row, a row a kind with its "
           "icon chip, name, count, detail, sparkline and last seen",
           evg.startswith('<div class="ev-grp ev-hd">')
-          and evg.count('<div class="ev-grp">') == 22
+          and evg.count('<div class="ev-grp">') == 21
           and '<div class="ev-grp"><span class="ev-ic t-bad"><svg' in evg
           and '<span class="ev-nm t-bad">GPS reset loop</span><span '
               'class="ev-n">4</span>' in evg
@@ -14288,15 +13178,11 @@ else:
     ev_samples = [
         ("gps reset loop 5 restarts in 6 s", "gloop"),
         ("gps reset loop 3 more windows", "gloop"),
-        ("gps reset loop 4 banners, no NMEA", "gloop"),
-        ("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10", "grx"),
-        ("gps rate 100 ms refused", "setup"),
         ("gps refused CFGMSG,0,7,5", "setup"),
         ("gps systems h135155", "grx"),
         ("gps refused CFGSYS,h135155", "setup"),
         ("gps setup lost: no GST", "setup"),
-        ("gps pvt no NAV-PVT, NMEA this boot", "pvt"),
-        ("gps setup not taken: no NAV-PVT (2 more)", "setup"),
+        ("gps setup not taken: no GST (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
         ("gps back after 75 s", "gsil"),
         ("boot cause 1 prev_up 26731 mhz 160 mem 12912", "boot"),
@@ -14390,7 +13276,7 @@ else:
               if k_ != g_]
     check("PAGE-EV-KINDS: every diag format gps_logger.py writes has a "
           "sample (%d formats), each sample in its kind: crashes, bugs, "
-          "upload errors, OTA, GPS silent / reset loop / setup / pvt, WiFi, "
+          "upload errors, OTA, GPS silent / reset loop / setup, WiFi, "
           "track and clock, reboots, boots, receiver; Other only the clock "
           "set and heap notes" % len(ev_fmts),
           len(ev_fmts) >= 45 and not ev_nomatch and isinstance(ev_kinds, list)
@@ -14874,13 +13760,13 @@ else:
     lay_j.update(
         diag=["up 600 utc 20261102T070000Z nmea 9/1 gpsboots 0 loops 0 sats "
               "14/9 fix 3D_fix hdop None points 512 sent 400 wifi connected "
-              "pulses 3 mem 27000 idf 157/120 heap 124 ubx 900/0 hacc 2.1",
+              "pulses 3 mem 27000 idf 157/120 heap 124",
               "boot cause 1 prev_up 700 mhz 80",
               "upload err OSError 113 ECONNABORTED while posting the batch"],
         satellites=[{"name": "G12", "system": "GPS", "svid": 12, "cno": 38,
                      "elev": 45, "azim": 120, "used": True,
                      "unhealthy": False}],
-        receiver="u-blox M10, ROM SPG 5.10", rx_bytes=123456, rx_age_s=0,
+        receiver="UC6580I G1B1L1E1, R6.0.0.0Build3700", rx_bytes=123456, rx_age_s=0,
         good_age_s=0, gps_boots=2, points=123456, left=12345, files=12,
         sent=98765, upload="err OSError 113", upload_err=3,
         upload_age_s=4000, uptime=93784, prev_run="11 min 40 s",
@@ -15077,21 +13963,16 @@ check("WEB-LINK: rx_bytes counts every byte, good_age_s only whole frames",
       repr((j0.get("rx_bytes"), junk_b, junk_good, j1.get("good_age_s"),
             good_at, ubx_at, j2.get("rx_bytes"), j2.get("good_age_s"))))
 
-# WEB-POS6: the position at the track line's precision for the static test:
-# NAV-PVT's integer 1e-7 degrees exactly, NMEA's float to 6 decimals
-gl.st.update(pos_at=_clock[0], valid=True, lat=47.1853612, lon=18.4273049, lat_i=471853612,
-             lon_i=184273049)
-p_pvt = json.loads(gl._web_json())
-gl.st.update(lat_i=None, lon_i=None)
+# WEB-POS6: the position at the track line's precision for the static test
+gl.st.update(pos_at=_clock[0], valid=True, lat=47.1853612, lon=18.4273049)
 p_nm = json.loads(gl._web_json())
 gl.st["valid"] = False
 p_none = json.loads(gl._web_json())
-check("WEB-POS6: pos6 from lat_i/lon_i (PVT), %.6f (NMEA), None w/o fix",
-      p_pvt["pos6"] == "47.185361, 18.427305"
-      and p_nm["pos6"] == "47.185361, 18.427305"
-      and p_pvt["position"] == "47.18536, 18.42730"
+check("WEB-POS6: pos6 %.6f, None w/o fix",
+      p_nm["pos6"] == "47.185361, 18.427305"
+      and p_nm["position"] == "47.18536, 18.42730"
       and p_none["pos6"] is None,
-      repr((p_pvt.get("pos6"), p_nm.get("pos6"), p_none.get("pos6"))))
+      repr((p_nm.get("pos6"), p_none.get("pos6"))))
 gl.reset()
 
 # WEB-DAYS: the day history's days for the page's picker, oldest first,
@@ -16902,8 +15783,8 @@ try:
         _clock[0] += gl.OTA_CHECK
         gl._ota_check()
         hm = [ln for ln in diag_lines() if "hmac" in ln]
-        # (a PVT status line runs to ~220 B after weeks up: the cap is
-        # above it, or its last field, hacc, was cut off the page's donut)
+        # (a status line runs to ~220 B after weeks up: the cap is above it,
+        # or its last field was cut off the page's donut)
         diag_clear()
         gl._diag_write("s" * 260)
         keep = diag_lines() == ["s" * 260]
@@ -17145,18 +16026,6 @@ check("R2-8: gpio keep-alive on a GPS pin falls back to scan",
       (m8a, m8b) == ("scan", "gpio"), repr((m8a, m8b)))
 gl.IS_HELTEC = True  # <<<BOARD
 
-# >>>UBLOX
-# R2-PVT: GPS_PVT takes the usual false words
-_pv = gl.GPS_PVT
-got = []
-for v in ("false", "off", "no", "0", "auto", "1", "true", "maybe"):
-    gl.GPS_PVT = None
-    gl._gps_pvt_env({"GPS_PVT": v})
-    got.append(gl.GPS_PVT)
-gl.GPS_PVT = _pv
-check("R2-PVT: GPS_PVT false/off/no/0 turn it off, auto/1/true on",
-      got == [False, False, False, False, True, True, True, None], repr(got))
-# <<<UBLOX
 
 # R2-PORTAL: an HTML 2xx (a captive portal) does not count as sent
 online(_r2_dir)
@@ -17686,8 +16555,8 @@ gl.HIST_DIR = os.path.join(_tb, "hist")
 
 def _tb_drive(n, fmt, seed=1, lat=47.185356, lon=18.426934, step=1,
               gaps=True):
-    """n text lines as _line writes them: a 1 Hz drive (fmt 2: NAV-PVT
-    ints, acc and speed; fmt 1: NMEA floats and hdop)."""
+    """n text lines: a 1 Hz drive (fmt 2: older NAV-PVT tracks, ints, acc and
+    speed; fmt 1: as _line writes them, NMEA floats and hdop)."""
     r = _rnd.Random(seed)
     out = []
     t = 1793520000 - gl.EPOCH_DAYS * 86400     # 2026-11-01
@@ -17705,7 +16574,7 @@ def _tb_drive(n, fmt, seed=1, lat=47.185356, lon=18.426934, step=1,
         tc = gl._stamp_s(t)[1]
         e = "%.1f" % ele if not gaps or r.random() > 0.01 else ""
         if fmt == 2:
-            c = gl._i7(li) + "," + gl._i7(lo)
+            c = _i7(li) + "," + _i7(lo)
             out.append("%s,%s,%d,%s,%s\n" % (c, e, max(1, int(hd * 2)),
                                              "%.1f" % spd, tc))
         else:
@@ -18497,7 +17366,7 @@ _uart_rx[:] = b""
 hl = _heltec_logger()
 check("HELTEC-BOARD: UART1 on 34/33 at 115200, Vext (GPIO3) high and the TFT "
       "backlight (GPIO21) off, before any UART use; no other board changes",
-      hl.IS_HELTEC and hl.GPS_UC and not hl.IS_C6
+      hl.IS_HELTEC and not hl.IS_C6
       and (hl.GPS_UART, hl.GPS_TX, hl.GPS_RX, hl.BAUD) == (1, 34, 33, 115200)
       and [p[:2] for p in _pin_levels if p[0] in (3, 21)] == [(3, 1), (21, 0)],
       repr((hl.GPS_TX, hl.GPS_RX, hl.BAUD, _pin_levels[:4])))
@@ -18521,7 +17390,7 @@ _ha_setup = hl.uart
 hl.gps_setup()
 _cmds = list(_ha_setup.cmds)
 check("UC-SETUP: PDTINFO (no checksum: with one it gets no answer), then CFGNAV "
-      "first (it resets the GSV rate), each with its checksum, no UBX byte; "
+      "first (it resets the GSV rate), each with its checksum; "
       "GST once a second, GSA and GSV at their pace, text notices off",
       _cmds[0] == b"$PDTINFO\r\n"
       and _cmds[1].startswith(b"$CFGNAV,200,200,1000*")
@@ -18533,12 +17402,9 @@ check("UC-SETUP: PDTINFO (no checksum: with one it gets no answer), then CFGNAV 
       and [c[1:].split(b"*")[0].decode() for c in _cmds[1:]] == [
           "CFGNAV,200,200,1000", "CFGMSG,0,0,1", "CFGMSG,0,4,1", "CFGMSG,0,1,0",
           "CFGMSG,0,5,0", "CFGMSG,0,2,25", "CFGMSG,0,3,25", "CFGMSG,0,7,5",
-          "CFGMSG,6,0,0", "CFGMSG,6,1,0"]
-      and not any(b"\xb5" in c for c in _cmds), repr(_cmds))
-check("UC-SETUP: all answered: taken for now, NMEA mode, the receiver's model "
-      "from PDTINFO",
-      hl.st["setup_ok"] is True and hl.st["mode"] == "nmea"
-      and hl.st["checked"] is False
+          "CFGMSG,6,0,0", "CFGMSG,6,1,0"], repr(_cmds))
+check("UC-SETUP: all answered: taken for now, the receiver's model from PDTINFO",
+      hl.st["setup_ok"] is True and hl.st["checked"] is False
       and hl.st["gps_ver"] == "UC6580I G1B1L1E1, R6.0.0.0Build3700",
       repr((hl.st["setup_ok"], hl.st["gps_ver"])))
 _ha_setup.cmds[:] = []
@@ -18578,13 +17444,12 @@ _uc_feed(hl, "", "UC6580I G1B1L1E1 COM1", "PN 2400615000268",
          "SN 20230729000954003", "HWVer 00", "FWVer R6.0.0.0Build3700",
          "Copyright (c), Unicore Communications Inc.", "All rights reserved.")
 check("UC-RESTART: the plain text banner is one restart, not 7 bad lines; the "
-      "setup is due again and asks the model anew, no UBX",
+      "setup is due again and asks the model anew",
       hl.st["gps_boots"] == _b0 + 1 and hl.st["err"] == _e0
-      and hl.st["extra"] >= 1 and hl.st["gps_ver"] is None
-      and not any(b"\xb5" in c for c in hl.uart.cmds),
+      and hl.st["extra"] >= 1 and hl.st["gps_ver"] is None,
       repr((hl.st["gps_boots"], hl.st["err"], hl.st["extra"])))
 
-# 5 Hz with a fix: the verdict the u-blox setup gets
+# 5 Hz with a fix: the setup's verdict
 hl.reset()
 hl.uart = _UcUart()
 hl.gps_setup()
@@ -18646,7 +17511,7 @@ _uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
 _uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
 _again = [v[1] for v in hl.st["svs"]] == [50]
 check("UC-GSV: one list from a round: a satellite once with its strongest band, "
-      "used from GSA, NAV-SAT's shape and gnssIds; GSV is no sentence the "
+      "used from GSA, with its system's id; GSV is no sentence the "
       "setup turned off",
       _svs.get((0, 14)) == (14, 44, 77, 11, True, False, 0)
       and _svs.get((0, 17)) == (17, 35, 56, 319, True, False, 0)
@@ -18657,10 +17522,6 @@ check("UC-GSV: one list from a round: a satellite once with its strongest band, 
 check("UC-GSV-SKIP: GSV_EVERY s of GSV not decoded after a list (1 Hz with a "
       "fix); then not from a round's middle, a whole round again",
       _skip and _mid and _again, repr((_skip, _mid, _again, hl.st["svs"])))
-hl.uart.cmds[:] = []
-hl.sv_poll(_clock[0])
-check("UC-NO-UBX: the satellite poll writes nothing (no UBX to a UC6580)",
-      hl.uart.cmds == [] and hl.st["sv_miss"] == 0, repr(hl.uart.cmds))
 
 # GPS_SYS: a mask set once, only when the receiver has another
 class _UcSys(_UcUart):
@@ -18855,12 +17716,6 @@ check("UC-WATCH: no GST for UC_GST_LOST with sentences coming: gps_check sets it
       _w0 == 0 and _w1 == 0 and _w2 == 0 and _w3 == 1 and _w4
       and _dl2 == ["gps setup lost: no GST"], repr((_w0, _w1, _w2, _w3, _w4, _dl2)))
 hl.reset()
-_wait0 = _clock[0]
-hl.st.update(svs_at=None)
-hl.uart = _UcUart()
-hl._sv_fresh()
-check("UC-NO-WAIT: a page view does not hold the loop for a list nothing can ask for",
-      _clock[0] == _wait0, repr(_clock[0] - _wait0))
 _ipolls = []
 
 
@@ -19387,13 +18242,13 @@ check("ROUTE-JUMP: a stay's end: the anchor and the way out's first line 44 m on
 _rfresh()
 hl.log_reset()
 hl.st.update(date="2026-06-15", time="10:00:00", valid=True, lat=10.0, lon=20.0, pos_at=_clock[0],
-             rx=_clock[0], alt=120.5, hdop=1.0, hdop_at=_clock[0], lat_i=None, fixtype=3)
+             rx=_clock[0], alt=120.5, hdop=1.0, hdop_at=_clock[0], fixtype=3)
 
 
 def _rrec(east, s):
     p = (10.0, 20.0 + east / M_E6 / 1e6 / math.cos(math.radians(10.0)))
     tc = hl._stamp_s(s)[1]
-    hl._record((hl._stamp_s(s)[0], hl._line("%.6f,%.6f" % p, ("120.5", "1.0", "5.0", ""), tc, hl._trk_fmt())), p)
+    hl._record((hl._stamp_s(s)[0], hl._line("%.6f,%.6f" % p, ("120.5", "1.0"), tc)), p)
 
 
 for _i in range(5):
