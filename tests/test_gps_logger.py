@@ -653,36 +653,7 @@ def check(name, cond, detail=""):
         failures.append(msg)
 
 
-GPX_HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-              '<gpx version="1.1" creator="esp32 gps_logger" '
-              'xmlns="http://www.topografix.com/GPX/1/1">\n'
-              '<trk><name>%s</name><trkseg>\n')
-GPX_FOOTER = "</trkseg></trk></gpx>\n"
-
-
-def make_gpx(path, n, extra=b"", times=None, extras=None):
-    """Write n points to path. A .trk path gets the compact format, anything
-    else the legacy GPX XML (old .gpx files, still uploaded).
-    extra is appended raw before the footer; extras holds per-point XML tags
-    for GPX only."""
-    if path.endswith(".trk"):
-        return make_trk(path, n, extra=extra, times=times)
-    name = os.path.basename(path)[:-4]
-    parts = [(GPX_HEADER % name).encode()]
-    for i in range(n):
-        lat = 52.5 + i * 0.0001
-        lon = 13.4 + i * 0.0001
-        t = (times[i] if times else
-             "2026-10-05T%02d:%02d:%02dZ" % (i // 3600, (i // 60) % 60, i % 60))
-        extra_tags = extras[i] if extras else "<ele>%.1f</ele>" % 10.0
-        parts.append(
-            ('<trkpt lat="%.6f" lon="%.6f">%s'
-             '<time>%s</time></trkpt>\n' % (lat, lon, extra_tags, t)).encode())
-    if extra:
-        parts.append(extra)
-    parts.append(GPX_FOOTER.encode())
-    with open(path, "wb") as f:
-        f.write(b"".join(parts))
+HEADER = "#TRK1\n"
 
 
 def trk_line(lat, lon, t, ele="10.0", hdop=""):
@@ -691,15 +662,21 @@ def trk_line(lat, lon, t, ele="10.0", hdop=""):
     return "%.6f,%.6f,%s,%s,%s\n" % (lat, lon, ele, hdop, tc)
 
 
+def is_point(line):
+    """One point line: "lat,lon,ele,hdop,time" (TRK1) or "lat,lon,ele,acc,speed,
+    time" (TRK2). Without its newline (power cut mid-write) it is not a point."""
+    return (line[-1:] == b"\n" and 4 <= line.count(b",") <= 5
+            and line[:1] != b"#")
+
+
 def pts_in(path):
-    """Point lines in a track file (.trk) or a legacy .gpx file."""
-    gpx = not gl._is_trk(path)
+    """Point lines in a track file."""
     with open(path, "rb") as f:
-        return sum(1 for line in f if gl._is_point(line, gpx))
+        return sum(1 for line in f if is_point(line))
 
 
 def make_trk(path, n, extra=b"", times=None):
-    parts = [gl.HEADER.encode()]
+    parts = [HEADER.encode()]
     for i in range(n):
         t = (times[i] if times else
              "2026-10-05T%02d:%02d:%02dZ" % (i // 3600, (i // 60) % 60, i % 60))
@@ -738,7 +715,7 @@ def online(tmpdir):
     gl.LOG_DIR = tmpdir
     try:
         for n in os.listdir(tmpdir):
-            if n.endswith((".gpx", ".trk", ".trb", ".pos", ".tmp", ".bad")):
+            if n.endswith((".trk", ".trb", ".pos", ".tmp", ".bad")):
                 try:
                     os.remove(os.path.join(tmpdir, n))
                 except OSError:
@@ -839,31 +816,18 @@ check("FwWLAN: disconnect ASSOC_LEAVE is IDLE",
       fw.status() == 0 and fw._requested is False)
 
 
-# --- GPX parse helpers ------------------------------------------------------
-
-check("_attr missing closer returns None",
-      gl._attr('<trkpt lat="52.5', "lat") is None)
-check("_tag missing closer returns None",
-      gl._tag("<trkpt><time>2026-10-05T10:00:00Z", "time") is None)
-check("_attr complete value",
-      gl._attr('<trkpt lat="52.5" lon="13.4">', "lat") == "52.5")
-check("valid ISO time accepted",
-      gl._valid_time("2026-10-05T12:00:00Z"))
-check("quoted / short time rejected",
-      not gl._valid_time('2026-10-05T12:00:00Z"')
-      and not gl._valid_time("2026-10-05"))
 check("inf ele is not finite",
       not gl._finite(float("inf")))
 
 
 tmpdir = tempfile.mkdtemp(prefix="gpxlog-")
 try:
-    # --- truncated last <trkpt> --------------------------------------------
+    # --- truncated last line ----------------------------------------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_100000.gpx")
-    make_gpx(path, 3, extra=b'<trkpt lat="52.9" lon="13.9"><time>2026-10-05T11:00:00Z')
+    path = os.path.join(tmpdir, "20261005_100000.trk")
+    make_trk(path, 3, extra=b'52.9,13.9,10.0,,20261005T11')
     n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
-    check("truncated: consumed 4 trkpt lines (3 good + 1 truncated)", n == 4)
+    check("truncated: consumed 4 lines (3 good + 1 truncated)", n == 4)
     check("truncated: encoded only 3 valid points", n_ok == 3)
     check("truncated: produced a JSON body", size > 0)
     body = json.loads(bytes(gl._body[:size]).decode())
@@ -884,8 +848,8 @@ try:
 
     # --- file > 330 points -------------------------------------------------
     online(tmpdir)
-    big = os.path.join(tmpdir, "20261005_110000.gpx")
-    make_gpx(big, 350)
+    big = os.path.join(tmpdir, "20261005_110000.trk")
+    make_trk(big, 350)
     check("large: count_points from offset 0 is 350", gl.count_points() == 350)
     batches = 0
     while os.path.exists(big) and batches < 20:
@@ -901,7 +865,7 @@ try:
     check("pending() does not list .pos files",
           gl.pending() == [])
 
-    ghost = os.path.join(tmpdir, "20261005_120000.gpx.pos")
+    ghost = os.path.join(tmpdir, "20261005_120000.trk.pos")
     with open(ghost, "w") as f:
         f.write("12\n")
     check("pending() ignores a planted .pos sidecar",
@@ -910,8 +874,8 @@ try:
 
     # --- interrupted POST / offset commit (at-least-once, no loss) ---------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_130000.gpx")
-    make_gpx(path, 80)
+    path = os.path.join(tmpdir, "20261005_130000.trk")
+    make_trk(path, 80)
     real_write = gl.write_offset
     crash = [True]
 
@@ -949,8 +913,8 @@ try:
 
     # --- power-loss model: leftover .pos.tmp, no .pos ----------------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_131000.gpx")
-    make_gpx(path, 20)
+    path = os.path.join(tmpdir, "20261005_131000.trk")
+    make_trk(path, 20)
     with open(path + ".pos.tmp", "w") as f:
         f.write("9999\n")
     gl.up_reset()
@@ -969,8 +933,8 @@ try:
 
     # --- corrupt .pos (past EOF) must reset to 0, never delete without POST
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_132000.gpx")
-    make_gpx(path, 12)
+    path = os.path.join(tmpdir, "20261005_132000.trk")
+    make_trk(path, 12)
     with open(path + ".pos", "w") as f:
         f.write("%d\n" % (os.path.getsize(path) + 500))
     check("corrupt pos: read_offset resets to 0",
@@ -983,8 +947,8 @@ try:
 
     # empty / garbage .pos
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_133000.gpx")
-    make_gpx(path, 4)
+    path = os.path.join(tmpdir, "20261005_133000.trk")
+    make_trk(path, 4)
     with open(path + ".pos", "w") as f:
         f.write("not-a-number\n")
     check("garbage pos: treated as 0", gl.read_offset(path) == 0)
@@ -993,11 +957,11 @@ try:
 
     # --- HTTP 400: batch quarantine only -----------------------------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_140000.gpx")
-    make_gpx(path, 10)
+    path = os.path.join(tmpdir, "20261005_140000.trk")
+    make_trk(path, 10)
     _post_code[0] = 400
     pump()
-    check("http400: batch parked in .gpx.bad after one payload error",
+    check("http400: batch parked in .trk.bad after one payload error",
           os.path.exists(path + ".bad"),
           "state=%s" % gl.up["state"])
     check("http400: original GPX gone (whole remaining file was the batch)",
@@ -1007,14 +971,14 @@ try:
 
     # 80-point file: only first batch is parked, rest still uploads
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_141000.gpx")
-    make_gpx(path, 80)
+    path = os.path.join(tmpdir, "20261005_141000.trk")
+    make_trk(path, 80)
     _post_code[0] = 422
     pump()
     check("http422: GPX remains after batch quarantine",
           os.path.exists(path) and os.path.exists(path + ".bad"))
     with open(path + ".bad", "rb") as f:
-        bad_n = sum(1 for line in f if line.startswith(b"<trkpt"))
+        bad_n = sum(1 for line in f if is_point(line))
     check("http422: 50 points in .bad (one batch)", bad_n == 50)
     _post_code[0] = 201
     pump()
@@ -1027,8 +991,8 @@ try:
     for code, name in ((404, "http404"), (403, "http403"), (429, "http429"),
                        (302, "redirect"), (500, "http500")):
         online(tmpdir)
-        path = os.path.join(tmpdir, "20261005_15%s.gpx" % code)
-        make_gpx(path, 8)
+        path = os.path.join(tmpdir, "20261005_15%s.trk" % code)
+        make_trk(path, 8)
         _post_code[0] = code
         if code == 429:
             _post_headers[0] = {"Retry-After": "7"}
@@ -1044,8 +1008,8 @@ try:
 
     # 5xx exponential backoff
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_15500.gpx")
-    make_gpx(path, 5)
+    path = os.path.join(tmpdir, "20261005_15500.trk")
+    make_trk(path, 5)
     _post_code[0] = 503
     pump()
     b1 = gl.up["backoff"]
@@ -1058,8 +1022,8 @@ try:
 
     # 401 retries with long backoff (does not stop the run)
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_15401.gpx")
-    make_gpx(path, 5)
+    path = os.path.join(tmpdir, "20261005_15401.trk")
+    make_trk(path, 5)
     _post_code[0] = 401
     pump()
     check("http401: long backoff, not a permanent stop",
@@ -1074,8 +1038,8 @@ try:
 
     # --- POINT_MAX / long device_id ----------------------------------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_16id.gpx")
-    make_gpx(path, 3)
+    path = os.path.join(tmpdir, "20261005_16id.trk")
+    make_trk(path, 3)
     orig_id = gl.DEVICE_ID
     gl.DEVICE_ID = "Dawarich-GPS-tracker"  # 21 chars, the field default
     n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
@@ -1091,11 +1055,11 @@ try:
 
     # inf / nan / bad timestamp skipped
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_16bad.gpx")
-    extras = ["<ele>10.0</ele>", "<ele>inf</ele>", "<ele>1.0</ele>"]
-    times = ["2026-10-05T00:00:00Z", "2026-10-05T00:00:01Z",
-             '2026-10-05T00:00:02Z"injected']
-    make_gpx(path, 3, extras=extras, times=times)
+    path = os.path.join(tmpdir, "20261005_16bad.trk")
+    with open(path, "wb") as f:
+        f.write((HEADER + "52.5,13.4,10.0,,20261005T000000Z\n"
+                 "52.5,13.4,inf,,20261005T000001Z\n"
+                 '52.5,13.4,1.0,,20261005T000002Z"injected\n' + gl.FOOTER).encode())
     n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
     check("K6: inf ele omitted but point kept; bad timestamp skipped",
           n == 3 and n_ok == 2, "n=%s n_ok=%s" % (n, n_ok))
@@ -1110,9 +1074,9 @@ try:
     gl.wifi["state"] = "lost"
     check("full: losing WiFi does not clear the full-flash state",
           gl.log["full"] is True)
-    gl.log["file"] = os.path.join(tmpdir, "20261005_160000.gpx")
+    gl.log["file"] = os.path.join(tmpdir, "20261005_160000.trk")
     gl.log["created"] = False
-    gl.log["batch"] = ['<trkpt lat="1" lon="2"><time>t</time></trkpt>\n']
+    gl.log["batch"] = ["1.000000,2.000000,,,20261005T160000Z\n"]
     orig_free = gl.free
     gl.free = lambda: 100
     gl.flush()
@@ -1250,8 +1214,8 @@ try:
 
     # --- count_points from offset + up_reset tmp cleanup -------------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_170000.gpx")
-    make_gpx(path, 40)
+    path = os.path.join(tmpdir, "20261005_170000.trk")
+    make_trk(path, 40)
     # write a sane mid-file offset (start of a line)
     skipped = 0
     with open(path, "rb") as f:
@@ -1259,30 +1223,30 @@ try:
             line = f.readline()
             if not line:
                 break
-            if line.startswith(b"<trkpt"):
+            if is_point(line):
                 skipped += 1
         mid = f.tell()
     gl.write_offset(path, mid)
     left = gl.count_points()
     check("count_points: counts from sidecar offset (not the whole file)",
           0 < left < 40, "left=%s mid=%s" % (left, mid))
-    tmpf = os.path.join(tmpdir, "20261005_170000.gpx.pos.tmp")
+    tmpf = os.path.join(tmpdir, "20261005_170000.trk.pos.tmp")
     with open(tmpf, "w") as f:
         f.write("1\n")
     gl.up_reset()
     check("up_reset: removes leftover .tmp sidecars",
           not os.path.exists(tmpf))
 
-    orphan = os.path.join(tmpdir, "gone.gpx.pos")
+    orphan = os.path.join(tmpdir, "gone.trk.pos")
     with open(orphan, "w") as f:
         f.write("0\n")
     gl.up_reset()
-    check("up_reset: removes orphan .gpx.pos without a matching .gpx",
+    check("up_reset: removes orphan .trk.pos without a matching .trk",
           not os.path.exists(orphan))
 
     # --- WDT budget: count_points feeds inside the loop --------------------
-    path = os.path.join(tmpdir, "20261005_17wdt.gpx")
-    make_gpx(path, 200)
+    path = os.path.join(tmpdir, "20261005_17wdt.trk")
+    make_trk(path, 200)
     dog = WDT(timeout=gl.WDT_TIMEOUT)
     gl._wdt = dog
     before = dog.fed
@@ -1290,7 +1254,7 @@ try:
     check("WDT budget: count_points feeds during a long read",
           dog.fed > before, "fed %s -> %s" % (before, dog.fed))
     online(tmpdir)
-    make_gpx(path, 200)
+    make_trk(path, 200)
     gl._wdt = dog
     before = dog.fed
     pump()
@@ -1624,8 +1588,8 @@ try:
 
     # .bad recovery after a successful upload
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_18bad.gpx")
-    make_gpx(path, 4)
+    path = os.path.join(tmpdir, "20261005_18bad.trk")
+    make_trk(path, 4)
     _post_code[0] = 400
     pump()
     check("recovery: payload error created .bad",
@@ -1641,8 +1605,8 @@ try:
 
     # --- B1: persistent 400 on 2000-pt file must not drop points -----------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_19e1.gpx")
-    make_gpx(path, 2000)
+    path = os.path.join(tmpdir, "20261005_19e1.trk")
+    make_trk(path, 2000)
     _post_code[0] = 400
     for _ in range(8):
         pump()
@@ -1654,7 +1618,7 @@ try:
     bad_n = 0
     if os.path.exists(badp):
         with open(badp, "rb") as f:
-            bad_n = sum(1 for line in f if line.startswith(b"<trkpt"))
+            bad_n = sum(1 for line in f if is_point(line))
     check("B1 E1: persistent 400 does not delete unsent points",
           os.path.exists(path) and remain + bad_n == 2000,
           "remain=%s bad=%s exists=%s state=%s" % (
@@ -1666,8 +1630,8 @@ try:
 
     # --- B1 E2: .bad retry + 422 must keep the quarantined file ------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_19e2.gpx")
-    make_gpx(path, 10)
+    path = os.path.join(tmpdir, "20261005_19e2.trk")
+    make_trk(path, 10)
     _post_code[0] = 422
     pump()
     check("B1 E2: first 422 parked the batch", os.path.exists(path + ".bad"))
@@ -1679,14 +1643,14 @@ try:
           os.path.exists(path + ".bad"),
           "state=%s" % gl.up["state"])
     with open(path + ".bad", "rb") as f:
-        still = sum(1 for line in f if line.startswith(b"<trkpt"))
+        still = sum(1 for line in f if is_point(line))
     check("B1 E2: quarantined points not deleted",
           still == 10, "still=%s" % still)
 
     # --- B1: .bad full: do not advance offset ------------------------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_19full.gpx")
-    make_gpx(path, 80)
+    path = os.path.join(tmpdir, "20261005_19full.trk")
+    make_trk(path, 80)
     with open(path + ".bad", "wb") as f:
         f.write(b"x" * (gl.MAX_BAD_BYTES))
     _post_code[0] = 400
@@ -1699,8 +1663,8 @@ try:
           gl.up["state"] == "bad full")
     check("B1 bad-full: it stays so while the stuck file is there",
           gl._bad_full_left())
-    later = os.path.join(tmpdir, "20261005_19later.gpx")
-    make_gpx(later, 8)
+    later = os.path.join(tmpdir, "20261005_19later.trk")
+    make_trk(later, 8)
     _posts[:] = []
     _post_code[0] = 201
     gl.up["next_at"] = _clock[0]
@@ -1711,7 +1675,7 @@ try:
     check("B1: BAD FULL stays after another file succeeds",
           gl._bad_full_left())
     with open(path, "rb") as f:
-        kept = sum(1 for line in f if line.startswith(b"<trkpt"))
+        kept = sum(1 for line in f if is_point(line))
     check("B1 bad-full: original 80 points still in GPX",
           kept == 80)
     _post_code[0] = 201
@@ -1727,15 +1691,13 @@ try:
 
     # --- B2: 200 kB line without newline must not MemoryError/boot-loop ----
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_20long.gpx")
+    path = os.path.join(tmpdir, "20261005_20long.trk")
     with open(path, "wb") as f:
-        f.write((GPX_HEADER % "20261005_20long").encode())
-        f.write(b'<trkpt lat="52.500000" lon="13.400000">'
-                b'<time>2026-10-05T00:00:00Z</time></trkpt>\n')
+        f.write(HEADER.encode())
+        f.write(b"52.500000,13.400000,,,20261005T000000Z\n")
         f.write(b"A" * 200000 + b"\n")
-        f.write(b'<trkpt lat="52.500100" lon="13.400100">'
-                b'<time>2026-10-05T00:00:01Z</time></trkpt>\n')
-        f.write(GPX_FOOTER.encode())
+        f.write(b"52.500100,13.400100,,,20261005T000001Z\n")
+        f.write(gl.FOOTER.encode())
     n, n_ok, size, new_off, eof = gl.read_batch(path, 0)
     check("B2: 200 kB over-long line skipped, both points encoded",
           n_ok == 2 and eof,
@@ -1805,13 +1767,13 @@ try:
         p = os.path.join(tmpdir, n)
         if p == current:
             continue
-        if n.endswith((".gpx", ".trk", ".trb", ".pos", ".tmp", ".bad")):
+        if n.endswith((".trk", ".trb", ".pos", ".tmp", ".bad")):
             try:
                 os.remove(p)
             except OSError:
                 pass
-    finished = os.path.join(tmpdir, "20261004_210000.gpx")
-    make_gpx(finished, 4)
+    finished = os.path.join(tmpdir, "20261004_210000.trk")
+    make_trk(finished, 4)
     gl.up["url"] = "https://d.example"
     gl.up["key"] = "k"
     gl.up["next_at"] = _clock[0]
@@ -1941,11 +1903,11 @@ try:
     with open(f1, "rb") as f:
         raw = f.read()
     check("TRK-3: flush writes HEADER, point lines, FOOTER; appends keep the footer last",
-          raw == (gl.HEADER + p1 + p2 + p3 + gl.FOOTER).encode(), repr(raw))
+          raw == (HEADER + p1 + p2 + p3 + gl.FOOTER).encode(), repr(raw))
 
     rb = os.path.join(trk_dir, "read.trk")
     with open(rb, "wb") as f:
-        f.write((gl.HEADER
+        f.write((HEADER
                  + "52.500000,13.400000,10.0,1.2,20261005T120005Z\n"
                  + "-\n"
                  + "-33.800000,-70.600000,,,20261005T120010Z\n"
@@ -1969,14 +1931,11 @@ try:
     os.makedirs(cnt_dir)
     gl.LOG_DIR = cnt_dir
     shutil.copy(rb, os.path.join(cnt_dir, "mix.trk"))
-    old_gpx = os.path.join(cnt_dir, "old.gpx")
-    make_gpx(old_gpx, 3)
+    with open(os.path.join(cnt_dir, "old.gpx"), "wb") as f:
+        f.write(b'<trkpt lat="52.5" lon="13.4"><time>2026-10-05T10:00:00Z</time></trkpt>\n')
     total = gl.count_points()
-    check("TRK-5: count_points counts .trk and legacy .gpx points only",
-          total == 3 + 3, "total=%s" % total)
-    n_g, n_ok_g, _, _, _ = gl.read_batch(old_gpx, 0)
-    check("TRK-5: legacy .gpx is still read for upload",
-          n_g == 3 and n_ok_g == 3, "n=%s n_ok=%s" % (n_g, n_ok_g))
+    check("TRK-5: count_points counts point lines of track files only",
+          total == 3, "total=%s" % total)
 
     check("TRK-6: a compact point line is under 50 bytes (old GPX point was 112)",
           len(trk_line(52.5, 13.4, "2026-10-05T12:00:05Z", hdop="1.2")
@@ -2004,13 +1963,13 @@ try:
     drift = [trk_line(53.9, 14.9, "2026-10-05T13:00:%02dZ" % (i + 10))
              for i in range(4)]
     with open(te, "wb") as f:
-        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+        f.write((HEADER + "".join(good) + gl.FOOTER + "".join(drift)
                  + "52.6,13.5,,,2026100").encode())
     n, n_ok, size, new_off, eof = gl.read_batch(te, 0)
     te_left = gl.count_points()
     online(end_dir)
     with open(te, "wb") as f:
-        f.write((gl.HEADER + "".join(good) + gl.FOOTER + "".join(drift)
+        f.write((HEADER + "".join(good) + gl.FOOTER + "".join(drift)
                  + gl.FOOTER).encode())
     pump()
     te_locs = locations()
@@ -2080,7 +2039,7 @@ try:
             ("47.0", "19.0", "abc", "x", "20261005T120012Z")]
     same_p = os.path.join(end_dir, "20261005_150000.trk")
     with open(same_p, "wb") as f:
-        f.write((gl.HEADER + "".join(",".join(r) + "\n" for r in rows)
+        f.write((HEADER + "".join(",".join(r) + "\n" for r in rows)
                  + gl.FOOTER).encode())
     want = []
     for la, lo, el, hd, tc in rows:
@@ -2113,7 +2072,7 @@ try:
     fit = " " * (gl.LINE_MAX - len(pt)) + pt
     over = " " * (gl.LINE_MAX + 1 - len(pt)) + pt
     with open(lm_p, "wb") as f:
-        f.write((gl.HEADER + pt + fit + over + "x" * 3000 + "\n" + pt
+        f.write((HEADER + pt + fit + over + "x" * 3000 + "\n" + pt
                  + gl.FOOTER).encode())
     n, n_ok, size, new_off, eof = gl.read_batch(lm_p, 0)
     check("RB-LONG: LINE_MAX line read, longer lines skipped, rest kept",
@@ -2135,20 +2094,15 @@ try:
     # finite is left out, as an inf hdop is (it went into the JSON as inf)
     inf_p = os.path.join(end_dir, "20261005_170000.trk")
     with open(inf_p, "wb") as f:
-        f.write((gl.HEADER + "47.100000,19.100000,100.0,1e308,"
+        f.write((HEADER + "47.100000,19.100000,100.0,1e308,"
                  "20261101T100000Z\n" + gl.FOOTER).encode())
     n, n_ok, size, new_off, eof = gl.read_batch(inf_p, 0)
     j_trk = _strict_json(bytes(gl._body[:size]))
-    inf_g = os.path.join(end_dir, "20261005_170000.gpx")
-    make_gpx(inf_g, 1, extras=["<ele>1.0</ele><hdop>1e308</hdop>"])
-    n, n_ok, size, new_off, eof = gl.read_batch(inf_g, 0)
-    j_gpx = _strict_json(bytes(gl._body[:size]))
     check("UPL-5: hdop * HDOP_M not finite: no accuracy, valid JSON, the "
-          "point kept (.trk and .gpx)",
-          all(isinstance(j_, dict) and len(j_["locations"]) == 1
-              and "horizontal_accuracy" not in j_["locations"][0]
-              ["properties"] for j_ in (j_trk, j_gpx)),
-          repr((j_trk, j_gpx))[:300])
+          "point kept",
+          isinstance(j_trk, dict) and len(j_trk["locations"]) == 1
+          and "horizontal_accuracy" not in j_trk["locations"][0]["properties"],
+          repr(j_trk)[:300])
 
     # UPL-6: a point time that is no UTC time (month 13, day 32, Feb 30,
     # hour 24, minute 60, second 60) is no point, as _kb_time has it
@@ -2157,23 +2111,16 @@ try:
              "20261100T100000Z", "20240229T100000Z", "20990101T000000Z")
     tm_p = os.path.join(end_dir, "20261005_180000.trk")
     with open(tm_p, "wb") as f:
-        f.write((gl.HEADER + "".join("47.1,19.1,1.0,1.0,%s\n" % t_
+        f.write((HEADER + "".join("47.1,19.1,1.0,1.0,%s\n" % t_
                                      for t_ in bad_t) + gl.FOOTER).encode())
     n, n_ok, size, new_off, eof = gl.read_batch(tm_p, 0)
     j_tm = _strict_json(bytes(gl._body[:size]))
-    tg_p = os.path.join(end_dir, "20261005_180000.gpx")
-    iso_t = ["%s-%s-%sT%s:%s:%sZ" % (t_[0:4], t_[4:6], t_[6:8], t_[9:11],
-                                     t_[11:13], t_[13:15]) for t_ in bad_t]
-    make_gpx(tg_p, len(iso_t), times=iso_t)
-    n2, n2_ok, size2, new_off, eof = gl.read_batch(tg_p, 0)
-    j_tg = _strict_json(bytes(gl._body[:size2]))
     want_t = ["2024-02-29T10:00:00Z", "2099-01-01T00:00:00Z"]
-    got_t = [[x["properties"]["timestamp"] for x in j_["locations"]]
-             if isinstance(j_, dict) else j_ for j_ in (j_tm, j_tg)]
+    got_t = ([x["properties"]["timestamp"] for x in j_tm["locations"]]
+             if isinstance(j_tm, dict) else j_tm)
     check("UPL-6: a point time out of range (month, day, hour, minute, "
-          "second) is skipped in a .trk and a .gpx",
-          (n, n_ok, n2, n2_ok) == (9, 2, 9, 2) and got_t == [want_t] * 2,
-          repr((n, n_ok, n2, n2_ok, got_t)))
+          "second) is skipped",
+          (n, n_ok) == (9, 2) and got_t == want_t, repr((n, n_ok, got_t)))
 
     gl.LOG_DIR = saved_dir
 
@@ -2323,8 +2270,8 @@ try:
 
     # --- K4: point that does not fit must not drop the remainder -----------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_22k4.gpx")
-    make_gpx(path, 100)
+    path = os.path.join(tmpdir, "20261005_22k4.trk")
+    make_trk(path, 100)
     orig_id = gl.DEVICE_ID
     orig_body = gl._body
     gl.DEVICE_ID = "X" * 32
@@ -2347,7 +2294,7 @@ try:
             line = f.readline()
             if not line:
                 break
-            if line.startswith(b"<trkpt"):
+            if is_point(line):
                 rest += 1
     check("K4: unread points remain in the file",
           n_ok + rest == 100,
@@ -2460,8 +2407,8 @@ try:
 
     # --- E4 / E5 Retry-After clamp -----------------------------------------
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_23ra.gpx")
-    make_gpx(path, 5)
+    path = os.path.join(tmpdir, "20261005_23ra.trk")
+    make_trk(path, 5)
     _post_code[0] = 429
     _post_headers[0] = {"Retry-After": "-3"}
     pump()
@@ -2469,8 +2416,8 @@ try:
           gl.up["next_at"] == _clock[0] + gl.BACKOFF_START,
           "next_at=%s" % gl.up["next_at"])
     online(tmpdir)
-    path = os.path.join(tmpdir, "20261005_24ra.gpx")
-    make_gpx(path, 5)
+    path = os.path.join(tmpdir, "20261005_24ra.trk")
+    make_trk(path, 5)
     _post_code[0] = 503
     _post_headers[0] = {"Retry-After": "604800"}
     pump()
@@ -2479,15 +2426,15 @@ try:
           "next_at=%s" % gl.up["next_at"])
     _post_headers[0] = {}
 
-    # --- orphan .gpx.bad.pos -----------------------------------------------
+    # --- orphan .trk.bad.pos -----------------------------------------------
     online(tmpdir)
-    orphan_bad = os.path.join(tmpdir, "gone.gpx.bad.pos")
+    orphan_bad = os.path.join(tmpdir, "gone.trk.bad.pos")
     with open(orphan_bad, "w") as f:
         f.write("0\n")
     gl.up_reset()
     gl.up["url"] = "https://dawarich.example.com"
     gl.up["key"] = "secret-key"
-    check("orphan .gpx.bad.pos cleaned by up_reset",
+    check("orphan .trk.bad.pos cleaned by up_reset",
           not os.path.exists(orphan_bad))
 
     # HOME1=0 override
@@ -2891,9 +2838,9 @@ try:
 
     # --- per-file backoff: one stuck file does not block the others --------
     online(tmpdir)
-    stuck = os.path.join(tmpdir, "20261001_000000.gpx")
-    later = os.path.join(tmpdir, "20261005_000000.gpx")
-    make_gpx(stuck, 200)
+    stuck = os.path.join(tmpdir, "20261001_000000.trk")
+    later = os.path.join(tmpdir, "20261005_000000.trk")
+    make_trk(stuck, 200)
     _post_code[0] = 400
     pumps = 0
     while stuck not in (gl.up.get("hold") or {}) and pumps < 8:
@@ -2903,7 +2850,7 @@ try:
     check("HOL: oldest file is held after global payload errors",
           stuck in (gl.up.get("hold") or {}),
           "hold=%s pumps=%s" % (gl.up.get("hold"), pumps))
-    make_gpx(later, 8)
+    make_trk(later, 8)
     _posts[:] = []
     _post_code[0] = 201
     gl.up["next_at"] = _clock[0]
@@ -2921,7 +2868,7 @@ try:
     os.mkdir(rot_dir)
     gl.LOG_DIR = rot_dir
     open_path = os.path.join(rot_dir, "open.trk")
-    make_gpx(open_path, 3)
+    make_trk(open_path, 3)
     gl.log_reset()
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
@@ -3108,9 +3055,8 @@ try:
     def _gpx_pts(path):
         if not os.path.exists(path):
             return 0
-        gpx = not gl._is_trk(path)
         with orig_open(path, "rb") as f:
-            return sum(1 for line in f if gl._is_point(line, gpx))
+            return sum(1 for line in f if is_point(line))
 
     orig_open = builtins.open
 
@@ -3160,7 +3106,7 @@ try:
 
     gl.log_reset()
     close_path = os.path.join(close_dir, "c.trk")
-    make_gpx(close_path, 2)
+    make_trk(close_path, 2)
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt])
     builtins.open = _close_wrap(False)
     try:
@@ -3173,7 +3119,7 @@ try:
           "n_pts=%s batch=%s" % (_gpx_pts(close_path), gl.log["batch"]))
 
     # WF-5: LittleFS rollback on append — keep the batch, no lost points
-    make_gpx(close_path, 2)
+    make_trk(close_path, 2)
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=os.path.getsize(close_path))
     builtins.open = _close_wrap(True)
@@ -3243,7 +3189,7 @@ try:
         return _open
 
     part_path = os.path.join(close_dir, "part.trk")
-    make_gpx(part_path, 2)
+    make_trk(part_path, 2)
     good = os.path.getsize(part_path)
     gl.log.update(file=part_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=good)
@@ -3286,14 +3232,14 @@ try:
     check("WF-8: create retry rewrites from scratch with a valid header",
           gl.log["created"] is True and gl.log["batch"] == []
           and _gpx_pts(create_part) == 1
-          and create_body.startswith(gl.HEADER.encode())
+          and create_body.startswith(HEADER.encode())
           and create_body.endswith(gl.FOOTER.encode()),
           "created=%s n_pts=%s head=%r" % (
               gl.log.get("created"), _gpx_pts(create_part), create_body[:80]))
 
     # M7: transient stat/open EIO must not flip created=False (wb would wipe)
     eio_path = os.path.join(close_dir, "eio.trk")
-    make_gpx(eio_path, 112)
+    make_trk(eio_path, 112)
     eio_pts = _gpx_pts(eio_path)
     gl.log.update(file=eio_path, created=True, points=112, batch=[extra_pt],
                   err=0, new_seg=False, good_size=os.path.getsize(eio_path))
@@ -3325,7 +3271,7 @@ try:
           "n_pts=%s" % _gpx_pts(eio_path))
 
     gone_path = os.path.join(close_dir, "gone.trk")
-    make_gpx(gone_path, 2)
+    make_trk(gone_path, 2)
     gl.log.update(file=gone_path, created=True, points=2, batch=[extra_pt],
                   err=0, new_seg=False, good_size=os.path.getsize(gone_path))
     os.remove(gone_path)
@@ -3339,7 +3285,7 @@ try:
           "created=%s n_pts=%s" % (gl.log.get("created"), _gpx_pts(gone_path)))
 
     trunc_path = os.path.join(close_dir, "trunc.trk")
-    make_gpx(trunc_path, 2)
+    make_trk(trunc_path, 2)
     with orig_open(trunc_path, "rb") as f:
         trunc_raw = f.read()
     with orig_open(trunc_path, "wb") as f:
@@ -3373,7 +3319,7 @@ try:
 
     # --- empty / EOF .bad must be deleted, not spun (~50 read_batch/s) -----
     online(tmpdir)
-    empty_bad = os.path.join(tmpdir, "empty.gpx.bad")
+    empty_bad = os.path.join(tmpdir, "empty.trk.bad")
     with open(empty_bad, "wb"):
         pass
     reads = [0]
@@ -3398,9 +3344,9 @@ try:
           "reads %s -> %s next_at=%s now=%s" % (
               n1, reads[0], gl.up["next_at"], _clock[0]))
 
-    eof_bad = os.path.join(tmpdir, "tail.gpx.bad")
+    eof_bad = os.path.join(tmpdir, "tail.trk.bad")
     with open(eof_bad, "wb") as f:
-        f.write(b'<trkpt lat="52.5" lon="13.4"><time>2026-10-05T00:00:00Z</time></trkpt>\n')
+        f.write(b"52.500000,13.400000,,,20261005T000000Z\n")
     gl.write_offset(eof_bad, os.path.getsize(eof_bad))
     gl.up["allow_bad"] = True
     gl.up["next_at"] = _clock[0]
@@ -11925,7 +11871,7 @@ check("WEB-PIECES: a piece over WEB_CHUNK goes out in WEB_CHUNK memoryview "
 # WEB-FILES: the file counts of the page are listed at most every 10 s
 # (pending() and pending_bad() listed, sorted and built paths twice a poll)
 fc_td = tempfile.mkdtemp(prefix="webfiles-")
-for n in ("20261001_100000.trk", "20261001_110000.gpx",
+for n in ("20261001_100000.trk", "20261001_110000.trk",
           "20261001_090000.trk.bad", "20261001_100000.trk.pos",
           "20261001_120000.trk"):
     open(os.path.join(fc_td, n), "w").close()
@@ -16597,7 +16543,7 @@ try:
     check("TRKB: a rejected batch is parked as text lines in .trb.bad "
           "(listed as a .bad, read as text)",
           btxt == "".join(rl[:50]) and gl.pending_bad() == [bad]
-          and gl._is_trk(bad) and not bad.endswith(gl.TRB)
+          and not bad.endswith(gl.TRB)
           and "".join(rl[:50]) in "".join(hist_q),
           repr(btxt[:80]))
     for _ in range(10):
@@ -17019,7 +16965,7 @@ try:
     check("TRKB: new files are .trb (TRK_BIN; False: .trk as before), "
           "a suffix older firmware does not list",
           nm1.endswith("20261101_130000.trb") and nm2.endswith(".trk")
-          and not nm1.endswith((".gpx", ".trk")), repr((nm1, nm2)))
+          and not nm1.endswith(".trk"), repr((nm1, nm2)))
 finally:
     gl.LOG_DIR, gl.HIST_DIR, gl.UPLOAD_BATCH = _tb_saved
     shutil.rmtree(_tb, ignore_errors=True)

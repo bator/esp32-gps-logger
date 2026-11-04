@@ -3056,7 +3056,6 @@ def at_home():
 # overwrites the footer with new points plus the footer again. LittleFS
 # commits on close, so a power cut leaves either the previous or the new
 # version. A line cut short has no newline and is skipped on read.
-# Older .gpx files (XML) are still read and uploaded.
 #
 # New files are binary (.trb, "#TRKB" header, TRK_BIN), ~6-8 bytes a point
 # instead of ~46-51. The lines are the same TRK1/TRK2 text, stored as the
@@ -3079,8 +3078,8 @@ HEADERB = "#TRKB\n"
 FOOTER = "#END\n"
 NEW_SEG = "-\n"
 TRB = ".trb"
-_TRACKS = (".gpx", ".trk", TRB)          # the track files (pending)
-_BADS = (".gpx.bad", ".trk.bad", ".trb.bad")
+_TRACKS = (".trk", TRB)                  # the track files (pending)
+_BADS = (".trk.bad", ".trb.bad")
 TRK_BIN = True                           # new track files binary (.trb)
 KEY_EVERY = 64                           # deltas between two keyframes
 _KB_MAX = 1 << 28                        # a delta at least this big: keyframe
@@ -5304,10 +5303,10 @@ def _kb_at(f, off, key, s):
         k = _kb_seek(f, off, key, s)
     return _kb_seek(f, off, -1, s) if k is None else k
 
-def _rd_point(a, b, gpx):
-    """_rbuf[a:b] is a point line (see _is_point)."""
-    if gpx:
-        return _rbuf.find(b"<trkpt", a, min(a + 6, b)) == a
+def _rd_point(a, b):
+    """_rbuf[a:b] is a point line: "lat,lon,ele,hdop,time" (TRK1) or
+    "lat,lon,ele,acc,speed,time" (TRK2). A line without its newline (power cut
+    mid-write) is not a point."""
     return (_rbuf[b - 1] == 10 and _rbuf[a] != 35
             and 4 <= _rbuf.count(b",", a, b) <= 5)
 
@@ -5328,7 +5327,6 @@ def count_points():
     nlines = 0
     for n in names:
         path = LOG_DIR + "/" + n
-        gpx = not _is_trk(path)
         tb = path.endswith(TRB)
         try:
             try:
@@ -5348,7 +5346,7 @@ def count_points():
                     a, b = _rd[1], _rd[2]
                     if a == b:
                         continue
-                    if not gpx and _rd_footer(a, b):
+                    if _rd_footer(a, b):
                         break
                     nlines += 1
                     if nlines & 63 == 0:
@@ -5357,7 +5355,7 @@ def count_points():
                         c = _rbuf[a]
                         if c >= 128 or (c == 61 and _rbuf[b - 1] == 10):
                             total += 1
-                    elif _rd_point(a, b, gpx):
+                    elif _rd_point(a, b):
                         total += 1
         except Exception as e:           # (it runs in up_reset at boot)
             print("count", path, repr(e))
@@ -5382,32 +5380,6 @@ def pending_bad():
     except OSError:
         return []
     return [LOG_DIR + "/" + n for n in names]
-
-def _attr(line, name):
-    i = line.find(name + '="')
-    if i < 0:
-        return None
-    i += len(name) + 2
-    j = line.find('"', i)
-    if j < 0:
-        return None
-    return line[i:j]
-
-def _tag(line, name):
-    i = line.find("<" + name + ">")
-    if i < 0:
-        return None
-    i += len(name) + 2
-    j = line.find("</" + name + ">", i)
-    if j < 0:
-        return None
-    return line[i:j]
-
-def _float(s):
-    try:
-        return float(s)
-    except (TypeError, ValueError):
-        return None
 
 def _finite(x):
     try:
@@ -5434,50 +5406,9 @@ def _tc_ok(rb, t):
                    (rb[t + 11] - 48) * 10 + rb[t + 12] - 48,
                    (rb[t + 13] - 48) * 10 + rb[t + 14] - 48)
 
-def _valid_time(t):
-    """ISO UTC `YYYY-MM-DDTHH:MM:SSZ`, a real time in 2020-2099."""
-    if not t or len(t) != 20:
-        return False
-    if (t[4] != "-" or t[7] != "-" or t[10] != "T"
-            or t[13] != ":" or t[16] != ":" or t[19] != "Z"):
-        return False
-    for i in (0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18):
-        if t[i] < "0" or t[i] > "9":
-            return False
-    return _ymd_ok(int(t[0:4]), int(t[5:7]), int(t[8:10]), int(t[11:13]),
-                   int(t[14:16]), int(t[17:19]))
-
 def _put(pos, b):
     _body[pos:pos + len(b)] = b
     return pos + len(b)
-
-def _is_trk(path):
-    """A .trk or .trb track or a .bad copy of one (text lines)."""
-    return path.endswith((".trk", TRB, ".trk.bad", ".trb.bad"))
-
-def _is_point(line, gpx):
-    """One point line: <trkpt> in old .gpx, "lat,lon,ele,hdop,time" (TRK1)
-    or "lat,lon,ele,acc,speed,time" (TRK2) in .trk. A line without its
-    newline (power cut mid-write) is not a point."""
-    if gpx:
-        return line.startswith(b"<trkpt")
-    return (line[-1:] == b"\n" and 4 <= line.count(b",") <= 5
-            and line[:1] != b"#")
-
-def _point(line, gpx):
-    """(lat, lon, time, ele, hdop) as strings, time as ISO UTC, or None
-    (a TRK2 line: its acc in place of hdop)."""
-    if gpx:
-        s = line.decode()
-        return (_attr(s, "lat"), _attr(s, "lon"), _tag(s, "time"),
-                _tag(s, "ele"), _tag(s, "hdop"))
-    f = line[:-1].decode().split(",")
-    tc = f[-1]
-    if len(tc) != 16 or tc[8] != "T" or tc[15] != "Z":
-        return None
-    t = "%s-%s-%sT%s:%s:%sZ" % (tc[0:4], tc[4:6], tc[6:8],
-                                tc[9:11], tc[11:13], tc[13:15])
-    return (f[0], f[1], t, f[2], f[3])
 
 _FOOT = FOOTER.encode()
 
@@ -5560,7 +5491,7 @@ def _trk_field(i, a, b, fmt, imax):
 def _trk_point(a, b):
     """Parse the .trk line _rbuf[a:b] in place into _pt -> -1 (not a point
     line), 0 (a point, not valid) or the length of its Overland JSON.
-    Same rules as _point and the checks in read_batch. A TRK1 line's hdop
+    A TRK1 line's hdop
     becomes horizontal_accuracy (* HDOP_M); a TRK2 line's acc is that
     already, and its speed (m/s) is "speed"."""
     rb = _rbuf
@@ -5652,34 +5583,6 @@ def _trk_put(pos):
         pos += 1
     return _put(pos, _tail())
 
-def _gpx_loc(line):
-    """Overland JSON of one legacy .gpx point line, or None if not valid."""
-    try:
-        p = _point(line, True)
-    except UnicodeError:
-        return None
-    lat_f = lon_f = None
-    if p is not None:
-        lat_f, lon_f = _float(p[0]), _float(p[1])
-    if not (p is not None and lat_f is not None and lon_f is not None
-            and _finite(lat_f) and _finite(lon_f)
-            and abs(lat_f) <= 90 and abs(lon_f) <= 180
-            and _valid_time(p[2])):
-        return None
-    ele_f = _float(p[3]) if p[3] else None
-    if ele_f is not None and not _finite(ele_f):
-        ele_f = None
-    hdop_f = _float(p[4]) if p[4] else None
-    extra = ""
-    if ele_f is not None:
-        extra += '"altitude":%.1f,' % ele_f
-    if hdop_f is not None and _finite(hdop_f * HDOP_M):   # (and hdop_f)
-        extra += '"horizontal_accuracy":%.1f,' % (hdop_f * HDOP_M)
-    return ('{"type":"Feature","geometry":{"type":"Point",'
-            '"coordinates":[%.6f,%.6f]},"properties":{'
-            '"timestamp":"%s",%s"device_id":"%s"}}'
-            % (lon_f, lat_f, p[2], extra, DEVICE_ID)).encode()
-
 def read_batch(path, off=0, key=None):
     """Fill _body with up to UPLOAD_BATCH valid points from byte offset off
     as Overland JSON -> (n, n_ok, body_len, new_off, eof).
@@ -5689,7 +5592,6 @@ def read_batch(path, off=0, key=None):
     per point (the float checks), not ~25 and a line buffer. A .trb is
     read from its keyframe at key (read_pos) and each delta decoded to its
     text line first; the keyframe at new_off goes to _rk[0]."""
-    gpx = not _is_trk(path)
     tb = path.endswith(TRB)
     s = _ks
     n, n_ok, pos, sep = 0, 0, _put(0, _J_START), 0
@@ -5719,14 +5621,7 @@ def read_batch(path, off=0, key=None):
             if a == b:
                 s[0] = None              # (an over-long line in a .trb)
                 continue
-            loc = None
-            if gpx:
-                line = bytes(_rmv[a:b])
-                if not _is_point(line, True):
-                    continue
-                loc = _gpx_loc(line)
-                need = len(loc) if loc else 0
-            elif _rd_footer(a, b):
+            if _rd_footer(a, b):
                 # the footer ends a .trk: bytes after it are left over from
                 # a longer flush that failed (a later, shorter one wrote its
                 # footer before them), lines the logger dropped
@@ -5762,7 +5657,7 @@ def read_batch(path, off=0, key=None):
                 if sep:
                     _body[pos] = 44      # ,
                     pos += 1
-                pos = _put(pos, loc) if gpx else _trk_put(pos)
+                pos = _trk_put(pos)
                 sep = 1
                 n_ok += 1
             if n >= UPLOAD_BATCH:
@@ -5794,7 +5689,6 @@ def commit_offset(path, n, new_off, eof=False, key=None):
 def _track_lines(src, path, off, end, key, fn):
     """fn(a, b) for each point line of the track file src (path) from off
     to end, in _rbuf[a:b]: a .trb's decoded from its keyframe at key."""
-    gpx = not _is_trk(path)
     if path.endswith(TRB):
         s = _ks
         if off and _kb_at(src, off, key, s) is None:
@@ -5813,7 +5707,7 @@ def _track_lines(src, path, off, end, key, fn):
     _rd_open(off)
     while _rd[0] + _rd[2] < end and _rd_line(src):
         a, b = _rd[1], _rd[2]
-        if a < b and _rd_point(a, b, gpx):
+        if a < b and _rd_point(a, b):
             fn(a, b)
 
 _hd8 = bytearray(8)                      # the day of the open history file
