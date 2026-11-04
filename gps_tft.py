@@ -141,11 +141,15 @@ def width(font, s):
     return n
 
 def _text(fb, font, s, x, base, tone):
-    """s with its baseline at row base, each glyph blitted straight from flash."""
+    """s with its baseline at row base, each glyph blitted straight from flash.
+    Nothing to blit outside the band (each glyph's slice and tuple, in each band,
+    went to the garbage): only how wide it is, the x that follows."""
     f, mv = font
-    p = _gs4_palette(tone)
     y = base - f[5]
     h = f[4]
+    if y >= BAND_H or y + h <= 0:
+        return x + width(font, s)
+    p = _gs4_palette(tone)
     for ch in s:
         i = _index(f, ch)
         w = f[1][i]

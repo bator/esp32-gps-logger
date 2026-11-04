@@ -6195,7 +6195,7 @@ try:
           aways == [True, False, True, False], repr(aways))
     import inspect
     check("WEB: _loop serves the page; wifi_stop closes it",
-          "web_tick()" in inspect.getsource(gl._loop)
+          "web_tick" in inspect.getsource(gl._loop)
           and "_web_close()" in inspect.getsource(gl.wifi_stop))
 
     # WEB-DEADLINE: one wall-clock limit per request (a client that sends
@@ -8224,7 +8224,7 @@ try:
                   for src in resets.values()), repr((pf, tf)))
     loop_src = inspect.getsource(gl._loop)
     check("DIAG: _loop writes a line every DIAG ms",
-          "_diag(now)" in loop_src and "DIAG" in loop_src)
+          "_diag, now" in loop_src and "DIAG" in loop_src)
 finally:
     gl.DIAG, gl.DIAG_MAX = saved_diag
 
@@ -9452,7 +9452,8 @@ try:
         for k in range(5):
             _uart_rx.extend(pvt_frame(t_at(s_), 475000000 + 2000 * s_,
                                       190000000, nano=k * 200000000))
-    gl.read_uart()
+    while gl.uart.any():                 # (RX_READS a call, no log_tick between)
+        gl.read_uart()
     th_n = gl.st.get("q_thin")
     gl.log_tick()
     th_lines = list(gl.log["batch"])
@@ -15860,6 +15861,36 @@ try:
           and _ota_log == [("boot", "ota_1"), ("reset",)],
           repr((fw, _ota_log, gl.ota.get("failed"))))
 
+    # GD-OTA-SHA: the page's own sha256 (same size: only the hash tells), and
+    # the slot read back from flash (the stream's hash matches a bad write)
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    _serve(_manifest(200))
+    _files["http://ota.lan/gps/web.html.gz"] = b"x" * len(_page)
+    try:
+        gl._ota_check()
+    except ValueError:
+        pass
+    gd_page = (list(_ota_log), os.path.exists(os.path.join(_ota_dir, "web.html.gz.new")),
+               os.path.exists(os.path.join(_ota_dir, "web.html.gz.tmp")))
+    check("GD-OTA-PAGE: a page of the right size failing its sha256 is not staged, "
+          "nothing boots", gd_page == ([], False, False), repr(gd_page))
+    _ota_reset()
+    _serve(_manifest(200))
+    gd_rb = _slots[1].readblocks
+    def _gd_bad_read(blk, buf):
+        gd_rb(blk, buf)
+        buf[0] ^= 1                      # what the flash holds is not what went in
+    _slots[1].readblocks = _gd_bad_read
+    try:
+        gl._ota_check()
+    finally:
+        del _slots[1].readblocks
+    check("GD-OTA-READBACK: a slot whose read-back differs from its sha256 is a bad "
+          "image, nothing boots",
+          _ota_log == [] and gl.ota["state"] == "bad image",
+          repr((_ota_log, gl.ota["state"])))
+
     # OTA-POWERON: MicroPython 1.29 reports a brownout as PWRON_RESET, so a
     # build that browned out on a weak supply was rolled back, never blamed
     # and installed again 2 min after every boot. A power-on rollback is a
@@ -16083,6 +16114,16 @@ try:
         _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\n\r\nabc")
         out = bytearray()
         got.append((gl._raw_get("http://h/x", out.extend, 5000), bytes(out)))
+        # GD-OTA-LIMIT: no Content-Length: the limit holds while reading
+        _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\n\r\n" + b"y" * 9000)
+        out = bytearray()
+        try:
+            gd_lim = gl._raw_get("http://h/x", out.extend, 5000)
+        except ValueError as e:
+            gd_lim = str(e)
+        check("GD-OTA-LIMIT: a body with no length stops at the limit, not at the "
+              "flash's end", gd_lim == "ota body over 5000" and len(out) <= 5000,
+              repr((gd_lim, len(out))))
         # HOST-PORT: the GET's Host header too
         get_hosts = []
         for u_ in ("http://h:8080/m.json", "http://h/m.json"):
@@ -18805,6 +18846,749 @@ check("OTA-BOARD: the Heltec takes only a manifest naming it, the C6 only one "
       and hl._ota_signed(_mfs) == gl._ota_signed(_mf) + b"|board=GPS_LOGGER_S3"
       and gl._ota_signed(_mf) == hl._ota_signed(_mf))
 _uart_rx[:] = b""
+
+# --- 2026-11 review: robustness (RB-n) and guards the suite did not notice
+# being removed (GD-n) ---------------------------------------------------------
+gl = _reload_logger()
+_rb_dir = tempfile.mkdtemp(prefix="rb-")
+gl.LOG_DIR = os.path.join(_rb_dir, "gpx")
+gl.HIST_DIR = os.path.join(_rb_dir, "hist")
+os.makedirs(gl.LOG_DIR)
+os.makedirs(gl.HIST_DIR)
+gl.reset()
+gl.log_reset()
+gl.wifi_reset()
+gl.up_reset()
+
+
+class _RbConn(object):
+    """An accepted client: what it asked for, what it got."""
+    def __init__(self, req=b""):
+        self.req, self.sent, self.closed = req, bytearray(), False
+    def settimeout(self, t):
+        pass
+    def recv(self, n):
+        out, self.req = self.req[:n], self.req[n:]
+        return out
+    def write(self, b):
+        self.sent.extend(b)
+        return len(b)
+    def send(self, b):
+        self.sent.extend(b)
+        return len(b)
+    sendall = send
+    def close(self):
+        self.closed = True
+
+
+class _RbListen(object):
+    """The listening socket: bind/listen as asked, failing at the name in
+    oom with a MemoryError, accept what waits, EAGAIN otherwise."""
+    oom = None
+    made = []
+    def __init__(self):
+        self.waiting, self.accepts, self.closed = [], 0, False
+        _RbListen.made.append(self)
+    def _oom(self, name):
+        if _RbListen.oom == name:
+            raise MemoryError("memory allocation failed")
+    def setsockopt(self, *a):
+        pass
+    def bind(self, a):
+        self._oom("bind")
+    def listen(self, n):
+        self._oom("listen")
+    def setblocking(self, b):
+        pass
+    def accept(self):
+        self._oom("accept")
+        self.accepts += 1
+        if not self.waiting:
+            raise OSError(11)
+        return self.waiting.pop(0), ("1.2.3.4", 5)
+    def close(self):
+        self.closed = True
+
+
+class _RbSockMod(object):
+    AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR = 2, 1, 1, 4
+    @staticmethod
+    def socket(*a):
+        if _RbListen.oom == "socket":
+            raise MemoryError("memory allocation failed")
+        return _RbListen()
+    @staticmethod
+    def getaddrinfo(host, port):
+        return [(2, 1, 0, "", (host, port))]
+
+
+def _rb_web(home=False, away=False):
+    """The server closed, WEB on, connected; home and WEB_AWAY as asked."""
+    gl._web_close()
+    gl.socket = _RbSockMod
+    gl.WEB, gl.WEB_AWAY = True, away
+    gl.wifi_reset()
+    gl.wifi.update(state="connected", ip="192.168.1.60", home=home)
+    del _RbListen.made[:]
+    _RbListen.oom = None
+    gl.ota["pend"] = None
+    gl._tick_bug.clear()
+    gl._guard_mem[0] = 0
+
+
+_rb_socket = gl.socket
+
+# RB-WEB-NET: web_tick serves on whatever network the radio is on. WEB_AWAY
+# only keeps the radio on for it off home (README, status page; commit
+# 7276921): the page "up only briefly" off home is this, so it stays
+_rb_rows = []
+for _h, _a in ((True, False), (False, False), (False, True)):
+    _rb_web(_h, _a)
+    gl.web_tick()
+    _c = _RbConn(b"GET /nope HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n")
+    _RbListen.made[-1].waiting.append(_c)
+    gl.web_tick()
+    _s1 = bytes(_c.sent[:12])
+    gl.wifi["state"] = "sleep"           # (asleep, on any network: closed)
+    gl.web_tick()
+    _rb_rows.append((_s1, _RbListen.made[-1].closed, gl._web_sock is None))
+check("RB-WEB-NET: connected, home or not, WEB_AWAY or not, the page answers; "
+      "with the radio asleep the socket is closed",
+      _rb_rows == [(b"HTTP/1.0 404", True, True)] * 3, repr(_rb_rows))
+
+# RB-OOM: one MemoryError in the page's accept()/socket setup or a status
+# line went through run()'s crash branch: a reset, a boot-fail and, an OTA
+# pending, /ota.mark "crash" blaming a good build
+
+
+def _rb_loop(n=5):
+    """n passes of _loop; "ran" or what left it (run()'s crash branch)."""
+    k = [0]
+    def _sl(ms):
+        _clock[0] += ms
+        k[0] += 1
+        if k[0] >= n:
+            raise KeyboardInterrupt
+    saved = (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
+             gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick, gl.draw,
+             gl._boot_ok, gl.read_uart)
+    gl.time.sleep_ms = _sl
+    gl.wifi_tick = gl.upload_tick = gl.log_tick = gl.draw = lambda: None
+    gl._boot_ok = gl.read_uart = lambda: None
+    gl.ota_tick = gl.gps_check = gl.keepalive_tick = gl.tft_tick = lambda now: None
+    gl._wdt = None
+    try:
+        gl._loop()
+        return "returned"
+    except KeyboardInterrupt:
+        return "ran"
+    except Exception as e:
+        return repr(e)
+    finally:
+        (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
+         gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick, gl.draw,
+         gl._boot_ok, gl.read_uart) = saved
+
+
+def _rb_oom(*a):
+    raise MemoryError("memory allocation failed")
+
+
+_rb_marks = []
+_rb_saved = (gl._ota_mark, gl.sv_seen, gl._temp, gl.DIAG, gl.STATUS)
+gl._ota_mark = _rb_marks.append
+_rb_res = {}
+try:
+    for _p in (None, 200):
+        gl.DIAG = 0
+        _rb_web()
+        gl.web_tick()                    # (the listener, for accept)
+        gl.ota["pend"] = _p
+        _RbListen.oom = "accept"
+        _rb_res["accept", _p] = _rb_loop()
+        for _at in ("socket", "bind", "listen"):
+            _rb_web()
+            gl.ota["pend"] = _p
+            _RbListen.oom = _at
+            _rb_res[_at, _p] = (_rb_loop(), gl._web_sock is None,
+                                all(s.closed for s in _RbListen.made))
+        _rb_web()
+        gl.WEB = False
+        gl.ota["pend"] = _p
+        gl.DIAG = 1
+        gl.sv_seen = _rb_oom
+        _rb_res["diag", _p] = _rb_loop()
+        gl.sv_seen = _rb_saved[1]
+        gl.DIAG = 0
+        gl.STATUS = 1
+        gl._tick_bug.clear()
+        gl._temp = _rb_oom
+        _rb_res["status", _p] = _rb_loop()
+        gl._temp = _rb_saved[2]
+        gl.STATUS = _rb_saved[4]
+finally:
+    gl.ota["pend"] = None
+    _RbListen.oom = None
+    gl._ota_mark, gl.sv_seen, gl._temp, gl.DIAG, gl.STATUS = _rb_saved
+_rb_want = {}
+for _p in (None, 200):
+    _rb_want["accept", _p] = _rb_want["diag", _p] = _rb_want["status", _p] = "ran"
+    for _at in ("socket", "bind", "listen"):
+        _rb_want[_at, _p] = ("ran", True, True)
+check("RB-OOM: a MemoryError in accept(), _web_open (its socket closed), _diag or "
+      "_status stays in the loop, also with an OTA pending: no crash branch, no "
+      "/ota.mark", _rb_res == _rb_want and not _rb_marks, repr((_rb_res, _rb_marks)))
+
+# RB-OOM-RULES: _guarded's other rules, as they were: a pending image's real
+# bug still rolls it back; the page sits out TICK_PAUSE; memory reboots count
+_rb_web()
+gl.ota["pend"] = 200
+_rb_saved = (gl._temp, gl.STATUS)
+gl.STATUS = 1
+gl._temp = lambda: (_ for _ in ()).throw(TypeError("bug"))
+_rb_bug = _rb_loop()
+gl._temp, gl.STATUS = _rb_saved
+gl.ota["pend"] = None
+gl.WEB = True
+_rb_web()
+gl.web_tick()
+_RbListen.oom = "accept"
+_rb_acc = []
+_rb_real = _RbListen.accept
+def _rb_counted(self):
+    _rb_acc.append(_clock[0])
+    return _rb_real(self)
+_RbListen.accept = _rb_counted
+_rb_r1 = _rb_loop(int(gl.TICK_PAUSE // 20) + 50)
+_RbListen.accept = _rb_real
+_RbListen.oom = None
+_rb_gap = _rb_acc[1] - _rb_acc[0] if len(_rb_acc) > 1 else None
+check("RB-OOM-RULES: an OTA pending, a real bug in a status line still leaves the "
+      "loop; a page out of memory waits TICK_PAUSE, no retry every pass",
+      "TypeError" in _rb_bug and _rb_r1 == "ran" and len(_rb_acc) == 2
+      and _rb_gap is not None and gl.TICK_PAUSE <= _rb_gap <= gl.TICK_PAUSE + 100,
+      repr((_rb_bug, _rb_r1, _rb_acc)))
+
+_rb_reboots = []
+_rb_saved = (gl._mem_reboot, gl._mem_reboot_soon, gl._bug_once)
+gl._mem_reboot = _rb_reboots.append
+gl._mem_reboot_soon = lambda: False
+try:
+    gl._tick_bug.clear()
+    gl._guard_mem[0] = gl.GUARD_MEM_MAX - 2
+    gl._guarded("web", lambda: None, None, True)
+    _rb_kept = gl._guard_mem[0]          # a page tick running through: no proof
+    gl.ota["pend"] = 200
+    gl._guard_mem[0] = gl.GUARD_MEM_MAX
+    gl._guarded("web", _rb_oom, None, True)
+    _rb_pend = list(_rb_reboots)         # (a reset would abort the image)
+    gl.ota["pend"] = None
+    gl._tick_bug.clear()
+    gl._guard_mem[0] = gl.GUARD_MEM_MAX - 1
+    gl._guarded("web", _rb_oom, None, True)
+    _rb_due = list(_rb_reboots)
+    gl._tick_bug.clear()
+    gl._guarded("wifi", lambda: None)
+    _rb_clear = gl._guard_mem[0]
+    # the telling allocates too: out of memory it stays quiet, in the loop
+    gl._tick_bug.clear()
+    gl._bug_once = _rb_oom
+    _rb_tell = "ok"
+    try:
+        gl._guarded("diag", _rb_oom, 1, True)
+    except MemoryError:
+        _rb_tell = "raised"
+finally:
+    gl.ota["pend"] = None
+    gl._mem_reboot, gl._mem_reboot_soon, gl._bug_once = _rb_saved
+    gl._guard_mem[0] = 0
+    gl._tick_bug.clear()
+check("RB-OOM-COUNT: a page tick that runs through clears no count of a lasting "
+      "MemoryError (a tick of the others does), no memory reboot with an image "
+      "pending, one at GUARD_MEM_MAX without; a MemoryError in the telling stays in",
+      _rb_kept == gl.GUARD_MEM_MAX - 2 and _rb_pend == []
+      and _rb_due == ["guarded memory web"] and _rb_clear == 0 and _rb_tell == "ok",
+      repr((_rb_kept, _rb_pend, _rb_due, _rb_clear, _rb_tell)))
+
+# RB-KB-FEED: _kb_seek from the start of a long .trb, on no feed
+_rb_p = os.path.join(gl.LOG_DIR, "feed.trb")
+_rb_lines = _tb_drive(2000, 2)
+_rb_body = gl.HEADERB.encode() + gl._kb_encode(_rb_lines, len(_rb_lines), None)
+with open(_rb_p, "wb") as f:
+    f.write(_rb_body)
+_rb_s = list(gl._ks)
+gl._wdt = WDT(timeout=120000)
+gl._wdt.fed = 0
+with builtins.open(_rb_p, "rb") as f:    # (this file's open decodes a .trb)
+    _rb_k = gl._kb_seek(f, len(_rb_body), -1, _rb_s)
+_rb_fed = gl._wdt.fed
+gl._wdt = None
+check("RB-KB-FEED: _kb_seek feeds the WDT every 64 records (a day's file from its "
+      "start), and still finds the end",
+      _rb_k is not None and _rb_fed >= 2000 // 64 - 1, repr((_rb_k, _rb_fed)))
+
+# RB-UART: read_uart has a budget: a UART that never empties must not hold
+# the loop, its feed() and the logging. In normal use nothing is lost
+
+
+class _RbUart(object):
+    """data as it would wait in the UART's buffer; flood: never empty."""
+    def __init__(self, data=b"", flood=False):
+        self.data, self.flood, self.reads = bytearray(data), flood, 0
+    def any(self):
+        return 1 if self.flood else len(self.data)
+    def readinto(self, mv):
+        self.reads += 1
+        if self.flood:
+            if self.reads > 20000:       # (the old endless loop: ends the test)
+                self.flood = False
+            mv[:6] = b"$junk\n"
+            return 6
+        k = min(len(mv), len(self.data))
+        mv[:k] = self.data[:k]
+        del self.data[:k]
+        return k
+
+
+_rb_saved = (gl.uart, gl.handle)
+_rb_seen = []
+gl.handle = lambda b, a, e: _rb_seen.append(bytes(b[a:e]))
+try:
+    gl.reset()
+    gl._rx_n = gl._rx_s = 0
+    gl.uart = _RbUart(flood=True)
+    gl.read_uart()
+    _rb_flood = gl.uart.reads
+    # a full 8 KB buffer (the Heltec's): one pass takes all of it, in order
+    gl._rx_n = gl._rx_s = 0
+    del _rb_seen[:]
+    _rb_ln = [b"$GNGGA,%05d,47.1,N,18.4,E,1,12,0.9,100,M,40,M,,*00" % i for i in range(160)]
+    _rb_8k = b"\n".join(_rb_ln) + b"\n"
+    gl.uart = _RbUart(_rb_8k)
+    gl.read_uart()
+    _rb_one = (len(_rb_8k) >= 8192, gl.uart.any(), _rb_seen == _rb_ln)
+    # more than a pass takes: the rest waits there, no byte lost or doubled
+    gl._rx_n = gl._rx_s = 0
+    del _rb_seen[:]
+    _rb_ln = [b"$GNGGA,%05d,47.1,N,18.4,E,1,12,0.9,100,M,40,M,,*00" % i for i in range(1500)]
+    gl.uart = _RbUart(b"\n".join(_rb_ln) + b"\n")
+    _rb_n = 0
+    while gl.uart.any() and _rb_n < 100:
+        gl.read_uart()
+        _rb_n += 1
+    _rb_many = (_rb_n > 1, _rb_seen == _rb_ln)
+finally:
+    gl.uart, gl.handle = _rb_saved
+    gl._rx_n = gl._rx_s = 0
+    gl.reset()
+check("RB-UART: a UART never empty: read_uart returns after its budget",
+      _rb_flood <= getattr(gl, "RX_READS", 0) and _rb_flood > 0, repr(_rb_flood))
+check("RB-UART-NOLOSS: a full 8 KB buffer goes in one pass (a pass is ~25 ms at "
+      "2.3 KB/s); more waits in the UART for the next pass, nothing lost or doubled",
+      _rb_one == (True, 0, True) and _rb_many == (True, True),
+      repr((_rb_one, _rb_many)))
+
+# RB-POLL: no client: a poll that allocates nothing, no accept() raising
+# EAGAIN (~96 B, ~40 times a second). tests/web_loopback.py and
+# tests/mpy_unix_logger.py run the real one on the unix port
+
+
+class _RbPoll(object):
+    def __init__(self):
+        self.reg, self.timeouts = [], []
+    def register(self, s, ev):
+        self.reg.append((s, ev))
+    def ipoll(self, t=-1):
+        self.timeouts.append(t)
+        return iter([(s, 1) for s, _e in self.reg if s.waiting])
+
+
+class _RbSelect(object):
+    POLLIN = 1
+    @staticmethod
+    def poll():
+        return _RbPoll()
+
+
+_rb_saved = gl.select
+gl.select = _RbSelect
+try:
+    _rb_web()
+    gl.web_tick()
+    _rb_l = _RbListen.made[-1]
+    for _i in range(50):
+        gl.web_tick()
+    _rb_idle = _rb_l.accepts
+    _rb_c = _RbConn(b"GET /nope HTTP/1.1\r\n\r\n")
+    _rb_l.waiting.append(_rb_c)
+    gl.web_tick()
+    _rb_pl = getattr(gl, "_web_poll", None)
+    _rb_tmo = set(_rb_pl.timeouts) if _rb_pl is not None else None
+    gl.wifi["state"] = "sleep"
+    gl.web_tick()
+    _rb_gone = getattr(gl, "_web_poll", 1)
+finally:
+    gl.select = _rb_saved
+check("RB-POLL: no accept() with nobody waiting, a zero-timeout poll; a client is "
+      "served; the poll goes with the socket",
+      _rb_idle == 0 and _rb_c.sent[:12] == b"HTTP/1.0 404" and _rb_tmo == {0}
+      and _rb_gone is None, repr((_rb_idle, bytes(_rb_c.sent[:12]), _rb_tmo, _rb_gone)))
+# ... and where poll has no ipoll (CPython): accept() as before
+_rb_web()
+gl.web_tick()
+_rb_l = _RbListen.made[-1]
+_rb_c = _RbConn(b"GET /nope HTTP/1.1\r\n\r\n")
+_rb_l.waiting.append(_rb_c)
+gl.web_tick()
+check("RB-POLL-NONE: no usable poll: accept() asks, as before",
+      getattr(gl, "_web_poll", None) is None and _rb_c.sent[:12] == b"HTTP/1.0 404",
+      repr(bytes(_rb_c.sent[:12])))
+gl._web_close()
+gl.socket, gl.WEB, gl.WEB_AWAY = _rb_socket, False, False
+gl.wifi_reset()
+
+# RB-Q: no new list on each pass without a fix when the queue is empty
+gl.reset()
+gl.log_reset()
+_rb_q = gl.st["q"]
+gl.log_tick()
+_rb_same = gl.st["q"] is _rb_q
+gl.st["q"] = [("stale",)]
+gl.log_tick()
+check("RB-Q: without a fix an empty seconds queue keeps its list (a new one every "
+      "pass was garbage), a stale second still goes",
+      _rb_same and gl.st["q"] == [], repr(gl.st["q"]))
+
+# RB-CELL: a comprehension over skip made it a cell, allocated at every
+# upload_tick (32 B, ~40 times a second: tests/mpy_unix_logger.py measures)
+import ast as _ast
+_rb_cells = [n for n in _ast.walk(_ast.parse(inspect.getsource(gl.upload_tick)))
+             if isinstance(n, _ast.ListComp)
+             and any(isinstance(x, _ast.Name) and x.id == "skip" for x in _ast.walk(n))]
+check("RB-CELL: upload_tick's skip is no cell", not _rb_cells, repr(len(_rb_cells)))
+
+# RB-TFT: _text blits nothing outside the band, the panel stays as it was
+_ft_saved = _ft._text
+
+
+def _ft_all(fb, font, s, x, base, tone):
+    """_text as it was: every glyph, into every band (blit clips)."""
+    f, mv = font
+    p = _ft._gs4_palette(tone)
+    y = base - f[5]
+    h = f[4]
+    for ch in s:
+        i = _ft._index(f, ch)
+        w = f[1][i]
+        o = f[2][i * 2] | f[2][i * 2 + 1] << 8
+        fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, _FakeFramebuf.GS4_HMSB), x, y, _ft.BG, p)
+        x += w
+    return x
+
+
+_rb_states = [("47", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
+              ("-", False, 0, "--:--", None, 0, "", False, None),
+              ("128", True, 9, "23:59", 0, 1, "kész", False, (100, "tele")),
+              ("0", True, 12, "00:00", 1, 2, "99999", True, (75, "<1 óra"))]
+
+
+def _rb_panel(text):
+    _ft._text = text
+    out = []
+    try:
+        for s in _rb_states:
+            _ft._D.top = _ft._D.low = _ft._D.lit = None
+            _ft.set_state(*s)
+            _ft.frame()
+            out.append(dict(_TftSpi.panel))
+    finally:
+        _ft._text = _ft_saved
+    return out
+
+
+_TftSpi.fail = False
+_ft.start()
+_rb_new = _rb_panel(_ft_saved)
+_ft.start()
+_rb_old = _rb_panel(_ft_all)
+_rb_diff = [i for i in range(len(_rb_old)) if _rb_old[i] != _rb_new[i]]
+
+
+class _RbFb(object):
+    """The band, counting the glyphs blitted wholly outside it."""
+    def __init__(self, fb):
+        self.fb, self.out, self.n = fb, 0, 0
+    def blit(self, src, x, y, key=-1, pal=None):
+        h = src[2] if isinstance(src, tuple) else 0
+        if isinstance(src, tuple) and src[3] == _FakeFramebuf.GS4_HMSB:
+            self.n += 1
+            if y >= _ft.BAND_H or y + h <= 0:
+                self.out += 1
+        self.fb.blit(src, x, y, key, pal)
+    def __getattr__(self, k):
+        return getattr(self.fb, k)
+
+
+# ... and at the band's very edges, one row in and just out: each font's every
+# glyph, and one inked to its first and last row (the fonts' may be blank there)
+_rb_edge = []
+_rb_ink = ("X", b"\x04", b"\x00\x00", b"\xff" * 12, 6, 5)
+for _fnt in _ft._FONTS + [(_rb_ink, memoryview(_rb_ink[3]))]:
+    _f = _fnt[0]
+    _hh = _f[4]
+    for _y in (-_hh, 1 - _hh, _ft.BAND_H - 1, _ft.BAND_H):
+        _ft._D.fb.fill(_ft.BG)
+        _ft_saved(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], "txt")
+        _a1 = bytes(_ft._D.buf)
+        _ft._D.fb.fill(_ft.BG)
+        _ft_all(_ft._D.fb, _fnt, _f[0], 0, _y + _f[5], "txt")
+        if _a1 != bytes(_ft._D.buf):
+            _rb_edge.append((_hh, _y))
+_rb_fb0 = _ft._D.fb
+_ft._D.fb = _RbFb(_rb_fb0)
+_ft._D.top = _ft._D.low = None
+_ft.set_state(*_rb_states[0])
+_ft.frame()
+_rb_blit = (_ft._D.fb.n, _ft._D.fb.out)
+_rb_x = (_ft._text(_ft._D.fb, _ft._NUM, "12", 7, 500, "txt"), 7 + _ft.width(_ft._NUM, "12"))
+_ft._D.fb = _rb_fb0
+check("RB-TFT: no glyph blitted outside its band; x still follows; the panel "
+      "pixel-identical to blitting every glyph into every band",
+      not _rb_diff and not _rb_edge and _rb_blit[0] > 0 and _rb_blit[1] == 0
+      and _rb_x[0] == _rb_x[1] and len(_rb_new[0]) == 160 * 80,
+      repr((_rb_diff, _rb_edge, _rb_blit, _rb_x)))
+
+# RB-HITS: an OTA download the guard aborted raises the same counter: the
+# next failed POST said "upload aborted" though nothing of it was
+
+
+def _rb_guard_hit():
+    """As _raw_get's guard fires: the deadline over, its socket closed."""
+    gl._guard_start(_RbConn(), 100)
+    _clock[0] += 200
+    gl._guard_cb(None)
+    gl._guard_stop()
+
+
+gl.DIAG = 60000
+diag_clear()
+gl.up["url"], gl.up["key"] = "https://x", "k"
+_rb_hits0 = gl._guard["hits"]
+_rb_guard_hit()
+_post_raise[0] = OSError(-202)
+gl._http_post(10)
+_rb_l1 = [l for l in diag_lines() if l.startswith("upload")]
+diag_clear()
+# a POST the guard did abort still says so
+_rb_saved = gl.HTTP_POST
+def _rb_aborted(url, data, headers, timeout):
+    gl._guard["hits"] += 1
+    raise OSError(9)
+gl.HTTP_POST = _rb_aborted
+_post_raise[0] = None
+gl._http_post(10)
+gl.HTTP_POST = _rb_saved
+_rb_l2 = [l for l in diag_lines() if l.startswith("upload aborted")]
+check("RB-HITS: an aborted OTA download is no 'upload aborted' for the next failed "
+      "POST; a POST the guard aborted is",
+      gl._guard["hits"] > _rb_hits0 + 1 and _rb_l1 == ["upload err OSError(-202)"]
+      and len(_rb_l2) == 1, repr((_rb_l1, _rb_l2)))
+diag_clear()
+
+# GD-GC: the early, frequent collection (a heap grown into the IDF heap
+# starves TLS: see gps_logger.py). The unix port checks the real gc too
+_rb_th = []
+_rb_saved = sys.modules["gc"].threshold
+sys.modules["gc"].threshold = lambda *a: _rb_th.append(a)
+_heltec_logger()
+sys.modules["gc"].threshold = _rb_saved
+check("GD-GC: importing the logger sets gc.threshold(8192)", _rb_th == [(8192,)],
+      repr(_rb_th))
+
+# GD-HIST: /hist's day is a date, not a path (d=../gpx/<name> served any file)
+with open(os.path.join(gl.LOG_DIR, "x.trk"), "w") as f:
+    f.write("SECRET-TRACK\n")
+with open(os.path.join(gl.LOG_DIR, "somelongername.trk"), "w") as f:
+    f.write("SECRET-TRACK\n")
+with open(os.path.join(gl.HIST_DIR, "20261001.trk"), "w") as f:
+    f.write("TODAY-LINE\n")
+_rb_hist = []
+for _d in (b"../gpx/x", b"../gpx/somelongername", b"20261001"):
+    _c = _RbConn()
+    gl._web_end[0] = None
+    gl._web_reply(_c, b"GET /hist?d=" + _d + b"&o=0 HTTP/1.1\r\n\r\n")
+    _rb_hist.append((bytes(_c.sent[:12]), b"SECRET" in _c.sent, b"TODAY" in _c.sent))
+check("GD-HIST: a /hist day that is no 8-digit date is a 404 (d=../gpx/<name>), a "
+      "real day is served",
+      _rb_hist == [(b"HTTP/1.0 404", False, False)] * 2 + [(b"HTTP/1.0 200", False, True)],
+      repr(_rb_hist))
+
+# GD-CA: only a missing CA_FILE means "no CA": any other error (a failing
+# flash) must not turn into an unverified POST
+_rb_saved = (gl.CA_FILE, os.stat)
+gl.CA_FILE = os.path.join(_rb_dir, "no-such-ca.der")
+_rb_none = gl._ca_size()
+_rb_real_stat = os.stat
+def _rb_stat(p, *a, **k):
+    if p == gl.CA_FILE:
+        raise OSError(5, "EIO")
+    return _rb_real_stat(p, *a, **k)
+os.stat = _rb_stat
+gl._tls_ctx[0] = None
+_rb_ca = []
+try:
+    for _fn in (gl._ca_size, gl._tls_context):
+        try:
+            _fn()
+            _rb_ca.append("no error")
+        except OSError as e:
+            _rb_ca.append(e.args[0])
+finally:
+    os.stat = _rb_real_stat
+    gl.CA_FILE = _rb_saved[0]
+    gl._tls_ctx[0] = None
+check("GD-CA: _ca_size: ENOENT is None, any other error raises, and the TLS context "
+      "is not made without the CA (no unverified POST)",
+      _rb_none is None and _rb_ca == [5, 5], repr((_rb_none, _rb_ca)))
+
+# GD-IDLE: the radio does not sleep off home while a new firmware still has to
+# read the manifest: a sleep is no retry, a rollback at OTA_HEALTH
+_rb_saved = (gl._radio_idle_ok, set(WLAN.ok))
+_rb_idle = []
+for _p in (200, None):
+    gl.WEB = False
+    gl.wifi_reset()
+    _w = gl.network.WLAN(gl.network.STA_IF)
+    _w.active(True)
+    WLAN.ok = {"phone"}
+    _w.connect("phone", "x")
+    gl.wifi.update(wlan=_w, state="connected", home=False, ssid="phone", ip="1.2.3.4")
+    gl.wifi["idle_at"] = _clock[0]
+    gl.ota["pend"] = _p
+    gl._radio_idle_ok = lambda: True
+    _clock[0] += gl.WIFI_IDLE
+    gl.wifi_tick()
+    _rb_idle.append(gl.wifi["state"])
+gl.ota["pend"] = None
+gl._radio_idle_ok, WLAN.ok = _rb_saved
+gl.wifi_reset()
+check("GD-IDLE: connected off home with all uploaded: the radio sleeps, but not "
+      "while a firmware waits to confirm", _rb_idle == ["connected", "sleep"],
+      repr(_rb_idle))
+
+# GD-DIAG-RES: the log never takes the flash reserve kept for the tracks
+_rb_saved = (gl.free, gl.DIAG)
+gl.DIAG = 60000
+diag_clear()
+gl.free = lambda: gl.MIN_FREE - 1
+gl._diag_write("under the reserve")
+_rb_d1 = os.path.exists(gl.DIAG_FILE)
+gl.free = lambda: gl.MIN_FREE
+gl._diag_write("at the reserve")
+_rb_d2 = diag_lines()
+gl.free = lambda: None
+gl._diag_write("no statvfs")
+_rb_d3 = diag_lines()
+gl.free, gl.DIAG = _rb_saved
+diag_clear()
+check("GD-DIAG-RES: under MIN_FREE free no diag line is written (the tracks keep the "
+      "reserve), at it or with free unknown one is",
+      _rb_d1 is False and _rb_d2 == ["at the reserve"]
+      and _rb_d3 == ["at the reserve", "no statvfs"], repr((_rb_d1, _rb_d2, _rb_d3)))
+
+# GD-HOLD: a held stay keeps at most HOLD_MAX lines: a long drive must not
+# reach MAX_BATCH (which drops the oldest)
+
+
+def _rb_batch(n):
+    return ["47.500000,19.000000,100.0,2,0.0,20261031T%02d%02d%02dZ\n"
+            % (i // 3600, i // 60 % 60, i % 60) for i in range(n)]
+
+
+gl.reset()
+gl.log_reset()
+gl.free = lambda: 10 ** 9
+gl.log["file"] = os.path.join(gl.LOG_DIR, "hold.trk")
+gl.log["created"] = False
+_rb_b = _rb_batch(gl.HOLD_MAX + 5)
+gl.log["batch"][:] = _rb_b
+gl.flush("20261031T000000Z")         # all newer than the hold
+_rb_h1 = list(gl.log["batch"])
+gl.log["batch"][:] = _rb_batch(gl.HOLD_MAX)
+_rb_sz = gl._file_size(gl.log["file"])
+gl.flush("20261031T000000Z")
+_rb_h2 = (len(gl.log["batch"]), gl._file_size(gl.log["file"]) == _rb_sz)
+check("GD-HOLD: flush(hold) lets the oldest lines over HOLD_MAX go to the file, up "
+      "to HOLD_MAX it holds them all",
+      _rb_h1 == _rb_b[5:] and _rb_h2 == (gl.HOLD_MAX, True), repr((len(_rb_h1), _rb_h2)))
+
+# GD-TRIM: at the reserve an older history day goes before any track line:
+# the drawing yields to the points
+_rb_days = [os.path.join(gl.HIST_DIR, d + ".trk") for d in ("20261002", "20261003")]
+for _f in _rb_days:
+    with open(_f, "w") as f:
+        f.write("x\n")
+gl.free = lambda: 10 ** 9 if not os.path.exists(os.path.join(gl.HIST_DIR, "20261001.trk")) else gl.MIN_FREE - 1
+gl.reset()
+gl.log_reset()
+gl.log["file"] = os.path.join(gl.LOG_DIR, "trim.trk")
+gl.log["created"] = False
+gl.log["fix"] = True
+_rb_b = _rb_batch(3)
+gl.log["batch"][:] = _rb_b
+gl.flush()
+_rb_tr = (gl.log["full"], gl.log["batch"], os.path.exists(gl.log["file"]),
+          os.path.exists(os.path.join(gl.HIST_DIR, "20261001.trk")), os.path.exists(_rb_days[-1]))
+check("GD-TRIM: flush at the flash reserve removes older history days and writes the "
+      "lines; the newest day stays",
+      _rb_tr == (False, [], True, False, True), repr(_rb_tr))
+gl.free = lambda: 10 ** 9
+
+# GD-POS-NL: a .trk offset not after a newline is inside a line (a damaged
+# .pos): from 0, not half a line up
+_rb_p = os.path.join(gl.LOG_DIR, "pos.trk")
+_rb_body = b"#head\n" + b"".join(l.encode() for l in _rb_batch(3))
+with open(_rb_p, "wb") as f:
+    f.write(_rb_body)
+_rb_nl = _rb_body.index(b"\n") + 1
+gl.write_offset(_rb_p, _rb_nl)
+_rb_pos1 = gl.read_pos(_rb_p)
+gl.write_offset(_rb_p, _rb_nl + 5)
+_rb_pos2 = gl.read_pos(_rb_p)
+check("GD-POS-NL: a .trk .pos after a newline is kept, one inside a line reads as 0",
+      _rb_pos1 == (_rb_nl, None) and _rb_pos2 == (0, None), repr((_rb_pos1, _rb_pos2)))
+
+# GD-WDT-COUNT: main.py counts a WDT reset before it decides to start: a
+# logger hanging at boot must end in the REPL, not in a reset loop for ever
+_rb_main = {"Pin": Pin, "RTC": RTC, "machine": sys.modules["machine"], "time": time,
+            "__name__": "boot_helpers"}
+with open(os.path.join(ROOT, "main.py")) as f:
+    exec(compile(f.read(), "main.py", "exec"), _rb_main)
+_rb_main["gps_boot"] = None
+_rb_ran = []
+_rb_fake = types.ModuleType("gps_logger")
+_rb_fake.run = lambda: _rb_ran.append(1)
+_rb_real_gl = sys.modules.get("gps_logger")
+sys.modules["gps_logger"] = _rb_fake
+_rb_rc = _reset_cause[0], RTC.mem
+try:
+    _reset_cause[0] = 3                  # WDT_RESET
+    RTC.mem = b"%d" % (_rb_main["BOOT_FAIL_MAX"] - 1)
+    _rb_main["_boot_start"]()
+    _rb_wdt = (list(_rb_ran), _rb_main["_boot_fail_get"]())
+    del _rb_ran[:]
+    _reset_cause[0] = 1
+    RTC.mem = b"%d" % (_rb_main["BOOT_FAIL_MAX"] - 1)
+    _rb_main["_boot_start"]()
+    _rb_pwr = (list(_rb_ran), _rb_main["_boot_fail_get"]())
+finally:
+    _reset_cause[0], RTC.mem = _rb_rc
+    if _rb_real_gl is not None:
+        sys.modules["gps_logger"] = _rb_real_gl
+check("GD-WDT-COUNT: _boot_start counts a WDT reset first: the last one allowed does "
+      "not start the logger again; any other reset does",
+      _rb_wdt == ([], 5) and _rb_pwr == ([1], 4), repr((_rb_wdt, _rb_pwr)))
+shutil.rmtree(_rb_dir, ignore_errors=True)
 
 print()
 print("%d passed, %d failed" % (passed, failed))

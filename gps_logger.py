@@ -2128,6 +2128,9 @@ def handle(line, s=0, e=None):
 # bytearray.find (start/end in place, no copy: MicroPython 1.29 has it),
 # not byte by byte in Python.
 RX_READ = 256                            # bytes per readinto: small pieces
+RX_READS = 64                            # readintos per read_uart: 16 KB, twice
+                                         # the Heltec's whole UART buffer; the
+                                         # rest waits there for the next pass
 RX_LINE = 256                            # no newline after this many bytes
 RX_FRAME = 1100                          # (or a UBX frame this long): junk
 _rx = bytearray(RX_FRAME + RX_READ)
@@ -2151,10 +2154,14 @@ def read_uart():
     in place. An error in one (a MemoryError while publishing a second)
     counts it bad (st["err"]) and the rest is read: no exception leaves
     the buffer uncommitted, or the next call handled the same sentences
-    again and queued the same seconds twice."""
+    again and queued the same seconds twice. At most RX_READS reads: a UART
+    never empty (a flood, handlers slower than it) must not hold the loop,
+    its feed() and the logging."""
     global _rx_n, _rx_s
     b = _rx
-    while uart.any():
+    left = RX_READS
+    while left and uart.any():
+        left -= 1
         n = _rx_n
         k = uart.readinto(_rxv[n:n + RX_READ])
         if not k:
@@ -3211,9 +3218,10 @@ def _web_search(now):
     >= SEEN_MIN_RSSI: not a hidden home whose BSSIDs are not known yet, a
     home link that dropped weaker than that, or the hotspot WEB_AWAY
     served the page on. The hourly round after a deliberate sleep is no
-    drop (down_at None). A link off home without WEB_AWAY served no page:
-    no search in any keep-alive mode (gpio, radio, KEEPALIVE=0 searched
-    30 min after a hotspot drop)."""
+    drop (down_at None). A link off home without WEB_AWAY keeps no page up
+    (it is served only while the radio is on anyway, see web_tick): no
+    search in any keep-alive mode (gpio, radio, KEEPALIVE=0 searched 30 min
+    after a hotspot drop)."""
     if not WEB or not (WEB_AWAY or _has_home()):
         return False
     if not wifi.get("down_home"):
@@ -5679,8 +5687,9 @@ def log_tick():
     if not has_fix(now):
         if log["fix"]:
             _drain_q()                   # valid seconds just before the loss
-        else:
-            st["q"] = []                 # stale
+        elif st.get("q"):
+            st["q"] = []                 # stale (a new list only if any: this
+                                         # runs every pass without a fix)
         # the heartbeat after the queued seconds: a departure in them comes
         # first, and nothing is stamped before lines already written
         _still_beat(now)
@@ -6246,13 +6255,18 @@ def _kb_seek(f, off, key, s):
     offset -1 was not checked: a corrupt "1234 -1" was read from inside a
     record). -> the offset of the keyframe s is from (with -1 the last one
     read, -1 if none), None when off is not where a record starts read so
-    (s then not valid)."""
+    (s then not valid). Feeds the WDT every 64 records: from the start of a
+    long day's file this takes as long as count_points' lines."""
     s[0] = None
     k = key
+    n = 0
     _rd_open(key if key > 0 else 0)
     while _rd[0] + _rd[2] < off:
         if not _rd_rec(f):
             break
+        n += 1
+        if n & 63 == 0:
+            feed()
         a, b = _rd[1], _rd[2]
         if a < b:
             if _rbuf[a] == 61:           # (as read_batch keeps _rk[0])
@@ -7303,6 +7317,9 @@ def _http_post(size):
     r = None
     code, retry = None, None
     _post_phase[0] = None
+    # only a hit during this POST is its abort: not the OTA download's (that
+    # shares the guard), or one in the headers of the last, 2xx POST
+    up["guard_hits"] = _guard["hits"]
     try:
         r = HTTP_POST("%s/api/v1/overland/batches" % up["url"],
                       memoryview(_body)[:size],
@@ -7320,9 +7337,6 @@ def _http_post(size):
             code = None
         up["enomem"] = 0
         up["last_err"] = None
-        # the guard may have closed the socket while the headers were read
-        # (the status kept): not a sign of the next error's abort
-        up["guard_hits"] = _guard["hits"]
     except MemoryError:
         up["enomem"] = up.get("enomem", 0) + 1
         raise
@@ -7458,7 +7472,13 @@ def upload_tick():
     up["files"] = len(files)
     skip = up.get("skip")
     if skip and skip in files and len(files) > 1:
-        files = [p for p in files if p != skip]
+        # (no comprehension: it would make skip a cell, allocated every call,
+        # also on the early returns above, ~40 times a second)
+        due = []
+        for p in files:
+            if p != skip:
+                due.append(p)
+        files = due
     held = up.get("hold") or {}
     due = []
     for p in files:
@@ -8472,6 +8492,7 @@ def ota_tick(now):
 # client used to hold the loop for ~50 s: 2 s per 1 KB send).
 
 _web_sock = None
+_web_poll = None                         # its poll, None: accept() asks itself
 
 def _web_env(env):
     """WEB=0 in .env: no status page, the radio sleeps at home as before.
@@ -8492,8 +8513,20 @@ def _web_env(env):
         else:
             WEB_AWAY = t
 
+def _web_poller(s):
+    """A poll on the listening socket: ipoll(0) with nobody waiting allocates
+    nothing, an accept() raises EAGAIN (~96 B, ~40 times a second). None where
+    it does not work (CPython's poll has no ipoll): accept() as before."""
+    try:
+        p = select.poll()
+        p.ipoll
+        p.register(s, select.POLLIN)
+        return p
+    except (AttributeError, TypeError, ValueError, OSError):
+        return None
+
 def _web_open():
-    global _web_sock
+    global _web_sock, _web_poll
     s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -8501,18 +8534,22 @@ def _web_open():
         s.bind(socket.getaddrinfo("0.0.0.0", WEB_PORT)[0][-1])
         s.listen(2)
         s.setblocking(False)
+        _web_poll = _web_poller(s)
         _web_sock = s
         print("web http://%s/" % wifi.get("ip"))
-    except OSError as e:
-        print("web", repr(e))
-        if s is not None:
+    except (OSError, MemoryError) as e:  # (no half-open socket left behind)
+        if s is not None and _web_sock is not s:
             try:
                 s.close()
             except OSError:
                 pass
+        if isinstance(e, MemoryError):
+            raise                        # _guarded: a pause, not 40 tries a s
+        print("web", repr(e))
 
 def _web_close():
-    global _web_sock
+    global _web_sock, _web_poll
+    _web_poll = None
     if _web_sock is not None:
         try:
             _web_sock.close()
@@ -9191,7 +9228,9 @@ def _web_bug(e):
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
-    within WEB_DEADLINE."""
+    within WEB_DEADLINE. On any network: WEB_AWAY keeps the radio on for the
+    page off home (wifi_tick), without it the page is up as long as the radio
+    is, for the uploads (README, status page)."""
     if not WEB or wifi["state"] != "connected":
         _web_close()
         return
@@ -9199,6 +9238,11 @@ def web_tick():
         _web_open()
         if _web_sock is None:
             return
+    if _web_poll is not None:
+        for _ in _web_poll.ipoll(0):
+            break
+        else:
+            return                       # nobody waiting
     try:
         c = _web_sock.accept()[0]
     except OSError:
@@ -9550,7 +9594,7 @@ _tick_bug = {}                           # its name -> ticks of the bug
 GUARD_MEM_MAX = 10                       # guarded MemoryErrors in a row:
 _guard_mem = [0]                         # a memory reboot (_mem_reboot)
 
-def _guarded(name, fn, arg=None):
+def _guarded(name, fn, arg=None, side=False):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
     (once a kind), the tick skipped for TICK_PAUSE (no retry every 20 ms;
     after a MemoryError a gc.collect) and the loop, the logging, goes on.
@@ -9559,7 +9603,13 @@ def _guarded(name, fn, arg=None):
     BOOT_FAIL_MAX boots, logging nothing. Not guarded: log_tick and the
     GPS reads (the logging itself: a reset is their recovery), and nothing
     while an OTA image is pending (its crash rolls it back). Nothing is
-    fed here: a tick that hangs still fires the WDT."""
+    fed here: a tick that hangs still fires the WDT.
+    side: the page and the status lines, which only need a little RAM at a
+    bad moment. Their MemoryError is no crash of a pending image either (it
+    wrote /ota.mark and blamed a good build; a real bug in them still rolls
+    it back, and a memory reboot waits, as it would abort the image), and
+    their running through says nothing about a lasting one (one idle page
+    tick allocates nothing, and no reboot would ever have come)."""
     at = _tick_bug.get(name)
     if at is not None:
         if _age(time.ticks_ms(), at) < TICK_PAUSE:
@@ -9571,9 +9621,11 @@ def _guarded(name, fn, arg=None):
             fn()
         else:
             fn(arg)
-        _guard_mem[0] = 0
+        if not side:
+            _guard_mem[0] = 0
     except Exception as e:
-        if pend is not None or ota["pend"] is not None:
+        pending_ota = pend is not None or ota["pend"] is not None
+        if pending_ota and not (side and isinstance(e, MemoryError)):
             raise
         now = time.ticks_ms()
         if isinstance(e, MemoryError):
@@ -9581,16 +9633,20 @@ def _guarded(name, fn, arg=None):
             # the crash reset was a lasting MemoryError's recovery (the
             # heap fragmented for good): GUARD_MEM_MAX in a row reboot
             _guard_mem[0] += 1
-            if _guard_mem[0] >= GUARD_MEM_MAX and not _mem_reboot_soon():
+            if (_guard_mem[0] >= GUARD_MEM_MAX and not pending_ota
+                    and not _mem_reboot_soon()):
                 _guard_mem[0] = 0
                 _mem_reboot("guarded memory " + name)
         if name == "upload":
             # (after the POST, before the commit: the same batch went up
             # again every TICK_PAUSE for ever)
             _schedule(now)
-        _tick_bug[name] = now
-        print("bug", name, repr(e))
-        _bug_once("bug %s %s" % (name, repr(e)[:60]))
+        try:                             # (the telling allocates: it must not
+            _tick_bug[name] = now        # turn a MemoryError into a crash)
+            print("bug", name, repr(e))
+            _bug_once("bug %s %s" % (name, repr(e)[:60]))
+        except MemoryError:
+            pass
 
 def _loop():
     global _wdt
@@ -9610,7 +9666,7 @@ def _loop():
         keepalive_tick(time.ticks_ms())
         feed()
         _guarded("upload", upload_tick)
-        web_tick()
+        _guarded("web", web_tick, None, True)
         _guarded("ota", ota_tick, time.ticks_ms())
         now = time.ticks_ms()
         tft_tick(now)
@@ -9621,9 +9677,9 @@ def _loop():
             draw()
             last = now
         if time.ticks_diff(now, status_at) >= STATUS:
-            _status()
+            _guarded("status", _status, None, True)
             status_at = now
         if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
-            _diag(now)
+            _guarded("diag", _diag, now, True)
             diag_at = now
         time.sleep_ms(20)

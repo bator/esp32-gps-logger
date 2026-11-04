@@ -541,12 +541,14 @@ boot cause 2 (hard reset), the same as the logger's own `machine.reset()`
 1 (power on). The counter is cleared after 60 s (`BOOT_OK_MS`) of a healthy
 main loop, by `deploy.sh` or by a power cycle. By hand:
 `mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
-A bug in the WiFi, upload or OTA tick no longer resets the board: it is
+A bug in the WiFi, upload or OTA tick, the status page's or a status
+line's, no longer resets the board: it is
 one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
 (`TICK_PAUSE`) and logging goes on; an upload bug also backs the upload
 off. Ten MemoryErrors in a row there (`GUARD_MEM_MAX`) are a memory reboot,
 as the crash reset used to be. A bug in the logging itself, and anything
-while an OTA image is pending, still goes to the crash branch.
+while an OTA image is pending, still goes to the crash branch, except a
+MemoryError in the page or a status line: no reason to blame the new build.
 
 In the REPL after 5 a frozen firmware no longer waits for good: after 30
 minutes (`BOOT_RETRY_MS`) a timer sets the count back to 4 and resets, one
@@ -832,9 +834,13 @@ phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
 measured at most every 30 s (also for the OLED) and the waiting files are
 counted at most every 10 s. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
-`WEB=0` in `.env` turns both off. On the other networks the radio sleeps
-a few seconds after the last upload, so the page is up only briefly; with
-`WEB_AWAY=1` it stays connected there too. Those networks use DHCP: find
+`WEB=0` in `.env` turns both off. On the other networks the page is up
+only while the radio is on anyway (something still to upload, then up to
+`WIFI_IDLE`, 10 s, before it sleeps); with `WEB_AWAY=1` the radio stays
+connected for it there too. `WEB_AWAY` decides how long the radio stays
+on, not who is served: whenever the board is connected, on any network in
+`.env`, the page answers everyone on that network, with no password.
+Those networks use DHCP: find
 the board's address in the hotspot or router client list (by its DHCP
 hostname, `HOSTNAME`) or in the `web http://…/`
 console line.

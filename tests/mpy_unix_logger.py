@@ -583,6 +583,120 @@ check("home_aps file round trip", aps == [b"\x01\x02\x03\xaa\xbb\xcc",
                                           b"\xff" * 6,
                                           b"\xab\xcd\xef\x01\x23\x45"])
 
+# 2026-11 review: the real things only this port has. The real gc, the real
+# poll on a real socket, what the passes without a client allocate
+if sys.implementation.name == "micropython":
+    check("gc.threshold(8192) set by the import", gc.threshold() == 8192)
+
+
+    def _alloc(fn, n=100):
+        gc.collect()
+        gc.disable()
+        a0 = gc.mem_alloc()
+        for _ in range(n):
+            fn()
+        a1 = gc.mem_alloc()
+        gc.enable()
+        return (a1 - a0) // n
+
+
+    import socket as _socket
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.wifi["state"] = "connected"
+    gl.WEB = True
+    for k in range(8):                  # a free port
+        gl.WEB_PORT = 20000 + (time.ticks_ms() * 7 + k * 1013) % 20000
+        gl.web_tick()
+        if gl._web_sock is not None:
+            break
+    poll_up = gl._web_sock is not None and gl._web_poll is not None
+    idle = _alloc(gl.web_tick)
+    guard = _alloc(lambda: gl._guarded("web", gl.web_tick, None, True))
+    print("web idle alloc", idle, "guarded", guard)
+    check("web: a real poll on the listening socket; no client: 0 bytes a pass",
+          poll_up and idle == 0 and guard == 0)
+    # the same poll sees a client come: the socket is taken and answered
+    cl = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    cl.connect(_socket.getaddrinfo("127.0.0.1", gl.WEB_PORT)[0][-1])
+    cl.write(b"GET /nope HTTP/1.0\r\n\r\n")
+    for _ in range(20):
+        gl.web_tick()
+    got = cl.read(12)
+    cl.close()
+    gl._web_close()
+    check("web: ipoll(0) wakes for a client, the poll goes with the socket",
+          got == b"HTTP/1.0 404" and gl._web_poll is None and gl._web_sock is None)
+    gl.WEB = False
+    gl.up["next_at"] = time.ticks_add(time.ticks_ms(), 10000000)
+    up_alloc = _alloc(gl.upload_tick)
+    print("upload_tick alloc", up_alloc)
+    check("upload_tick that waits allocates nothing (no cell)", up_alloc == 0)
+    gl.wifi_reset()
+
+    # the display on the real framebuf: glyphs outside the band skipped, each
+    # byte to the panel as when every glyph went into every band
+    sent = []
+
+
+    class _Spi:
+        def __init__(self, *a, **k):
+            pass
+
+        def write(self, b):
+            sent.append(bytes(b))
+
+
+    class _Pin(_Dummy):
+        OUT = 1
+
+
+    machine.SPI = _Spi
+    import gps_tft as tft
+    tft.Pin = _Pin
+    tft.time = _Obj()
+    tft.time.sleep_ms = lambda ms: None
+    tft.start()
+    states = (("47", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
+              ("-", False, 0, "--:--", None, 0, "", False, None),
+              ("128", True, 9, "23:59", 0, 1, "kész", False, (100, "tele")),
+              ("0", True, 12, "00:00", 1, 2, "99999", True, (75, "<1 óra")))
+
+
+    def panel():
+        del sent[:]
+        for s in states:
+            tft._D.top = tft._D.low = tft._D.lit = None
+            tft.set_state(*s)
+            tft.frame()
+        return b"".join(sent)
+
+
+    def text_all(fb, font, s, x, base, tone):
+        f, mv = font
+        p = tft._gs4_palette(tone)
+        y = base - f[5]
+        h = f[4]
+        for ch in s:
+            i = tft._index(f, ch)
+            w = f[1][i]
+            o = f[2][i * 2] | f[2][i * 2 + 1] << 8
+            fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, tft.framebuf.GS4_HMSB), x, y, tft.BG, p)
+            x += w
+        return x
+
+
+    now_panel = panel()
+    text_now = tft._text
+    tft._text = text_all
+    all_panel = panel()
+    tft._text = text_now
+    out_band = _alloc(lambda: tft._text(tft._D.fb, tft._NUM, "12", 4, 500, "txt"))
+    print("tft panel bytes", len(now_panel), "out of band alloc", out_band)
+    check("tft: on the real framebuf the panel gets each byte as before, a text "
+          "outside the band allocates nothing",
+          len(now_panel) > 50000 and now_panel == all_panel and out_band == 0)
+
 if fails:
     raise SystemExit("mpy logger smoke FAILED: %s" % ", ".join(fails))
 print("mpy logger smoke passed")
