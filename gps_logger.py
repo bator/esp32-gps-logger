@@ -1252,7 +1252,19 @@ def _uc_line(p):
 
 _UC_GNSS = {"GP": 0, "GA": 2, "GB": 3, "GQ": 5, "GL": 6}  # NAV-SAT's gnssId
 _UC_SYS = {1: 0, 2: 6, 3: 2, 4: 3, 5: 5}  # GSA's system id -> gnssId
-_uc_sv = {"new": {}, "keys": [], "used": []}
+_uc_sv = {"new": {}, "open": False, "until": None, "used": []}
+
+def _uc_gsv_skip():
+    """True while a list is fresh: with a fix its GSV comes at 1 Hz whatever
+    the rate (25 is read back; ~25 sentences a second, measured), each
+    decoded and split into ~20 strings for nothing."""
+    u = _uc_sv
+    if u["until"] is None:
+        return False
+    if time.ticks_diff(u["until"], time.ticks_ms()) > 0:
+        return True
+    u["until"] = None
+    return False
 
 def _uc_gsa(f):
     """One GSA: the satellites of its system in the fix (a round's list:
@@ -1267,24 +1279,28 @@ def _uc_gsa(f):
 
 def _uc_gsv(talker, f):
     """One GSV sentence into a round's list (the same satellite on two
-    bands: its strongest). A sentence seen in this round already (system,
-    signal, number) starts the next one and closes this as st["svs"], the
-    shape of _ubx_frame's NAV-SAT list: (svid, cno, elevation, azimuth, used,
-    unhealthy, gnssId). Not by a pause: with a fix the receiver spreads a
-    round over the epochs (a list a minute, measured)."""
+    bands: its strongest). A round starts with GPS's first sentence; the
+    next such one closes it as st["svs"], the shape of _ubx_frame's NAV-SAT
+    list: (svid, cno, elevation, azimuth, used, unhealthy, gnssId), and the
+    next GSV_EVERY s of GSV are not even decoded (_uc_gsv_skip)."""
     g = _UC_GNSS.get(talker)
     if g is None:
         return
     u = _uc_sv
-    key = "%d,%s,%s" % (g, f[-1], f[2])
-    if key in u["keys"]:
+    first = g == 0 and f[2] == "1" and f[-1] == "1"
+    if first and u["open"]:
         if u["new"]:
             used = u["used"]
             st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8)
                          for k, v in u["new"].items()]
             st["svs_at"], st["sv_miss"] = time.ticks_ms(), 0
-        u["new"], u["keys"] = {}, []
-    u["keys"].append(key)
+        u["new"], u["open"] = {}, False
+        u["until"] = time.ticks_add(time.ticks_ms(), GSV_EVERY * 1000)
+        return
+    if first:
+        u["open"] = True
+    elif not u["open"]:
+        return                           # (the rest of a round begun before)
     for i in range(4, len(f) - 3, 4):
         n = _num(f[i], int)
         if n is None:
@@ -1531,11 +1547,31 @@ def _gps_mute(now):
         st["mute_at"] = None
         _diag_write("gps back after %d s" % (_age(rx, m) // 1000))
 
+_usb_in = None
+
+def _usb_drain():
+    """The ESP32-S3's USB Serial/JTAG: a byte sent while the board boots
+    (mpremote right after a flash) stays in its FIFO, MicroPython's start-up
+    clears the interrupt that would read it, and until something reads the
+    host's next bytes, its Ctrl-C too, wait: a logger no mpremote could stop
+    (measured; only the ROM's download mode cleared it). Polling stdin reads
+    it (mp_hal_stdio_poll)."""
+    global _usb_in
+    try:
+        if _usb_in is None:
+            _usb_in = select.poll()
+            _usb_in.register(sys.stdin, select.POLLIN)
+        _usb_in.poll(0)
+    except (OSError, ValueError, AttributeError):
+        pass
+
 def gps_check(now):
     """Send the setup again while the receiver still sends the sentences it
     turns off: a receiver powered up with the board is still booting when
     run() sends it, and stays at 1 Hz. Less and less often, so a receiver
     that never takes it (or an unwired ESP TX) costs next to nothing."""
+    if IS_HELTEC:
+        _usb_drain()
     if _age(now, st["loop_at"]) >= GPS_LOOP_WINDOW:
         _stamps_old(now)
         _gps_loop_check(now)
@@ -1985,6 +2021,9 @@ def handle(line, s=0, e=None):
     if star - s == 6 or star - s > 6 and v[s + 6] == 44:
         k = v[s + 3] << 16 | v[s + 4] << 8 | v[s + 5]
     name = _HKEY.get(k)
+    if GPS_UC and name == "GSV" and _uc_gsv_skip():
+        st["ok"] += 1
+        return
     if name is None and hi < 128:
         if GPS_UC:
             _uc_line(p)

@@ -18074,9 +18074,18 @@ _uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"),
          _nmea("GBGSV,1,1,01,25,75,249,38,1"),
          _nmea("GAGSV,1,1,01,13,42,203,,7"))
 _e1 = hl.st["extra"]
-_clock[0] += 200                         # no pause: spread over the epochs
+_clock[0] += 200                         # no pause: GSV at 1 Hz with a fix
 _uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # the next round closes this one
 _svs = {(v[6], v[0]): v for v in (hl.st["svs"] or [])}
+_uok = hl.st["ok"]
+_uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,99,1"))
+_clock[0] += hl.GSV_EVERY * 1000 + 1
+_skip = hl.st["ok"] == _uok + 1 and not hl._uc_sv["new"]
+_uc_feed(hl, _nmea("GAGSV,1,1,01,13,42,203,31,7"))      # the end of a round
+_mid = not hl._uc_sv["new"]
+_uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
+_uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
+_again = [v[1] for v in hl.st["svs"]] == [50]
 check("UC-GSV: one list from a round: a satellite once with its strongest band, "
       "used from GSA, NAV-SAT's shape and gnssIds; GSV is no sentence the "
       "setup turned off",
@@ -18085,8 +18094,10 @@ check("UC-GSV: one list from a round: a satellite once with its strongest band, 
       and _svs.get((0, 30)) == (30, 0, 36, 201, False, False, 0)
       and _svs.get((3, 25)) == (25, 38, 75, 249, True, False, 3)
       and _svs.get((2, 13)) == (13, 0, 42, 203, False, False, 2)
-      and hl.sv_used() == 3 and hl.sv_seen() == 3 and _e1 == 0
-      and hl.st["extra"] == 0, repr((hl.st["svs"], _e1, hl.st["extra"])))
+      and _e1 == 0 and hl.st["extra"] == 0, repr((_svs, _e1, hl.st["extra"])))
+check("UC-GSV-SKIP: GSV_EVERY s of GSV not decoded after a list (1 Hz with a "
+      "fix); then not from a round's middle, a whole round again",
+      _skip and _mid and _again, repr((_skip, _mid, _again, hl.st["svs"])))
 hl.uart.cmds[:] = []
 hl.sv_poll(_clock[0])
 check("UC-NO-UBX: the satellite poll writes nothing (no UBX to a UC6580)",
