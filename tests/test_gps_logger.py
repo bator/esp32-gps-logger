@@ -44,6 +44,25 @@ def _gunzip_w(data, wbits):
         return None
 
 
+def _load_web_min():
+    """tools/web_min.py (without one: None, its checks fail, the rest runs)."""
+    path = os.path.join(ROOT, "tools", "web_min.py")
+    if not os.path.exists(path):
+        return None
+    spec = importlib.util.spec_from_file_location("web_min", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+web_min = _load_web_min()
+
+
+def _page_min(raw):
+    """web.html's bytes as they go on the board, before the gzip."""
+    return web_min.minify(raw.decode("utf-8")).encode("utf-8") if web_min else raw
+
+
 class _FakeDeflate:
     """MicroPython 1.29's deflate module over zlib, for CPython: DeflateIO
     reads a gzip stream with a 2**wbits window, as uzlib does (a stream
@@ -7142,15 +7161,18 @@ lb_td = tempfile.mkdtemp(prefix="loopgz-")
 lb_gz = os.path.join(lb_td, "web.html.gz")
 with open(os.path.join(ROOT, "web.html"), "rb") as f:
     lb_page = f.read()
+lb_plain = os.path.join(lb_td, "web.min.html")
+with open(lb_plain, "wb") as f:
+    f.write(_page_min(lb_page))
 with open(lb_gz, "wb") as f:              # (as deploy.sh makes it)
-    f.write(_gz_small(lb_page, getattr(gl, "WEB_GZ_WBITS", 12)))
+    f.write(_gz_small(_page_min(lb_page), getattr(gl, "WEB_GZ_WBITS", 12)))
 for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
     if not interp:
         print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
         continue
     try:
         out = subprocess.check_output(
-            [interp, os.path.join(ROOT, "tests", "web_loopback.py"), lb_gz],
+            [interp, os.path.join(ROOT, "tests", "web_loopback.py"), lb_gz, lb_plain],
             stderr=subprocess.STDOUT, timeout=60)
         loop_out = out.decode()
     except subprocess.CalledProcessError as e:
@@ -7258,6 +7280,10 @@ def deploy_run(env_extra):
     work = tempfile.mkdtemp(dir=dp_td)
     for n in ("deploy.sh", "gps_logger.py", "main.py", "web.html"):
         shutil.copy(os.path.join(ROOT, n), work)
+    os.makedirs(os.path.join(work, "tools"))
+    if web_min:
+        shutil.copy(os.path.join(ROOT, "tools", "web_min.py"),
+                    os.path.join(work, "tools"))
     os.makedirs(os.path.join(work, ".venv", "bin"))
     for n, src in (("python", FAKE_PY), ("mpremote", FAKE_MPREMOTE),
                    ("shim.py", FAKE_SHIM)):
@@ -7329,7 +7355,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     with open(os.path.join(ROOT, "gps_logger.py"), "rb") as f:
         new_mpy = b"MPY" + f.read()
     with open(os.path.join(ROOT, "web.html"), "rb") as f:
-        new_page = f.read()
+        new_page = _page_min(f.read())
     rc, out, err, dev, calls = deploy_run({})
     cps = [c for call in calls for c in call if c[0] == "cp"]
     check("DEPLOY: copies to .dpl, checks, renames; old .dpl and stray .py go",
@@ -7342,9 +7368,9 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
     dp_w = getattr(gl, "WEB_GZ_WBITS", 12)
-    check("DEPLOY-GZIP: only web.html.gz goes up, made with the board's "
-          "small window (WEB_GZ_WBITS: it inflates it for curl), no mtime; "
-          "the old plain web.html is removed in the same swap",
+    check("DEPLOY-GZIP: only web.html.gz goes up, stripped (tools/web_min.py), "
+          "made with the board's small window (WEB_GZ_WBITS: it inflates it for "
+          "curl), no mtime; the old plain web.html is removed in the same swap",
           _gunzip_w(dev_file(dev, "web.html.gz") or b"", dp_w) == new_page
           and (dev_file(dev, "web.html.gz") or b"")[4:8] == b"\0\0\0\0"
           and ["cp", "web.html.gz", ":web.html.gz.dpl"] in cps
@@ -7564,6 +7590,9 @@ def build_run(args, env_extra, dirty=False):
     os.makedirs(os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "tools", "build_firmware.sh"),
                 os.path.join(work, "tools"))
+    if web_min:
+        shutil.copy(os.path.join(ROOT, "tools", "web_min.py"),
+                    os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft.py"), work)
@@ -7858,7 +7887,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     # inflates it for a client without gzip); an older firmware (after a
     # rollback: OTA_PAGES of both pages, as on master) accepts it too
     with open(os.path.join(work, "web.html"), "rb") as f:
-        pub_page = f.read()
+        pub_page = _page_min(f.read())
     pub_gz = dev_file(dest, "web-%s.html.gz" % man.get("commit")) or b""
     saved_pages = gl.OTA_PAGES
     gl.OTA_PAGES = ("/web.html", "/web.html.gz")
@@ -7867,7 +7896,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     finally:
         gl.OTA_PAGES = saved_pages
     check("BUILD-PUBLISH-GZ: the manifest names only /web.html.gz "
-          "(web-<commit>.html.gz, the board's WEB_GZ_WBITS window); no "
+          "(web-<commit>.html.gz, stripped, the board's WEB_GZ_WBITS window); no "
           "plain page published; an older firmware's check accepts it",
           rc == 0 and [f["path"] for f in man.get("files", [])]
           == ["/web.html.gz"]
@@ -14543,6 +14572,132 @@ else:
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                        "web.html")) as f:
     page_src = f.read()
+# WEB-MIN: tools/web_min.py strips the page at build time (a // in a string or
+# a regex is no comment: the page has both); web.html keeps its comments
+_wm_js = (
+    ('var u = "https://atlas.crusand.org/x"; // a url\n', 'var u = "https://atlas.crusand.org/x";'),
+    ("var u = 'a//b', v = \"/*no*/\", w = 'it\\'s // no';", "var u = 'a//b', v = \"/*no*/\", w = 'it\\'s // no';"),
+    ('x = s.replace(/\\/\\/.*$/, ""); // gone', 'x = s.replace(/\\/\\/.*$/, "");'),
+    ('if (/[/]\\/\\/"/.test(s)) y(); /* c */ z();', 'if (/[/]\\/\\/"/.test(s)) y(); z();'),
+    ("a = b / c; // d / e\n", "a = b / c;"),
+    ('if (x) /\\/\\/"/.test(y); // z', 'if (x) /\\/\\/"/.test(y);'),
+    ("while (x) /'/.test(y)", "while (x) /'/.test(y)"),
+    ("n = (a + b) / 2 / c; // x", "n = (a + b) / 2 / c;"),
+    ('i++ / 2 // "\n', "i++ / 2"),
+    ("return /'//* c */;", "return /'/ ;"),
+    ("a = [1] / 2; b = x / 3; c = 4 / 5 // q", "a = [1] / 2; b = x / 3; c = 4 / 5"),
+    ('f(/a/g, /b\\/c/i, !/d/.test(e), x ? /"/ : /\'/); // r', 'f(/a/g, /b\\/c/i, !/d/.test(e), x ? /"/ : /\'/);'),
+    ("function f() {\n    // c\n\n    return 1;   // d\n}\n", "function f() {\nreturn 1;\n}"),
+    ("var a = 1 /* x */ + 2;", "var a = 1 + 2;"),
+    ("a /* one\ntwo */ b", "a\nb"),
+    ('s = "a\\\n   b"; // c', 's = "a\\\n   b";'),
+    ("// it's\nx = 1;", "x = 1;"),
+    ("x  =  a   +   b  ;", "x = a + b ;"),
+    ("a = b\n\n\n  c = d", "a = b\nc = d"),
+)
+_wm_got = [(web_min.minify_js(a_), b_) for a_, b_ in _wm_js] if web_min else []
+check("WEB-MIN-JS: comments and indentation out; a // or /* in a string or a regex "
+      "stays, a division is no regex, the lines and the spaces around operators stay",
+      web_min and all(a_ == b_ for a_, b_ in _wm_got), repr([g_ for g_ in _wm_got if g_[0] != g_[1]]))
+_wm_cases = web_min and (
+    web_min.minify_css('a{content:"/* no */"} /* yes */\n   b{c:url(x/*y)}\n\n') == 'a{content:"/* no */"}\nb{c:url(x/*y)}',
+    web_min.minify_css("a/**/b{}") == "a b{}",
+    web_min.minify('<a href="https://x//y">t</a><!-- c -->\n   <b>  x</b>\n\n<style>\n/*c*/ a{b:c}\n</style>'
+                   '<script>\n// s\nf("//");\n</script>\n')
+    == '<a href="https://x//y">t</a>\n<b>  x</b>\n<style>\na{b:c}\n</style><script>\nf("//");\n</script>\n')
+check("WEB-MIN-CSS: comments out, a /* in a CSS string or a url() stays; markup: comments "
+      "and indentation out, a // in an attribute stays", _wm_cases and all(_wm_cases), repr(_wm_cases))
+_wm_bad = []
+if web_min:
+    for fn_, src_ in ((web_min.minify_js, '"cut\n"'), (web_min.minify_js, "a = /cut\n/"),
+                      (web_min.minify_js, "/* cut"), (web_min.minify_js, "a = `b`"),
+                      (web_min.minify_css, "a{b:'cut\n}"), (web_min.minify_css, "/* cut")):
+        try:
+            _wm_bad.append(fn_(src_))
+        except web_min.MinifyError:
+            pass
+_wm_td = tempfile.mkdtemp(prefix="webmin-")
+_wm_broken = os.path.join(_wm_td, "broken.html")
+with open(_wm_broken, "w") as f:
+    f.write('<script>\nvar a = "cut;\n</script>\n')
+_wm_tool = os.path.join(ROOT, "tools", "web_min.py")
+_wm_r = subprocess.run([sys.executable, _wm_tool, _wm_broken, os.path.join(_wm_td, "o.gz")],
+                       capture_output=True, text=True)
+check("WEB-MIN-FAIL: what it cannot read (a string, regex or comment cut short, a template "
+      "literal) stops the build, nothing written",
+      web_min and not _wm_bad and _wm_r.returncode == 1 and "cut short" in _wm_r.stderr
+      and not os.path.exists(os.path.join(_wm_td, "o.gz")), repr((_wm_bad, _wm_r.stderr[-200:])))
+_wm_page = web_min.minify(page_src) if web_min else page_src
+_wm_css = lambda t_: re.sub(r"\s+", " ", re.sub(r"/\*.*?\*/", " ", t_[t_.index("<style>"):t_.index("</style>")],
+                                                flags=re.S)).replace(" }", "}").strip()
+_wm_html = lambda t_: re.sub(r"\s+", " ", re.sub(r"<!--.*?-->", " ", t_[:t_.index("<style>")]
+                                                 + t_[t_.index("</style>"):t_.index("<script>")], flags=re.S))
+_wm_gz = os.path.join(_wm_td, "page.gz")
+_wm_r = subprocess.run([sys.executable, _wm_tool, os.path.join(ROOT, "web.html"), _wm_gz],
+                       capture_output=True, text=True)
+_wm_data = b""
+if os.path.exists(_wm_gz):
+    with open(_wm_gz, "rb") as f:
+        _wm_data = f.read()
+_wm_w = getattr(gl, "WEB_GZ_WBITS", 12)
+check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
+      "mtime, not over 29 KB (35.7 before); the CSS and the markup only lose comments and "
+      "white space; stripping again changes nothing; web.html itself keeps its comments",
+      web_min and _wm_r.returncode == 0
+      and _gunzip_w(_wm_data, _wm_w) == _wm_page.encode("utf-8") and _wm_data[4:8] == b"\0\0\0\0"
+      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 29000
+      and web_min.minify(_wm_page) == _wm_page and "<!--" not in _wm_page
+      and "/*" not in _wm_page[_wm_page.index("<style>"):_wm_page.index("</style>")]
+      and _wm_css(_wm_page) == _wm_css(page_src) and _wm_html(_wm_page) == _wm_html(page_src)
+      and "<!--" in page_src and "// " in page_src,
+      repr((_wm_r.returncode, _wm_r.stderr[-200:], len(_wm_data), len(_wm_page))))
+if node is not None:
+    _wm_min = os.path.join(_wm_td, "web.html")
+    with open(_wm_min, "w", encoding="utf-8") as f:
+        f.write(_wm_page)
+    _wm_here = os.path.join(ROOT, "tests", "web_page_test.js")
+
+    def _wm_view(path, js):
+        return subprocess.run([node, _wm_here, path], input=js, capture_output=True,
+                              text=True).stdout
+
+    _wm_same = []
+    for js_ in (page_json, page_json2, page_json3):
+        # (a minute turning over between the two runs changes a printed time)
+        for _ in range(3):
+            a_ = _wm_view(os.path.join(ROOT, "web.html"), js_)
+            if a_ and a_ == _wm_view(_wm_min, js_):
+                _wm_same.append(True)
+                break
+        else:
+            _wm_same.append(False)
+    check("WEB-MIN-RUN: tests/web_page_test.js on the stripped page prints what it prints "
+          "on web.html, all it runs (view, the DOM stub, the map, the track, the event "
+          "log) on three status answers", web_min and _wm_same == [True] * 3, repr(_wm_same))
+    # the same program: acorn (inside node) on both, the positions left out
+    _wm_ast = (
+        "const a = require('internal/deps/acorn/acorn/dist/acorn');"
+        "const fs = require('fs');"
+        "const js = (p) => { const h = fs.readFileSync(p, 'utf8');"
+        " return h.slice(h.indexOf('<script>') + 8, h.lastIndexOf('</script>')); };"
+        "const c = [];"
+        "const t = (s, o) => JSON.stringify(a.parse(s, Object.assign({ecmaVersion: 'latest'}, o)),"
+        " (k, v) => k === 'start' || k === 'end' ? undefined : typeof v === 'bigint' ? String(v) : v);"
+        "const x = t(js(process.argv[1])), y = t(js(process.argv[2]), {onComment: c});"
+        "console.log(JSON.stringify({same: x === y, comments: c.length, n: x.length}));")
+    _wm_r = subprocess.run([node, "--expose-internals", "-e", _wm_ast, os.path.join(ROOT, "web.html"), _wm_min],
+                           capture_output=True, text=True)
+    if "Cannot find module" in _wm_r.stderr or "bad option" in _wm_r.stderr:
+        print("SKIP  WEB-MIN-AST: this node has no acorn to reach")
+    else:
+        try:
+            _wm_j = json.loads(_wm_r.stdout)
+        except ValueError:
+            _wm_j = {"error": _wm_r.stderr[-300:]}
+        check("WEB-MIN-AST: the stripped script parses to the same program as the source "
+              "(every string and regex with its raw text), no comment left",
+              web_min and _wm_j.get("same") is True and _wm_j.get("comments") == 0, repr(_wm_j))
+shutil.rmtree(_wm_td, True)
 check("PAGE-STATIC-GONE: no Static test panel, code, CSS or browser "
       "storage on the page",
       not any(w_ in page_src for w_ in (

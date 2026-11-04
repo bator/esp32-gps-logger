@@ -257,22 +257,8 @@ case "$MODE" in
     mkdir -p "$OUT/ota"
     BINF=micropython-$COMMIT.bin
     cp "$OUT/micropython.bin" "$OUT/ota/$BINF"
-    # not gzip -9: its 32 KB window is what inflating it takes on the board,
-    # more than the heap has free; the firmware's own WEB_GZ_WBITS window
-    WBITS=$(sed -n 's/^WEB_GZ_WBITS = \([0-9][0-9]*\).*/\1/p' gps_logger.py)
-    case "$WBITS" in
-        9|1[0-5]) ;;
-        *) echo "No WEB_GZ_WBITS in gps_logger.py: '$WBITS'" >&2; exit 1 ;;
-    esac
-    python3 - "$WBITS" web.html "$OUT/ota/web-$COMMIT.html.gz" <<'EOF'
-import sys, zlib
-w, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-z = zlib.compressobj(9, zlib.DEFLATED, 16 + w)
-with open(src, "rb") as f:
-    gz = z.compress(f.read()) + z.flush()
-with open(dst, "wb") as f:
-    f.write(gz)
-EOF
+    # stripped and gzipped as deploy.sh does it, the firmware's own window
+    python3 tools/web_min.py web.html "$OUT/ota/web-$COMMIT.html.gz"
     python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" "$MBOARD" <<'EOF'
 import hashlib, hmac, json, os, sys
 d, key_file, build, commit, board = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]

@@ -126,26 +126,11 @@ case "$FROZEN" in
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
-# The status page goes up only gzipped (~26 KB; the plain web.html took
-# ~70 KB of flash): sent as is to browsers (Accept-Encoding: gzip), inflated
-# on the board for other clients (curl). Not gzip -9: its 32 KB window is
-# what inflating it takes, more than the Python heap has free; the
-# firmware's WEB_GZ_WBITS window (4 KB). No name or mtime in the header:
-# the same page gives the same bytes.
-WBITS=$(sed -n 's/^WEB_GZ_WBITS = \([0-9][0-9]*\).*/\1/p' gps_logger.py)
-case "$WBITS" in
-    9|1[0-5]) ;;
-    *) echo "No WEB_GZ_WBITS in gps_logger.py: '$WBITS'" >&2; exit 1 ;;
-esac
-python3 - "$WBITS" web.html web.html.gz <<'EOF2'
-import sys, zlib
-w, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-z = zlib.compressobj(9, zlib.DEFLATED, 16 + w)
-with open(src, "rb") as f:
-    gz = z.compress(f.read()) + z.flush()
-with open(dst, "wb") as f:
-    f.write(gz)
-EOF2
+# The status page goes up only gzipped: sent as is to browsers
+# (Accept-Encoding: gzip), inflated on the board for other clients (curl).
+# tools/web_min.py strips it and makes the gzip, with the firmware's
+# WEB_GZ_WBITS window (see there); web.html itself keeps its comments.
+python3 tools/web_min.py web.html web.html.gz
 
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block

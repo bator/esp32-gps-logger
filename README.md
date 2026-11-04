@@ -770,8 +770,9 @@ out, measured on the unix port). It costs ~11% (zlib level 9 on
 0.5 / 1 / 2 / 4 KB window). A board deployed before this still has the
 plain `/web.html` (its `.gz` may have the 32 KB window, too wide to
 inflate here): it goes to clients without gzip until the next deploy or
-OTA removes it. When you change the page by hand, gzip it the way
-`deploy.sh` does and copy only `/web.html.gz`; then it asks
+OTA removes it. When you change the page by hand, make the gzip the way
+`deploy.sh` does (`python3 tools/web_min.py web.html web.html.gz`) and copy
+only `/web.html.gz`; then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
 only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the

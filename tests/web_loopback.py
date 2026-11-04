@@ -3,9 +3,10 @@
 # are slow, send nothing, send too much, reset mid-reply or outlast the
 # request deadline. Single-threaded: a client's bytes wait in the kernel
 # until web_tick reads them.
-# Run: /path/to/micropython tests/web_loopback.py [web.html.gz]  (or python3)
+# Run: /path/to/micropython tests/web_loopback.py [web.html.gz [plain]]  (or python3)
 # With a gzip of web.html as the argument, a client that accepts gzip must
-# get that file (tests/test_gps_logger.py passes one).
+# get that file (tests/test_gps_logger.py passes one, stripped as
+# tools/web_min.py does it, and plain: the page in it, when not web.html).
 import sys
 import json
 import time
@@ -428,6 +429,10 @@ if gz_path:
 
     plain_page = gl.WEB_PAGE
     gl.WEB_PAGE = "/nonexistent-gps-logger-loopback/web.html"
+    if len(sys.argv) > 2:
+        f = open(sys.argv[2], "rb")
+        page = f.read()
+        f.close()
     gl.read_uart = sample
     s = client(req)
     gc.collect()
