@@ -19021,6 +19021,7 @@ check("TFT-FONT-BASE: BASE and HEIGHT say where the crop was: the blank rows bac
       repr((_fsha, [_ffonts[n][4:] for n in _fnames])))
 _fpair = dict(zip(_fnames, (_ft._HERO, _ft._NUM, _ft._TXT, _ft._LAB, _ft._WORD)))
 _frows = []
+_band0, _ft.BAND_H = _ft.BAND_H, 64      # (one tall band: the string is on it)
 for _n, _s, _want in _font_rows:
     # (the band as gps_tft has it: a string blitted at a row, read back)
     _fb = _FakeFramebuf.FrameBuffer(bytearray(160 * 64 * 2), 160, 64, _FakeFramebuf.RGB565)
@@ -19028,6 +19029,7 @@ for _n, _s, _want in _font_rows:
     _ft._text(_fb, _fpair[_n], _s, 2, 40, "txt")
     _ink = [y - 40 for y in range(64) if any(_fb.pixel(x, y) != _ft.BG for x in range(160))]
     _frows.append((_n, _s, (_ink[0], _ink[-1]) if _ink else None))
+_ft.BAND_H = _band0
 check("TFT-FONT-ROWS: a string stays on its rows against the baseline",
       _frows == list(_font_rows), repr(_frows))
 _fstates = (("47", True, 22, "11:42", None, 3, "1284", True),
