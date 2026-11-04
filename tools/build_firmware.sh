@@ -8,7 +8,9 @@
 # Needs ESP-IDF (v5.5.2 for MicroPython 1.29) and a MicroPython v1.29.0 tree:
 #   IDF_DIR=~/esp/esp-idf  MPY_DIR=~/esp/micropython  (defaults)
 # The board is boards/GPS_LOGGER_C6: ESP32_GENERIC_C6 with two OTA app slots
-# (partitions-8MiBplus-ota.csv, 16 MB flash). BOARD_DIR picks another.
+# (partitions-ota.csv, 16 MB flash). BOARD_DIR picks another, its chip and
+# flash size read from it: boards/GPS_LOGGER_S3 is the Heltec Wireless Tracker
+# (ESP32-S3, 8 MB).
 # Usage:
 #   tools/build_firmware.sh                    build only
 #   PORT=/dev/ttyACM0 tools/build_firmware.sh --flash
@@ -30,8 +32,8 @@
 # and runs as before) and any /gps_logger.py, clears the boot-fail counter
 # and puts main.py and the page up. Right after esptool's reset the raw
 # REPL may not come for a while: if deploy.sh cannot reach it, run it again.
-# --migrate moves a board to the OTA partition table, once: it needs 16 MB
-# of flash, backs up the first 4 MB (mode 600: it holds the old file
+# --migrate moves a board to the OTA partition table, once: it needs the
+# flash size of the board's sdkconfig.board, backs up the first 4 MB (mode 600: it holds the old file
 # system's start, /.env with its keys too), erases the whole flash (the file
 # system too: copy /.env and /hist off first) and writes bootloader,
 # partition table, otadata and the app. Then put the files back and run
@@ -44,7 +46,8 @@
 # OTA_DEST (host:/path) with scp, each file as <name>.tmp moved over the
 # live one with ssh (a board reading a half-copied file got a mix), the
 # manifest last: a board reading the old manifest meanwhile still finds
-# the files it names. A build not newer than the published manifest's is
+# the files it names. Each board has its own OTA_DEST and .env OTA_URL: a
+# manifest names its board and a board refuses another's. A build not newer than the published manifest's is
 # refused (FORCE=1 publishes it anyway). The manifest is signed with the
 # key in OTA_KEY_FILE (default ~/.config/gps-logger/ota.key, the board's
 # .env OTA_KEY: printable ASCII, e.g. openssl rand -hex 32); only a clean
@@ -62,7 +65,10 @@ IDF_DIR=${IDF_DIR:-$HOME/esp/esp-idf}
 MPY_DIR=${MPY_DIR:-$HOME/esp/micropython}
 BOARD_DIR=${BOARD_DIR:-$PWD/boards/GPS_LOGGER_C6}
 BOARD=$(basename "$BOARD_DIR")
+CHIP=${CHIP:-$(sed -n 's/^set(IDF_TARGET \(.*\))$/\1/p' "$BOARD_DIR/mpconfigboard.cmake" 2>/dev/null || true)}
 CHIP=${CHIP:-esp32c6}
+FLASH_MB=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\([0-9]*\)MB"$/\1/p' "$BOARD_DIR/sdkconfig.board" 2>/dev/null || true)
+FLASH_MB=${FLASH_MB:-16}
 PORT=${PORT:-/dev/ttyUSB0}
 APP_SIZE=0x1c0000                         # one OTA app slot (partitions-ota.csv)
 APP1=$(printf '0x%x' $((0x10000 + APP_SIZE)))  # the second slot's offset
@@ -163,8 +169,8 @@ case "$MODE" in
     # (not "| grep -q" under pipefail: grep stops at the match, esptool's
     # next write gets EPIPE and the pipe fails: a 16 MB board was refused)
     FID=$(esptool.py --chip "$CHIP" --port "$PORT" flash_id 2>/dev/null || true)
-    if ! grep -q "flash size: 16MB" <<< "$FID"; then
-        echo "--migrate needs a board with 16 MB of flash: not touching it" >&2
+    if ! grep -q "flash size: ${FLASH_MB}MB" <<< "$FID"; then
+        echo "--migrate needs a board with $FLASH_MB MB of flash: not touching it" >&2
         exit 1
     fi
     BACKUP=$OUT/full-backup-$(date +%Y%m%d-%H%M%S).bin
@@ -212,7 +218,16 @@ case "$MODE" in
         exit 1
     fi
     LIVE_BUILD=0
+    # the manifest's "board": the C6's has none (boards in the field read it
+    # as ever), any other board's is signed and refused by a different board
+    MBOARD=$BOARD
+    [ "$BOARD" = GPS_LOGGER_C6 ] && MBOARD=
     if [ -n "$LIVE" ]; then
+        LIVE_BOARD=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read()).get("board") or "")' <<< "$LIVE" 2>/dev/null || true)
+        if [ "$LIVE_BOARD" != "$MBOARD" ]; then
+            echo "$OTA_DEST holds the firmware of another board (${LIVE_BOARD:-GPS_LOGGER_C6}): each board has its own folder" >&2
+            exit 1
+        fi
         LIVE_BUILD=$(python3 -c 'import json, sys; print(int(json.loads(sys.stdin.read())["build"]))' <<< "$LIVE" 2>/dev/null || echo x)
     fi
     if [ "$LIVE_BUILD" = x ]; then
@@ -243,9 +258,9 @@ with open(src, "rb") as f:
 with open(dst, "wb") as f:
     f.write(gz)
 EOF
-    python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" <<'EOF'
+    python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" "$MBOARD" <<'EOF'
 import hashlib, hmac, json, os, sys
-d, key_file, build, commit = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+d, key_file, build, commit, board = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 key = open(key_file, "rb").read().strip()
 def meta(name):
     b = open(os.path.join(d, name), "rb").read()
@@ -262,6 +277,9 @@ for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),):
 t = "%d|%s|%d|%s|%s" % (m["build"], m["commit"], m["size"], m["sha256"], m["url"])
 for f in m["files"]:
     t += "|%s|%d|%s|%s" % (f["path"], f["size"], f["sha256"], f["url"])
+if board:
+    m["board"] = board
+    t += "|board=" + board
 m["hmac"] = hmac.new(key, t.encode(), hashlib.sha256).hexdigest()
 with open(os.path.join(d, "manifest.json"), "w") as f:
     json.dump(m, f)

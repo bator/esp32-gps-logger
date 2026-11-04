@@ -4,7 +4,8 @@
 # It must run precompiled: compiling on the device grows the Python heap,
 # which leaves too little IDF heap for TLS uploads. main.py imports
 # gps_logger at boot (hold the boot-bypass pin during reset to skip it:
-# GPIO10 on the ESP32-C6, GPIO25 on the ESP32; main.py's SKIP_PIN).
+# GPIO10 on the ESP32-C6, GPIO7 on the Heltec, GPIO25 on the ESP32; main.py's
+# SKIP_PIN).
 # On a firmware with the logger frozen in (tools/build_firmware.sh) only
 # main.py and the page go up, and only if the frozen logger is this
 # gps_logger.py (same SHA-256; FORCE=1 deploys them anyway). FORCE_MPY=1

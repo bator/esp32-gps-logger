@@ -147,6 +147,8 @@ class Pin(object):
             raise ValueError("invalid pin")
         self.n = n
         self._v = 0
+        if "value" in k:
+            _pin_levels.append((n, k["value"], _clock[0]))
 
     def value(self, v=None):
         if v is None:
@@ -7616,6 +7618,27 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and named[:1] == ["micropython-%s.bin" % man.get("commit")]
           and all(os.path.exists(os.path.join(dest, n)) for n in named),
           repr((rc_dirty, rc_nokey, rc_badkey, rc, man, scp, err[-200:])))
+    # BUILD-PUBLISH-BOARD: a board other than the C6 names itself in the
+    # manifest (signed); a folder holding another board's manifest is refused
+    s3 = os.path.join(ROOT, "boards", "GPS_LOGGER_S3")
+    dest3 = tempfile.mkdtemp(dir=dp_td)
+    penv3 = {"OTA_KEY_FILE": key_file, "OTA_DEST": "fakehost:" + dest3,
+             "BOARD_DIR": s3}
+    rc3, _o, err3, _w, _c = build_run(["--publish"], penv3)
+    try:
+        with open(os.path.join(dest3, "manifest.json")) as f:
+            man3 = json.load(f)
+    except (OSError, ValueError):
+        man3 = {}
+    hmac3 = gl._hmac_hex(b"0123456789abcdef0123456789abcdef", gl._ota_signed(man3)) if man3 else None
+    rc_c6on3 = build_run(["--publish"], {"OTA_KEY_FILE": key_file, "OTA_DEST": "fakehost:" + dest3})[0]
+    rc_s3onc6, _o, err_c6, _w, _c = build_run(["--publish"], dict(penv3, OTA_DEST="fakehost:" + dest, FORCE="1"))
+    check("BUILD-PUBLISH-BOARD: the Heltec's manifest names its board, signed; a "
+          "board's folder takes no other board's firmware, FORCE=1 or not",
+          rc3 == 0 and man3.get("board") == "GPS_LOGGER_S3"
+          and man3.get("hmac") == hmac3 and "board" not in man
+          and rc_c6on3 != 0 and rc_s3onc6 != 0 and "another board" in err_c6,
+          repr((rc3, err3[-200:], man3, rc_c6on3, rc_s3onc6, err_c6[-200:])))
     # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
     # names /web.html.gz alone, made with the board's small window (it
     # inflates it for a client without gzip); an older firmware (after a
@@ -13907,6 +13930,7 @@ else:
         ("gps reset loop 4 banners, no NMEA", "gloop"),
         ("gps u-blox M10, ROM SPG 5.10 (7b202e), PROTVER=34.10", "grx"),
         ("gps rate 100 ms refused", "setup"),
+        ("gps refused CFGMSG,0,7,5", "setup"),
         ("gps pvt no NAV-PVT, NMEA this boot", "pvt"),
         ("gps setup not taken: no NAV-PVT (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -17848,6 +17872,237 @@ finally:
     shutil.rmtree(_tb, ignore_errors=True)
     gl.log_reset()
     gl.up_reset()
+
+
+# --- The Heltec Wireless Tracker (UC6580) -----------------------------------
+# The sentences here are the board's, measured 2026-11-04 (receiver UC6580I
+# R6.0.0.0Build3700, indoors: no signal, so the fix sentences are made up).
+def _heltec_logger(machine="Heltec Wireless Tracker with ESP32S3"):
+    saved = getattr(sys.implementation, "_machine", None)
+    sys.implementation._machine = machine
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "gps_logger_heltec", os.path.join(ROOT, "gps_logger.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+    finally:
+        if saved is None:
+            del sys.implementation._machine
+        else:
+            sys.implementation._machine = saved
+    m.DIAG_FILE = os.path.join(diag_dir, "diag-h.log")
+    m.DIAG_OLD = os.path.join(diag_dir, "diag-h.1")
+    m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf-h")
+    m.HIST_DIR = os.path.join(diag_dir, "hist-h")
+    m.HOME_APS_FILE = None
+    m.WEB = False
+    return m
+
+
+class _UcUart(UART):
+    """A UC6580: answers each command ($FAIL for those in bad, nothing while
+    silent), PDTINFO with what the board's receiver says."""
+    PDT = b"$PDTINFO,UC6580I,G1B1L1E1,V00,R6.0.0.0Build3700,2400615000268,20230729000954003*64\r\n"
+
+    def __init__(self, bad=(), silent=False):
+        self.bad, self.silent, self.cmds = bad, silent, []
+
+    def write(self, data):
+        data = bytes(data)
+        self.cmds.append(data)
+        if self.silent:
+            return len(data)
+        body = data[1:].split(b"*")[0].strip().decode()
+        if body == "PDTINFO":
+            _uart_rx.extend(self.PDT)
+        if any(body.startswith(b) for b in self.bad):
+            _uart_rx.extend(b"$FAIL,0*1E\r\n")
+        else:
+            _uart_rx.extend(b"$OK*04\r\n")
+        return len(data)
+
+
+def _uc_feed(m, *lines):
+    for ln in lines:
+        _uart_rx.extend(ln if isinstance(ln, bytes) else ln.encode())
+        _uart_rx.extend(b"\r\n")
+    m.read_uart()
+
+
+def _nmea(body):
+    c = 0
+    for ch in body:
+        c ^= ord(ch)
+    return "$%s*%02X" % (body, c)
+
+
+_pin_levels[:] = []
+_uart_rx[:] = b""
+hl = _heltec_logger()
+check("HELTEC-BOARD: UART1 on 34/33 at 115200, Vext (GPIO3) high and the TFT "
+      "backlight (GPIO21) off, before any UART use; no other board changes",
+      hl.IS_HELTEC and hl.GPS_UC and not hl.IS_C6
+      and (hl.GPS_UART, hl.GPS_TX, hl.GPS_RX, hl.BAUD) == (1, 34, 33, 115200)
+      and [p[:2] for p in _pin_levels if p[0] in (3, 21)] == [(3, 1), (21, 0)]
+      and not gl.GPS_UC and gl.BAUD == 9600,
+      repr((hl.GPS_TX, hl.GPS_RX, hl.BAUD, _pin_levels[:4])))
+check("HELTEC-PINS: only the receiver's and free pins for the GPS UART; a "
+      "keep-alive pin not on the Vext, USB, LoRa or strapping pins",
+      all(hl._gps_pin_ok(n, True) for n in (33, 34, 4, 48))
+      and not any(hl._gps_pin_ok(n, True) for n in (0, 3, 8, 19, 20, 21, 26, 35, 38, 45))
+      and hl.PB_PIN in hl._HELTEC_FREE and not hl._pin_taken(5)
+      and all(hl._pin_taken(n) for n in (0, 3, 7, 18, 19, 21, 33, 34, 45)))
+with open(os.path.join(ROOT, "main.py")) as f:
+    _msrc = f.read()
+check("HELTEC-SKIP: main.py's boot-bypass pin is GPIO7, free and not the "
+      "download-mode button", "7 if \"Heltec\" in _M" in _msrc
+      and 7 not in hl._HELTEC_FREE)
+
+# the setup
+hl.reset()
+hl.uart = _UcUart()
+_uart_rx[:] = b""
+_ha_setup = hl.uart
+hl.gps_setup()
+_cmds = list(_ha_setup.cmds)
+check("UC-SETUP: PDTINFO (no checksum: with one it gets no answer), then CFGNAV "
+      "first (it resets the GSV rate), each with its checksum, no UBX byte; "
+      "GST once a second, GSA and GSV at their pace, text notices off",
+      _cmds[0] == b"$PDTINFO\r\n"
+      and _cmds[1].startswith(b"$CFGNAV,200,200,1000*")
+      and b"$CFGMSG,0,0,1*06\r\n" in _cmds
+      and any(c.startswith(b"$CFGMSG,0,7,5*") for c in _cmds)
+      and any(c.startswith(b"$CFGMSG,0,2,25*") for c in _cmds)
+      and any(c.startswith(b"$CFGMSG,0,3,25*") for c in _cmds)
+      and any(c.startswith(b"$CFGMSG,6,0,0*") for c in _cmds)
+      and not any(b"\xb5" in c for c in _cmds), repr(_cmds))
+check("UC-SETUP: all answered: taken for now, NMEA mode, the receiver's model "
+      "from PDTINFO",
+      hl.st["setup_ok"] is True and hl.st["mode"] == "nmea"
+      and hl.st["checked"] is False
+      and hl.st["gps_ver"] == "UC6580I G1B1L1E1, R6.0.0.0Build3700",
+      repr((hl.st["setup_ok"], hl.st["gps_ver"])))
+_ha_setup.cmds[:] = []
+hl.gps_setup()
+check("UC-SETUP: the model is asked once", not any(
+    c.startswith(b"$PDTINFO") for c in _ha_setup.cmds))
+
+hl.reset()
+hl.uart = _UcUart(silent=True)
+_t0 = _clock[0]
+hl.gps_setup()
+check("UC-SILENT: no answer ends the setup at the first silent command after "
+      "PDTINFO (the loop is not held up), and gps_check retries",
+      hl.st["setup_ok"] is False and hl.st["checked"] is True
+      and len(hl.uart.cmds) == 2 and _clock[0] - _t0 <= 3 * hl.UC_ACK_WAIT,
+      repr((hl.st["setup_ok"], hl.uart.cmds, _clock[0] - _t0)))
+
+hl.reset()
+_hdl, _hdw = [], hl._diag_write
+hl._diag_write = _hdl.append
+hl.uart = _UcUart(bad=("CFGNAV",))
+hl.gps_setup()
+hl._diag_write = _hdw
+_hd = "\n".join(_hdl)
+check("UC-FAIL: a refused rate is said and is no \"not taken\" verdict; the "
+      "rest of the setup goes on",
+      hl.st["setup_ok"] is True and hl.st["rate_nak"] is True
+      and "gps refused CFGNAV,200,200,1000" in _hd
+      and any(c.startswith(b"$CFGMSG,0,7,5") for c in hl.uart.cmds), _hd[-200:])
+
+# a restart: the banner the board prints after a power cycle
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_b0, _e0 = hl.st["gps_boots"], hl.st["err"]
+_uc_feed(hl, "", "UC6580I G1B1L1E1 COM1", "PN 2400615000268",
+         "SN 20230729000954003", "HWVer 00", "FWVer R6.0.0.0Build3700",
+         "Copyright (c), Unicore Communications Inc.", "All rights reserved.")
+check("UC-RESTART: the plain text banner is one restart, not 7 bad lines; the "
+      "setup is due again and asks the model anew, no UBX",
+      hl.st["gps_boots"] == _b0 + 1 and hl.st["err"] == _e0
+      and hl.st["extra"] >= 1 and hl.st["gps_ver"] is None
+      and not any(b"\xb5" in c for c in hl.uart.cmds),
+      repr((hl.st["gps_boots"], hl.st["err"], hl.st["extra"])))
+
+# 5 Hz with a fix: the verdict the u-blox setup gets
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_ok0 = hl.st["ok"]
+for _s in range(5):
+    for _f in range(5):
+        _t = "1200%02d.%02d" % (_s, _f * 20)
+        _uc_feed(hl,
+                 _nmea("GNRMC,%s,A,4711.1214,N,01825.6160,E,0.05,,041126,,,A,V" % _t),
+                 _nmea("GNGGA,%s,4711.1214,N,01825.6160,E,1,14,0.80,120.5,M,40.0,M,," % _t))
+        if _f == 0:
+            _uc_feed(hl, _nmea("GNGST,%s,0.8,,,,1.4,1.6,2.5" % _t))
+        _clock[0] += 200
+_clock[0] += hl.GPS_VERIFY
+hl._setup_check(_clock[0])
+check("UC-5HZ: GGA, RMC and GST at 5 Hz pass the setup's check (5 fixes a "
+      "second, GST seen), nothing counted as not taken",
+      hl.st["checked"] is True and hl.st["extra"] == 0 and hl.st["hz5"] > 0
+      and hl.st["err"] == 0 and hl.st["std"] is not None and hl.st["ok"] > _ok0,
+      repr((hl.st["checked"], hl.st["extra"], hl.st["hz1"], hl.st["hz5"], hl.st["err"])))
+
+# no fix yet: its RMC carries a date that is not today
+hl.reset()
+hl.uart = _UcUart()
+_uc_feed(hl, _nmea("GNRMC,090328.00,V,,,,,,,170126,,,N,V"),
+         _nmea("GNGGA,090328.00,,,,,0,00,99.99,,,,,,"),
+         _nmea("GNGST,090328.00,0.0,,,,3750000,3750000,3750000"))
+_clock[0] += 1100
+_uc_feed(hl, _nmea("GNRMC,090329.00,V,,,,,,,170126,,,N,V"),
+         _nmea("GNGGA,090329.00,,,,,0,00,99.99,,,,,,"))
+_clock[0] += 1100
+_uc_feed(hl, _nmea("GNRMC,090330.00,V,,,,,,,170126,,,N,V"))
+check("UC-NOFIX: the receiver's made-up date before a fix (17 Jan 2026, no "
+      "position) is not a date or a fix", hl.st["pos_at"] is None
+      and hl.st["date"] is None and hl.st["err"] == 0,
+      repr((hl.st["pos_at"], hl.st["date"], hl.st["err"])))
+
+# the satellite list from GSV: two bands of one satellite, then GSA's used ones
+hl.reset()
+hl.uart = _UcUart()
+hl.gps_setup()
+_uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"),
+         _nmea("GNGSA,A,3,25,,,,,,,,,,,,1.2,0.8,0.9,4"),
+         _nmea("GPGSV,1,1,03,14,77,011,40,17,56,319,35,30,36,201,,1"),
+         _nmea("GPGSV,1,1,03,14,77,011,44,17,56,319,,30,36,201,,8"),
+         _nmea("GBGSV,1,1,01,25,75,249,38,1"),
+         _nmea("GAGSV,1,1,01,13,42,203,,7"))
+_e1 = hl.st["extra"]
+_clock[0] += 5000
+_uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # the next round closes this one
+_svs = {(v[6], v[0]): v for v in (hl.st["svs"] or [])}
+check("UC-GSV: one list from a round: a satellite once with its strongest band, "
+      "used from GSA, NAV-SAT's shape and gnssIds; GSV is no sentence the "
+      "setup turned off",
+      _svs.get((0, 14)) == (14, 44, 77, 11, True, False, 0)
+      and _svs.get((0, 17)) == (17, 35, 56, 319, True, False, 0)
+      and _svs.get((0, 30)) == (30, 0, 36, 201, False, False, 0)
+      and _svs.get((3, 25)) == (25, 38, 75, 249, True, False, 3)
+      and _svs.get((2, 13)) == (13, 0, 42, 203, False, False, 2)
+      and hl.sv_used() == 3 and hl.sv_seen() == 3 and _e1 == 0
+      and hl.st["extra"] == 0, repr((hl.st["svs"], _e1, hl.st["extra"])))
+hl.uart.cmds[:] = []
+hl.sv_poll(_clock[0])
+check("UC-NO-UBX: the satellite poll writes nothing (no UBX to a UC6580)",
+      hl.uart.cmds == [] and hl.st["sv_miss"] == 0, repr(hl.uart.cmds))
+
+# OTA: each board only its own firmware
+_mf = {"build": 5, "commit": "abc1234", "size": 9, "sha256": "0" * 64,
+       "url": "x.bin", "files": []}
+_mfs = dict(_mf, board="GPS_LOGGER_S3")
+check("OTA-BOARD: the Heltec takes only a manifest naming it, the C6 only one "
+      "without a board (as published so far), and the name is signed",
+      hl._ota_manifest_ok(_mfs) and not hl._ota_manifest_ok(_mf)
+      and gl._ota_manifest_ok(_mf) and not gl._ota_manifest_ok(_mfs)
+      and hl._ota_signed(_mfs) == gl._ota_signed(_mf) + b"|board=GPS_LOGGER_S3"
+      and gl._ota_signed(_mf) == hl._ota_signed(_mf))
+_uart_rx[:] = b""
 
 print()
 print("%d passed, %d failed" % (passed, failed))
