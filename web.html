@@ -314,7 +314,7 @@ var TILES = "https://atlas.crusand.org/tiles/geoapify/";
 // again only after ADDR_M metres and ADDR_S seconds
 var ADDR = "https://atlas.crusand.org/api/v1/photon/reverse";
 var ADDR_M = 25, ADDR_S = 20;
-var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
+var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA sentence: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
 
 function esc(v) {
@@ -716,7 +716,7 @@ function evTele(a, cols) {
     "</div></div></div>";
 }
 function bytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }
-// The GPS link: seconds since the last whole NMEA/UBX frame (good_age_s,
+// The GPS link: seconds since the last whole NMEA sentence (good_age_s,
 // null: none since boot), the bytes a second between two polls (rx_bytes over
 // the uptime between them). -> {tone, rate, silent: s silent or 0, junk: bytes
 // arrive but no whole frame (wiring, baud)}, or null (a firmware without it)

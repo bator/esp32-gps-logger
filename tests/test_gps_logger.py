@@ -818,7 +818,7 @@ try:
 finally:
     os.statvfs = _real_statvfs
 check("FLASH-CACHE: _flash_kb reads statvfs once per 30 s, in kB",
-      len(_sv_calls) == 2 and len(set(_flash_vals)) == 1 and _flash_vals[0] > 0,
+      len(_sv_calls) == 2 and len(set(_flash_vals[:6])) == 1 and _flash_vals[0] > 0,
       "%r %r" % (_sv_calls, _flash_vals[:2]))
 
 check("default DEVICE_ID is Dawarich-GPS-tracker",

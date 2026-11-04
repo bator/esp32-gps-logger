@@ -25,8 +25,8 @@ GPS_MAX_STD = 20                         # m: receiver's own error estimate
 GPS_RETRY = 5000                         # ms: setup sent again if 1 Hz
 GPS_RETRY_MAX = 300000                   # sentences still come this long after
 GPS_IGNORED_MAX = 60000                  # ms cap between setups a receiver
-                                         # acknowledges but does not take
-GPS_VERIFY = 10000                       # ms after an acknowledged setup:
+                                         # answers but does not take
+GPS_VERIFY = 10000                       # ms after an answered setup:
                                          # still one fix a second, or no GST
                                          # = not taken, set up again
 GPS_VERIFY_MAX = 1800000                 # ms it waits for 3 valid seconds to
@@ -1039,7 +1039,7 @@ def gps_check(now):
             or (not st["extra"] and st["setup_ok"] is True)
             or _age(now, at) < st["setup_wait"]):
         if st["setup_ok"] is True and st["extra"]:
-            st["ack_n"] += 1             # acknowledged, but not taken
+            st["ack_n"] += 1             # answered, but not taken
         st["setup_wait"] = min(st["setup_wait"] * 2, GPS_RETRY_MAX)
         print("gps setup again")
         gps_setup()
@@ -1054,7 +1054,7 @@ _freq_bad = []                           # clocks this board refused
 _freq_bad_at = [None]                    # ticks of the last refusal
 
 def _set_freq(mhz):
-    """CPU clock: 80 MHz saves ~15-25 mA on the ESP32 against 240 (the UART
+    """CPU clock: 80 MHz saves current against 240 (the UART
     runs off the fixed APB clock, WiFi needs 80 or more). A failed change
     is tried again (FREQ_TRIES in all): one passing error blacklisted the
     clock for good, and a failed drop-back after a POST left the board at
@@ -8067,7 +8067,7 @@ def web_tick():
             pass
         gc.collect()
 
-# --- Screen -----------------------------------------------------------------
+# --- GPS state in words ------------------------------------------------------
 
 def status():
     if st["rx"] is None or _age(time.ticks_ms(), st["rx"]) > NO_DATA:
