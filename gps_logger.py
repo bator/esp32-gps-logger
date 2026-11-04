@@ -8504,13 +8504,15 @@ def _web_open():
         s.setblocking(False)
         _web_sock = s
         print("web http://%s/" % wifi.get("ip"))
-    except OSError as e:
-        print("web", repr(e))
-        if s is not None:
+    except (OSError, MemoryError) as e:  # (no half-open socket left behind)
+        if s is not None and _web_sock is not s:
             try:
                 s.close()
             except OSError:
                 pass
+        if isinstance(e, MemoryError):
+            raise                        # _guarded: a pause, not 40 tries a s
+        print("web", repr(e))
 
 def _web_close():
     global _web_sock
@@ -9553,7 +9555,7 @@ _tick_bug = {}                           # its name -> ticks of the bug
 GUARD_MEM_MAX = 10                       # guarded MemoryErrors in a row:
 _guard_mem = [0]                         # a memory reboot (_mem_reboot)
 
-def _guarded(name, fn, arg=None):
+def _guarded(name, fn, arg=None, side=False):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
     (once a kind), the tick skipped for TICK_PAUSE (no retry every 20 ms;
     after a MemoryError a gc.collect) and the loop, the logging, goes on.
@@ -9562,7 +9564,13 @@ def _guarded(name, fn, arg=None):
     BOOT_FAIL_MAX boots, logging nothing. Not guarded: log_tick and the
     GPS reads (the logging itself: a reset is their recovery), and nothing
     while an OTA image is pending (its crash rolls it back). Nothing is
-    fed here: a tick that hangs still fires the WDT."""
+    fed here: a tick that hangs still fires the WDT.
+    side: the page and the status lines, which only need a little RAM at a
+    bad moment. Their MemoryError is no crash of a pending image either (it
+    wrote /ota.mark and blamed a good build; a real bug in them still rolls
+    it back, and a memory reboot waits, as it would abort the image), and
+    their running through says nothing about a lasting one (one idle page
+    tick allocates nothing, and no reboot would ever have come)."""
     at = _tick_bug.get(name)
     if at is not None:
         if _age(time.ticks_ms(), at) < TICK_PAUSE:
@@ -9574,9 +9582,11 @@ def _guarded(name, fn, arg=None):
             fn()
         else:
             fn(arg)
-        _guard_mem[0] = 0
+        if not side:
+            _guard_mem[0] = 0
     except Exception as e:
-        if pend is not None or ota["pend"] is not None:
+        pending_ota = pend is not None or ota["pend"] is not None
+        if pending_ota and not (side and isinstance(e, MemoryError)):
             raise
         now = time.ticks_ms()
         if isinstance(e, MemoryError):
@@ -9584,16 +9594,20 @@ def _guarded(name, fn, arg=None):
             # the crash reset was a lasting MemoryError's recovery (the
             # heap fragmented for good): GUARD_MEM_MAX in a row reboot
             _guard_mem[0] += 1
-            if _guard_mem[0] >= GUARD_MEM_MAX and not _mem_reboot_soon():
+            if (_guard_mem[0] >= GUARD_MEM_MAX and not pending_ota
+                    and not _mem_reboot_soon()):
                 _guard_mem[0] = 0
                 _mem_reboot("guarded memory " + name)
         if name == "upload":
             # (after the POST, before the commit: the same batch went up
             # again every TICK_PAUSE for ever)
             _schedule(now)
-        _tick_bug[name] = now
-        print("bug", name, repr(e))
-        _bug_once("bug %s %s" % (name, repr(e)[:60]))
+        try:                             # (the telling allocates: it must not
+            _tick_bug[name] = now        # turn a MemoryError into a crash)
+            print("bug", name, repr(e))
+            _bug_once("bug %s %s" % (name, repr(e)[:60]))
+        except MemoryError:
+            pass
 
 def _loop():
     global _wdt
@@ -9613,7 +9627,7 @@ def _loop():
         keepalive_tick(time.ticks_ms())
         feed()
         _guarded("upload", upload_tick)
-        web_tick()
+        _guarded("web", web_tick, None, True)
         _guarded("ota", ota_tick, time.ticks_ms())
         now = time.ticks_ms()
         tft_tick(now)
@@ -9624,9 +9638,9 @@ def _loop():
             draw()
             last = now
         if time.ticks_diff(now, status_at) >= STATUS:
-            _status()
+            _guarded("status", _status, None, True)
             status_at = now
         if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
-            _diag(now)
+            _guarded("diag", _diag, now, True)
             diag_at = now
         time.sleep_ms(20)

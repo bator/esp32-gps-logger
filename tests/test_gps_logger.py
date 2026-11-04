@@ -6195,7 +6195,7 @@ try:
           aways == [True, False, True, False], repr(aways))
     import inspect
     check("WEB: _loop serves the page; wifi_stop closes it",
-          "web_tick()" in inspect.getsource(gl._loop)
+          "web_tick" in inspect.getsource(gl._loop)
           and "_web_close()" in inspect.getsource(gl.wifi_stop))
 
     # WEB-DEADLINE: one wall-clock limit per request (a client that sends
@@ -8224,7 +8224,7 @@ try:
                   for src in resets.values()), repr((pf, tf)))
     loop_src = inspect.getsource(gl._loop)
     check("DIAG: _loop writes a line every DIAG ms",
-          "_diag(now)" in loop_src and "DIAG" in loop_src)
+          "_diag, now" in loop_src and "DIAG" in loop_src)
 finally:
     gl.DIAG, gl.DIAG_MAX = saved_diag
 
@@ -18914,6 +18914,160 @@ for _h, _a in ((True, False), (False, False), (False, True)):
 check("RB-WEB-NET: connected, home or not, WEB_AWAY or not, the page answers; "
       "with the radio asleep the socket is closed",
       _rb_rows == [(b"HTTP/1.0 404", True, True)] * 3, repr(_rb_rows))
+
+# RB-OOM: one MemoryError in the page's accept()/socket setup or a status
+# line went through run()'s crash branch: a reset, a boot-fail and, an OTA
+# pending, /ota.mark "crash" blaming a good build
+
+
+def _rb_loop(n=5):
+    """n passes of _loop; "ran" or what left it (run()'s crash branch)."""
+    k = [0]
+    def _sl(ms):
+        _clock[0] += ms
+        k[0] += 1
+        if k[0] >= n:
+            raise KeyboardInterrupt
+    saved = (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
+             gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick, gl.draw,
+             gl._boot_ok, gl.read_uart)
+    gl.time.sleep_ms = _sl
+    gl.wifi_tick = gl.upload_tick = gl.log_tick = gl.draw = lambda: None
+    gl._boot_ok = gl.read_uart = lambda: None
+    gl.ota_tick = gl.gps_check = gl.keepalive_tick = gl.tft_tick = lambda now: None
+    gl._wdt = None
+    try:
+        gl._loop()
+        return "returned"
+    except KeyboardInterrupt:
+        return "ran"
+    except Exception as e:
+        return repr(e)
+    finally:
+        (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
+         gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick, gl.draw,
+         gl._boot_ok, gl.read_uart) = saved
+
+
+def _rb_oom(*a):
+    raise MemoryError("memory allocation failed")
+
+
+_rb_marks = []
+_rb_saved = (gl._ota_mark, gl.sv_seen, gl._temp, gl.DIAG, gl.STATUS)
+gl._ota_mark = _rb_marks.append
+_rb_res = {}
+try:
+    for _p in (None, 200):
+        gl.DIAG = 0
+        _rb_web()
+        gl.web_tick()                    # (the listener, for accept)
+        gl.ota["pend"] = _p
+        _RbListen.oom = "accept"
+        _rb_res["accept", _p] = _rb_loop()
+        for _at in ("socket", "bind", "listen"):
+            _rb_web()
+            gl.ota["pend"] = _p
+            _RbListen.oom = _at
+            _rb_res[_at, _p] = (_rb_loop(), gl._web_sock is None,
+                                all(s.closed for s in _RbListen.made))
+        _rb_web()
+        gl.WEB = False
+        gl.ota["pend"] = _p
+        gl.DIAG = 1
+        gl.sv_seen = _rb_oom
+        _rb_res["diag", _p] = _rb_loop()
+        gl.sv_seen = _rb_saved[1]
+        gl.DIAG = 0
+        gl.STATUS = 1
+        gl._tick_bug.clear()
+        gl._temp = _rb_oom
+        _rb_res["status", _p] = _rb_loop()
+        gl._temp = _rb_saved[2]
+        gl.STATUS = _rb_saved[4]
+finally:
+    gl.ota["pend"] = None
+    _RbListen.oom = None
+    gl._ota_mark, gl.sv_seen, gl._temp, gl.DIAG, gl.STATUS = _rb_saved
+_rb_want = {}
+for _p in (None, 200):
+    _rb_want["accept", _p] = _rb_want["diag", _p] = _rb_want["status", _p] = "ran"
+    for _at in ("socket", "bind", "listen"):
+        _rb_want[_at, _p] = ("ran", True, True)
+check("RB-OOM: a MemoryError in accept(), _web_open (its socket closed), _diag or "
+      "_status stays in the loop, also with an OTA pending: no crash branch, no "
+      "/ota.mark", _rb_res == _rb_want and not _rb_marks, repr((_rb_res, _rb_marks)))
+
+# RB-OOM-RULES: _guarded's other rules, as they were: a pending image's real
+# bug still rolls it back; the page sits out TICK_PAUSE; memory reboots count
+_rb_web()
+gl.ota["pend"] = 200
+_rb_saved = (gl._temp, gl.STATUS)
+gl.STATUS = 1
+gl._temp = lambda: (_ for _ in ()).throw(TypeError("bug"))
+_rb_bug = _rb_loop()
+gl._temp, gl.STATUS = _rb_saved
+gl.ota["pend"] = None
+gl.WEB = True
+_rb_web()
+gl.web_tick()
+_RbListen.oom = "accept"
+_rb_acc = []
+_rb_real = _RbListen.accept
+def _rb_counted(self):
+    _rb_acc.append(_clock[0])
+    return _rb_real(self)
+_RbListen.accept = _rb_counted
+_rb_r1 = _rb_loop(int(gl.TICK_PAUSE // 20) + 50)
+_RbListen.accept = _rb_real
+_RbListen.oom = None
+_rb_gap = _rb_acc[1] - _rb_acc[0] if len(_rb_acc) > 1 else None
+check("RB-OOM-RULES: an OTA pending, a real bug in a status line still leaves the "
+      "loop; a page out of memory waits TICK_PAUSE, no retry every pass",
+      "TypeError" in _rb_bug and _rb_r1 == "ran" and len(_rb_acc) == 2
+      and _rb_gap is not None and gl.TICK_PAUSE <= _rb_gap <= gl.TICK_PAUSE + 100,
+      repr((_rb_bug, _rb_r1, _rb_acc)))
+
+_rb_reboots = []
+_rb_saved = (gl._mem_reboot, gl._mem_reboot_soon, gl._bug_once)
+gl._mem_reboot = _rb_reboots.append
+gl._mem_reboot_soon = lambda: False
+try:
+    gl._tick_bug.clear()
+    gl._guard_mem[0] = gl.GUARD_MEM_MAX - 2
+    gl._guarded("web", lambda: None, None, True)
+    _rb_kept = gl._guard_mem[0]          # a page tick running through: no proof
+    gl.ota["pend"] = 200
+    gl._guard_mem[0] = gl.GUARD_MEM_MAX
+    gl._guarded("web", _rb_oom, None, True)
+    _rb_pend = list(_rb_reboots)         # (a reset would abort the image)
+    gl.ota["pend"] = None
+    gl._tick_bug.clear()
+    gl._guard_mem[0] = gl.GUARD_MEM_MAX - 1
+    gl._guarded("web", _rb_oom, None, True)
+    _rb_due = list(_rb_reboots)
+    gl._tick_bug.clear()
+    gl._guarded("wifi", lambda: None)
+    _rb_clear = gl._guard_mem[0]
+    # the telling allocates too: out of memory it stays quiet, in the loop
+    gl._tick_bug.clear()
+    gl._bug_once = _rb_oom
+    _rb_tell = "ok"
+    try:
+        gl._guarded("diag", _rb_oom, 1, True)
+    except MemoryError:
+        _rb_tell = "raised"
+finally:
+    gl.ota["pend"] = None
+    gl._mem_reboot, gl._mem_reboot_soon, gl._bug_once = _rb_saved
+    gl._guard_mem[0] = 0
+    gl._tick_bug.clear()
+check("RB-OOM-COUNT: a page tick that runs through clears no count of a lasting "
+      "MemoryError (a tick of the others does), no memory reboot with an image "
+      "pending, one at GUARD_MEM_MAX without; a MemoryError in the telling stays in",
+      _rb_kept == gl.GUARD_MEM_MAX - 2 and _rb_pend == []
+      and _rb_due == ["guarded memory web"] and _rb_clear == 0 and _rb_tell == "ok",
+      repr((_rb_kept, _rb_pend, _rb_due, _rb_clear, _rb_tell)))
 
 shutil.rmtree(_rb_dir, ignore_errors=True)
 

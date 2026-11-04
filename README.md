@@ -541,12 +541,14 @@ boot cause 2 (hard reset), the same as the logger's own `machine.reset()`
 1 (power on). The counter is cleared after 60 s (`BOOT_OK_MS`) of a healthy
 main loop, by `deploy.sh` or by a power cycle. By hand:
 `mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
-A bug in the WiFi, upload or OTA tick no longer resets the board: it is
+A bug in the WiFi, upload or OTA tick, the status page's or a status
+line's, no longer resets the board: it is
 one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
 (`TICK_PAUSE`) and logging goes on; an upload bug also backs the upload
 off. Ten MemoryErrors in a row there (`GUARD_MEM_MAX`) are a memory reboot,
 as the crash reset used to be. A bug in the logging itself, and anything
-while an OTA image is pending, still goes to the crash branch.
+while an OTA image is pending, still goes to the crash branch, except a
+MemoryError in the page or a status line: no reason to blame the new build.
 
 In the REPL after 5 a frozen firmware no longer waits for good: after 30
 minutes (`BOOT_RETRY_MS`) a timer sets the count back to 4 and resets, one
