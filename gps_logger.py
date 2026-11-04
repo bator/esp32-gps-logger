@@ -2,7 +2,7 @@ from machine import Pin, UART, WDT
 import machine, sys, time, os, network, gc, math, socket, json, select, struct
 import hashlib, binascii
 try:
-    import esp32                         # mcu_temperature() on C3/C6/S2/S3
+    import esp32                         # mcu_temperature(), OTA partitions
 except ImportError:
     esp32 = None
 try:
@@ -16,7 +16,7 @@ except ImportError:
 # and TLS (mbedTLS lives in the IDF heap) then fails with ENOMEM.
 gc.threshold(8192)
 
-BAUD = 9600
+BAUD = 115200                            # the UC6580's
 GPS_HZ = 5                               # fixes a second; one averaged point
                                          # a second is kept
 SECONDS_Q = 8                            # published seconds kept for log_tick
@@ -37,9 +37,9 @@ AVG_MAX_SPEED = 10                       # km/h: above this a second's point
                                          # is its first fix, not the mean (the
                                          # mean lies ~0.4 s along the track:
                                          # 6 m at 50 km/h, stamped the second)
-CPU_MHZ = 80                             # CPU clock in the main loop (ESP32:
-                                         # 20/40/80/160/240, C6: 80/160);
-                                         # 0 leaves the firmware default
+CPU_MHZ = 80                             # CPU clock in the main loop
+                                         # (20/40/80/160/240); 0 leaves the
+                                         # firmware default
 CPU_MHZ_UPLOAD = 160                     # clock during a POST (TLS); 0 = no
                                          # change. .env CPU_MHZ / CPU_MHZ_UP
 STATUS = 600000                          # ms between console status lines
@@ -92,33 +92,19 @@ GPS_STORM_QUIET = 10000                  # ms without a restart (in a storm
                                          # GPS_STORM_WAIT): the storm is
                                          # over, set it up within GPS_RETRY
 
-# Board pins. ESP32 (WROOM): UART2 on GPIO16/17. The ESP32-C6 has no UART2 and
-# GPIO16/17 are its console UART, so it uses UART1 on GPIO18 (TX) / GPIO19
-# (RX): plain pins, unlike the strapping pins GPIO4/5 the GPS used before.
-# The Heltec Wireless Tracker (ESP32-S3, boards/GPS_LOGGER_S3): its UC6580 is
-# on the board, UART1 on GPIO34 (TX) / GPIO33 (RX), at 115200 baud, powered
-# by the Vext rail (GPIO3 high: the receiver, its LNA and the TFT). No I2C
-# OLED: gps_tft.py drives the TFT once the logger runs (dark until then).
-# .env GPS_TX / GPS_RX move the GPS UART (_gps_pins_env, e.g. back to 4/5).
-# main.py keeps the matching boot-bypass pin.
-IS_C6 = "ESP32C6" in getattr(sys.implementation, "_machine", "")
-IS_HELTEC = "Heltec" in getattr(sys.implementation, "_machine", "")
+# The Heltec Wireless Tracker (ESP32-S3, boards/GPS_LOGGER_S3): its UC6580 is on
+# the board, UART1 on GPIO34 (TX) / GPIO33 (RX), powered by the Vext rail (GPIO3
+# high: the receiver, its LNA and the TFT). gps_tft.py drives the TFT once the
+# logger runs (dark until then). main.py keeps the boot-bypass pin.
 HELTEC_VEXT = 3                          # high: the rail of the UC6580
 HELTEC_TFT_BL = 21                       # the TFT's backlight (gps_tft.py)
-if IS_C6:
-    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 18, 19, 7, 6
-elif IS_HELTEC:
-    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 1, 34, 33, -1, -1
-    BAUD = 115200
-    Pin(HELTEC_VEXT, Pin.OUT, value=1)
-    Pin(HELTEC_TFT_BL, Pin.OUT, value=0)
-else:
-    GPS_UART, GPS_TX, GPS_RX, I2C_SCL, I2C_SDA = 2, 17, 16, 22, 21
+GPS_UART, GPS_TX, GPS_RX = 1, 34, 33
+Pin(HELTEC_VEXT, Pin.OUT, value=1)
+Pin(HELTEC_TFT_BL, Pin.OUT, value=0)
 
 # (rides out HTTP calls; at 115200 the UC6580 sends ~2.3 KB/s: a keep-alive
 # scan's pause overran 4 KB, one cut sentence per pulse, measured)
-uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX,
-            rxbuf=8192 if IS_HELTEC else 4096)
+uart = UART(GPS_UART, baudrate=BAUD, tx=GPS_TX, rx=GPS_RX, rxbuf=8192)
 
 NO_DATA = 3000                           # ms of silence = "No data!"
 GPS_SILENT = 60000                       # ms without a byte: a diag line
@@ -213,21 +199,8 @@ PB_KEEPALIVE = 5000                      # ms between power bank keep-alive
                                          # off; .env KEEPALIVE=<seconds>).
                                          # 15 s kept the 20 Ah bank on for
                                          # 3 h, not for good: it averages
-PB_MODE = "scan"                         # what a pulse is (.env KEEPALIVE_MODE):
-                                         # "scan": radio on, one scan (~2 s at
-                                         # ~100 mA: +40 mA average at 5 s);
-                                         # "radio": radio on and off again, no
-                                         # scan (~0.2 s burst, ~5 mA average;
-                                         # too little for the 20 Ah bank, which
-                                         # averages: +13 mA lasted 3 h only);
-                                         # "gpio": PB_PIN high PB_PULSE_MS
-                                         # (a load resistor via a MOSFET)
-PB_PIN = 2 if IS_C6 else 6 if IS_HELTEC else 26
-PB_PULSE_MS = 100                        # ms the gpio pulse lasts
-PB_CONNECTED = False                     # .env KEEPALIVE_CONNECTED=1: pulses
-                                         # also while connected and idle (a
-                                         # bank on the status page at home;
-                                         # scan or gpio, not radio)
+                                         # A pulse is the radio on, one scan, off
+                                         # (~2 s at ~100 mA: +40 mA average at 5 s)
 SEEN_WAIT = 60000                        # ms: a keep-alive scan that sees home
                                          # wakes the radio at most this often
                                          # (doubling while rounds fail)
@@ -281,8 +254,8 @@ BACKOFF_MAX = 1800000                    # ms cap (30 min) on upload backoff
 AUTH_BACKOFF = 1800000                   # ms retry after 401 (plan/key/limit)
 HTTP_TIMEOUT = 15                        # s per socket op (connect, TLS)
 HTTP_WAIT = 30000                        # ms for the server's answer, the
-                                         # UART read meanwhile (a 4 KB buffer
-                                         # holds ~5 s of NMEA)
+                                         # UART read meanwhile (its 8 KB buffer
+                                         # holds ~3.5 s of NMEA)
 HTTP_CHUNK = 1024                        # body bytes per write, UART between
 HTTP_LINE = 256                          # bytes per read of an answer line
 HTTP_LINES = 64                          # reads of the answer's head at most
@@ -1037,8 +1010,7 @@ def gps_check(now):
     turns off: a receiver powered up with the board is still booting when
     run() sends it, and stays at 1 Hz. Less and less often, so a receiver
     that never takes it (or an unwired ESP TX) costs next to nothing."""
-    if IS_HELTEC:
-        _usb_drain()
+    _usb_drain()
     _uc_watch(now)
     if _age(now, st["loop_at"]) >= GPS_LOOP_WINDOW:
         st["loop_at"] = now
@@ -1117,7 +1089,7 @@ def _mhz_env(env, key, default):
     except ValueError:
         print(key, "invalid, using", default)
         return default
-    allowed = (80, 160) if IS_C6 else (20, 40, 80, 160, 240)
+    allowed = (20, 40, 80, 160, 240)
     if n == 0 or n in allowed:
         return n
     print(key, "not 0 or", "/".join(str(m) for m in allowed), "on this",
@@ -1530,8 +1502,7 @@ def read_uart():
 
 # --- Watchdog ---------------------------------------------------------------
 # Created only from run()/_loop(), so the boot-bypass REPL (main.py's
-# SKIP_PIN: GPIO10 on the C6, GPIO7 on the Heltec, GPIO25 on the ESP32) is not reset. ESP32
-# cannot disarm it: Ctrl-C starts a Timer that keeps feeding until
+# SKIP_PIN, GPIO7) is not reset. ESP32 cannot disarm it: Ctrl-C starts a Timer that keeps feeding until
 # KEEPALIVE_MAX, then the dog is allowed to reset.
 
 _wdt = None
@@ -2507,15 +2478,14 @@ def _web_search(now):
     served the page on. The hourly round after a deliberate sleep is no
     drop (down_at None). A link off home without WEB_AWAY keeps no page up
     (it is served only while the radio is on anyway, see web_tick): no
-    search in any keep-alive mode (gpio, radio, KEEPALIVE=0 searched 30 min
-    after a hotspot drop)."""
+    search, keep-alive or not (KEEPALIVE=0 searched 30 min after a hotspot
+    drop)."""
     if not WEB or not (WEB_AWAY or _has_home()):
         return False
     if not wifi.get("down_home"):
         if not WEB_AWAY:
             return False                 # no page off home anyway
-    elif (PB_KEEPALIVE and PB_MODE == "scan"
-          and _home_seeable(wifi.get("down_ssid"))):
+    elif PB_KEEPALIVE and _home_seeable(wifi.get("down_ssid")):
         r = wifi.get("down_rssi")
         if r is None or r >= SEEN_MIN_RSSI:
             return False                 # _home_seen wakes it
@@ -2760,70 +2730,10 @@ def _min_move_env(env):
     else:
         print("MIN_MOVE not 0-50 m, using", MIN_MOVE)
 
-# The Heltec's pins nothing on the board uses. Not 0/3/45/46 (strapping, 3
-# Vext too), 1/2 (battery ADC), 8-14 (LoRa), 18 (LED), 19/20 (USB), 21 and
-# 38-42 (TFT), 26-32 (flash), 33-36 (GNSS), 43/44 (UART0) or 7 (main.py's
-# boot-bypass pin)
-_HELTEC_FREE = (4, 5, 6, 15, 16, 17, 47, 48)
-
-def _gps_pin_ok(n, out):
-    """A pin the GPS UART may use: on the chip, not the console UART0, the
-    USB D-/D+, the SPI flash, the I2C (OLED) or the boot-bypass pin, and
-    not a strapping pin a GPS TX idling high would break the boot with
-    (C6: 8/9 download mode; ESP32: 0, and 12, MTDI: the flash at 1.8 V;
-    the Heltec: only its free pins, _HELTEC_FREE, or the receiver's own).
-    out: the ESP's TX, not on the ESP32's input-only 34-39."""
-    if n in (I2C_SCL, I2C_SDA):
-        return False
-    if IS_HELTEC:
-        return n in _HELTEC_FREE or n in (33, 34)
-    if IS_C6:
-        return 0 <= n <= 23 and n not in (8, 9, 10, 12, 13, 16, 17)
-    if out and n >= 34:
-        return False
-    return (0 <= n <= 39 and n not in (0, 1, 3, 12, 25)
-            and not 6 <= n <= 11 and n not in (20, 24, 28, 29, 30, 31))
-
-def _gps_pins_env(env):
-    """GPS_TX / GPS_RX in .env: the ESP's UART pins to the receiver (GPS_TX
-    the ESP's TX -> GPS RX, GPS_RX the ESP's RX <- GPS TX), e.g. the C6's
-    old wiring 4/5 for a second receiver. A pin the board or the chip
-    needs (_gps_pin_ok), or both the same, keeps the default; the UART is
-    moved to the new pins (before the first setup: run)."""
-    global GPS_TX, GPS_RX
-    pins = {"GPS_TX": GPS_TX, "GPS_RX": GPS_RX}
-    for key in ("GPS_TX", "GPS_RX"):
-        v = _plain(env.get(key))
-        if not v:
-            continue
-        try:
-            n = int(v)
-        except ValueError:
-            n = -1
-        if _gps_pin_ok(n, key == "GPS_TX"):
-            pins[key] = n
-        else:
-            print(key, v, "is not a GPS pin here, using", pins[key])
-    tx, rx = pins["GPS_TX"], pins["GPS_RX"]
-    if tx == rx:
-        print("GPS_TX and GPS_RX are the same pin, using", GPS_TX, GPS_RX)
-        return
-    if (tx, rx) == (GPS_TX, GPS_RX):
-        return
-    try:
-        uart.init(baudrate=BAUD, tx=tx, rx=rx)
-    except (ValueError, OSError) as e:
-        print("GPS pins", tx, rx, repr(e), "- using", GPS_TX, GPS_RX)
-        return
-    GPS_TX, GPS_RX = tx, rx
-    print("GPS pins tx", tx, "rx", rx)
-
 def _keepalive_env(env):
     """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
-    5-600 s between pulses; anything else keeps the default. KEEPALIVE_MODE
-    picks the pulse (scan / radio / gpio), KEEPALIVE_PIN the gpio,
-    KEEPALIVE_CONNECTED=1 pulses while connected and idle too."""
-    global PB_KEEPALIVE, PB_MODE, PB_PIN, PB_CONNECTED
+    5-600 s between pulses; anything else keeps the default."""
+    global PB_KEEPALIVE
     v = _plain(env.get("KEEPALIVE"))
     if v:
         try:
@@ -2837,92 +2747,16 @@ def _keepalive_env(env):
                       PB_KEEPALIVE // 1000, "s")
         except ValueError:
             print("KEEPALIVE invalid, using", PB_KEEPALIVE // 1000, "s")
-    m = _plain(env.get("KEEPALIVE_MODE"))
-    if m:
-        m = m.lower()
-        if m in ("scan", "radio", "gpio"):
-            PB_MODE = m
-        else:
-            print("KEEPALIVE_MODE not scan/radio/gpio, using", PB_MODE)
-    v = _plain(env.get("KEEPALIVE_PIN"))
-    if v:
-        try:
-            n = int(v)
-        except ValueError:
-            n = None
-        if n is None or n < 0:
-            print("KEEPALIVE_PIN invalid, using", PB_PIN)
-        elif _pin_taken(n):
-            print("KEEPALIVE_PIN", n, "is in use (GPS, I2C, boot-bypass",
-                  "or USB), using", PB_PIN)
-        else:
-            PB_PIN = n
-    v = _plain(env.get("KEEPALIVE_CONNECTED"))
-    if v:
-        t = _truthy(v)
-        if t is None:
-            print("KEEPALIVE_CONNECTED not 1/0, using",
-                  1 if PB_CONNECTED else 0)
-        else:
-            PB_CONNECTED = t
-    if PB_MODE == "gpio" and _pin_taken(PB_PIN):
-        # the default pin (or one set before the GPS moved): a pulse there
-        # would take a GPS UART pad from the receiver
-        print("KEEPALIVE_PIN", PB_PIN, "is in use (GPS?) - keep-alive scan")
-        PB_MODE = "scan"
 
-def _pin_taken(n):
-    """A pin the board already uses or must not drive: GPS UART, I2C
-    (OLED), main.py's boot-bypass pin (10 on the C6, 25 on the ESP32, 7 on
-    the Heltec, whose free pins are _HELTEC_FREE); on
-    the C6 the USB D-/D+ pins 12/13 and UART0 16/17 (the console), the
-    strapping pins 4/5 (JTAG, the old GPS wiring), 8/9 (a MOSFET gate's
-    pull-down holds 9 low at reset: download mode) and 15 (JTAG source) and
-    the SPI flash pins 24-30; on the ESP32 the strapping pins 0 (download
-    mode) and 12 (MTDI: a load holding it high at reset sets the flash to
-    1.8 V, a WROOM does not boot), UART0 1/3 and the SPI flash pins 6-11
-    (driving one crashes the board). Pulsing one of them breaks it."""
-    if n in (GPS_TX, GPS_RX, I2C_SCL, I2C_SDA):
-        return True
-    if IS_HELTEC:
-        return n not in _HELTEC_FREE
-    if IS_C6:
-        return n in (4, 5, 8, 9, 10, 12, 13, 15, 16, 17) or 24 <= n <= 30
-    return n in (0, 1, 3, 12, 25) or 6 <= n <= 11
-
-_pb_pin = None
-
-def _pb_pulse_gpio():
-    """PB_PIN high for PB_PULSE_MS: a load resistor through a MOSFET draws
-    the burst a power bank looks for (22 ohm on 5 V: ~230 mA for 0.1 s,
-    ~5 mA average at 5 s). False when the pin cannot be driven."""
-    global _pb_pin
-    try:
-        if _pb_pin is None:
-            _pb_pin = Pin(PB_PIN, Pin.OUT)
-            _pb_pin.value(0)
-        _pb_pin.value(1)
-        time.sleep_ms(PB_PULSE_MS)
-        _pb_pin.value(0)
-        return True
-    except Exception as e:
-        try:
-            _pb_pin.value(0)
-        except Exception:
-            pass
-        print("keepalive gpio", PB_PIN, repr(e))
-        return False
-
-def _pb_pulse_radio(w, scan):
-    """Radio on (and one scan), off again. The radio start-up alone is a
-    ~100-200 mA burst for a fraction of a second; a scan holds it ~2 s."""
+def _pb_pulse_radio(w):
+    """Radio on, one scan (it holds ~100 mA ~2 s, and watches the stay's access
+    points and the home network: _stay_scan, _home_seen), off again."""
     try:
         w.active(True)
-        if scan:
-            aps = w.scan()
-            if not _scan_empty(aps, "pb_empty"):
-                _stay_scan(aps)
-                _home_seen(aps)
+        aps = w.scan()
+        if not _scan_empty(aps, "pb_empty"):
+            _stay_scan(aps)
+            _home_seen(aps)
     except SCAN_ERR:
         pass
     finally:
@@ -2935,44 +2769,26 @@ def keepalive_tick(now):
     """Power bank keep-alive. With the radio asleep the board draws less
     than many power banks count as a load, and they switch off (the
     board's 20 Ah bank after 1 h; with a scan every 15 s after 3 h, so it
-    averages the load over a long time). Every PB_KEEPALIVE ms one pulse
-    goes out (PB_MODE: a gpio load pulse, the radio turned on and off, or
-    a full scan). Not while the radio is on anyway (connected, connecting,
-    lost). GPS seconds published during a pulse are queued, not lost."""
-    global PB_MODE
+    averages the load over a long time). Every PB_KEEPALIVE ms one scan goes
+    out (_pb_pulse_radio). Not while the radio is on anyway (connected,
+    connecting, lost). GPS seconds published during a pulse are queued, not
+    lost."""
     w = wifi.get("wlan")
-    state = wifi["state"]
     # radio idle: asleep, nothing found, or no WiFi at all (no .env, an
     # error): a logging-only board needs the pulses most
-    idle = state in ("sleep", "not found", "no .env", "error", "off")
-    conn = (PB_CONNECTED and state == "connected" and PB_MODE != "radio"
-            and not str(up.get("state") or "").startswith("send"))
-    if not PB_KEEPALIVE or not (idle or conn):
+    if not PB_KEEPALIVE or wifi["state"] not in ("sleep", "not found", "no .env",
+                                                 "error", "off"):
         wifi["pb_at"] = now
         return
     if _age(now, wifi["pb_at"]) < PB_KEEPALIVE:
         return
     wifi["pb_at"] = now
     feed()
-    if PB_MODE == "gpio" and _pb_pulse_gpio():
-        pass
-    else:
-        if PB_MODE == "gpio":
-            PB_MODE = "scan"             # no such pin: fall back for good
-            print("keepalive mode scan")
-        if w is None:
-            w = _pb_wlan()
-        if w is None:
-            return
-        if conn:
-            try:
-                aps = w.scan()           # connected: scan, keep the link
-                if not _scan_empty(aps, "pb_empty"):
-                    _stay_scan(aps)
-            except SCAN_ERR:
-                pass
-        else:
-            _pb_pulse_radio(w, PB_MODE == "scan")
+    if w is None:
+        w = _pb_wlan()
+    if w is None:
+        return
+    _pb_pulse_radio(w)
     wifi["pb_scans"] += 1
     feed()
 
@@ -7023,7 +6839,7 @@ def _hmac_hex(key, msg):
     out = hashlib.sha256(bytes(b ^ 0x5C for b in key) + inner).digest()
     return binascii.hexlify(out).decode()
 
-OTA_BOARD = "GPS_LOGGER_S3" if IS_HELTEC else None  # (the manifest's "board")
+OTA_BOARD = "GPS_LOGGER_S3"              # (the manifest's "board")
 
 def _ota_eq(a, b):
     """a == b for two strings in a time independent of where they differ
@@ -7039,7 +6855,7 @@ def _ota_eq(a, b):
 def _ota_signed(m):
     """The bytes the manifest's HMAC covers (build_firmware.sh signs the
     same): build|commit|size|sha256|url, then path|size|sha256|url a file,
-    then |board=<name> on a board other than the C6 (OTA_BOARD)."""
+    then |board=<name> (OTA_BOARD)."""
     t = "%d|%s|%d|%s|%s" % (m["build"], m["commit"], m["size"], m["sha256"],
                             m["url"])
     for f in m.get("files") or ():
@@ -7074,7 +6890,7 @@ def _ota_manifest_ok(m):
     between fields kept the HMAC (a page path swallowing the next file, a
     commit swallowing the firmware: the page installed as firmware). The
     format stays, boards in the field read the same manifests. A manifest
-    for another board (OTA_BOARD: "board", none for the C6) is not this
+    for another board (OTA_BOARD: "board") is not this
     board's firmware, whatever its signature."""
     try:
         if type(m) is not dict or m.get("board") != OTA_BOARD:
@@ -8002,7 +7818,7 @@ def _web_read(c):
     end = _web_end[0]
     if end is not None:
         # a client dribbling its head (or an idle preconnect) held the loop
-        # for WEB_DEADLINE: longer than the UART buffer lasts at 9600 baud
+        # for WEB_DEADLINE: longer than the UART buffer lasts
         head = time.ticks_add(time.ticks_ms(), WEB_HEAD_WAIT * 1000)
         if time.ticks_diff(head, end) < 0:
             _web_end[0] = head
@@ -8453,9 +8269,9 @@ _tft_t = [None, None, 0, 0, 0]           # last values, last frame, the errors
 _tft_b = [None, None, None]              # (2: the WiFi level last shown)
 
 def _tft_start():
-    """Only on the Heltec; a failure leaves the logger running without it."""
+    """A failure leaves the logger running without it."""
     global _tft
-    if not IS_HELTEC or _tft is not None:
+    if _tft is not None:
         return
     try:
         import gps_tft
@@ -8969,7 +8785,6 @@ def run():
         up_reset()
         _tft_start()
         env = load_env(ENV_FILE)
-        _gps_pins_env(env)               # before the first setup
         _gps_sys_env(env)
         _min_move_env(env)
         _diag_env(env)

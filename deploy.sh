@@ -4,9 +4,8 @@
 # It must run precompiled: compiling on the device grows the Python heap,
 # which leaves too little IDF heap for TLS uploads (-O3: no line numbers in
 # tracebacks, ~10 KB less, as in the frozen firmware). main.py imports
-# gps_logger at boot (hold the boot-bypass pin during reset to skip it:
-# GPIO10 on the ESP32-C6, GPIO7 on the Heltec, GPIO25 on the ESP32; main.py's
-# SKIP_PIN).
+# gps_logger at boot (hold the boot-bypass pin, GPIO7, during reset to skip it;
+# main.py's SKIP_PIN).
 # On a firmware with the logger frozen in (tools/build_firmware.sh) only
 # main.py and the page go up, and only if the frozen logger is this
 # gps_logger.py (same SHA-256; FORCE=1 deploys them anyway). FORCE_MPY=1
@@ -59,7 +58,8 @@ restart_logger() {
 }
 trap restart_logger EXIT
 
-# An OTA being validated? And ESP32 is Xtensa, ESP32-C6 is RISC-V: which one
+# An OTA being validated? And is it the board: a Heltec Wireless Tracker (an
+# ESP32-S3: Xtensa); the logger runs on nothing else
 BOARD=$($MPREMOTE connect "$PORT" exec "
 import os, sys
 print('ota.pending', 'ota.pending' in os.listdir())
@@ -80,8 +80,7 @@ if [ "$OTAPEND" != False ]; then
 fi
 MACHINE=$(tail -n 1 <<< "$BOARD")
 case "$MACHINE" in
-    *ESP32C6*) ARCH=rv32imc ;;
-    *ESP32*)   ARCH=xtensawin ;;
+    *Heltec*) ARCH=xtensawin ;;
     *) echo "Unsupported board: $MACHINE" >&2; exit 1 ;;
 esac
 echo "Board: $MACHINE ($ARCH)"

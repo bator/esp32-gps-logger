@@ -1,11 +1,11 @@
-// The Heltec Wireless Tracker. The name must keep "Heltec" and the MCU name
-// "ESP32S3": gps_logger.py, main.py and deploy.sh tell the board by them.
+// The Heltec Wireless Tracker. The name must keep "Heltec": deploy.sh tells the
+// board by it.
 
 #define MICROPY_HW_BOARD_NAME               "Heltec Wireless Tracker"
 #define MICROPY_HW_MCU_NAME                 "ESP32S3"
 
 // The USB-C socket is on the chip's USB Serial/JTAG (no TinyUSB CDC): the
-// same port for the ROM download mode and the REPL, as on the C6.
+// same port for the ROM download mode and the REPL.
 #define MICROPY_HW_ENABLE_USBDEV            (0)
 #define MICROPY_HW_ENABLE_UART_REPL         (0)
 

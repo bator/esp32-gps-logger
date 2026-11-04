@@ -2,7 +2,7 @@
 """Optional on-device timing probes. Does not flash firmware.
 
 Run against a board that already has the logger stopped (the boot-bypass
-pin held at reset: GPIO10 on the ESP32-C6, see main.py SKIP_PIN):
+pin held at reset: GPIO7, see main.py SKIP_PIN):
 
     .venv/bin/mpremote run tests/device_bench.py
 

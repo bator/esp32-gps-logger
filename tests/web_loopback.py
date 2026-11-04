@@ -28,6 +28,8 @@ class _Obj:
 
 
 class _Dummy:
+    OUT = 1
+
     def __init__(self, *a, **k):
         pass
 

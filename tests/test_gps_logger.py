@@ -628,8 +628,6 @@ def _reload_logger():
     return m
 
 
-# the only board there is: the suite runs on what it runs on
-sys.implementation._machine = "Heltec Wireless Tracker with ESP32S3"
 _install_mocks()
 sys.modules["machine"].WDT_RESET = 3
 sys.modules["machine"].PWRON_RESET = 1
@@ -4863,8 +4861,7 @@ try:
     cafe = ("cafe", -85, b"\x04" * 6)
     phone = ("phone", -40, b"\x09" * 6)
     train = ("MAVSTART-WIFI", -70, b"\x03" * 6)
-    saved_aps, saved_mode = WLAN.scan_aps, gl.PB_MODE
-    gl.PB_MODE = "scan"
+    saved_aps = WLAN.scan_aps
     try:
         ok_a = ka_setup([office, cafe, phone])
         ka_run(60)
@@ -4892,7 +4889,7 @@ try:
         ka_run(5 * 60)
         no_aps = gl.log["still"]["active"]
     finally:
-        WLAN.scan_aps, gl.PB_MODE = saved_aps, saved_mode
+        WLAN.scan_aps = saved_aps
         gl.wifi.update(wlan=None, state="offline", nets=[])
     check("STAYWIFI: setup - away stays", ok_a and ok_b and ok_c)
     check("STAYWIFI: the stay's access points gone -> the stay ends, no fix",
@@ -4907,7 +4904,6 @@ try:
     # sample was out past STILL_NEAR; otherwise the ring is the stay's
     # drift (its last receding run, within metres of the anchor) and the
     # stay just ends
-    gl.PB_MODE = "scan"
     res = []
     try:
         for last in ((1, 3, 6, 10), (60, 80, 100, 120)):
@@ -4920,7 +4916,7 @@ try:
             ka_run(3 * 60)
             res.append((not gl.log["still"]["active"], sv_lines()[n0:]))
     finally:
-        WLAN.scan_aps, gl.PB_MODE = saved_aps, saved_mode
+        WLAN.scan_aps = saved_aps
         gl.wifi.update(wlan=None, state="offline", nets=[])
     check("STAYWIFI: left near the anchor: the stay ends, no drift written",
           res[0][0] and res[0][1] == [], repr(res[0]))
@@ -6262,25 +6258,22 @@ try:
         out = []
         real_print = gl.print if hasattr(gl, "print") else None
         gl.print = lambda *x, **k: out.append(" ".join(str(y) for y in x))
-        saved_c6 = gl.IS_C6
         try:
             gl._freq_bad[:] = []
             gl._set_freq(100)
             gl._set_freq(100)
             once = sum(1 for o in out if o.startswith("cpu freq 100")) == 1
-            gl.IS_C6 = True
-            c6 = [gl._mhz_env({"CPU_MHZ": v}, "CPU_MHZ", 80)
-                  for v in ("40", "240", "160", "80", "0")]
+            s3 = [gl._mhz_env({"CPU_MHZ": v}, "CPU_MHZ", 80)
+                  for v in ("40", "240", "160", "80", "0", "100")]
         finally:
-            gl.IS_C6 = saved_c6
             if real_print is None:
                 del gl.print
             else:
                 gl.print = real_print
         check("CPU: an unsupported clock is reported once, not per POST",
               once, repr(out))
-        check("CPU: on a C6 only 80/160 (or 0) are accepted from .env",
-              c6 == [80, 80, 160, 80, 0], repr(c6))
+        check("CPU: 20/40/80/160/240 (or 0) are accepted from .env",
+              s3 == [40, 240, 160, 80, 0, 80], repr(s3))
         a = gl._mhz_env({"CPU_MHZ": "160  # fast"}, "CPU_MHZ", 80)
         b = gl._mhz_env({"CPU_MHZ": "0"}, "CPU_MHZ", 80)
         c = gl._mhz_env({"CPU_MHZ": "100"}, "CPU_MHZ", 80)
@@ -6504,10 +6497,8 @@ try:
           gl.wifi["state"] == "connected" and weak is False and strong is True,
           "weak=%s strong=%s" % (weak, strong))
 
-    gl.IS_HELTEC = False  # >>>BOARD (a later commit: the checks of removed modes)
-    # PB_KEEPALIVE: with the radio asleep, one pulse every PB_KEEPALIVE ms
-    # keeps a power bank from switching off; none while the radio is on
-    # anyway. PB_MODE: "radio" (on/off, default), "scan", "gpio" (a pin)
+    # PB_KEEPALIVE: with the radio asleep, one scan every PB_KEEPALIVE ms keeps a
+    # power bank from switching off; none while the radio is on anyway
     scans = [0]
     ons = [0]
     real_scan = WLAN.scan
@@ -6523,9 +6514,6 @@ try:
         return real_active(self, x)
     WLAN.scan = counting_scan
     WLAN.active = counting_active
-    check("PB_KEEPALIVE: the default pulse is a scan (radio was too little)",
-          gl.PB_MODE == "scan")
-    saved_mode, saved_pin = gl.PB_MODE, gl.PB_PIN
     try:
         sv_reset()
         w, calls, out = rv_start_wifi(rv_env, [("home", -40)], ["home"])
@@ -6535,108 +6523,14 @@ try:
         check("PB_KEEPALIVE: no keep-alive pulse while connected",
               gl.wifi["state"] == "connected" and gl.wifi["pb_scans"] == 0)
         gl._wifi_off(wl(), "sleep")
-        gl.PB_MODE = "radio"
-        n0, o0 = scans[0], ons[0]
-        for _ in range(4):
-            _clock[0] += gl.PB_KEEPALIVE // 2
-            gl.keepalive_tick(_clock[0])
-        check("PB_KEEPALIVE radio: asleep -> radio on/off per PB_KEEPALIVE, no scan",
-              scans[0] - n0 == 0 and ons[0] - o0 == 2 and gl.wifi["pb_scans"] == 2
-              and not wl().active() and gl.wifi["state"] == "sleep",
-              "scans=%d ons=%d" % (scans[0] - n0, ons[0] - o0))
-        gl.PB_MODE = "scan"
         n0 = scans[0]
         for _ in range(4):
             _clock[0] += gl.PB_KEEPALIVE // 2
             gl.keepalive_tick(_clock[0])
         check("PB_KEEPALIVE scan: one scan per PB_KEEPALIVE, radio off after",
-              scans[0] - n0 == 2 and gl.wifi["pb_scans"] == 4
+              scans[0] - n0 == 2 and gl.wifi["pb_scans"] == 2
               and not wl().active() and gl.wifi["state"] == "sleep",
               "scans=%d" % (scans[0] - n0))
-        gl.PB_MODE = "gpio"
-        gl.PB_PIN = 26
-        gl._pb_pin = None
-        del _pin_levels[:]
-        n0, o0 = scans[0], ons[0]
-        _clock[0] += gl.PB_KEEPALIVE
-        gl.keepalive_tick(_clock[0])
-        lv = list(_pin_levels)
-        check("PB_KEEPALIVE gpio: the pin goes high for PB_PULSE_MS, radio untouched",
-              [(n, v) for n, v, t in lv] == [(26, 0), (26, 1), (26, 0)]
-              and lv[2][2] - lv[1][2] == gl.PB_PULSE_MS
-              and scans[0] == n0 and ons[0] == o0 and gl.wifi["pb_scans"] == 5,
-              "levels=%r" % lv)
-        gl.PB_PIN = 99
-        gl._pb_pin = None
-        Pin.fail = (99,)
-        o0 = ons[0]
-        try:
-            _clock[0] += gl.PB_KEEPALIVE
-            gl.keepalive_tick(_clock[0])
-        finally:
-            Pin.fail = ()
-        check("PB_KEEPALIVE gpio: an unusable pin falls back to scan for good",
-              gl.PB_MODE == "scan" and ons[0] - o0 == 1
-              and gl.wifi["pb_scans"] == 6, "mode=%s" % gl.PB_MODE)
-        gl.PB_MODE = "radio"
-        gl._keepalive_env({"KEEPALIVE_MODE": "Scan", "KEEPALIVE_PIN": "14"})
-        m1, p1 = gl.PB_MODE, gl.PB_PIN
-        gl._keepalive_env({"KEEPALIVE_MODE": "laser", "KEEPALIVE_PIN": "x"})
-        check("PB_KEEPALIVE: .env KEEPALIVE_MODE / KEEPALIVE_PIN, bad ones kept",
-              m1 == "scan" and p1 == 14 and gl.PB_MODE == "scan"
-              and gl.PB_PIN == 14, "%s %s %s %s" % (m1, p1, gl.PB_MODE, gl.PB_PIN))
-        # WR-b: a pin the board already uses (GPS, I2C, boot-bypass, the
-        # C6's USB) is refused: pulsing it broke the GPS or the console
-        saved_c6 = gl.IS_C6
-        kept = []
-        try:
-            for v in (gl.GPS_TX, gl.GPS_RX, gl.I2C_SCL, gl.I2C_SDA, 25):
-                gl.PB_PIN = 26
-                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
-                kept.append(gl.PB_PIN)
-            gl.IS_C6 = True
-            for v in (10, 12, 13):
-                gl.PB_PIN = 2
-                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
-                kept.append(gl.PB_PIN)
-            gl._keepalive_env({"KEEPALIVE_PIN": "3"})
-            free = gl.PB_PIN
-        finally:
-            gl.IS_C6 = saved_c6
-        check("WR-b: KEEPALIVE_PIN on a GPS/I2C/boot/USB pin keeps the default",
-              kept == [26] * 5 + [2] * 3 and free == 3, "%r %r" % (kept, free))
-        # R2-12: pins the chip itself needs: ESP32 strapping GPIO0 (download
-        # mode), UART0 1/3, SPI flash 6-11 (driving one crashes the board);
-        # C6 strapping 4/5 and 8/9, UART0 16/17, SPI flash 24-30
-        saved_c6, saved_pin = gl.IS_C6, gl.PB_PIN
-        bad_ok, good = [], []
-        try:
-            gl.IS_C6 = False
-            for v in (0, 1, 3, 6, 7, 8, 9, 10, 11):
-                gl.PB_PIN = 26
-                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
-                if gl.PB_PIN != 26:
-                    bad_ok.append(("esp32", v))
-            for v in (2, 4, 27, 32):
-                gl.PB_PIN = 26
-                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
-                good.append(gl.PB_PIN)
-            gl.IS_C6 = True
-            for v in (4, 5, 8, 9, 16, 17, 24, 27, 30):
-                gl.PB_PIN = 2
-                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
-                if gl.PB_PIN != 2:
-                    bad_ok.append(("c6", v))
-            for v in (3, 11, 18, 23):
-                gl.PB_PIN = 2
-                gl._keepalive_env({"KEEPALIVE_PIN": str(v)})
-                good.append(gl.PB_PIN)
-        finally:
-            gl.IS_C6, gl.PB_PIN = saved_c6, saved_pin
-        check("R2-12: KEEPALIVE_PIN on a strapping/flash/UART0 pin is refused "
-              "per chip", bad_ok == []
-              and good == [2, 4, 27, 32, 3, 11, 18, 23],
-              "%r %r" % (bad_ok, good))
         saved = gl.PB_KEEPALIVE
         try:
             gl._keepalive_env({"KEEPALIVE": "0"})
@@ -6661,8 +6555,6 @@ try:
     finally:
         WLAN.scan = real_scan
         WLAN.active = real_active
-        gl.PB_MODE, gl.PB_PIN, gl._pb_pin = saved_mode, saved_pin, None
-    gl.IS_HELTEC = True  # <<<BOARD
 
     # BOM: a .env saved by Windows Notepad
     bom = os.path.join(rv_dir, "env_bom")
@@ -6884,7 +6776,7 @@ with open(a[-1], "rb") as f, open(out, "wb") as g:
 FAKE_SHIM = r"""
 import sys, os, types
 sys.implementation._machine = os.environ.get(
-    "FAKE_MACHINE", "Generic ESP32C6 module with ESP32C6")
+    "FAKE_MACHINE", "Heltec Wireless Tracker with ESP32S3")
 m = types.ModuleType("machine")
 class RTC:
     def memory(self, b=None):
@@ -7030,7 +6922,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [n for n in os.listdir(dev) if n.endswith(".dpl")]
           and dev_file(dev, ".rtc") == b"0"
           and len(cps) == 3 and all(c[2].endswith(".dpl") for c in cps)
-          and "Board: Generic ESP32C6" in out and "(rv32imc)" in out
+          and "Board: Heltec Wireless Tracker" in out and "(xtensawin)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
     dp_w = getattr(gl, "WEB_GZ_WBITS", 12)
@@ -7165,6 +7057,17 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY-RESTART: every exit restarts the logger: a reset, or with "
           "an OTA pending a run without one; the pending check comes first",
           rs == [True] * len(rs), repr(rs))
+    # DEPLOY-BOARD: the logger runs on the Heltec alone: a C6 or a plain ESP32
+    # is refused before anything is copied
+    db = []
+    for mach in ("Generic ESP32C6 module with ESP32C6", "Generic ESP32 module with ESP32",
+                 "Raspberry Pi Pico with RP2040"):
+        rc, out, err, dev, calls = deploy_run({"FAKE_MACHINE": mach})
+        db.append((rc != 0, "Unsupported board" in err,
+                   not [c for c in calls if "cp" in [x[0] for x in c]]))
+    rc, out, err, dev, calls = deploy_run({})
+    check("DEPLOY-BOARD: anything but the Heltec is refused, nothing copied",
+          db == [(True, True, True)] * 3 and rc == 0, repr(db))
     # DEPLOY-FORCE-PENDING: FORCE_PENDING=1 during an OTA validation got
     # through the copy and then the last step's own reset aborted the
     # pending image (rolled back, the build blamed): no reset then, the
@@ -7497,7 +7400,8 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and all(os.path.exists(os.path.join(dest, n)) for n in named),
           repr((rc_dirty, rc_nokey, rc_badkey, rc, man, scp, err[-200:])))
     # BUILD-PUBLISH-BOARD: the board names itself in the manifest (signed); a
-    # folder holding another board's manifest (the C6's had no name) is refused
+    # folder holding another board's manifest (an older board's had no name) is
+    # refused
     s3 = os.path.join(ROOT, "boards", "GPS_LOGGER_S3")
     dest3 = tempfile.mkdtemp(dir=dp_td)
     penv3 = {"OTA_KEY_FILE": key_file, "OTA_DEST": "fakehost:" + dest3,
@@ -9556,8 +9460,7 @@ def rv_connect(ok, aps, nets=None):
     return w
 
 
-saved_rv = (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, set(WLAN.ok), gl.PB_MODE,
-            gl.PB_CONNECTED)
+saved_rv = (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, set(WLAN.ok), gl.PB_KEEPALIVE)
 try:
     # W-1: a Latin-1 / cut-off UTF-8 SSID in a scan does not crash
     latin = ("K\xe1v\xe9z\xf3", -60, b"\x04" * 6)
@@ -9660,47 +9563,18 @@ try:
           "scan" in calls and "disc" in calls
           and calls.index("disc") < calls.index("scan"), repr(calls))
 
-    # W-23: no .env: gpio pulses still go out; scan pulses get a WLAN
+    # W-23: no .env: the scan pulses get a WLAN of their own
     gl.wifi_reset()
     gl.wifi["state"] = "no .env"
-    gl.PB_MODE = "gpio"
-    pins = []
-    real_gpio = gl._pb_pulse_gpio
-    gl._pb_pulse_gpio = lambda: pins.append(1) or True
-    try:
-        for _ in range(4):
-            _clock[0] += gl.PB_KEEPALIVE
-            gl.keepalive_tick(_clock[0])
-    finally:
-        gl._pb_pulse_gpio = real_gpio
-    gl.PB_MODE = "scan"
     gl._pb_w = None
     n0 = gl.wifi["pb_scans"]
     _clock[0] += gl.PB_KEEPALIVE
     gl.keepalive_tick(_clock[0])
-    check("W-23: without .env the keep-alive still pulses (gpio and scan)",
-          len(pins) == 4 and gl.wifi["pb_scans"] == n0 + 1
-          and gl._pb_w is not None, "%d %d" % (len(pins), gl.wifi["pb_scans"]))
-
-    # KEEPALIVE_CONNECTED: pulses while connected and idle, opt-in
-    w = rv_connect(["home"], [("home", -50)])
-    gl.PB_CONNECTED = False
-    n0 = gl.wifi["pb_scans"]
-    for _ in range(3):
-        _clock[0] += gl.PB_KEEPALIVE
-        gl.keepalive_tick(_clock[0])
-    off_n = gl.wifi["pb_scans"] - n0
-    gl._keepalive_env({"KEEPALIVE_CONNECTED": "1"})
-    for _ in range(3):
-        _clock[0] += gl.PB_KEEPALIVE
-        gl.keepalive_tick(_clock[0])
-    on_n = gl.wifi["pb_scans"] - n0
-    check("KEEPALIVE_CONNECTED: off by default; on, scans keep the link",
-          off_n == 0 and on_n == 3 and gl.wifi["state"] == "connected"
-          and w.active(), "%d %d %s" % (off_n, on_n, gl.wifi["state"]))
+    check("W-23: without .env the keep-alive still pulses",
+          gl.wifi["pb_scans"] == n0 + 1 and gl._pb_w is not None,
+          "%d" % gl.wifi["pb_scans"])
 
     # DHCP after a static network: always asked for once any net is static
-    gl.PB_CONNECTED = False
     cfgs = []
     real_ifc = getattr(WLAN, "ifconfig", None)
 
@@ -9814,7 +9688,7 @@ try:
 
     # WR-30: WEB, radio asleep: a keep-alive scan seeing the hidden home's
     # learned BSSID starts a round (it only knew visible SSIDs)
-    gl.WEB, gl.PB_MODE = True, "scan"
+    gl.WEB = True
     w = rv_connect(["home"], [("", -55, mine_b), ("hot", -40)],
                    nets=[dict(n) for n in hid_nets])
     gl.wifi_tick()                       # learn
@@ -9832,10 +9706,10 @@ try:
     check("WR-30: a keep-alive scan seeing the hidden home's BSSID wakes it",
           back is not None and back <= 60, "back after %r s" % back)
 
-    # WR-30: WEB on, gpio keep-alive (no scan sees home come back): a failed
+    # WR-30: WEB on, no keep-alive (no scan sees home come back): a failed
     # round searches on with the backoff for WEB_SEARCH, then sleeps; it
     # dropped to WIFI_SLEEP (status page down 1 h) at once
-    gl.PB_MODE = "gpio"
+    gl.PB_KEEPALIVE = 0
     w = rv_connect([], [])
     for _ in range(60):
         if gl.wifi["state"] != "connecting":
@@ -9859,7 +9733,7 @@ try:
           "then sleeps", first == "not found" and back is not None
           and back <= 120 and gl.wifi["state"] == "sleep",
           "%r %r %r" % (first, back, gl.wifi["state"]))
-    gl.WEB, gl.PB_MODE = False, "scan"
+    gl.WEB, gl.PB_KEEPALIVE = False, 5000
 
     def wb_drop(w, aps_back, ok_back, after, limit=10 * 60):
         """The link drops (beacon timeout), the AP is back after `after` s:
@@ -9881,7 +9755,7 @@ try:
     # ROAM_MIN_RSSI), a router restart of 60 s with nothing to send: the
     # keep-alive scans saw home only at >= ROAM_MIN_RSSI, so the radio
     # slept WIFI_SLEEP (page down 1 h); at -60 dBm it was back in 64 s
-    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = True, False, "scan"
+    gl.WEB, gl.WEB_AWAY = True, False
     wb_mine = b"\x61" * 6
     wb_back = []
     for hid in (False, True):
@@ -9913,7 +9787,7 @@ try:
     # WB-2: WEB_AWAY, on the phone hotspot with nothing to send: a 20 s
     # blip took the "a keep-alive scan sees home come back" shortcut,
     # but those scans only watch home networks: page down 1 h
-    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = True, True, "scan"
+    gl.WEB, gl.WEB_AWAY = True, True
     w = rv_connect(["hot"], [("hot", -50)])
     for _ in range(60):
         _clock[0] += 1000
@@ -9939,7 +9813,7 @@ try:
     # WB-3: down_at was set by any failed round, also the hourly one after
     # a deliberate sleep (all uploaded): _web_search took that for a fresh
     # drop and searched for WEB_SEARCH (~7 extra rounds in ~35 min)
-    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = True, False, "gpio"
+    gl.WEB, gl.WEB_AWAY, gl.PB_KEEPALIVE = True, False, 0
     w = rv_connect(["hot"], [("hot", -50)])
     gl.wifi["idle_at"] = _clock[0] - gl.WIFI_IDLE
     gl.wifi_tick()
@@ -9963,7 +9837,7 @@ try:
           and gl.wifi["state"] == "sleep" and gl.wifi["down_at"] is None,
           "%r %d rounds %r %r" % (slept, wb_rounds[0], gl.wifi["state"],
                                   gl.wifi["down_at"]))
-    gl.WEB, gl.WEB_AWAY, gl.PB_MODE = False, False, "scan"
+    gl.WEB, gl.WEB_AWAY, gl.PB_KEEPALIVE = False, False, 5000
 
     # WB-4: a MemoryError after the scan (_stay_scan, _home_seen, the sort,
     # the dict copies) escaped wifi_tick and the roam: run()'s crash
@@ -10071,7 +9945,6 @@ try:
              "config")
     real_w = dict((k, WLAN.__dict__[k]) for k in names)
     real_ctor = sys.modules["network"].WLAN
-    gl.PB_MODE, gl.PB_CONNECTED = "scan", True
     w = rv_connect(["hot"], [("hot", -50)])
     crashed = []
 
@@ -10302,11 +10175,11 @@ try:
         # scan keep-alive, WEB on: a keep-alive scan cannot see a hidden
         # home whose BSSIDs are not known, so the failed boot round sleeps
         # WIFI_SLEEP (status page down ~1 h). Now it searches on
-        gl.WEB, gl.PB_KEEPALIVE, gl.PB_MODE = True, 5000, "scan"
+        gl.WEB, gl.PB_KEEPALIVE = True, 5000
 
         def r2_late_router(env_text, blank):
             r2_boot(env_text, [], [])
-            gl.WEB, gl.PB_KEEPALIVE, gl.PB_MODE = True, 5000, "scan"
+            gl.WEB, gl.PB_KEEPALIVE = True, 5000
             r2_until(lambda: gl.wifi["state"] != "connecting", 60)
             boot = gl.wifi["state"]
             _clock[0] += 60000
@@ -10467,20 +10340,21 @@ try:
               and on90 is False, "%r %r" % (on78, on90))
 
         # WR3-3: the "no page off home" exit of _web_search was in the scan
-        # keep-alive branch only: in gpio / radio mode, or KEEPALIVE=0, a
-        # hotspot drop (WEB_AWAY off) searched WEB_SEARCH (30 min) on
+        # keep-alive branch only: with KEEPALIVE=0 a hotspot drop (WEB_AWAY off)
+        # searched WEB_SEARCH (30 min) on
         gl.WEB, gl.WEB_AWAY = True, False
         wf3 = {}
-        for mode, ka in (("gpio", 5000), ("radio", 5000), ("scan", 0)):
-            gl.PB_MODE, gl.PB_KEEPALIVE = mode, ka
+        for ka in (5000, 0):
+            gl.PB_KEEPALIVE = ka
             w = rv_connect(["hot"], [("hot", -50)])
             on_hot = gl.wifi["ssid"] == "hot"
-            wf3["%s/%d" % (mode, ka)] = (on_hot,) + wf_drop(w, 10 * 60)
-        gl.PB_MODE, gl.PB_KEEPALIVE = "gpio", 5000
+            wf3[ka] = (on_hot,) + wf_drop(w, 10 * 60)
+        gl.PB_KEEPALIVE = 0
         w = rv_connect(["home"], [("home", -50)])
         wf3_home = wf_drop(w, 10 * 60)
-        check("WR3-3: a hotspot drop without WEB_AWAY sleeps in every "
-              "keep-alive mode (a home drop still searches)",
+        gl.PB_KEEPALIVE = 5000
+        check("WR3-3: a hotspot drop without WEB_AWAY sleeps, keep-alive or not "
+              "(a home drop with none to see it come back still searches)",
               all(v[0] and v[1] <= 1 and v[2] == "sleep"
                   for v in wf3.values())
               and wf3_home[0] >= 2 and wf3_home[1] == "not found",
@@ -10552,8 +10426,7 @@ try:
         # dropped hidden home whose BSSID is not learned "seeable", and
         # _web_search stopped (page down 1 h) although no keep-alive scan
         # sees that one come back. It is the dropped network's now
-        gl.WEB, gl.WEB_AWAY, gl.PB_MODE, gl.PB_KEEPALIVE = (True, False,
-                                                            "scan", 5000)
+        gl.WEB, gl.WEB_AWAY, gl.PB_KEEPALIVE = True, False, 5000
         mix = [{"ssid": "home", "pw": "x", "home": True, "hidden": False,
                 "bssid": None, "ip": None},
                {"ssid": "hid", "pw": "z", "home": True, "hidden": True,
@@ -10575,7 +10448,7 @@ try:
         # WR3-6: keep-alive scans stepped the rounds' empty-scan count: one
         # empty pulse made a round's own first empty scan (taken as failed:
         # every network tried) the second (a place without APs: nothing)
-        gl.WEB, gl.PB_MODE, gl.PB_KEEPALIVE = False, "scan", 5000
+        gl.WEB, gl.PB_KEEPALIVE = False, 5000
         online(rv_td)
         gl.wifi["nets"] = rv_nets()
         gl.wifi["wlan"] = w = WLAN(0)
@@ -10587,16 +10460,9 @@ try:
         gl.wifi["rounds"] = 1
         w.active(True)
         order = [c["ssid"] for c in gl._candidate_order(w)]
-        gl.PB_CONNECTED = True
-        gl.wifi.update(state="connected", empty=0,
-                       pb_at=_clock[0] - gl.PB_KEEPALIVE)
-        gl.keepalive_tick(_clock[0])
-        conn_pulse = (gl.wifi["pb_scans"], gl.wifi["empty"])
-        gl.PB_CONNECTED = False
         check("WR3-6: an empty keep-alive scan does not count as the "
               "round's empty scan", pulsed == (1, 0)
-              and order == ["home", "hot"] and conn_pulse == (2, 0),
-              "%r %r %r" % (pulsed, order, conn_pulse))
+              and order == ["home", "hot"], "%r %r" % (pulsed, order))
 
         # WR3-7: dead state: wifi["pw"] (a second copy of the password in
         # RAM, never read), saw_connecting, tries, pb_conn_at
@@ -10615,8 +10481,7 @@ try:
         if hasattr(gl, "bytes"):
             del gl.bytes
 finally:
-    (gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, WLAN.ok, gl.PB_MODE,
-     gl.PB_CONNECTED) = saved_rv
+    gl.WEB, gl.WEB_AWAY, WLAN.scan_aps, WLAN.ok, gl.PB_KEEPALIVE = saved_rv
     gl.wifi_reset()
 
 
@@ -13800,53 +13665,6 @@ check("MINMOVE-ENV: 0-50 m read (decimals, comment); invalid keeps 1",
       got == [2.5, 0.0, 7.0, 1, 1, 1, 1], repr(got))
 
 import inspect
-gl.IS_HELTEC = False  # >>>BOARD
-# GPS-PINS-ENV: .env GPS_TX / GPS_RX move the GPS UART (a second receiver
-# on the C6's old 4/5 wiring); pins the board or chip needs, both the same,
-# or a UART that refuses keep the default
-class _UartSpy(object):
-    def __init__(self, fail=False):
-        self.calls, self.fail = [], fail
-    def init(self, **k):
-        if self.fail:
-            raise ValueError("bad pin")
-        self.calls.append(k)
-_gp_saved = (gl.uart, gl.GPS_TX, gl.GPS_RX, gl.IS_C6)
-gp = []
-try:
-    gl.IS_C6 = True
-    for env, fail in (({"GPS_TX": "4", "GPS_RX": "5 # old wiring"}, False),
-                      ({"GPS_TX": "12", "GPS_RX": "16"}, False),
-                      ({"GPS_TX": "4", "GPS_RX": "18"}, False),
-                      ({"GPS_TX": "x", "GPS_RX": "9"}, False),
-                      ({"GPS_TX": "2", "GPS_RX": "3"}, True),
-                      ({}, False)):
-        gl.GPS_TX, gl.GPS_RX = 18, 19
-        gl.uart = _UartSpy(fail)
-        gl._gps_pins_env(env)
-        gp.append((gl.GPS_TX, gl.GPS_RX, list(gl.uart.calls)))
-    gl.IS_C6 = False
-    gl.GPS_TX, gl.GPS_RX = 17, 16
-    gl.uart = _UartSpy()
-    gl._gps_pins_env({"GPS_TX": "34", "GPS_RX": "12"})
-    gp.append((gl.GPS_TX, gl.GPS_RX, list(gl.uart.calls)))
-    gl._gps_pins_env({"GPS_TX": "27", "GPS_RX": "35"})
-    gp.append((gl.GPS_TX, gl.GPS_RX, list(gl.uart.calls)))
-finally:
-    gl.uart, gl.GPS_TX, gl.GPS_RX, gl.IS_C6 = _gp_saved
-check("GPS-PINS-ENV: GPS_TX/GPS_RX move the UART; console, USB, strapping "
-      "8/9/12, same pin, input-only TX or a refused init keep the default",
-      gp == [(4, 5, [{"baudrate": gl.BAUD, "tx": 4, "rx": 5}]),
-             (18, 19, []),
-             (4, 18, [{"baudrate": gl.BAUD, "tx": 4, "rx": 18}]),
-             (18, 19, []),
-             (18, 19, []),
-             (18, 19, []),
-             (17, 16, []),
-             (27, 35, [{"baudrate": gl.BAUD, "tx": 27, "rx": 35}])]
-      and "_gps_pins_env(env)" in inspect.getsource(gl.run),
-      repr(gp))
-gl.IS_HELTEC = True  # <<<BOARD
 
 # WEB-LINK: the page's GPS link - bytes read, seconds since the last whole
 # NMEA sentence (a bad checksum is not one), None before any
@@ -13948,31 +13766,23 @@ check("WEB-UPLOAD-AGE: upload_age_s None until a 2xx, then its age",
       repr((ua0, ua1, ua2, gl.up.get("sent"))))
 
 
-# C6-UART: the C6 reads the GPS on UART1 GPIO18 (TX) / GPIO19 (RX), not the
-# strapping pins 4/5 (the GPS is soldered to 18/19 now); the ESP32 keeps 16/17
+# UART-PINS: the UC6580 on UART1 GPIO34 (TX) / GPIO33 (RX) at its 115200, a buffer
+# that rides out HTTP calls
 _uart_kw = []
 _UART0 = sys.modules["machine"].UART
 class _UARTSpy(_UART0):
     def __init__(self, *a, **k):
         _uart_kw.append((a, k))
-_saved_machine = getattr(sys.implementation, "_machine", "")
+        _UART0.__init__(self, *a, **k)
 sys.modules["machine"].UART = _UARTSpy
 try:
-    sys.implementation._machine = "Generic ESP32C6 module with ESP32C6"
-    c6 = _reload_logger()
-    c6_pins = (c6.IS_C6, c6.GPS_UART, c6.GPS_TX, c6.GPS_RX, _uart_kw[-1])
-    sys.implementation._machine = "Generic ESP32 module with ESP32"
-    wr = _reload_logger()
-    wr_pins = (wr.IS_C6, wr.GPS_UART, wr.GPS_TX, wr.GPS_RX)
+    gl = _reload_logger()
 finally:
     sys.modules["machine"].UART = _UART0
-    sys.implementation._machine = _saved_machine
     gl = _reload_logger()
-check("C6-UART: C6 GPS on UART1 tx=18 rx=19, ESP32 on UART2 tx=17 rx=16",
-      c6_pins[:4] == (True, 1, 18, 19)
-      and c6_pins[4][0][:1] == (1,) and c6_pins[4][1].get("tx") == 18
-      and c6_pins[4][1].get("rx") == 19
-      and wr_pins == (False, 2, 17, 16), "%r %r" % (c6_pins, wr_pins))
+check("UART-PINS: UART1 tx=34 rx=33 at 115200, rxbuf 8 KB",
+      _uart_kw[-1] == ((1,), {"baudrate": 115200, "tx": 34, "rx": 33, "rxbuf": 8192}),
+      repr(_uart_kw[-1]))
 
 # --- review fixes (REV-n: the n-th finding of the 2026-11-01 review) ------
 
@@ -14332,7 +14142,7 @@ for how in ("mem", "empty"):
     except MemoryError:
         r6.append("raised")
 try:
-    gl._pb_pulse_radio(_ScanW("mem"), True)
+    gl._pb_pulse_radio(_ScanW("mem"))
     r6.append("pulse ok")
 except MemoryError:
     r6.append("pulse raised")
@@ -14474,20 +14284,6 @@ gl.wifi_reset()
 check("REV-14: WLAN made again after the backoff, not before",
       early14 is None and made14, repr((early14, made14)))
 
-gl.IS_HELTEC = False  # >>>BOARD
-# REV-15: strapping pins refused as KEEPALIVE_PIN: C6 GPIO15, ESP32 GPIO12
-saved15 = gl.IS_C6
-try:
-    gl.IS_C6 = True
-    c15 = (gl._pin_taken(15), gl._pin_taken(2), gl._pin_taken(3))
-    gl.IS_C6 = False
-    e15 = (gl._pin_taken(12), gl._pin_taken(26), gl._pin_taken(13))
-finally:
-    gl.IS_C6 = saved15
-check("REV-15: C6 15 and ESP32 12 refused, the defaults kept",
-      c15 == (True, False, False) and e15 == (True, False, False),
-      repr((c15, e15)))
-gl.IS_HELTEC = True  # <<<BOARD
 
 # REV-16: an append after one cut short (half a line, no newline) starts
 # on a new line: no ghost point glued from the two
@@ -15847,7 +15643,7 @@ try:
     mc = _guarded(_t_main_crash)
     check("MAIN-CRASH: a logger failing in main.py while an OTA is pending "
           "marks the build's run as a crash", mc == ["crash", None], repr(mc))
-    # OTA-DOC: the C6's boot-bypass pin is GPIO10, not GPIO25
+    # OTA-DOC: the boot-bypass pin is GPIO7, not GPIO25
     with open(os.path.join(ROOT, "tests", "device_bench.py")) as f:
         bench = f.read()
     with open(os.path.join(ROOT, "gps_logger.py")) as f:
@@ -15923,9 +15719,9 @@ gl._stay_scan = lambda aps: stays.append(len(aps))
 try:
     e7 = [gl._scan_known(_EmptyW()), gl._scan_known(_EmptyW())]
     gl.wifi["empty"] = 0
-    gl._pb_pulse_radio(_EmptyW(), True)
+    gl._pb_pulse_radio(_EmptyW())
     first_pulse = list(stays)
-    gl._pb_pulse_radio(_EmptyW(), True)
+    gl._pb_pulse_radio(_EmptyW())
 finally:
     gl._stay_scan = _ss
 check("R2-7: one empty scan is a failed one, two in a row a place without "
@@ -15934,22 +15730,6 @@ check("R2-7: one empty scan is a failed one, two in a row a place without "
       repr((e7, first_pulse, stays)))
 gl.wifi_reset()
 
-gl.IS_HELTEC = False  # >>>BOARD
-# R2-8: KEEPALIVE_MODE=gpio on the default pin the GPS moved onto falls back
-# to scan
-_k8 = (gl.PB_MODE, gl.PB_PIN, gl.GPS_TX, gl.GPS_RX)
-try:
-    gl.PB_PIN, gl.GPS_TX, gl.GPS_RX = 2, 3, 2
-    gl._keepalive_env({"KEEPALIVE_MODE": "gpio"})
-    m8a = gl.PB_MODE
-    gl.GPS_TX, gl.GPS_RX = 18, 19
-    gl._keepalive_env({"KEEPALIVE_MODE": "gpio"})
-    m8b = gl.PB_MODE
-finally:
-    gl.PB_MODE, gl.PB_PIN, gl.GPS_TX, gl.GPS_RX = _k8
-check("R2-8: gpio keep-alive on a GPS pin falls back to scan",
-      (m8a, m8b) == ("scan", "gpio"), repr((m8a, m8b)))
-gl.IS_HELTEC = True  # <<<BOARD
 
 
 # R2-PORTAL: an HTML 2xx (a captive portal) does not count as sent
@@ -17250,19 +17030,11 @@ finally:
 # --- The Heltec Wireless Tracker (UC6580) -----------------------------------
 # The sentences here are the board's, measured 2026-11-04 (receiver UC6580I
 # R6.0.0.0Build3700, indoors: no signal, so the fix sentences are made up).
-def _heltec_logger(machine="Heltec Wireless Tracker with ESP32S3"):
-    saved = getattr(sys.implementation, "_machine", None)
-    sys.implementation._machine = machine
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "gps_logger_heltec", os.path.join(ROOT, "gps_logger.py"))
-        m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m)
-    finally:
-        if saved is None:
-            del sys.implementation._machine
-        else:
-            sys.implementation._machine = saved
+def _heltec_logger():
+    spec = importlib.util.spec_from_file_location(
+        "gps_logger_heltec", os.path.join(ROOT, "gps_logger.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
     m.DIAG_FILE = os.path.join(diag_dir, "diag-h.log")
     m.DIAG_OLD = os.path.join(diag_dir, "diag-h.1")
     m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf-h")
@@ -17290,22 +17062,14 @@ _pin_levels[:] = []
 _uart_rx[:] = b""
 hl = _heltec_logger()
 check("HELTEC-BOARD: UART1 on 34/33 at 115200, Vext (GPIO3) high and the TFT "
-      "backlight (GPIO21) off, before any UART use; no other board changes",
-      hl.IS_HELTEC and not hl.IS_C6
-      and (hl.GPS_UART, hl.GPS_TX, hl.GPS_RX, hl.BAUD) == (1, 34, 33, 115200)
+      "backlight (GPIO21) off, before any UART use",
+      (hl.GPS_UART, hl.GPS_TX, hl.GPS_RX, hl.BAUD) == (1, 34, 33, 115200)
       and [p[:2] for p in _pin_levels if p[0] in (3, 21)] == [(3, 1), (21, 0)],
       repr((hl.GPS_TX, hl.GPS_RX, hl.BAUD, _pin_levels[:4])))
-check("HELTEC-PINS: only the receiver's and free pins for the GPS UART; a "
-      "keep-alive pin not on the Vext, USB, LoRa or strapping pins",
-      all(hl._gps_pin_ok(n, True) for n in (33, 34, 4, 48))
-      and not any(hl._gps_pin_ok(n, True) for n in (0, 3, 8, 19, 20, 21, 26, 35, 38, 45))
-      and hl.PB_PIN in hl._HELTEC_FREE and not hl._pin_taken(5)
-      and all(hl._pin_taken(n) for n in (0, 3, 7, 18, 19, 21, 33, 34, 45)))
 with open(os.path.join(ROOT, "main.py")) as f:
     _msrc = f.read()
-check("HELTEC-SKIP: main.py's boot-bypass pin is GPIO7, free and not the "
-      "download-mode button", "7 if \"Heltec\" in _M" in _msrc
-      and 7 not in hl._HELTEC_FREE)
+check("HELTEC-SKIP: main.py's boot-bypass pin is GPIO7, not the download-mode "
+      "button", "SKIP_PIN = 7" in _msrc)
 
 # the setup
 hl.reset()
