@@ -1820,24 +1820,6 @@ def wifi_reset():
     wifi["down_rssi"] = None
     wifi["down_ssid"] = None             # (any home network may come up)
 
-def _set_hostname(name):
-    if not name:
-        return
-    try:
-        network.hostname(name)
-        return
-    except (AttributeError, OSError, TypeError, ValueError,
-            RuntimeError):
-        pass
-    w = wifi.get("wlan")
-    if w is None:
-        return
-    try:
-        w.config(dhcp_hostname=name)
-    except (AttributeError, OSError, TypeError, ValueError,
-            RuntimeError):
-        pass
-
 def _recently_failed(ssid, now):
     t = wifi["failed"].get(ssid)
     return t is not None and _age(now, t) < FAIL_HOLD
@@ -1950,10 +1932,9 @@ def _scan_found(aps):
     for rec in aps:
         # SSIDs compared as bytes: a neighbour's Latin-1 or cut-off UTF-8
         # SSID raised UnicodeError on decode() and crashed the logger
-        raw = rec[0]
-        ssid = raw if isinstance(raw, bytes) else raw.encode()
+        ssid = rec[0]
         rssi = rec[3]
-        bssid = rec[1] if len(rec) > 1 else None
+        bssid = rec[1]
         if not ssid:
             wifi["blank_any"] = True     # some hidden AP is around
             if _blank_bad(bssid, now):
@@ -2070,7 +2051,7 @@ def _blank_home_ok(strict=False):
 def _learn_home(w):
     """Connected to the hidden home: note its BSSID, so a neighbour's
     empty-SSID AP no longer counts as home in range (_scan_known). v1.29
-    has no config("bssid") getter: then a scan while connected, and a
+    has no config("bssid") getter: so a scan while connected, and a
     record carrying the hidden SSID (if the IDF names the AP it is on) or
     else the one blank AP on the link's channel within LEARN_RSSI dB of its
     RSSI is ours. Several such blank APs (or none): nothing learned.
@@ -2091,49 +2072,38 @@ def _learn_home(w):
     try:
         found = []
         other = []                       # BSSIDs of visible networks
-        b = None
         try:
-            b = bytes(w.config("bssid"))
+            ch = w.config("channel")
         except (OSError, ValueError, TypeError, RuntimeError):
-            pass
-        if b:
-            found.append(b)
-        else:
-            try:
-                ch = w.config("channel")
-            except (OSError, ValueError, TypeError, RuntimeError):
-                ch = None
-            try:
-                r = w.status("rssi")
-            except (OSError, ValueError, RuntimeError):
-                r = None
-            feed()
-            read_uart()
-            try:
-                aps = w.scan()
-            except SCAN_ERR:
-                return
-            feed()
-            one, many = None, False
-            for rec in aps:
-                raw = rec[0]
-                if raw:
-                    if not isinstance(raw, bytes):
-                        raw = raw.encode()
-                    if raw == me:
-                        found.append(bytes(rec[1]))  # named by the IDF: ours
-                    else:
-                        other.append(bytes(rec[1]))
-                    continue
-                if ch is not None and rec[2] != ch:
-                    continue
-                if r is not None and abs(rec[3] - r) > LEARN_RSSI:
-                    continue
-                many = one is not None
-                one = bytes(rec[1])
-            if not found and one is not None and not many:
-                found.append(one)
-        found = [x for x in found if len(x) == 6]
+            ch = None
+        try:
+            r = w.status("rssi")
+        except (OSError, ValueError, RuntimeError):
+            r = None
+        feed()
+        read_uart()
+        try:
+            aps = w.scan()
+        except SCAN_ERR:
+            return
+        feed()
+        one, many = None, False
+        for rec in aps:
+            raw = rec[0]
+            if raw:
+                if raw == me:
+                    found.append(rec[1])  # named by the IDF: ours
+                else:
+                    other.append(rec[1])
+                continue
+            if ch is not None and rec[2] != ch:
+                continue
+            if r is not None and abs(rec[3] - r) > LEARN_RSSI:
+                continue
+            many = one is not None
+            one = rec[1]
+        if not found and one is not None and not many:
+            found.append(one)
         if not found:
             return                       # cannot tell: nothing changes
         aps = wifi["home_aps"]
@@ -2299,7 +2269,7 @@ def _wifi_clear(w):
     try:
         w.active(False)
         w.active(True)
-        _set_hostname(HOSTNAME)
+        network.hostname(HOSTNAME)
     except WLAN_ERR:
         pass
     t0 = time.ticks_ms()
@@ -2347,14 +2317,7 @@ def _wifi_connect(w, net):
     _wifi_ip(w, net)
     ssid = net.get("raw") or net["ssid"]
     try:
-        bssid = net.get("bssid")
-        if bssid:
-            try:
-                w.connect(ssid, net["pw"], bssid=bssid)
-            except TypeError:
-                w.connect(ssid, net["pw"])
-        else:
-            w.connect(ssid, net["pw"])
+        w.connect(ssid, net["pw"], bssid=net.get("bssid"))
     except WLAN_ERR as e:
         _mark_failed(net["ssid"], "connect %r" % (e,))
         return _wifi_next(w)
@@ -2578,7 +2541,7 @@ def _wifi_begin_round(w):
     try:
         if not w.active():
             w.active(True)               # after _wifi_off
-            _set_hostname(HOSTNAME)
+            network.hostname(HOSTNAME)
     except WLAN_ERR:
         pass
     wifi["cand"] = _candidate_order(w)
@@ -2823,8 +2786,6 @@ def _home_seen(aps):
         if rec[3] < SEEN_MIN_RSSI:
             continue
         raw = rec[0]
-        if not isinstance(raw, bytes):
-            raw = raw.encode()
         if (raw and raw in homes) or (not raw and rec[1] in mine):
             break
     else:
@@ -2884,7 +2845,7 @@ def _wifi_make():
     (wifi_tick tries again after the backoff, doubling)."""
     try:
         w = wifi["wlan"] = network.WLAN(network.STA_IF)
-        _set_hostname(HOSTNAME)
+        network.hostname(HOSTNAME)
         w.active(True)
         return w
     except WLAN_ERR:
@@ -4055,8 +4016,6 @@ def _still_window(now, pos):
         sl.update(win_at=now, win_tc=_tc(), ref=pos, sum=[0.0, 0.0, 0],
                   qs=[])
     r, sm, qs = sl["ref"], sl["sum"], sl["qs"]
-    if qs is None:                       # (a window opened without them)
-        qs = sl["qs"] = []
     while len(qs) < 3 and (_age(now, sl["win_at"])
                            >= (len(qs) + 1) * (STILL_WINDOW // 4)):
         qs.append((sm[0], sm[1], sm[2]))   # the sums up to each quarter's
@@ -4354,9 +4313,7 @@ def _stay_scan(aps):
     seen = []
     for rec in aps:
         raw = rec[0]
-        if not isinstance(raw, bytes):
-            raw = raw.encode()
-        b = bytes(rec[1])
+        b = rec[1]
         if (raw and raw in own) or not b or b[0] & 0x02:
             continue                     # (SSIDs compared as bytes: a
         seen.append((rec[3], b))         # Latin-1 one broke decode())
