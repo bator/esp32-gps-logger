@@ -1151,8 +1151,8 @@ def _diag_write(line):
         print("diag", repr(e))
 
 def _diag_utc():
-    t = _fix_secs()
-    return "-" if t is None else _stamp_at(t)[1]
+    t = _fix_s()
+    return "-" if t is None else _stamp_s(t)[1]
 
 def _diag_tail(path, n):
     """The last n lines of a diag file, [] if none. Reads only its last
@@ -3806,15 +3806,6 @@ def _sample_line(now, prev, last_t):
 TIME_BACK = 3600                         # s a fix behind the last line ...
 TIME_BACK_N = 10                         # ... in a row that drop last_t
 
-def _iso_s(t):
-    """Seconds since 2020 of an ISO time YYYY-MM-DDTHH:MM:SSZ, or None."""
-    try:
-        return ((_days(int(t[0:4]), int(t[5:7]), int(t[8:10])) - EPOCH_DAYS)
-                * 86400 + int(t[11:13]) * 3600 + int(t[14:16]) * 60
-                + int(t[17:19]))
-    except (TypeError, ValueError, IndexError):
-        return None
-
 def _time_back(t, lt):
     """A usable fix at t (ISO), older than the last line written, lt.
     TIME_BACK_N of them in a row over TIME_BACK behind it: lt was a false
@@ -3823,7 +3814,7 @@ def _time_back(t, lt):
     stamped after t still in RAM with it, a new segment starts, a diag
     line notes it. (One fix that far behind is a glitch itself: skipped
     as before.)"""
-    a, b = _iso_s(t), _iso_s(lt)
+    a, b = _dt_s(t, t, 11), _dt_s(lt, lt, 11)
     if a is None or b is None or b - a <= TIME_BACK:
         log["back"] = 0
         return
@@ -3928,22 +3919,17 @@ FIX_S_END = 2145916800                   # 2088-01-01 in seconds since 2020:
 
 def _fix_s():
     """Seconds since 2020 of the current fix's date and time, or None."""
-    d, t = st["date"], st["time"]
+    return _dt_s(st["date"], st["time"])
+
+def _dt_s(d, t, i=0):
+    """Seconds since 2020 of a date YYYY-MM-DD and, from index i of t, a time
+    HH:MM:SS (an ISO time is both: i 11), or None."""
     try:
         return ((_days(int(d[0:4]), int(d[5:7]), int(d[8:10])) - EPOCH_DAYS)
-                * 86400 + int(t[0:2]) * 3600 + int(t[3:5]) * 60
-                + int(t[6:8]))
+                * 86400 + int(t[i:i + 2]) * 3600 + int(t[i + 3:i + 5]) * 60
+                + int(t[i + 6:i + 8]))
     except (TypeError, ValueError, IndexError):
         return None
-
-def _fix_secs():
-    """UTC seconds (since 1970) of the current fix's date and time, or None."""
-    s = _fix_s()
-    return None if s is None else s + EPOCH_DAYS * 86400
-
-def _stamp_at(secs):
-    """(ISO time, compact track time) for UTC seconds since 1970."""
-    return _stamp_s(secs - EPOCH_DAYS * 86400)
 
 def _stamp_s(secs):
     """(ISO time, compact track time) for seconds since 2020."""
@@ -7305,7 +7291,7 @@ def _ago(t):
 def _web_rows():
     """(key, value) pairs of the JSON (web.html labels them)."""
     view = sv_seen()
-    t = _fix_secs()
+    t = _fix_s()
     pos = pos6 = None
     # a silent receiver keeps its last second's valid flag: no position
     # once that second is older than NO_DATA (the page would show it live)
@@ -7328,7 +7314,7 @@ def _web_rows():
         ("sats", "%d / %s" % (view, sv_used())),
         ("hdop", st["hdop"]),
         ("std", st.get("std")),          # (GST: the receiver's own error, m)
-        ("utc", None if t is None else _stamp_at(t)[0]),
+        ("utc", None if t is None else _stamp_s(t)[0]),
         ("position", pos),
         ("pos6", pos6),
         ("nmea", "%d / %d" % (st["ok"], st["err"])),

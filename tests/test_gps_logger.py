@@ -633,6 +633,7 @@ sys.modules["machine"].SOFT_RESET = 4
 sys.modules["machine"].HARD_RESET = 2
 sys.modules["machine"].reset_cause = lambda: _reset_cause[0]
 gl = _reload_logger()
+_EPOCH_S = gl.EPOCH_DAYS * 86400         # 1970 -> the firmware's 2020
 
 passed = 0
 failed = 0
@@ -4678,8 +4679,8 @@ try:
         gl.st.update(date="%04d-%02d-%02d" % (y, m, d),
                      time="%02d:%02d:%02d" % (hh, mi, ss))
         iso = "%04d-%02d-%02dT%02d:%02d:%02dZ" % (y, m, d, hh, mi, ss)
-        ok = ok and gl._fix_secs() == secs and gl._stamp_at(secs)[0] == iso
-    ok = ok and gl._stamp_at(calendar.timegm((2026, 12, 31, 23, 59, 59, 0, 0, 0))
+        ok = ok and gl._fix_s() + _EPOCH_S == secs and gl._stamp_s(secs - _EPOCH_S)[0] == iso
+    ok = ok and gl._stamp_s(calendar.timegm((2026, 12, 31, 23, 59, 59, 0, 0, 0)) - _EPOCH_S
                              + 1)[0] == "2027-01-01T00:00:00Z"
     check("HB: UTC date arithmetic matches the calendar (year end, leap, 2100)",
           ok)
@@ -4689,7 +4690,7 @@ try:
     check("HB: internal seconds count from 2020 and stay below 2**30",
           s20 is not None and 0 < s20 < 2 ** 30
           and gl._stamp_s(s20)[0] == "2026-10-18T08:00:00Z"
-          and gl._fix_secs() == calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0)),
+          and gl._fix_s() + _EPOCH_S == calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0)),
           "s20=%s" % s20)
     # a receiver past a GPS week rollover says 1999 (read as 2099) or 2000:
     # such a fix is not used, moving or in a stay. (From 2088 on its
@@ -5391,7 +5392,7 @@ try:
     _clock[0] += 1000
     epoch("000001.00", date="191026")
     check("MIDNIGHT: the second past midnight without an RMC is no fix",
-          not gl.has_fix(_clock[0]) and gl._fix_secs() is None
+          not gl.has_fix(_clock[0]) and gl._fix_s() is None
           and gl.st["time"] == "00:00:00")
     _clock[0] += 1000
     epoch("000002.00", date="191026")

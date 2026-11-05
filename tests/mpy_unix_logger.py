@@ -328,7 +328,7 @@ except Exception as e:
 check("status JSON parts are valid JSON", jd is not None
       and jd.get("satellites") and "uptime" in jd)
 check("JSON parts stream", not isinstance(gl._web_json_parts(gl._web_rows(), gl._sv_list()), list))
-check("UTC stamp", gl._stamp_at(1793256075)[0] == "2026-10-29T06:41:15Z")
+check("UTC stamp", gl._stamp_s(1793256075 - gl.EPOCH_DAYS * 86400)[0] == "2026-10-29T06:41:15Z")
 check("uptime counter", gl.uptime_s() >= 0)
 check("upload wait without holds", gl._upload_wait(time.ticks_ms()) == 0)
 
