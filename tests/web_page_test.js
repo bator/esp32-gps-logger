@@ -320,12 +320,12 @@ ft.timeline = c0.timeline(trips, 1, true);
 ft.timelineNone = [c0.timeline([], null, true), c0.timeline([], null, false)];
 // the places of the trips: the names, the queue
 ft.placeOf = [
-  {osm_key: "railway", osm_value: "station", name: "Budapest-Kelenföld", street: "Etele tér", city: "Budapest"},
-  {osm_key: "building", street: "Fűtőház utca", housenumber: "16", city: "Székesfehérvár"},
-  {osm_key: "amenity", name: "Gyógyszertár", street: "Balatoni út", city: "Budapest"},
-  {osm_key: "highway", name: "Fűtőház utca", city: "Székesfehérvár", district: "Víziváros"},
-  {osm_key: "landuse", name: "Temető", city: "Székesfehérvár", district: "Börgönd"},
-  {osm_key: "place", name: "X", city: "Budapest", district: "Budapest"},
+  {osm_key: "railway", osm_value: "station", name: "Nagyváros-Kelet", street: "Pálya tér", city: "Nagyváros"},
+  {osm_key: "building", street: "Fő utca", city: "Kisváros"},
+  {osm_key: "amenity", name: "Gyógyszertár", street: "Hosszú út", city: "Nagyváros"},
+  {osm_key: "highway", name: "Fő utca", city: "Kisváros", district: "Óváros"},
+  {osm_key: "landuse", name: "Temető", city: "Kisváros", district: "Szélső"},
+  {osm_key: "place", name: "X", city: "Nagyváros", district: "Nagyváros"},
   {osm_key: "place", name: "X"}].map((x) => c0.placeOf({features: [{properties: x}]})).concat(c0.placeOf({features: []}));
 ft.placeLine = c0.timeline(trips, 1, true, [["A <b>", "B"], ["", "C"]]);
 ft.placeSame = c0.timeline(trips, 1, true, [["", ""], ["", ""]]) === ft.timeline;

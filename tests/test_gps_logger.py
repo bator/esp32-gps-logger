@@ -13315,9 +13315,9 @@ else:
           repr((ft.get("trips"), ft.get("timeline"))))
     check("PAGE-PLACE-NAME: a station by its name, else city and street (no number, no shop's "
           "name), a road's own name, the district; a name once; nothing named: empty",
-          ft.get("placeOf") == ["Budapest-Kelenföld", "Székesfehérvár, Fűtőház utca",
-                                "Budapest, Balatoni út", "Székesfehérvár, Fűtőház utca",
-                                "Székesfehérvár, Börgönd", "Budapest", "", ""],
+          ft.get("placeOf") == ["Nagyváros-Kelet", "Kisváros, Fő utca",
+                                "Nagyváros, Hosszú út", "Kisváros, Fő utca",
+                                "Kisváros, Szélső", "Nagyváros", "", ""],
           repr(ft.get("placeOf")))
     _pl = ft.get("placeLine") or ""
     check("PAGE-PLACE-LINE: a known place over its line, escaped, the row taller; an unknown one "
