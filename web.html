@@ -238,6 +238,7 @@ details summary{cursor:pointer;font:600 10.5px "JetBrains Mono",monospace;letter
 .kpi{display:flex;gap:22px;font-family:"JetBrains Mono",monospace;margin-bottom:12px}.kpi b{font-size:22px;color:#fff}.kpi em{font-style:normal;font-size:11px;color:var(--m);margin-left:4px}
 .tr{display:grid;grid-template-columns:50px 18px 1fr;min-height:30px;font:12.5px "JetBrains Mono",monospace;line-height:16px}
 .tr time{color:#fff;font-weight:600}.tr span{color:var(--m);padding-left:8px}
+.tr.pl{min-height:46px}.tr strong{color:#fff;font:600 13px Inter,sans-serif}
 .tr i{position:relative}
 .tr i:before{content:"";position:absolute;left:4px;top:3px;width:10px;height:10px;border-radius:50%;box-sizing:border-box;background:var(--b);border:2px solid var(--m)}
 .tr i:after{content:"";position:absolute;left:8px;top:13px;bottom:-3px;border-left:2px dashed rgba(142,142,150,.45)}
@@ -1056,18 +1057,74 @@ function dur(ms) { var m = Math.round(ms / 60000); return m < 60 ? m + " min" : 
 // the timeline: a dot and a solid line per trip (distance, time, mean
 // speed), a hollow dot and a dashed line per stop; on: the trip shown on
 // the map (pure, for tests)
-function timeline(trips, on, past) {
+function timeline(trips, on, past, names) {
   if (!trips.length) return '<span class="hint">' + (past ? "NO TRIP THIS DAY" : "NO TRIP YET TODAY") + "</span>";
   var h = "";
+  // a place over its line, where one is known (names: tripPlaces); else as before
+  var pl = function (n, rest) { return n ? "<strong>" + esc(n) + "</strong>" + (rest ? "<br>" + rest : "") : rest; };
   for (var k = 0; k < trips.length; k++) {
-    var t = trips[k], ms = t.t1 - t.t0, v = ms > 0 ? t.km * 3600000 / ms : 0;
-    h += '<div class="tr go' + (k === on ? " on" : "") + '" onclick="hlTrip(' + k + ')"><time>' + hm(t.t0) + "</time><i></i><span><b>" +
-      t.km.toFixed(2) + " km</b> &middot; " + dur(ms) + " &middot; " + v.toFixed(0) + " km/h</span></div>";
+    var t = trips[k], ms = t.t1 - t.t0, v = ms > 0 ? t.km * 3600000 / ms : 0, n = names && names[k] || [];
+    h += '<div class="tr go' + (n[0] ? " pl" : "") + (k === on ? " on" : "") + '" onclick="hlTrip(' + k + ')"><time>' + hm(t.t0) + "</time><i></i><span>" +
+      pl(n[0], "<b>" + t.km.toFixed(2) + " km</b> &middot; " + dur(ms) + " &middot; " + v.toFixed(0) + " km/h") + "</span></div>";
     var nx = trips[k + 1];
-    h += '<div class="tr ' + (nx ? "st" : "end") + '"><time>' + hm(t.t1) + "</time><i></i><span>" +
-      (nx ? "stop " + dur(nx.t0 - t.t1) : "") + "</span></div>";
+    h += '<div class="tr ' + (nx ? "st" : "end") + (n[1] ? " pl" : "") + '"><time>' + hm(t.t1) + "</time><i></i><span>" +
+      pl(n[1], nx ? "stop " + dur(nx.t0 - t.t1) : "") + "</span></div>";
   }
   return h;
+}
+// Where the trips start and end: Photon's answer -> "City, Street", or a railway
+// station's name; "" when it names nothing (pure, for tests)
+function placeOf(j) {
+  var f = j && j.features && j.features[0], p = f && f.properties;
+  if (!p) return "";
+  if (p.osm_key === "railway") return p.name || "";
+  var s = p.street || (p.osm_key === "highway" && p.name) || p.district || p.locality || "";
+  return [p.city || p.county || "", s].filter(function (x, i, a) { return x && a.indexOf(x) === i; }).join(", ");
+}
+// A place is asked once, one at a time: a railway station within PLACE_KM of it,
+// else what is there. Kept by the nearest 0.001 degree (about 100 m) while the page
+// is open, so a day shown again asks nothing. Unreachable, as away from the internet:
+// no name, the line as it was, a new try after PLACE_WAIT.
+var PLACE_KM = .15, PLACE_WAIT = 60000, PLACE_MAX = 400;
+var places = {}, placeQ = [], placeBusy = false, placeOff = 0;
+function placeKey(p) { return p[1].toFixed(3) + "," + p[2].toFixed(3); }
+// each trip's [from, to] as known, the unknown ones queued. A trip still going has
+// no end yet: its last point moves, and asking for it would ask all the way (open)
+function tripPlaces(trips, pts, open) {
+  var one = function (i) {
+    var p = pts[i], k = placeKey(p);
+    if (k in places) return places[k];
+    for (var q = 0; q < placeQ.length; q++) if (placeQ[q].k === k) return "";
+    placeQ.push({k: k, lat: p[1], lon: p[2], any: false});
+    return "";
+  };
+  return trips.map(function (t, n) { return [one(t.i0), open && n === trips.length - 1 ? "" : one(t.i1)]; });
+}
+function placeGot(q, name) {
+  placeQ.shift();
+  if (Object.keys(places).length >= PLACE_MAX) places = {};
+  places[q.k] = name;
+  tpKey = "";
+  trackPaint();
+}
+function placeNext() {
+  if (placeBusy || !placeQ.length || Date.now() < placeOff) return;
+  var q = placeQ[0], x = new XMLHttpRequest();
+  var failed = function () { placeBusy = false; placeOff = Date.now() + PLACE_WAIT; };
+  placeBusy = true;
+  x.open("GET", ADDR + "?lat=" + q.lat.toFixed(5) + "&lon=" + q.lon.toFixed(5) + "&limit=1" +
+    (q.any ? "" : "&radius=" + PLACE_KM + "&osm_tag=railway:station"), true);
+  x.timeout = 8000;
+  x.onload = function () {
+    if (x.status !== 200) return failed();
+    var n = "";
+    try { n = placeOf(JSON.parse(x.responseText)); } catch (e) { return failed(); }
+    placeBusy = false;
+    if (n || q.any) placeGot(q, n); else q.any = true;
+    placeNext();
+  };
+  x.onerror = x.ontimeout = failed;
+  x.send();
 }
 function kpis(trips) {
   var km = 0, ms = 0;
@@ -1241,7 +1298,10 @@ function trackPaint() {
   for (var j = 0; j < hist.trips.length; j++) km += hist.trips[j].km;
   document.getElementById("day").innerHTML = hist.trips.length ? "<em>" + (hist.past ? dayName() : "TODAY") + " </em>" +
     km.toFixed(2) + " KM" : "";
-  paint({tkpi: kpis(hist.trips), tline: timeline(hist.trips, hist.hl, hist.past)});
+  var tn = hist.trips.length, tl = tn && hist.trips[tn - 1];
+  paint({tkpi: kpis(hist.trips), tline: timeline(hist.trips, hist.hl, hist.past,
+    tripPlaces(hist.trips, hist.pts, tl && !hist.past && Date.now() - tl.t1 <= GAP_MS))});
+  placeNext();
   navPaint();
   document.getElementById("gpx").disabled = !hist.pts.length;
 }

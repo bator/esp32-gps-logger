@@ -664,7 +664,11 @@ to fill the column next to *Systems*; signal bars and *Systems* on the right):
   step through today and the days the board keeps. On top the km, the
   moving time and the trips; below, a dot and a solid line per trip (start
   time, km, duration, mean km/h) and a hollow dot and a dashed line per stop
-  (its length). A trip is a run of points without a gap over 5 min that
+  (its length). Over each line the place where it starts or ends, from Atlas'
+  Photon, as for the position (a railway station within 150 m, else city and
+  street, once a place, kept while the page is open); no answer, as offline:
+  the line alone. A trip still going has no end place yet. A trip is a run of
+  points without a gap over 5 min that
   covers 100 m at least; a few fixes while standing belong to the stop. A
   trip clicked is drawn white on the map, which zooms to it (clicked again:
   the whole day). `GPX` saves the shown day as GPX 1.1 (built in the

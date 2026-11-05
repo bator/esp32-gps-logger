@@ -318,6 +318,63 @@ const trips = c0.tripsOf(tp);
 ft.trips = trips.map((t) => [t.i0, t.i1, (t.t0 - d0) / 60000, (t.t1 - d0) / 60000, Math.round(t.km * 100) / 100]);
 ft.timeline = c0.timeline(trips, 1, true);
 ft.timelineNone = [c0.timeline([], null, true), c0.timeline([], null, false)];
+// the places of the trips: the names, the queue
+ft.placeOf = [
+  {osm_key: "railway", osm_value: "station", name: "Budapest-Kelenföld", street: "Etele tér", city: "Budapest"},
+  {osm_key: "building", street: "Fűtőház utca", housenumber: "16", city: "Székesfehérvár"},
+  {osm_key: "amenity", name: "Gyógyszertár", street: "Balatoni út", city: "Budapest"},
+  {osm_key: "highway", name: "Fűtőház utca", city: "Székesfehérvár", district: "Víziváros"},
+  {osm_key: "landuse", name: "Temető", city: "Székesfehérvár", district: "Börgönd"},
+  {osm_key: "place", name: "X", city: "Budapest", district: "Budapest"},
+  {osm_key: "place", name: "X"}].map((x) => c0.placeOf({features: [{properties: x}]})).concat(c0.placeOf({features: []}));
+ft.placeLine = c0.timeline(trips, 1, true, [["A <b>", "B"], ["", "C"]]);
+ft.placeSame = c0.timeline(trips, 1, true, [["", ""], ["", ""]]) === ft.timeline;
+ft.placeQ = (() => {
+  const q = page(1600), c = q.c, urls = () => q.xhrs.filter((x) => x.url.indexOf(c.ADDR) === 0);
+  const answer = (x, props) => {
+    x.status = 200;
+    x.responseText = JSON.stringify({features: props ? [{properties: props}] : []});
+    x.onload();
+  };
+  const pts = [[0, 47.00001, 18, 100], [60000, 47.1, 18, 100], [120000, 47.10002, 18, 100], [180000, 47.5, 18, 100]];
+  const tr = [{i0: 0, i1: 1}, {i0: 2, i1: 3}];
+  const out = {};
+  out.first = c.tripPlaces(tr, pts, true);
+  out.queued = c.placeQ.map((x) => x.k);       // the open trip's end not; 47.1 once
+  c.placeNext();
+  c.placeNext();                               // one at a time
+  out.oneAtATime = urls().length;
+  out.url0 = urls()[0].url;
+  answer(urls()[0], null);                     // no station: asks for what is there
+  out.url1 = urls()[1].url;
+  answer(urls()[1], {osm_key: "building", street: "S", city: "C"});
+  out.url2 = urls()[2].url;
+  answer(urls()[2], {osm_key: "railway", name: "St"});  // a station: nothing more
+  out.after = [urls().length, c.placeQ.length, c.places["47.000,18.000"], c.places["47.100,18.000"]];
+  out.known = c.tripPlaces(tr, pts, true);
+  c.placeNext();
+  out.again = urls().length;                   // known: asks nothing
+  c.tripPlaces(tr, pts, false);                // the trip over: its end asked now
+  c.placeNext();
+  const x3 = urls()[3];
+  const t0 = c.Date ? 0 : Date.now();
+  x3.onerror();                                // away: no name, waits
+  out.failed = [c.placeBusy, c.placeQ.length, c.placeOff > t0];
+  c.placeNext();
+  out.waits = urls().length;
+  c.placeOff = 0;
+  c.placeNext();
+  urls()[4].status = 500;
+  urls()[4].onload();
+  out.http500 = [c.placeQ.length, c.placeOff > 0];
+  c.placeOff = 0;
+  c.placeNext();
+  answer(urls()[5], null);
+  c.placeNext();
+  answer(urls()[6], null);                     // names nothing: not asked again
+  out.none = [c.places["47.500,18.000"], c.placeQ.length];
+  return out;
+})();
 ft.kpis = c0.kpis(trips);
 ft.kpisLong = c0.kpis([{t0: 0, t1: 4500000, km: 12.345}]);
 ft.gpx = c0.gpxText([[Date.UTC(2026, 9, 30, 8, 0, 0), 47.1, 18.4, 120.5, 5], [Date.UTC(2026, 9, 30, 8, 0, 1), 47.2, 18.5, null, null],
