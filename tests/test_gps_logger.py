@@ -11334,6 +11334,30 @@ check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
       and limits and all(0 < n_ <= 256 for n_ in limits),
       "%r %r" % (r_long, limits[:4]))
 
+# HEAD-NAMES: each header in its own place, any case; HEAD-LINES: an endless
+# head is read HTTP_LINES times at most, what comes later is not looked at
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+try:
+    rv_sock[0] = RvSock(b"HTTP/1.1 200 OK\r\nCONTENT-type: text/HTML\r\n"
+                        b"Server: x\r\nretry-AFTER: 7\r\n\r\n", polls=0)
+    r_names = gl._raw_post("https://d.example", b"{}", {}, 15)
+    rv_sock[0] = RvSock(b"HTTP/1.1 200 OK\r\n"
+                        + b"X-Pad: y\r\n" * (gl.HTTP_LINES + 20)
+                        + b"Retry-After: 7\r\n\r\n", polls=0)
+    r_lines = gl._raw_post("https://d.example", b"{}", {}, 15)
+    n_lines = len(rv_sock[0].limits)
+finally:
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    tls_ctx_reset()
+check("HEAD-NAMES: _raw_post gives Retry-After and Content-Type by name, any case",
+      r_names == (200, b"7", b"text/HTML"), repr(r_names))
+check("HEAD-LINES: a head over HTTP_LINES lines stops there, the 200 stands",
+      r_lines == (200, None, None) and n_lines == gl.HTTP_LINES + 1,
+      "%r %d" % (r_lines, n_lines))
+
 # HOST-PORT: the Host header names a port that is not the scheme's default
 # (RFC 7230 5.4: a proxy or virtual host on :8443 routes by it)
 gl.socket, gl.select = fake_sockmod, fake_sel
