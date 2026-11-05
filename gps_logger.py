@@ -4605,7 +4605,7 @@ def _rm_done(path):
     try:
         os.remove(path)
     except OSError as e:
-        if e.args and e.args[0] == 2:    # ENOENT
+        if _enoent(e):
             return
         errs = up["rm_err"]
         errs[path] = errs.get(path, 0) + 1
@@ -5120,24 +5120,22 @@ def count_points():
             gc.collect()
     return total
 
-def pending():
-    """Finished track files, oldest first (names are YYYYMMDD_HHMMSS).
-    Sidecars (.pos) and quarantined (.bad) files are not listed."""
+def _ls(ends):
+    """The paths with these endings, oldest first (YYYYMMDD_HHMMSS)."""
     try:
-        names = sorted(n for n in os.listdir(LOG_DIR)
-                       if n.endswith(_TRACKS))
-    except OSError:
-        return []
-    return [p for p in (LOG_DIR + "/" + n for n in names) if p != log["file"]]
-
-def pending_bad():
-    """Rejected-batch files left for later recovery."""
-    try:
-        names = sorted(n for n in os.listdir(LOG_DIR)
-                       if n.endswith(_BADS))
+        names = sorted(n for n in os.listdir(LOG_DIR) if n.endswith(ends))
     except OSError:
         return []
     return [LOG_DIR + "/" + n for n in names]
+
+def pending():
+    """Finished track files. Sidecars (.pos) and quarantined (.bad) files
+    are not listed."""
+    return [p for p in _ls(_TRACKS) if p != log["file"]]
+
+def pending_bad():
+    """Rejected-batch files left for later recovery."""
+    return _ls(_BADS)
 
 def _ymd_ok(y, mo, d, hh, mi, ss):
     """A real UTC time in 2020-2099 (the ranges _kb_time checks, without
@@ -6241,7 +6239,8 @@ def upload_tick():
     if not _bad_full_left():
         up["state"] = "sending"
     read_uart()                          # drain NMEA before blocking
-    if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
+    fast = CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ
+    if fast:
         _set_freq(CPU_MHZ_UPLOAD)        # TLS handshake at full speed
     t_post = time.ticks_ms()
     try:
@@ -6253,7 +6252,7 @@ def upload_tick():
         _tls_reboot()
         return
     finally:
-        if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
+        if fast:
             _set_freq(CPU_MHZ)
         _heap_note("post")
     read_uart()                          # catch up after a multi-second POST
