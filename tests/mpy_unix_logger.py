@@ -87,6 +87,8 @@ import gps_logger as gl                 # noqa: E402
 gl.DIAG = 0                             # never write the host's /diag.log
 gl.LOG_DIR = "/nonexistent-gps-logger-smoke"
 gl.HIST_DIR = "/nonexistent-gps-logger-smoke-hist"
+if 1.0 + 1e-12 != 1.0:                  # a double build: the board's single
+    gl._RF = gl.array("d", bytes(8 * 3 * gl.STILL_DEP_MAX))  # keeps its digits
 gl.reset()
 gl.log_reset()
 gl.wifi_reset()

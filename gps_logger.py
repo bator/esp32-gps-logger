@@ -3226,17 +3226,14 @@ log = {}
 # the elevation and HDOP fields as the track line writes them (_fields: 8 and 4
 # bytes, space padded). A rebuilt line is the line _sample_line would have
 # written, rounding included: on the board a float is single
-# precision, the very value an array("f") keeps; a double (a test host)
-# takes three single floats, each what the ones before rounded off, which
-# add up to it exactly. The track lines are rebuilt on leaving. As tuples of
+# precision, the very value an array("f") keeps (a test host on doubles swaps
+# in an array("d")). The track lines are rebuilt on leaving. As tuples of
 # the line, its time and the position they took ~225 B a sample on the
 # board: 90 of them grew the heap to 116 of 124 kB and left no block over
 # 2 kB, so the next larger allocation took the heap mbedTLS needs.
 from array import array
-_NP = 1 if 1.0 + 1e-12 == 1.0 else 3     # floats a coordinate takes
-_RW = 2 * _NP + 1                        # floats a sample takes (d last)
 _RT = array("i", bytes(4 * STILL_DEP_MAX))         # (zeros, 4 B each:
-_RF = array("f", bytes(4 * _RW * STILL_DEP_MAX))   # a raw initialiser)
+_RF = array("f", bytes(4 * 3 * STILL_DEP_MAX))     # a raw initialiser)
 RE_W = 12                                # ele 8, hdop 4
 _RE = bytearray(RE_W * STILL_DEP_MAX)
 _RPAD = b" " * RE_W                      # an empty _RE entry
@@ -4336,11 +4333,10 @@ def _ring_add(sl, now, pos, d):
     cap = len(_RT)
     n, i = sl["rn"], sl["ri"]
     if n:
-        k = _RW * ((i + n - 1) % cap)
-        if d + STILL_TOL < _RF[k + _RW - 1]:
+        k = 3 * ((i + n - 1) % cap)
+        if d + STILL_TOL < _RF[k + 2]:
             n = 0
-        elif _dist(_ring_deg(k), _ring_deg(k + _NP),
-                   pos[0], pos[1]) <= STILL_DEP_STEP:
+        elif _dist(_RF[k], _RF[k + 1], pos[0], pos[1]) <= STILL_DEP_STEP:
             return
     if not n:
         sl["rt0"], i = s, 0
@@ -4352,10 +4348,10 @@ def _ring_add(sl, now, pos, d):
     sl["rn"], sl["ri"] = n, i
     _RT[j] = s - sl["rt0"]               # (seconds since 2020 overflowed it
                                          # from 2088 on: see _sample)
-    k = _RW * j
-    _ring_put(k, pos[0])
-    _ring_put(k + _NP, pos[1])
-    _RF[k + _RW - 1] = d
+    k = 3 * j
+    _RF[k] = pos[0]
+    _RF[k + 1] = pos[1]
+    _RF[k + 2] = d
     k = RE_W * j
     _RE[k:k + RE_W] = _RPAD
     o = 0
@@ -4363,25 +4359,6 @@ def _ring_add(sl, now, pos, d):
         if len(x) <= w:                  # (beyond 99999.9 m: none)
             _RE[k + o:k + o + len(x)] = x.encode()
         o += w
-
-def _ring_put(k, v):
-    """Keep coordinate v in _RF from k on (see _NP)."""
-    m = k + _NP
-    while k < m:
-        _RF[k] = v
-        v -= _RF[k]                      # (what single precision lost)
-        k += 1
-
-def _ring_deg(k):
-    """A coordinate kept in the departure ring from _RF[k] on (_NP floats,
-    added up largest first: exact)."""
-    v = _RF[k]
-    m = k + _NP
-    k += 1
-    while k < m:
-        v += _RF[k]
-        k += 1
-    return v
 
 def _still_leave(wifi_seen=False):
     """End the stay and write the way out: the samples in the departure
@@ -4394,14 +4371,14 @@ def _still_leave(wifi_seen=False):
     n, i0, cap = sl["rn"], sl["ri"], len(_RT)
     _rt_trip(sl["rt0"] + _RT[i0] if n else None)
     if (wifi_seen and n
-            and _RF[_RW * ((i0 + n - 1) % cap) + _RW - 1] <= STILL_NEAR):
+            and _RF[3 * ((i0 + n - 1) % cap) + 2] <= STILL_NEAR):
         n = 0
     i = 0
     prev = None
     while i < n:
         j = (i0 + i) % cap
         i += 1
-        p = (_ring_deg(_RW * j), _ring_deg(_RW * j + _NP))
+        p = (_RF[3 * j], _RF[3 * j + 1])
         t, tc = _stamp_s(sl["rt0"] + _RT[j])
         # only what comes after the last line (an anchor point may have
         # been written while the way out began), so the track stays in order

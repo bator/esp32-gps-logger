@@ -2,6 +2,7 @@
 """CPython harness for gps_logger upload / crash / WiFi logic. Not deployed."""
 from __future__ import print_function
 
+import array
 import builtins
 import calendar
 import gc as real_gc
@@ -621,6 +622,9 @@ def _reload_logger():
     m.HIST_DIR = os.path.join(diag_dir, "hist")         # (day history)
     m.HOME_APS_FILE = None               # tests that keep BSSIDs set a path
     m.WEB = False                        # radio-sleep tests; WEB has its own
+    # a double keeps its digits in the departure ring, as the board's single
+    # does in array("f")
+    m._RF = array.array("d", bytes(8 * 3 * m.STILL_DEP_MAX))
     m.HTTP_POST = lambda url, data, headers, timeout: _post(
         url, data=data, headers=headers, timeout=timeout)
     return m
