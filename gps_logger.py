@@ -1844,7 +1844,7 @@ def _mark_failed(ssid, why=""):
             wifi["hid_wait"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
             wifi["hid_at"] = now
             b = wifi["blank_bssid"]
-            if (b is not None and b not in (wifi["home_aps"])
+            if (b is not None and b not in wifi["home_aps"]
                     and not _blank_bad(b, now)):
                 bad = [x for x in wifi["blank_bad"]
                        if _age(now, x[1]) < BLANK_BAD_HOLD]
@@ -2835,7 +2835,7 @@ def wifi_tick():
             if not wifi["home"] and _has_home():
                 spd = st.get("speed")
                 moving = (has_fix(now) and spd is not None and spd >= 5
-                          and not (log["still"]).get("active"))
+                          and not log["still"]["active"])
                 if moving:
                     wifi["moved_at"] = now
                     arrival = False
@@ -2878,8 +2878,7 @@ def wifi_tick():
                                                     wifi["rssi"]))
         # a stay that began at home stays a home stay while the link is
         # down (a router restart): at_home() reads sleep_home off-line
-        wifi["sleep_home"] = bool(wifi["home"] and (log["still"]
-                                                        or {}).get("active"))
+        wifi["sleep_home"] = bool(wifi["home"] and log["still"]["active"])
         wifi["home"] = False
         wifi["ip"] = wifi["rssi"] = None
         wifi["try_at"] = now
@@ -5812,10 +5811,9 @@ def _guard_stop():
 _post_phase = [None]                     # "connect", "tls", "http" in a POST,
                                          # "ctx" while the SSLContext is made
 
-def _http_open(method, url, guard_ms):
-    """The start of an HTTP/1.0 request, no redirects: a socket for url's host
-    with the guard armed on it (closing the raw socket fails a TLS call stuck
-    on it). -> (socket, its address, https?, host, the request's first lines).
+def _http_open(method, url):
+    """The start of an HTTP/1.0 request, no redirects: a socket for url's
+    host. -> (socket, its address, https?, host, the request's first lines).
     The Host header: host:port unless it is the scheme's default port (RFC
     7230 5.4; a proxy on :8443 routes by it)."""
     proto, _, rest = url.partition("://")
@@ -5824,11 +5822,11 @@ def _http_open(method, url, guard_ms):
     if ":" in host:
         host, _, p = host.rpartition(":")
         port = int(p)
-    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
-    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
-    _guard_start(s, guard_ms)
-    return s, ai[-1], proto == "https", host, "%s /%s HTTP/1.0\r\nHost: %s\r\n" % (
+    head = "%s /%s HTTP/1.0\r\nHost: %s\r\n" % (
         method, path, host if port == dflt else "%s:%d" % (host, port))
+    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
+    return (socket.socket(ai[0], socket.SOCK_STREAM, ai[2]), ai[-1],
+            proto == "https", host, head)
 
 def _http_head(s, want, got):
     """Read an answer's headers, in bounded pieces (a long header comes in
@@ -5862,8 +5860,9 @@ def _raw_post(url, data, headers, timeout):
     code, Retry-After, Content-Type), the two headers bytes, None when not
     sent."""
     _post_phase[0] = "connect"
-    s, addr, https, host, hdr = _http_open("POST", url, HTTP_MAX)
-    try:
+    s, addr, https, host, hdr = _http_open("POST", url)
+    _guard_start(s, HTTP_MAX)            # the raw socket: closing it fails
+    try:                                 # a TLS call stuck on it
         s.settimeout(timeout)
         s.connect(addr)
         if https:
@@ -6122,7 +6121,7 @@ def upload_tick():
     files = _due(files, held, now)
     if not files and up["allow_bad"]:
         files = _due([p for p in pending_bad()
-                      if (up["bad_try"]).get(p, 0) < MAX_BAD_RETRY],
+                      if up["bad_try"].get(p, 0) < MAX_BAD_RETRY],
                      held, now)
     if not files:
         if _bad_full_left():
@@ -6521,7 +6520,8 @@ def _raw_get(url, sink, limit):
     in pieces, the UART read and the WDT fed between, at most limit bytes
     (more: ValueError). The guard closes the socket after OTA_MAX. -> the
     status code (sink only gets a 200's body)."""
-    s, addr, https, host, hdr = _http_open("GET", url, OTA_MAX)
+    s, addr, https, host, hdr = _http_open("GET", url)
+    _guard_start(s, OTA_MAX)
     try:
         s.settimeout(HTTP_TIMEOUT)
         s.connect(addr)
