@@ -319,6 +319,10 @@ TICKS_CAP = 86400000                     # ms after which gps_check forgets
                                          # a receiver timestamp (it would
                                          # read as fresh again after 2**30)
 
+def _recent(now, t, ms):
+    """t (ticks, or None: never) is under ms old."""
+    return t is not None and _age(now, t) < ms
+
 def _age(now, t):
     """ms since ticks t. A timestamp taken just after now (say read_uart()
     ran between the two ticks_ms() calls) is age 0; a wrapped (large
@@ -484,7 +488,7 @@ def _publish():
     st["alt"] = alt[0] / alt[1] if alt[1] else None
     if hd[1]:
         st["hdop"], st["hdop_at"] = hd[0] / hd[1], now
-    elif st["hdop_at"] is None or _age(now, st["hdop_at"]) >= STALE:
+    elif not _recent(now, st["hdop_at"], STALE):
         st["hdop"], st["hdop_at"] = None, now
     # (a second without a GGA HDOP, RMC only: the last one and its stamp
     # are kept, _fresh_hdop holds them STALE ms: an unknown HDOP passes
@@ -568,7 +572,7 @@ def gsa(talker, f):
     gps_check sets it up again."""
     st["fixtype"] = _num(f[2], int)
     now = time.ticks_ms()
-    if st["gsa_at"] is None or _age(now, st["gsa_at"]) >= 1000:
+    if not _recent(now, st["gsa_at"], 1000):
         st["gsa_at"], st["gsa_n"] = now, 0
     st["gsa_n"] += 1
     if st["gsa_n"] == GSA_MAX + 1:
@@ -740,8 +744,7 @@ def _uc_setup():
                 mask = "h%X" % UC_SYS
                 r = _uc_cmd("CFGSYS," + mask)
                 if r is True:            # it restarts: the setup comes back
-                    print("gps systems", mask)
-                    _diag_write("gps systems " + mask)
+                    _say("gps systems " + mask)
                     return True
                 if r is None:            # refused: its own stay, and the rest
                     print("gps refused", mask)
@@ -753,8 +756,7 @@ def _uc_setup():
             if r is False:
                 return False
             if r is None:
-                print("gps refused", cmd)
-                _diag_write("gps refused " + cmd)
+                _say("gps refused " + cmd)
                 if cmd.startswith("CFGNAV"):
                     st["rate_nak"] = True
         feed()
@@ -802,7 +804,7 @@ def _uc_gsa(f):
     round every second by the clock cut one in two (11 seen, 6 in use)."""
     u = _uc_sv
     now = time.ticks_ms()
-    if u["gsa"] is None or _age(now, u["gsa"]) >= UC_GSA_GAP:
+    if not _recent(now, u["gsa"], UC_GSA_GAP):
         u["used"] = []
     u["gsa"] = now
     g = _UC_SYS.get(_num(f[-1], int))
@@ -917,7 +919,7 @@ def _not_taken(now, why):
     """A diag line for a setup that was not taken, one per GPS_NOT_TAKEN_SAY
     (the ones between counted): a session left at 1 Hz leaves a trace."""
     said = st["nt_said"]
-    if said is not None and _age(now, said) < GPS_NOT_TAKEN_SAY:
+    if _recent(now, said, GPS_NOT_TAKEN_SAY):
         st["nt_more"] += 1
         return
     more = st["nt_more"]
@@ -963,7 +965,7 @@ def _gps_mute(now):
             st["mute_at"] = at
             _diag_write("gps silent %d s, no bytes from the receiver"
                         % (_age(now, at) // 1000))
-    elif rx is not None and _age(now, rx) < GPS_SILENT:
+    elif _recent(now, rx, GPS_SILENT):
         st["mute_at"] = None
         _diag_write("gps back after %d s" % (_age(rx, m) // 1000))
 
@@ -994,14 +996,14 @@ def _uc_watch(now):
     if st["setup_ok"] is not True or at is None or st["extra"]:
         return
     g = st["gst_at"]
-    if _age(now, at) < UC_GST_LOST or (g is not None and _age(now, g) < UC_GST_LOST):
+    if _age(now, at) < UC_GST_LOST or _recent(now, g, UC_GST_LOST):
         return
-    if st["rx"] is None or _age(now, st["rx"]) >= NO_DATA:
+    if not _recent(now, st["rx"], NO_DATA):
         return                           # silent: _gps_mute's case
     st["extra"] = 1                      # (its usual backoff, under a minute)
     print("gps setup lost: no GST")
     said = st["gst_said"]
-    if said is None or _age(now, said) >= GPS_NOT_TAKEN_SAY:
+    if not _recent(now, said, GPS_NOT_TAKEN_SAY):
         st["gst_said"] = now
         _diag_write("gps setup lost: no GST")
 
@@ -1022,7 +1024,7 @@ def gps_check(now):
     b = st["boot_at"]
     quiet = GPS_STORM_QUIET
     t = st["storm_at"]
-    if t is not None and _age(now, t) < GPS_FLAP_WINDOW:
+    if _recent(now, t, GPS_FLAP_WINDOW):
         # in a storm, quiet means twice its last gap between restarts (up
         # to GPS_STORM_WAIT): restarts 12 s apart each got a setup, 54 in
         # 10 min, over a third of the loop blocked
@@ -1065,7 +1067,7 @@ def _set_freq(mhz):
         return
     if mhz in _freq_bad:
         at = _freq_bad_at[0]
-        if at is not None and _age(time.ticks_ms(), at) < FREQ_RETRY:
+        if _recent(time.ticks_ms(), at, FREQ_RETRY):
             return
         del _freq_bad[:]                 # all of them get a new chance
     for _ in range(FREQ_TRIES):
@@ -1313,8 +1315,7 @@ def _heap_note(phase):
         k0, k = _heap_kb[0], py_heap()[1]
         _heap_kb[0] = k
         if k0 is not None and k >= k0 + 2:
-            print("heap grew in %s to %d KB" % (phase, k))
-            _diag_write("heap grew in %s to %d KB" % (phase, k))
+            _say("heap grew in %s to %d KB" % (phase, k))
     except Exception:                    # MemoryError: a note never fails
         pass                             # the upload
 
@@ -1529,32 +1530,14 @@ def _boot_ok():
 def _boot_fail_bump():
     n = 0
     try:
-        m = machine.RTC().memory()
-        if m:
-            if isinstance(m, bytes):
-                m = m.split(b"\x00", 1)[0].split(b"\n", 1)[0].decode()
-            s = str(m).strip()
-            for c in s:
-                if c < "0" or c > "9":
-                    break
-                n = n * 10 + (ord(c) - 48)
+        for c in machine.RTC().memory():
+            if not 48 <= c <= 57:
+                break
+            n = n * 10 + c - 48
+        n += 1
+        machine.RTC().memory(b"%d" % n)
     except Exception:
-        try:
-            with open("/boot_fail") as f:
-                n = int(f.read().strip() or "0")
-        except Exception:
-            n = 0
-    n += 1
-    raw = ("%d" % n).encode()
-    try:
-        machine.RTC().memory(raw)
-    except Exception:
-        try:
-            f = open("/boot_fail", "w")
-            f.write("%d" % n)
-            f.close()
-        except Exception:
-            pass
+        pass
     return n
 
 def feed():
@@ -1730,9 +1713,9 @@ def _static_ip(env, keys):
         print("static ip", dk, "invalid - using", gk)
     return (ip, mask or "255.255.255.0", gw, dns or gw)
 
-def _env_warn(line):
-    """A .env mistake, on the console and in the diag log. Key names only:
-    an SSID or a password never goes into either."""
+def _say(line):
+    """On the console and in the diag log: a .env mistake (key names only: an
+    SSID or a password never goes into either), a GPS or heap note."""
     print(line)
     _diag_write(line)
 
@@ -1754,12 +1737,12 @@ def _load_nets(env):
             continue
         sb = s if isinstance(s, bytes) else s.encode()
         if sb in seen:
-            _env_warn("env %s: an SSID already set above, ignored" % sk)
+            _say("env %s: an SSID already set above, ignored" % sk)
             continue
         seen.append(sb)
         p = env.get(pk)
         if p is not None and not p:
-            _env_warn("env %s empty: %s is tried as an open network"
+            _say("env %s empty: %s is tried as an open network"
                       % (pk, sk))
         home = not x                     # (the first network by default)
         t = _truthy(env.get(hk2))
@@ -1780,7 +1763,7 @@ def _load_nets(env):
         nets.append(n)
     for k in env:
         if k[:4] in ("SSID", "WPA2") and k not in known:
-            _env_warn("env %s ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, "
+            _say("env %s ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, "
                       "WPA2_3 only)" % k)
     return nets
 
@@ -1823,7 +1806,7 @@ def _rssi(w):
 
 def _recently_failed(ssid, now):
     t = wifi["failed"].get(ssid)
-    return t is not None and _age(now, t) < FAIL_HOLD
+    return _recent(now, t, FAIL_HOLD)
 
 def _wifi_diag(kind, line):
     """A WiFi event in the diag log (a drop and why the reconnects failed
@@ -1832,7 +1815,7 @@ def _wifi_diag(kind, line):
     now = time.ticks_ms()
     at, more = wifi["diag_at"], wifi["diag_more"]
     t = at.get(kind)
-    if t is not None and _age(now, t) < WIFI_DIAG_GAP:
+    if _recent(now, t, WIFI_DIAG_GAP):
         more[kind] = more.get(kind, 0) + 1
         return
     n = more.pop(kind, 0)
@@ -2013,7 +1996,7 @@ def _home_veto(now, sl):
     home stay and uploaded 80 drift points). After a veto, departures wait
     STILL_HOME_HOLD before the next check."""
     at = sl.get("veto_at")
-    if at is not None and _age(now, at) < STILL_HOME_HOLD:
+    if _recent(now, at, STILL_HOME_HOLD):
         return True
     if home_in_range():
         sl["veto_at"] = now
@@ -2181,7 +2164,7 @@ def _hidden_home_target(now, arrival=False):
     if not _blank_home_ok():
         return None
     at = wifi["hid_at"]
-    if at is not None and _age(now, at) < (wifi["hid_wait"]):
+    if _recent(now, at, wifi["hid_wait"]):
         return None                      # a hidden-home roam failed lately
     for n in wifi["nets"]:
         if (n.get("home") and n.get("hidden")
@@ -2427,7 +2410,7 @@ def _web_search(now):
         if r is None or r >= SEEN_MIN_RSSI:
             return False                 # _home_seen wakes it
     at = wifi["down_at"]
-    return at is not None and _age(now, at) < WEB_SEARCH
+    return _recent(now, at, WEB_SEARCH)
 
 def _home_seeable(ssid=None):
     """A keep-alive scan can see home come back (_home_seen): for the home
@@ -2762,7 +2745,7 @@ def _home_seen(aps):
         return
     now = time.ticks_ms()
     at = wifi["seen_at"]
-    if at is not None and _age(now, at) < wifi["seen_wait"]:
+    if _recent(now, at, wifi["seen_wait"]):
         return
     wifi["seen_at"] = now
     wifi["seen_wait"] = min(wifi["seen_wait"] * 2, WIFI_BACKOFF_MAX)
@@ -3506,7 +3489,7 @@ def _werr(what, e=None):
     try:
         now = time.ticks_ms()
         at = log["err_at"]
-        if at is None or _age(now, at) >= WERR_EVERY:
+        if not _recent(now, at, WERR_EVERY):
             log["err_at"] = now
             _diag_write("track %s error %d %r %s" % (
                 what, log["err"], e, (log["file"] or "-")[-19:]))
@@ -3722,7 +3705,7 @@ def _fresh_std(now):
     None. Only this second's left 4 of 5 seconds unfiltered at 1 Hz (GST
     comes once per 5 epochs) and every second whose GST was lost."""
     std, at = st.get("std"), st.get("std_at")
-    if std is None or at is None or _age(now, at) >= GST_HOLD:
+    if std is None or not _recent(now, at, GST_HOLD):
         return None
     return std
 
@@ -3786,8 +3769,7 @@ def _time_back(t, lt):
     q = log["seg_tc"]
     while q and (q[-1] is None or q[-1] > tc):
         q.pop()
-    print("time back", lt, t)
-    _diag_write("time back %s %s" % (lt, t))
+    _say("time back %s %s" % (lt, t))
     log.update(last_t=None, prev=None, back=0)
     _seg_break()
 
@@ -4072,12 +4054,12 @@ def _still_beat(now):
             and wifi["state"] == "connected"
             and _age(now, sl["file_at"]) >= STILL_FILE):
         _still_close(now)
-    if sl["hb_at"] is not None and _age(now, sl["hb_at"]) < STILL_HEARTBEAT:
+    if _recent(now, sl["hb_at"], STILL_HEARTBEAT):
         return
-    if (sl["last_at"] is not None and _age(now, sl["last_at"]) < STILL_GAP
+    if (_recent(now, sl["last_at"], STILL_GAP)
             and sl["last_d"] > STILL_NEAR):
         return
-    if (sl["far_at"] is not None and _age(now, sl["far_at"]) < STILL_BACK
+    if (_recent(now, sl["far_at"], STILL_BACK)
             and sl["hb_at"] is not None
             and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT):
         return
@@ -4487,7 +4469,7 @@ def log_tick():
             # not from when space returns
             log["fix"], log["lost_at"] = False, now
         last = log["full_check"]
-        if last is not None and _age(now, last) < FULL_CHECK:
+        if _recent(now, last, FULL_CHECK):
             return
         log["full_check"] = now
         room = free()
@@ -5178,12 +5160,6 @@ def pending_bad():
         return []
     return [LOG_DIR + "/" + n for n in names]
 
-def _finite(x):
-    try:
-        return math.isfinite(x)
-    except AttributeError:
-        return x == x and x != float("inf") and x != float("-inf")
-
 def _ymd_ok(y, mo, d, hh, mi, ss):
     """A real UTC time in 2020-2099 (the ranges _kb_time checks, without
     its FIX_S_END bound): month 13 or hour 25 went up as they were."""
@@ -5281,7 +5257,7 @@ def _trk_field(i, a, b, fmt, imax):
     v = _fnum(a, b)
     if v is None:
         return 0 if _utf8(a, b) else -1
-    if not _finite(v):
+    if not math.isfinite(v):
         return 0
     return _ptnum(i, a, b, v, fmt, 1, imax)
 
@@ -5313,7 +5289,7 @@ def _trk_point(a, b):
     if not _tc_ok(rb, t):                # (a .trb keyframe _kb_parse did
         return 0                         # not take is passed here too)
     lat, lon = _fnum(a, c1), _fnum(c1 + 1, c2)
-    if (lat is None or lon is None or not _finite(lat) or not _finite(lon)
+    if (lat is None or lon is None or not math.isfinite(lat) or not math.isfinite(lon)
             or abs(lat) > 90 or abs(lon) > 180):
         return 0
     _pt[6] = t
@@ -5341,7 +5317,7 @@ def _trk_point(a, b):
         if v is None:
             if not _utf8(c3 + 1, c4):
                 return 0
-        elif _finite(v * HDOP_M):        # (1e308: finite, * HDOP_M inf:
+        elif math.isfinite(v * HDOP_M):        # (1e308: finite, * HDOP_M inf:
             _pt[10] = _pt[11] = 0        # invalid JSON, the batch a 400)
             _pt[12] = b"%.1f" % (v * HDOP_M)
             need += len(_J_ACC) + 1 + len(_pt[12])
@@ -5669,12 +5645,8 @@ def _clear_bad_full(path):
     bf.pop(path if path.endswith(".bad") else path + ".bad", None)
 
 def _io_write(s, b):
-    """All of b to a socket or TLS stream (MicroPython: write; CPython
-    test doubles: sendall)."""
-    w = getattr(s, "write", None)
-    if w is None:
-        s.sendall(b)
-        return
+    """All of b to a socket or TLS stream."""
+    w = s.write
     mv = memoryview(b)
     i = 0
     t0 = time.ticks_ms()
@@ -5723,10 +5695,7 @@ def _tls_context():
     ctx = _tls_ctx[0]
     if ctx is not None:
         return ctx
-    try:
-        import tls
-    except ImportError:
-        import ssl as tls
+    import tls
     sz = _ca_size()
     if sz is not None and sz > CA_MAX:   # (not read: "ca err", no reboot)
         raise ValueError("%s over %d B" % (CA_FILE, CA_MAX))
@@ -6107,22 +6076,19 @@ def _env_bad(url, key):
     space or a "# comment" got a 400 / 401 for ever); GEO_URL http(s)://
     host[:port][/path], host letters, digits, "-" and "." (userinfo or
     IPv6 made _raw_post's int(port) raise: "err net" for ever)."""
-    for c in key:
-        if not "!" <= c <= "~":
-            return "API_KEY in .env: a space, control or non-ASCII character"
-    for c in url:
-        if not "!" <= c <= "~":
-            return "GEO_URL in .env: a space, control or non-ASCII character"
+    for v, name in ((key, "API_KEY"), (url, "GEO_URL")):
+        for c in v:
+            if not "!" <= c <= "~":
+                return name + " in .env: a space, control or non-ASCII character"
     proto, _, rest = url.partition("://")
     host = rest.partition("/")[0]
     h, _, p = host.partition(":")
-    if (proto not in ("http", "https") or not h
-            or (":" in host and not (p.isdigit() and 0 < int(p) < 65536))):
-        return "GEO_URL in .env: not http(s)://host[:port][/path]"
+    ok = (proto in ("http", "https") and h
+          and (":" not in host or (p.isdigit() and 0 < int(p) < 65536)))
     for c in h:
         if not (c.isalpha() or c.isdigit() or c in "-."):
-            return "GEO_URL in .env: not http(s)://host[:port][/path]"
-    return None
+            ok = False
+    return None if ok else "GEO_URL in .env: not http(s)://host[:port][/path]"
 
 def _due(files, held, now):
     """files without those held back (_hold_file) for now."""
@@ -7006,7 +6972,7 @@ def _ota_probe(now):
     like an outage (_ota_try): never blamed, a build whose update path is
     broken would be reinstalled for good."""
     at = ota.get("probe_at")
-    if at is not None and _age(now, at) < OTA_PROBE:
+    if _recent(now, at, OTA_PROBE):
         return
     ota["probe_at"] = now
     body = bytearray()
@@ -7292,7 +7258,7 @@ def _flash_kb():
     """Free flash in KB, at most every 30 s: statvfs walks the whole
     LittleFS (slow, and the page asks every WEB_REFRESH)."""
     now = time.ticks_ms()
-    if _fl[1] is not None and _age(now, _fl[1]) < 30000:
+    if _recent(now, _fl[1], 30000):
         return _fl[0]
     try:
         v = os.statvfs("/")
@@ -7309,7 +7275,7 @@ def _hist_days():
     once (.trb, or an older firmware's .trk), listed at most every 30 s
     (the page picks a day from them)."""
     now = time.ticks_ms()
-    if _hd[1] is not None and _age(now, _hd[1]) < 30000:
+    if _recent(now, _hd[1], 30000):
         return _hd[0]
     try:
         _hd[0] = sorted(set(n[:8] for n in _hist_names()))
@@ -7325,7 +7291,7 @@ def _file_counts():
     10 s: pending() and pending_bad() list, sort and build the paths of the
     whole log directory, twice per poll. ilistdir counts without a list."""
     now = time.ticks_ms()
-    if _fc[2] is not None and _age(now, _fc[2]) < 10000:
+    if _recent(now, _fc[2], 10000):
         return _fc[0], _fc[1]
     n = bad = 0
     cur = log["file"]
@@ -7927,7 +7893,7 @@ def _local_hm():
     receiver silent: its time stands still then."""
     d, t = st["date"], st["time"]
     rx = st["rx"]
-    if not d or not t or rx is None or _age(time.ticks_ms(), rx) >= NO_DATA:
+    if not d or not t or not _recent(time.ticks_ms(), rx, NO_DATA):
         return "--:--"
     try:
         y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
@@ -7981,7 +7947,7 @@ def _store_state(now):
     nothing is logged into it. Standing still costs next to nothing, so the time
     is the worst case."""
     c = _tft_fs
-    if c[1] is not None and _age(now, c[1]) < TFT_STORE:
+    if _recent(now, c[1], TFT_STORE):
         return c[0]
     c[1] = now
     c[0] = None
@@ -8293,7 +8259,7 @@ def _rt_tick(now):
     """Every ROUTE_DRAW: midnight, the current position, the pixels when any of it
     changed, the file when due. Without a fix the clock runs on from the last one."""
     R = _Rt
-    if R.pts is None or (R.drawn is not None and _age(now, R.drawn) < ROUTE_DRAW):
+    if R.pts is None or _recent(now, R.drawn, ROUTE_DRAW):
         return
     R.drawn = now
     c = log["clock"]
@@ -8316,7 +8282,7 @@ def _rt_tick(now):
     if R.moved:
         R.moved = False
         _rt_project()
-    if R.unsaved and (R.saved is None or _age(now, R.saved) >= ROUTE_SAVE
+    if R.unsaved and (not _recent(now, R.saved, ROUTE_SAVE)
                       or (log["still"]["active"] and R.save_ok)):
         _rt_save(now)
     _tft_t[4] = 0
@@ -8348,7 +8314,7 @@ def tft_tick(now):
     t = _tft_t
     if _tft is None:
         return
-    if t[0] is None or _age(now, t[0]) >= TFT_STATE:
+    if not _recent(now, t[0], TFT_STATE):
         t[0] = now
         try:
             _tft.set_state(*_tft_state(now))
@@ -8356,7 +8322,7 @@ def tft_tick(now):
         except Exception as e:
             t[2] += 1
             _tft_bad(2, e)
-    if _tft is not None and (t[1] is None or _age(now, t[1]) >= TFT_FRAME):
+    if _tft is not None and not _recent(now, t[1], TFT_FRAME):
         t[1] = now
         try:
             _tft.frame()

@@ -858,7 +858,7 @@ check("FwWLAN: disconnect ASSOC_LEAVE is IDLE",
 
 
 check("inf ele is not finite",
-      not gl._finite(float("inf")))
+      not gl.math.isfinite(float("inf")))
 
 
 tmpdir = tempfile.mkdtemp(prefix="gpxlog-")
@@ -13031,7 +13031,7 @@ else:
     with open(os.path.join(ROOT, "gps_logger.py")) as f:
         ev_src = f.read()
     ev_fmts = re.findall(r'_wifi_diag\(\s*"\w+",\s*"([^"]*)"', ev_src)
-    for m_ in re.finditer(r'(_diag_write|_ota_say|_env_warn|_loop_diag|'
+    for m_ in re.finditer(r'(_diag_write|_ota_say|_say|_loop_diag|'
                           r'_bug_once)\((\s*now,)?\s*"([^"]*)"', ev_src):
         ev_fmts.append(m_.group(3))
 
