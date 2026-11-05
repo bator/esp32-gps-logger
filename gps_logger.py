@@ -2771,6 +2771,7 @@ def wifi_start():
     _keepalive_env(env)
     _web_env(env)
     _ota_env(env)
+    _ntp_env(env)
     DEVICE_ID = _safe_name(_plain(env.get("DEVICE_ID")), DEFAULT_DEVICE_ID)
     HOSTNAME = _safe_name(_plain(env.get("HOSTNAME"))
                           or _plain(env.get("DEVICE_ID")),
@@ -7859,13 +7860,78 @@ def _utc_hours(y, m, day, h):
         return 2 if past == (m == 3) else 1
     return 1
 
+# --- NTP --------------------------------------------------------------------
+# The display's clock and the route's day before the first fix, which indoors may
+# take long or never come: a fix is otherwise the only thing that tells the date.
+# Asked on any network until a fix has told the time, and then never again: a fix
+# wins, and this reaches neither a track line, nor the board clock, nor status.json.
+NTP_SERVER = "pool.ntp.org"              # .env NTP_SERVER; empty: never asked
+NTP_WAIT = 1000                          # ms an answer may take: the loop waits
+                                         # (the UART buffer holds 3 s of NMEA)
+NTP_RETRY = 60000                        # ms after a failed try, doubling to ...
+NTP_RETRY_MAX = 3600000                  # ... this
+NTP_AGAIN = 21600000                     # ms an answer is used before a new one
+_NTP_2020 = 3786825600                   # 2020-01-01 in seconds since 1900
+_ntp = [None, None, NTP_RETRY]           # (seconds since 2020, ticks) of the answer;
+                                         # ticks of the last try; the wait after it
+
+def _ntp_env(env):
+    global NTP_SERVER
+    if "NTP_SERVER" in env:
+        NTP_SERVER = _plain(env["NTP_SERVER"]) or None
+
+def _ntp_ask():
+    """Seconds since 2020 from NTP_SERVER, None: no answer, or none to believe (not
+    synchronised, no server, or a time before this build was made)."""
+    s = None
+    try:
+        ai = socket.getaddrinfo(NTP_SERVER, 123, 0, socket.SOCK_DGRAM)[0]
+        s = socket.socket(ai[0], socket.SOCK_DGRAM, ai[2])
+        s.settimeout(NTP_WAIT / 1000)
+        q = bytearray(48)
+        q[0] = 0x23                      # version 4, a client
+        s.sendto(q, ai[-1])
+        b = s.recv(48)
+    except (OSError, IndexError, ValueError):
+        return None
+    finally:
+        if s is not None:
+            s.close()
+    if len(b) < 48 or b[0] >> 6 == 3 or b[0] & 7 != 4 or not 0 < b[1] < 16:
+        return None
+    t = struct.unpack_from(">I", b, 40)[0] - _NTP_2020
+    return t if max(0, FW_BUILD - EPOCH_DAYS * 86400) <= t < FIX_S_END else None
+
+def ntp_tick(now):
+    n = _ntp
+    if (not NTP_SERVER or wifi["state"] != "connected" or log["clock"] is not None
+            or _recent(now, n[1], n[2])):
+        return
+    n[1] = now
+    read_uart()
+    feed()
+    t = _ntp_ask()
+    feed()
+    read_uart()
+    if t is None:
+        n[2] = min(n[2] * 2, NTP_RETRY_MAX)
+        return
+    n[0], n[2] = (t, time.ticks_ms()), NTP_AGAIN
+    _tft_t[4] = 0
+    _diag_write("clock ntp %s" % _stamp_s(t)[0])
+
 def _local_hm():
-    """"HH:MM" in Hungary from the fix's UTC, "--:--" without one or with the
-    receiver silent: its time stands still then."""
+    """"HH:MM" in Hungary from the fix's UTC, else from NTP's, "--:--" without either
+    or with the receiver silent: its time stands still then."""
     d, t = st["date"], st["time"]
     rx = st["rx"]
-    if not d or not t or not _recent(time.ticks_ms(), rx, NO_DATA):
-        return "--:--"
+    now = time.ticks_ms()
+    if not d or not t or not _recent(now, rx, NO_DATA):
+        c = _ntp[0]
+        if c is None or _age(now, c[1]) >= TICKS_OLD:
+            return "--:--"
+        d = _stamp_s(c[0] + _age(now, c[1]) // 1000)[0]
+        t = d[11:]
     try:
         y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
         h = int(t[:2])
@@ -8172,7 +8238,8 @@ def _rt_project():
 def _rt_load():
     """The route as last saved. Anything wrong with the file: as if none. It shows at
     once, whatever its day: a board indoors may wait long for a fix, the only thing that
-    tells the date. The first fix keeps it, or empties it if that was another day."""
+    tells the date but NTP (ntp_tick). The first of them keeps it, or empties it if
+    that was another day."""
     R = _Rt
     size = struct.calcsize(ROUTE_HEAD)
     try:
@@ -8234,7 +8301,7 @@ def _rt_tick(now):
     if R.pts is None or _recent(now, R.drawn, ROUTE_DRAW):
         return
     R.drawn = now
-    c = log["clock"]
+    c = log["clock"] or _ntp[0]
     if c is not None and _age(now, c[1]) < TICKS_OLD:
         d = _rt_day(c[0] + _age(now, c[1]) // 1000)
         if R.waiting or d > R.day:
@@ -8465,6 +8532,7 @@ def _loop():
         _guarded("upload", upload_tick)
         _guarded("web", web_tick, None, True)
         _guarded("ota", ota_tick, time.ticks_ms())
+        _guarded("ntp", ntp_tick, time.ticks_ms(), True)
         now = time.ticks_ms()
         tft_tick(now)
         if (not _boot_ok_done

@@ -13017,6 +13017,7 @@ else:
          ".err", "track"),
         ("upload ca err OSError(5)", "upl"),
         ("clock set 2026-11-02T11:38:31Z", "other"),
+        ("clock ntp 2026-11-02T11:38:31Z", "other"),
         ("upload err html 403 (captive portal?)", "upl"),
         ("upload aborted after 120 s", "upl"),
         ("upload err OSError(113)", "upl"),
@@ -18237,6 +18238,184 @@ check("ROUTE-BEFORE-FIX: a saved route shows at once without a fix, and writes n
       and _after == (False, 0, "0,0 km", True) and _same == (False, _n0, _km0, _c0)
       and _no_file == (None, ""),
       repr((_wait2, _before, _kept, _after, _same, _no_file)))
+
+
+# NTP: the clock and the route's day before the first fix
+class _NtpMod:
+    SOCK_DGRAM = 2
+    reply = None
+    addr = [(2, 2, 17, "", ("192.0.2.1", 123))]
+    asked, closed, sent, wait = [], [], [], []
+
+    @staticmethod
+    def getaddrinfo(host, port, fam, typ):
+        _NtpMod.asked.append((host, port, typ))
+        if isinstance(_NtpMod.addr, Exception):
+            raise _NtpMod.addr
+        return _NtpMod.addr
+
+    class socket:
+        def __init__(self, fam, typ, proto):
+            pass
+
+        def settimeout(self, t):
+            _NtpMod.wait.append(t)
+
+        def sendto(self, b, a):
+            _NtpMod.sent.append(bytes(b))
+
+        def recv(self, n):
+            if isinstance(_NtpMod.reply, Exception):
+                raise _NtpMod.reply
+            return _NtpMod.reply
+
+        def close(self):
+            _NtpMod.closed.append(1)
+
+
+def _nreply(s, first=0x24, stratum=2, size=48):
+    b = bytearray(48)
+    b[0], b[1] = first, stratum
+    b[40:44] = (s + hl._NTP_2020).to_bytes(4, "big")
+    return bytes(b[:size])
+
+
+def _nask(reply, addr=None):
+    _NtpMod.reply = reply
+    _NtpMod.addr = [(2, 2, 17, "", ("192.0.2.1", 123))] if addr is None else addr
+    return hl._ntp_ask()
+
+
+_n_sock, _n_build, _n_srv, _n_wifi = hl.socket, hl.FW_BUILD, hl.NTP_SERVER, hl.wifi["state"]
+hl.socket = _NtpMod
+hl.FW_BUILD = hl.EPOCH_DAYS * 86400 + _DAY - 86400 * 30
+_NtpMod.closed[:] = []
+_n_good = _nask(_nreply(_DAY))
+_n_query = _NtpMod.sent[-1][0] == 0x23 and len(_NtpMod.sent[-1]) == 48
+_n_bad = [_nask(x) for x in (b"", _nreply(_DAY, size=47), _nreply(_DAY, first=0x23),
+                             _nreply(_DAY, first=0xE4), _nreply(_DAY, stratum=0),
+                             _nreply(_DAY, stratum=16), _nreply(_DAY - 86400 * 31),
+                             _nreply(-hl._NTP_2020), OSError(110))]
+_n_closed = len(_NtpMod.closed) == 10
+_n_nodns = [_nask(_nreply(_DAY), OSError(-2)), _nask(_nreply(_DAY), []) ]
+check("NTP-ASK: a good answer in seconds since 2020; short, not a server's, unsynchronised, "
+      "stratum 0 or 16, before this build, an empty time, a timeout or no DNS: None; "
+      "the socket always closed",
+      _n_good == _DAY and _n_query and _n_bad == [None] * 9 and _n_closed
+      and _n_nodns == [None, None], repr((_n_good, _n_bad, _n_closed, _n_nodns)))
+
+_n0a = _n0
+hl._ntp[:] = [None, None, hl.NTP_RETRY]
+hl.log["clock"] = None
+_NtpMod.asked[:] = []
+_NtpMod.reply, _NtpMod.addr = OSError(110), [(2, 2, 17, "", ("192.0.2.1", 123))]
+hl.wifi["state"] = "sleep"
+hl.ntp_tick(_clock[0])
+_n_offline = len(_NtpMod.asked)
+hl.wifi["state"] = "connected"
+hl.NTP_SERVER = None
+hl.ntp_tick(_clock[0])
+_n_off = len(_NtpMod.asked)
+hl.NTP_SERVER = "ntp.test"
+hl.ntp_tick(_clock[0])
+hl.ntp_tick(_clock[0])
+_n_once = len(_NtpMod.asked)
+_n_w1 = hl._ntp[2]
+_clock[0] += hl.NTP_RETRY * 2
+hl.ntp_tick(_clock[0])
+_n_w2 = hl._ntp[2]
+for _i in range(12):
+    _clock[0] += hl.NTP_RETRY_MAX
+    hl.ntp_tick(_clock[0])
+_n_cap = hl._ntp[2]
+_NtpMod.reply = _nreply(_DAY)
+_clock[0] += hl.NTP_RETRY_MAX
+_n_lines = len(hl.log["batch"])
+_n_diag = []
+_n_dw = hl._diag_write
+hl._diag_write = _n_diag.append
+hl.ntp_tick(_clock[0])
+hl._diag_write = _n_dw
+_n_ok = hl._ntp[0] == (_DAY, _clock[0]) and hl._ntp[2] == hl.NTP_AGAIN
+_n_asked = len(_NtpMod.asked)
+hl.ntp_tick(_clock[0] + hl.NTP_AGAIN - 1)
+_n_held = len(_NtpMod.asked) == _n_asked
+hl.log["clock"] = (_DAY, _clock[0])
+hl.ntp_tick(_clock[0] + hl.NTP_AGAIN * 2)
+_n_fixed = len(_NtpMod.asked) == _n_asked
+hl.log["clock"] = None
+hl.ntp_tick(_clock[0] + hl.NTP_AGAIN)
+_n_again = len(_NtpMod.asked) == _n_asked + 1
+check("NTP-TICK: only connected, with a server and before a fix told the time; a failed try "
+      "waits, doubling to the cap; an answer lasts NTP_AGAIN, says one diag line and "
+      "writes no track line",
+      _n_offline == 0 and _n_off == 0 and _n_once == 1 and _n_w1 == 2 * hl.NTP_RETRY
+      and _n_w2 == 4 * hl.NTP_RETRY and _n_cap == hl.NTP_RETRY_MAX and _n_ok and _n_held
+      and _n_fixed and _n_again and len(hl.log["batch"]) == _n_lines
+      and _n_diag == ["clock ntp " + hl._stamp_s(_DAY)[0]],
+      repr((_n_offline, _n_off, _n_once, _n_w1, _n_w2, _n_cap, _n_ok, _n_held, _n_fixed, _n_again, _n_diag)))
+
+# (_DAY: 10:00 UTC on 2026-06-15, 12:00 in summer time)
+_clock[0] += 1000
+hl.st["rx"] = _clock[0]
+
+hl._ntp[0] = (_DAY, _clock[0])
+_h_summer = _ls(None, None)
+hl._ntp[0] = (_DAY - 86400 * 150, _clock[0])
+_h_winter = _ls(None, None)
+_h_gps = _ls("2026-11-04", "10:42:10")
+hl.st["rx"] = _clock[0] - hl.NO_DATA
+hl._ntp[0] = (_DAY, _clock[0])
+_h_silent = _ls("2026-11-04", "10:42:10")
+hl.st["rx"] = _clock[0]
+hl._ntp[0] = (_DAY, _clock[0] - 60000)
+_h_runs = _ls(None, None)
+_clock_old = _clock[0]
+hl._ntp[0] = None
+_h_none = _ls(None, None)
+check("NTP-CLOCK: before a fix the clock is NTP's in Hungarian time, summer and winter, and "
+      "runs on; a fix wins; without either --:--",
+      _h_summer == "12:00" and _h_winter == "11:00" and _h_gps == "11:42" and _h_silent == "12:00"
+      and _h_runs == "12:01" and _h_none == "--:--",
+      repr((_h_summer, _h_winter, _h_gps, _h_silent, _h_runs, _h_none)))
+hl.st.update(date=None, time=None)
+
+_rboot(_good)
+_rview()
+hl._ntp[0] = (_DAY + 7100, _clock[0])
+_rview()
+_r_same = (_Rt.waiting, _Rt.view[1], _Rt.km, _Rt.cm)
+_rboot(_good)
+_rview()
+hl._ntp[0] = (_DAY + 86400, _clock[0])
+_rview()
+_r_next = (_Rt.waiting, _Rt.view[1], _Rt.km)
+_rboot(None)
+hl._ntp[0] = (_DAY, _clock[0])
+_rview()
+_r_nofile = (_Rt.view[1], _Rt.km)
+_rboot(_good)
+hl._ntp[0] = (_DAY + 86400, _clock[0])
+hl.log["clock"] = (_DAY + 7100, _clock[0])
+_rview()
+_r_fixwins = (_Rt.view[1], _Rt.km, _Rt.cm)
+hl.log["clock"] = None
+hl._ntp[:] = [None, None, hl.NTP_RETRY]
+check("NTP-ROUTE: NTP tells the route's day before a fix: the same day kept, another emptied, "
+      "no file an empty day; a fix's clock wins over it",
+      _r_same == (False, _n0a, _km0, _c0) and _r_next == (False, 0, "0,0 km")
+      and _r_nofile == (0, "0,0 km") and _r_fixwins == (_n0a, _km0, _c0),
+      repr((_r_same, _r_next, _r_nofile, _r_fixwins)))
+
+_e_srv = []
+for _e in ({"NTP_SERVER": "ntp.lan # the router"}, {"NTP_SERVER": ""}, {}):
+    hl.NTP_SERVER = "kept"
+    hl._ntp_env(_e)
+    _e_srv.append(hl.NTP_SERVER)
+check("NTP-ENV: NTP_SERVER names the server, empty turns it off, absent keeps the default",
+      _e_srv == ["ntp.lan", None, "kept"], repr(_e_srv))
+hl.socket, hl.FW_BUILD, hl.NTP_SERVER, hl.wifi["state"] = _n_sock, _n_build, _n_srv, _n_wifi
+_rboot(None)
 _flip = bytearray(_good)
 _flip[40] ^= 1
 _bad_n = bytearray(_good)

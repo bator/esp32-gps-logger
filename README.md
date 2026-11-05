@@ -79,8 +79,10 @@ firmware R6.0.0.0Build3700.
   standing costs next to nothing). The speed is on the status page and in
   `status.json`. It never scrolls. The backlight is always on. The route survives a
   reboot in `/route.bin` (at most one write per 5 min of driving and one when a stay
-  starts) and shows again at once; the first fix empties it if it was another day, so
-  until then a board switched on the next morning shows yesterday's. `gps_tft.py`, its
+  starts) and shows again at once; the first fix or NTP answer empties it if it was
+  another day, so until then a board switched on the next morning, away from any
+  WiFi, shows yesterday's. Before the first fix the clock comes from NTP on any WiFi
+  (`NTP_SERVER`), and `--:--` without one. `gps_tft.py`, its
   anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
@@ -156,6 +158,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track or the board clock. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
@@ -529,7 +532,7 @@ GST`, `gps refused <command>`, `gps silent N s, no bytes from the receiver` and
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
 used, `clock set <UTC>` once a boot when the board clock is set from the
-GPS, `heap grew in <step> to N KB` when the
+GPS, `clock ntp <UTC>` when NTP tells the display the time before a fix, `heap grew in <step> to N KB` when the
 Python heap grew during an upload step (`read_batch`, `connect`,
 `tls_wrap`, `post`, the whole POST: the step that took IDF heap), a
 `reboot tls memory` or
