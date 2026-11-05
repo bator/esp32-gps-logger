@@ -321,13 +321,13 @@ gl.reset()
 gl.st["svs"] = saved_svs
 
 try:
-    jd = json.loads("".join(gl._web_json_parts()))
+    jd = json.loads("".join(gl._web_json_parts(gl._web_rows(), gl._sv_list())))
 except Exception as e:
     print("json", repr(e))
     jd = None
 check("status JSON parts are valid JSON", jd is not None
       and jd.get("satellites") and "uptime" in jd)
-check("JSON parts stream", not isinstance(gl._web_json_parts(), list))
+check("JSON parts stream", not isinstance(gl._web_json_parts(gl._web_rows(), gl._sv_list()), list))
 check("UTC stamp", gl._stamp_at(1793256075)[0] == "2026-10-29T06:41:15Z")
 check("uptime counter", gl.uptime_s() >= 0)
 check("upload wait without holds", gl._upload_wait(time.ticks_ms()) == 0)
@@ -367,7 +367,17 @@ for i in range(130):
         12.0 + (i % 11) * 0.4, gl._stamp_s(215611200 + i + i // 40 * 30)[1]))
 tl.append("-12.5,-0.000001,,1.2,20261101T090000Z\n")
 base = "/tmp/gps-logger-smoke-%d" % time.ticks_ms()
-body = gl._kb_encode(tl, len(tl), [70])
+
+
+def _kb_encode(lines, k, seg):
+    gl._kb_start()
+    out = bytearray()
+    while gl._kq[0] < k:
+        out += gl._kb_part(lines, k, seg)
+    return out
+
+
+body = _kb_encode(tl, len(tl), [70])
 outs = []
 try:
     with open(base + ".trb", "wb") as f:
@@ -405,7 +415,7 @@ if hasattr(gc, "mem_alloc"):
     tl2 = tl[:50]
     try:
         with open(base + ".trb", "wb") as f:
-            f.write(b"#TRKB\n" + gl._kb_encode(tl2, len(tl2), None) + b"#END\n")
+            f.write(b"#TRKB\n" + _kb_encode(tl2, len(tl2), None) + b"#END\n")
         with open(base + ".trk", "wb") as f:
             f.write(("#TRK2\n" + "".join(tl2) + "#END\n").encode())
         used = {}
@@ -472,7 +482,7 @@ if hasattr(gc, "mem_alloc"):
         for k in (10, 50):
             tl3 = tl[:k]
             with open(base + ".trb", "wb") as f:
-                f.write(b"#TRKB\n" + gl._kb_encode(tl3, k, None) + b"#END\n")
+                f.write(b"#TRKB\n" + _kb_encode(tl3, k, None) + b"#END\n")
             gl._hist_batch(base + ".trb", 0, 1 << 20, None)   # (day file made)
             gc.collect()
             gc.disable()
@@ -492,7 +502,7 @@ if hasattr(gc, "mem_alloc"):
         import os
         for i in range(0, 2000, 50):
             with open(base + "-h.trb", "wb") as f:
-                f.write(b"#TRKB\n" + gl._kb_encode(tl4[i:i + 50], 50, None) + b"#END\n")
+                f.write(b"#TRKB\n" + _kb_encode(tl4[i:i + 50], 50, None) + b"#END\n")
             gl._hist_batch(base + "-h.trb", 0, os.stat(base + "-h.trb")[6], None)
         os.remove(base + "-h.trb")
         day4 = tl4[0][-17:-9]

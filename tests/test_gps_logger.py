@@ -656,6 +656,21 @@ def check(name, cond, detail=""):
 HEADER = "#TRK1\n"
 
 
+def _kb_encode(lines, k, seg):
+    """lines[:k] as the bytes of a .trb flush, as flush writes them a
+    _kb_part at a time."""
+    gl._kb_start()
+    out = bytearray()
+    while gl._kq[0] < k:
+        out += gl._kb_part(lines, k, seg)
+    return out
+
+
+def _web_json():
+    """The whole status.json as one string (the board streams the parts)."""
+    return "".join(gl._web_json_parts(gl._web_rows(), gl._sv_list()))
+
+
 def trk_line(lat, lon, t, ele="10.0", hdop=""):
     """One .trk point line; t is the ISO form, stored compact."""
     tc = t.replace("-", "").replace(":", "")
@@ -683,7 +698,7 @@ def make_trb(path, n, times=None):
              "2026-10-05T%02d:%02d:%02dZ" % (i // 3600, (i // 60) % 60, i % 60))
         ls.append(trk_line(52.5 + i * 0.0001, 13.4 + i * 0.0001, t))
     with builtins.open(path, "wb") as f:
-        f.write(gl.HEADERB.encode() + bytes(gl._kb_encode(ls, n, None))
+        f.write(gl.HEADERB.encode() + bytes(_kb_encode(ls, n, None))
                 + gl.FOOTER.encode())
 
 
@@ -772,7 +787,7 @@ def hist_add(lines, k):
     batch's (_hist_batch)."""
     tmp = os.path.join(diag_dir, "hist-batch.trb")
     with builtins.open(tmp, "wb") as f:
-        f.write(gl.HEADERB.encode() + bytes(gl._kb_encode(lines, k, None))
+        f.write(gl.HEADERB.encode() + bytes(_kb_encode(lines, k, None))
                 + gl.FOOTER.encode())
     gl._hist_batch(tmp, 0, os.path.getsize(tmp), None)
     os.remove(tmp)
@@ -948,7 +963,7 @@ try:
     check("powerloss: up_reset removes leftover .pos.tmp",
           not os.path.exists(path + ".pos.tmp"))
     check("powerloss: missing .pos means offset 0",
-          gl.read_offset(path) == 0)
+          gl.read_pos(path)[0] == 0)
     pump()
     check("powerloss: file is POSTed (not dropped)",
           len(_posts) == 1 and not os.path.exists(path),
@@ -961,7 +976,7 @@ try:
     with open(path + ".pos", "w") as f:
         f.write("%d\n" % (os.path.getsize(path) + 500))
     check("corrupt pos: read_offset resets to 0",
-          gl.read_offset(path) == 0)
+          gl.read_pos(path)[0] == 0)
     pump()
     check("corrupt pos: POST happens (file not silently deleted)",
           len(_posts) == 1)
@@ -974,7 +989,7 @@ try:
     make_trk(path, 4)
     with open(path + ".pos", "w") as f:
         f.write("not-a-number\n")
-    check("garbage pos: treated as 0", gl.read_offset(path) == 0)
+    check("garbage pos: treated as 0", gl.read_pos(path)[0] == 0)
     pump()
     check("garbage pos: uploaded", len(_posts) == 1)
 
@@ -1677,11 +1692,11 @@ try:
     with open(path + ".bad", "wb") as f:
         f.write(b"x" * (gl.MAX_BAD_BYTES))
     _post_code[0] = 400
-    off0 = gl.read_offset(path)
+    off0 = gl.read_pos(path)[0]
     pump()
     check("B1 bad-full: offset not advanced",
-          gl.read_offset(path) == off0 and os.path.exists(path),
-          "off=%s state=%s" % (gl.read_offset(path), gl.up["state"]))
+          gl.read_pos(path)[0] == off0 and os.path.exists(path),
+          "off=%s state=%s" % (gl.read_pos(path)[0], gl.up["state"]))
     check("B1 bad-full: state is bad full",
           gl.up["state"] == "bad full")
     check("B1 bad-full: it stays so while the stuck file is there",
@@ -5667,7 +5682,7 @@ try:
     gl.wifi_tick()
     check("SLEEP: once everything is uploaded the radio goes off",
           len(_posts) == 1 and gl.wifi["state"] == "sleep"
-          and not wl().active() and gl.online() is False,
+          and not wl().active() and gl.wifi["state"] != "connected",
           "posts=%d state=%s" % (len(_posts), gl.wifi["state"]))
     n_conn = len(WLAN.connects)
     _clock[0] += gl.WIFI_SLEEP - 1000
@@ -9028,7 +9043,7 @@ def _hread(day):
 
 def _hkb(ls):
     """The .trb records a flush writes for the text lines ls."""
-    return bytes(gl._kb_encode(ls, len(ls), None))
+    return bytes(_kb_encode(ls, len(ls), None))
 
 
 def _drive(day, n, t0=36000, fmt=2, seed=1):
@@ -11870,7 +11885,7 @@ class LinesOnly(object):
 real_open = open
 gl.open = lambda p, *a, **k: LinesOnly(real_open(p, *a, **k))
 try:
-    pieces = list(gl._web_json_parts())
+    pieces = list(gl._web_json_parts(gl._web_rows(), gl._sv_list()))
 finally:
     del gl.open
     gl.DIAG_FILE = saved_diag_file
@@ -12659,12 +12674,12 @@ gl._web_diag = lambda: ["up 60 utc 20261031T053014Z nmea 9/1 gpsboots 0 "
                          "upload ca err OSError(5)", "up 60 <b>"]
 _idf_saved = gl.idf_heap
 gl.idf_heap = lambda: (157, 144)
-page_json = gl._web_json()
+page_json = _web_json()
 gl.idf_heap = _idf_saved
 gl.st["valid"] = False
 gl.wifi.update(state="off", ssid=None, rssi=None)
 gl.st["svs"] = None
-page_json2 = gl._web_json()
+page_json2 = _web_json()
 # no HDOP yet (no GGA in the last STALE ms)
 gl.st.update(pos_at=_clock[0], valid=True, fixtype=3, quality=1, hdop=None, lat=47.1,
              lon=18.4)
@@ -12672,11 +12687,11 @@ gl._web_diag = lambda: ["up 120 utc 20261031T130241Z nmea 72/0 gpsboots 0 "
                          "loops 0 sats 22/15 fix 3D_fix hdop None points 0 "
                          "sent 0 wifi connected pulses 0 mem 19280 idf "
                          "221/208 heap 62"]
-page_json3 = gl._web_json()
+page_json3 = _web_json()
 gl._web_diag = _diag_saved
 jd1, jd3 = json.loads(page_json), json.loads(page_json3)
 check("PAGE: JSON is generated piece by piece (no list in RAM)",
-      not isinstance(gl._web_json_parts(), (list, tuple))
+      not isinstance(gl._web_json_parts(gl._web_rows(), gl._sv_list()), (list, tuple))
       and jd1["hdop"] == 0.88199996)
 check("PAGE: status JSON has no field of the receiver this board does not have",
       not any(k in jd1 for k in ("hacc", "fix_src", "ubx")) and "nmea" in jd1
@@ -13652,11 +13667,11 @@ def _nm(body):
         c ^= ch
     return ("$%s*%02X\r\n" % (body, c)).encode()
 gl.reset()
-j0 = json.loads(gl._web_json())
+j0 = json.loads(_web_json())
 _junk = b"\x00\xff garbage\r\n$GPRMC,1,2*00\r\n"
 _uart_rx.extend(_junk)
 gl.read_uart()
-j1 = json.loads(gl._web_json())
+j1 = json.loads(_web_json())
 junk_b, junk_good = gl.st["rx_b"], gl.st["good"]
 _clock[0] += 4000
 s1 = _nm("GPRMC,120500.00,V,,,,,,,171026,,,N")
@@ -13672,7 +13687,7 @@ _clock[0] += 12000
 _bad_ck = b"$GNRMC,120502.00,V,,,,,,,171026,,,N*00\r\n"
 _uart_rx.extend(_bad_ck)                  # bytes came, no whole sentence
 gl.read_uart()
-j2 = json.loads(gl._web_json())
+j2 = json.loads(_web_json())
 check("WEB-LINK: rx_bytes counts every byte, good_age_s only whole frames",
       j0["rx_bytes"] == 0 and j0["rx_age_s"] is None
       and j0["good_age_s"] is None
@@ -13686,9 +13701,9 @@ check("WEB-LINK: rx_bytes counts every byte, good_age_s only whole frames",
 
 # WEB-POS6: the position at the track line's precision for the static test
 gl.st.update(pos_at=_clock[0], valid=True, lat=47.1853612, lon=18.4273049)
-p_nm = json.loads(gl._web_json())
+p_nm = json.loads(_web_json())
 gl.st["valid"] = False
-p_none = json.loads(gl._web_json())
+p_none = json.loads(_web_json())
 check("WEB-POS6: pos6 %.6f, None w/o fix",
       p_nm["pos6"] == "47.185361, 18.427305"
       and p_nm["position"] == "47.18536, 18.42730"
@@ -13712,7 +13727,7 @@ open(os.path.join(_hd_dir, "20261101.trb"), "w").close()
 _clock[0] += 10000
 days2 = gl._hist_days()
 _clock[0] += 25000
-days3 = json.loads(gl._web_json())["days"]
+days3 = json.loads(_web_json())["days"]
 gl.HIST_DIR = os.path.join(_hd_dir, "missing")
 gl._hd[1] = None
 days4 = gl._hist_days()
@@ -13729,7 +13744,7 @@ check("WEB-DAYS: sorted YYYYMMDD days, cached 30 s, [] without the folder",
 _ua_dir = tempfile.mkdtemp()
 online(_ua_dir)
 make_trk(os.path.join(_ua_dir, "20261031_120000.trk"), 3)
-ua0 = json.loads(gl._web_json())["upload_age_s"]
+ua0 = json.loads(_web_json())["upload_age_s"]
 _post_code[0] = 422
 pump()
 ua1 = gl.up["ok_at"]
@@ -13737,7 +13752,7 @@ online(_ua_dir)
 make_trk(os.path.join(_ua_dir, "20261031_130000.trk"), 3)
 pump()
 _clock[0] += 61000
-ua2 = json.loads(gl._web_json())["upload_age_s"]
+ua2 = json.loads(_web_json())["upload_age_s"]
 shutil.rmtree(_ua_dir, ignore_errors=True)
 check("WEB-UPLOAD-AGE: upload_age_s None until a 2xx, then its age",
       ua0 is None and ua1 is None and ua2 == 61 and gl.up["sent"] == 3,
@@ -13775,9 +13790,9 @@ gl.up_reset()
 gl.reset()
 gl.st.update(rx=_clock[0], pos_at=_clock[0], valid=True, fixtype=3,
              lat=47.1, lon=18.4)
-r1a = json.loads(gl._web_json())
+r1a = json.loads(_web_json())
 _clock[0] += gl.NO_DATA + 1000
-r1b = json.loads(gl._web_json())
+r1b = json.loads(_web_json())
 gl.reset()
 check("REV-1: no position once the last second is older than NO_DATA",
       r1a["position"] == "47.10000, 18.40000" and r1a["pos6"] is not None
@@ -15118,7 +15133,7 @@ try:
     one = (gl.OTA_URL, gl.OTA_KEY)
     gl._ota_env({"OTA_URL": "http://ota.lan/m.json", "OTA_KEY": "k3y "})
     both = (gl.OTA_URL, gl.OTA_KEY)
-    jd = json.loads(gl._web_json())
+    jd = json.loads(_web_json())
     check("OTA-ENV: OTA_URL and OTA_KEY both or no updates; fw/ota in JSON",
           one == (None, None) and both == ("http://ota.lan/m.json", b"k3y")
           and jd.get("fw") == gl.FW_COMMIT and "ota" in jd,
@@ -15901,7 +15916,7 @@ finally:
     gl._web_sock, gl._web_read, gl._web_reply, gl.WEB = _wsaved
     gl.wifi_reset()
 try:
-    w2_errs = json.loads(gl._web_json()).get("web_errs")
+    w2_errs = json.loads(_web_json()).get("web_errs")
 except ValueError:
     w2_errs = "bad json"
 check("WEBR-2: every new kind of web error reaches diag once (a repeat does "
@@ -16140,7 +16155,7 @@ def _wj_diag():
 
 gl._web_diag = _wj_diag
 try:
-    wj_text = "".join(gl._web_json_parts())
+    wj_text = "".join(gl._web_json_parts(gl._web_rows(), gl._sv_list()))
     try:
         wj = json.loads(wj_text)
         wj_ok = (wj["diag"] == ["first line"] and "satellites" in wj)
@@ -16556,7 +16571,7 @@ try:
            for i in range(6)]
     pf = os.path.join(_tb, "20900101_000000.trb")
     with builtins.open(pf, "wb") as f:
-        f.write(gl.HEADERB.encode() + gl._kb_encode(far, len(far), None)
+        f.write(gl.HEADERB.encode() + _kb_encode(far, len(far), None)
                 + gl.FOOTER.encode())
     n_f, ok_f = gl.read_batch(pf, 0)[:2]
     check("TRKB: lines past FIX_S_END are keyframes, every one read back",
@@ -16760,7 +16775,7 @@ try:
     # an unknown text record (not "=", "-" or "#": a damaged one) makes the
     # state not valid, as _kb_rec: the deltas after it are no points
     ul = _tb_drive(40, 2, seed=11)
-    ub = bytearray(gl.HEADERB.encode() + gl._kb_encode(ul, len(ul), None)
+    ub = bytearray(gl.HEADERB.encode() + _kb_encode(ul, len(ul), None)
                    + gl.FOOTER.encode())
     gl._rd_open(0)
     uo = []
@@ -16831,7 +16846,7 @@ try:
     fz = {}
     for fmt in (1, 2):
         fl = _tb_drive(100, fmt, seed=20 + fmt)
-        fz[fmt] = (gl.HEADERB.encode() + gl._kb_encode(fl, len(fl), None)
+        fz[fmt] = (gl.HEADERB.encode() + _kb_encode(fl, len(fl), None)
                    + gl.FOOTER.encode())
     fbad = []
     for it in range(400):
@@ -18892,7 +18907,7 @@ check("RB-OOM-COUNT: a page tick that runs through clears no count of a lasting 
 # RB-KB-FEED: _kb_seek from the start of a long .trb, on no feed
 _rb_p = os.path.join(gl.LOG_DIR, "feed.trb")
 _rb_lines = _tb_drive(2000, 2)
-_rb_body = gl.HEADERB.encode() + gl._kb_encode(_rb_lines, len(_rb_lines), None)
+_rb_body = gl.HEADERB.encode() + _kb_encode(_rb_lines, len(_rb_lines), None)
 with open(_rb_p, "wb") as f:
     f.write(_rb_body)
 _rb_s = list(gl._ks)

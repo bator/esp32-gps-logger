@@ -2995,9 +2995,6 @@ def wifi_stop():
     wifi["state"] = "off"
     wifi["home"] = False
 
-def online():
-    return wifi["state"] == "connected"
-
 def at_home():
     """Whether the connected network is configured as a home network, or
     the radio sleeps during a stay that began on one."""
@@ -3199,7 +3196,8 @@ def _kb_start():
 
 def _kb_part(lines, k, seg):
     """The next KB_CHUNK bytes or so of the .trb flush body of lines[:k]
-    (_kb_encode), from where _kq left off, and _kq moved on."""
+    (text lines; a keyframe first, the segment breaks before the indexes in
+    seg), from where _kq left off, and _kq moved on."""
     out = bytearray()
     s = _ke
     i, j, n = _kq
@@ -3217,16 +3215,6 @@ def _kb_part(lines, k, seg):
             n = 0
         i += 1
     _kq[0], _kq[1], _kq[2] = i, j, n
-    return out
-
-def _kb_encode(lines, k, seg):
-    """lines[:k] (text lines) as the bytes of a .trb flush: a keyframe
-    first, the segment breaks before the indexes in seg. (flush writes it
-    a _kb_part at a time.)"""
-    _kb_start()
-    out = bytearray()
-    while _kq[0] < k:
-        out += _kb_part(lines, k, seg)
     return out
 
 log = {}
@@ -4902,9 +4890,6 @@ def read_pos(path):
     except OSError:
         return 0, None
     return off, key if tb else None
-
-def read_offset(path):
-    return read_pos(path)[0]
 
 def write_offset(path, off, key=None):
     """Sidecar update: write <file>.pos.tmp, then rename over .pos.
@@ -7514,15 +7499,11 @@ def _sv_age():
     at = st["svs_at"]
     return None if at is None else _age(time.ticks_ms(), at) // 1000
 
-def _web_json_parts(rows=None, svs=None):
+def _web_json_parts(rows, svs):
     """The JSON in small pieces (no 8 KB string and its encoded copy).
     rows, svs: _web_rows() and _sv_list(), built by _web_status before
     the 200 (a bug in one is a 500, not a cut JSON); the rows go first
     and are let go before the diag lines are read."""
-    if rows is None:
-        rows = _web_rows()
-    if svs is None:
-        svs = _sv_list()
     yield '{"device":' + json.dumps(DEVICE_ID) + ',"refresh_s":%d' % (
         WEB_REFRESH)
     for key, v in rows:
@@ -7552,11 +7533,6 @@ def _web_json_parts(rows=None, svs=None):
         _web_bug(e)
         age = "null"
     yield '],"satellites_age_s":' + age + "}"
-
-def _web_json():
-    """The whole JSON as one string: the tests' view of status.json (the
-    board streams _web_json_parts)."""
-    return "".join(_web_json_parts())
 
 _web_end = [None]                        # ticks_ms deadline of the request
 
