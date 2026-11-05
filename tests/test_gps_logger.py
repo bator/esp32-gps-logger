@@ -16106,7 +16106,7 @@ gl._mem_reboot_soon = lambda: False
 try:
     gl._tick_bug.clear()
     gl.ota["pend"] = None
-    gl.up["next_at"], gl.up["backoff"] = None, None
+    gl.up["next_at"], gl.up["backoff"] = None, gl.BACKOFF_START
     gl._guarded("upload", lambda: (_ for _ in ()).throw(ValueError("x")))
     gi_sched = gl.up["next_at"] is not None and gl._waiting(
         _clock[0], gl.up["next_at"], gl.UP_WAIT_MAX)
@@ -16140,7 +16140,7 @@ finally:
     (gl._mem_reboot, gl._mem_reboot_soon, gl._track_lines,
      gl.HIST_DAYS) = gi_saved
     gl._tick_bug.clear()
-    gl.up["next_at"], gl.up["backoff"] = None, None
+    gl.up["next_at"], gl.up["backoff"] = None, gl.BACKOFF_START
 check("GUARD-INT: an upload bug backs the upload off, the history copy "
       "takes any error, a tick that ends the pending state still raises, "
       "GUARD_MEM_MAX MemoryErrors in a row reboot",

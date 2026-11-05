@@ -1841,12 +1841,12 @@ def _wifi_diag(kind, line):
 
 def _mark_failed(ssid, why=""):
     wifi["failed"][ssid] = time.ticks_ms()
-    wifi["fails"] = wifi.get("fails", 0) + 1
+    wifi["fails"] = wifi["fails"] + 1
     print("wifi fail", ssid, why)
     _wifi_diag("fail", "wifi fail %s %s" % (ssid, why))
-    if wifi.get("roaming") and _net_home(ssid):
+    if wifi["roaming"] and _net_home(ssid):
         if not _net_hidden(ssid):
-            b = wifi.get("roam_backoff") or ROAM_CHECK
+            b = wifi["roam_backoff"]
             wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
         else:
             # Hidden home: roam_backoff stays (it would delay a visible
@@ -1857,11 +1857,11 @@ def _mark_failed(ssid, why=""):
             # of ours never is: one failed try shut our own router out for
             # an hour (hid_wait throttles the tries already).
             now = wifi["failed"][ssid]
-            b = wifi.get("hid_wait") or ROAM_CHECK
+            b = wifi["hid_wait"]
             wifi["hid_wait"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
             wifi["hid_at"] = now
-            b = wifi.get("blank_bssid")
-            if (b is not None and b not in (wifi.get("home_aps") or ())
+            b = wifi["blank_bssid"]
+            if (b is not None and b not in (wifi["home_aps"])
                     and not _blank_bad(b, now)):
                 bad = [x for x in wifi["blank_bad"]
                        if _age(now, x[1]) < BLANK_BAD_HOLD]
@@ -1871,7 +1871,7 @@ def _mark_failed(ssid, why=""):
 
 def _blank_bad(bssid, now):
     """A hidden-home try on this empty-SSID AP failed within BLANK_BAD_HOLD."""
-    for b, t in wifi.get("blank_bad") or ():
+    for b, t in wifi["blank_bad"]:
         if b == bssid and _age(now, t) < BLANK_BAD_HOLD:
             return True
     return False
@@ -1888,7 +1888,7 @@ def _scan_empty(aps, k="empty"):
     if aps:
         wifi[k] = 0
         return False
-    n = wifi[k] = wifi.get(k, 0) + 1
+    n = wifi[k] = wifi[k] + 1
     return n == 1
 
 def _scan_known(w):
@@ -1922,7 +1922,7 @@ def _scan_found(aps):
     by = {}
     for n in wifi["nets"]:
         by[_ssid_b(n)] = n
-    mine = wifi.get("home_aps") or ()
+    mine = wifi["home_aps"]
     _stay_scan(aps)
     _home_seen(aps)
     now = time.ticks_ms()
@@ -1974,12 +1974,12 @@ def home_in_range():
     On the home link the bar is SEEN_MIN_RSSI: ROAM_MIN_RSSI is for
     jumping to a weak AP; associated at -78 dBm the board is at home, and
     that False let a multipath jump end the home stay (_home_veto)."""
-    w = wifi.get("wlan")
+    w = wifi["wlan"]
     if w is None or not _has_home():
         return None
     state = wifi["state"]
     lim = ROAM_MIN_RSSI
-    if state == "connected" and wifi.get("home"):
+    if state == "connected" and wifi["home"]:
         lim = SEEN_MIN_RSSI
         r = _rssi(w)
         if r is not None:
@@ -2024,8 +2024,8 @@ def _home_veto(now, sl):
 def _has_home():
     """Any home network configured (cached per nets list: wifi_tick asks
     every loop pass)."""
-    nets = wifi.get("nets") or []
-    c = wifi.get("hh")
+    nets = wifi["nets"]
+    c = wifi["hh"]
     if c is None or c[0] is not nets:
         c = wifi["hh"] = (nets, any(n.get("home") for n in nets))
     return c[1]
@@ -2034,14 +2034,14 @@ def _blank_home_ok(strict=False):
     """True if a hidden home is configured and a strong empty-SSID AP was
     seen. strict ("home in range"): once BSSIDs are learned, only one of
     them counts (_scan_known); else any strong blank AP does."""
-    r = wifi.get("blank_rssi")
+    r = wifi["blank_rssi"]
     if r is None or r < ROAM_MIN_RSSI:
         return False
-    if _blank_bad(wifi.get("blank_bssid"), time.ticks_ms()):
+    if _blank_bad(wifi["blank_bssid"], time.ticks_ms()):
         return False                     # a hidden-home try there failed
-    if strict and wifi.get("home_aps") and not wifi.get("blank_ours"):
+    if strict and wifi["home_aps"] and not wifi["blank_ours"]:
         return False                     # a stranger's (or unlearned) AP
-    for n in wifi.get("nets") or []:
+    for n in wifi["nets"]:
         if n.get("home") and n.get("hidden"):
             return True
     return False
@@ -2059,8 +2059,8 @@ def _learn_home(w):
     SSID, is dropped, so a wrong one does not stick. The list is kept in
     HOME_APS_FILE when it changes."""
     wifi["learn"] = False
-    ssid = wifi.get("ssid")
-    if not (wifi.get("home") and _net_hidden(ssid)):
+    ssid = wifi["ssid"]
+    if not (wifi["home"] and _net_hidden(ssid)):
         return
     me = _ssid_b(_net(ssid))             # (hidden home: it is configured)
     try:
@@ -2180,12 +2180,12 @@ def _hidden_home_target(now, arrival=False):
         return None
     if not _blank_home_ok():
         return None
-    at = wifi.get("hid_at")
-    if at is not None and _age(now, at) < (wifi.get("hid_wait") or ROAM_CHECK):
+    at = wifi["hid_at"]
+    if at is not None and _age(now, at) < (wifi["hid_wait"]):
         return None                      # a hidden-home roam failed lately
-    for n in wifi.get("nets") or []:
+    for n in wifi["nets"]:
         if (n.get("home") and n.get("hidden")
-                and n["ssid"] != wifi.get("ssid")
+                and n["ssid"] != wifi["ssid"]
                 and not _recently_failed(n["ssid"], now)):
             target = dict(n)
             target["bssid"] = None
@@ -2202,18 +2202,18 @@ def _candidate_order(w):
     costs CONNECT_TIMEOUT with the radio on."""
     now = time.ticks_ms()
     scanned = _scan_known(w)
-    rounds = wifi.get("rounds") or 0
+    rounds = wifi["rounds"]
     wifi["rounds"] = rounds + 1
     if scanned is None:
         cands = [dict(n) for n in wifi["nets"]]
     else:
         seen = set(n["ssid"] for n in scanned)
         every = rounds % UNLISTED_EVERY == 0
-        blank = wifi.get("blank_any")
+        blank = wifi["blank_any"]
         cands = scanned + [dict(n) for n in wifi["nets"]
                            if n["ssid"] not in seen
                            and (every or (blank and n.get("hidden")))]
-    if _blank_home_ok() and wifi.get("blank_ours"):
+    if _blank_home_ok() and wifi["blank_ours"]:
         # a hidden home behind one of its learned BSSIDs gets the scan's
         # RSSI, so a failed first association is retried at once
         # (_wifi_failed); a stranger's blank AP is no reason for 2 x 12 s
@@ -2270,7 +2270,7 @@ def _wifi_ip(w, net):
     try:
         if cfg:
             w.ifconfig(cfg)
-        elif any(n.get("ip") for n in wifi.get("nets") or []):
+        elif any(n.get("ip") for n in wifi["nets"]):
             w.ifconfig("dhcp")
     except (OSError, ValueError, TypeError, RuntimeError) as e:
         print("wifi ip", repr(e))
@@ -2301,7 +2301,7 @@ def _wifi_connect(w, net):
 
 def _net(ssid):
     """The configured network ssid ({}: none)."""
-    for n in wifi.get("nets") or []:
+    for n in wifi["nets"]:
         if n["ssid"] == ssid:
             return n
     return {}
@@ -2319,17 +2319,17 @@ def _wifi_got_ip(w):
     except WLAN_ERR:
         wifi["ip"] = None
     wifi["rssi"] = _rssi(w)
-    wifi["home"] = _net_home(wifi.get("ssid"))
+    wifi["home"] = _net_home(wifi["ssid"])
     wifi["down_at"] = None
-    lost = wifi.get("lost_at")
+    lost = wifi["lost_at"]
     if lost is not None:
         _wifi_diag("back", "wifi back %s after %s, %d failed tries, rssi %s"
-                   % (wifi.get("ssid") or "", _hms(_age(time.ticks_ms(), lost)
+                   % (wifi["ssid"] or "", _hms(_age(time.ticks_ms(), lost)
                                                    // 1000),
-                      wifi.get("fails", 0), wifi["rssi"]))
+                      wifi["fails"], wifi["rssi"]))
         wifi["lost_at"] = None
     wifi["learn"] = False
-    if wifi["home"] and _net_hidden(wifi.get("ssid")):
+    if wifi["home"] and _net_hidden(wifi["ssid"]):
         # our hidden home answered: no blank AP stays blamed for an
         # earlier failed try, hidden roams are due again, and its BSSID is
         # learned on the next wifi_tick (_learn_home)
@@ -2339,14 +2339,14 @@ def _wifi_got_ip(w):
         wifi["learn"] = True
     wifi["sleep_home"] = False
     wifi["idle_at"] = time.ticks_ms()
-    wifi["failed"].pop(wifi.get("ssid"), None)
+    wifi["failed"].pop(wifi["ssid"], None)
     wifi["backoff"] = WIFI_RETRY
     wifi["roam_at"] = time.ticks_ms()
     wifi["roaming"] = False
     wifi["seen_wait"] = SEEN_WAIT
     if wifi["home"]:
         wifi["roam_backoff"] = ROAM_CHECK
-    print("wifi ok", wifi.get("ssid") or "")
+    print("wifi ok", wifi["ssid"] or "")
     return True
 
 def _wifi_failed(w, s, elapsed):
@@ -2356,10 +2356,10 @@ def _wifi_failed(w, s, elapsed):
     often fails after ~7.5 s with 202 (STAT_WRONG_PASSWORD) although the
     password is right, and the retry connects within ~1 s. Anything else is
     demoted for FAIL_HOLD and the round moves on."""
-    ssid = wifi.get("ssid")
+    ssid = wifi["ssid"]
     why = "status %s after %d ms" % (s, elapsed)
-    cands = wifi.get("cand") or []
-    i = wifi.get("cand_i", 0)
+    cands = wifi["cand"]
+    i = wifi["cand_i"]
     net = cands[i] if i < len(cands) else None
     rssi = net.get("rssi") if net else None
     # 202 (STAT_WRONG_PASSWORD, also v1.29's CONNECTION_FAIL) on a network
@@ -2367,7 +2367,7 @@ def _wifi_failed(w, s, elapsed):
     # -75 dBm, a dip under ROAM_MIN_RSSI skipped the retry the 202 quirk
     # needs, and the reconnect after a drop failed round after round
     quirk = s == getattr(network, "STAT_WRONG_PASSWORD", 202)
-    if (net is not None and net["ssid"] == ssid and not wifi.get("retried")
+    if (net is not None and net["ssid"] == ssid and not wifi["retried"]
             and rssi is not None and (quirk or rssi >= ROAM_MIN_RSSI)):
         wifi["retried"] = True
         print("wifi retry", ssid, why)
@@ -2376,10 +2376,10 @@ def _wifi_failed(w, s, elapsed):
     return _wifi_next(w)
 
 def _wifi_next(w):
-    i = wifi.get("cand_i", 0) + 1
+    i = wifi["cand_i"] + 1
     wifi["cand_i"] = i
     wifi["retried"] = False
-    cands = wifi.get("cand") or []
+    cands = wifi["cand"]
     if i < len(cands):
         return _wifi_connect(w, cands[i])
     # a roam is over: status() raising during it (no _mark_failed) left
@@ -2419,14 +2419,14 @@ def _web_search(now):
     drop)."""
     if not WEB or not (WEB_AWAY or _has_home()):
         return False
-    if not wifi.get("down_home"):
+    if not wifi["down_home"]:
         if not WEB_AWAY:
             return False                 # no page off home anyway
-    elif PB_KEEPALIVE and _home_seeable(wifi.get("down_ssid")):
-        r = wifi.get("down_rssi")
+    elif PB_KEEPALIVE and _home_seeable(wifi["down_ssid"]):
+        r = wifi["down_rssi"]
         if r is None or r >= SEEN_MIN_RSSI:
             return False                 # _home_seen wakes it
-    at = wifi.get("down_at")
+    at = wifi["down_at"]
     return at is not None and _age(now, at) < WEB_SEARCH
 
 def _home_seeable(ssid=None):
@@ -2435,9 +2435,9 @@ def _home_seeable(ssid=None):
     with its BSSIDs known. None (boot: any of them may come up): every
     home network is. Before, a visible home in .env made a dropped hidden
     one with no BSSID learned "seeable": the page was down 1 h."""
-    aps = wifi.get("home_aps")
+    aps = wifi["home_aps"]
     any_ = False
-    for n in wifi.get("nets") or []:
+    for n in wifi["nets"]:
         if not n.get("home") or (ssid is not None and n["ssid"] != ssid):
             continue
         if n.get("hidden") and not aps:
@@ -2475,14 +2475,14 @@ def _upload_wait(now):
     flash or memory error backed off, or, with every waiting track held
     back (bad payloads), until the first hold ends. Before, "idle" with
     all tracks held kept the radio on for good."""
-    state = str(up.get("state") or "")
+    state = str(up["state"] or "")
     d = time.ticks_diff(up["next_at"], now)
     wait = d if 0 < d <= UP_WAIT_MAX else 0
     if state.startswith("err") or state in ("fs err", "low mem", "low idf"):
         return wait
     # "bad full": the rejected track is held (BACKOFF_MAX), its 15 s
     # next_at is no reason to keep the radio on: the holds below decide
-    held = up.get("hold") or {}
+    held = up["hold"]
     if not held:
         return 0
     first = None
@@ -2546,7 +2546,7 @@ def _ota_wants_radio():
 def _nothing_to_send():
     """All uploaded, or no GEO_URL/API_KEY ("no .env": never sends, so the
     waiting tracks are no reason for rounds every backoff or hour)."""
-    return _all_uploaded() or up.get("state") == "no .env"
+    return _all_uploaded() or up["state"] == "no .env"
 
 def _all_uploaded():
     """Nothing left for the network: no finished track waiting, nothing in
@@ -2573,7 +2573,7 @@ def wifi_wake():
 def _wifi_poll(w):
     """Advance a connecting attempt. Never sleeps. try_at is this attempt."""
     now = time.ticks_ms()
-    started = wifi.get("try_at")
+    started = wifi["try_at"]
     if started is None:
         wifi["try_at"] = now
         started = now
@@ -2592,7 +2592,7 @@ def _wifi_poll(w):
     # taken after it): that one is not this attempt's until CONNECT_TIMEOUT
     # elapses with no GOT_IP; any other failure status is (a fast fail: the
     # radio no longer stays on 12 s for every network that is not there)
-    leftover = s == wifi.get("prev_status")
+    leftover = s == wifi["prev_status"]
     if leftover and elapsed < CONNECT_TIMEOUT:
         return False
     return _wifi_failed(w, s, elapsed)
@@ -2610,7 +2610,7 @@ def _try_roam_home(w, arrival=False):
     target = None
     for n in found or ():
         if (n.get("home") and n.get("rssi", -100) >= ROAM_MIN_RSSI
-                and n["ssid"] != wifi.get("ssid")
+                and n["ssid"] != wifi["ssid"]
                 and not _recently_failed(n["ssid"], now)):
             target = n
             break
@@ -2623,7 +2623,7 @@ def _try_roam_home(w, arrival=False):
     if arrival:
         wifi["roam_backoff"] = ROAM_CHECK
         wifi["roam_at"] = now
-    cur = _net(wifi.get("ssid"))
+    cur = _net(wifi["ssid"])
     wifi["cand"] = [target] + ([dict(cur)] if cur else [])
     wifi["cand_i"] = 0
     wifi["retried"] = False
@@ -2706,7 +2706,7 @@ def keepalive_tick(now):
     out (_pb_pulse_radio). Not while the radio is on anyway (connected,
     connecting, lost). GPS seconds published during a pulse are queued, not
     lost."""
-    w = wifi.get("wlan")
+    w = wifi["wlan"]
     # radio idle: asleep, nothing found, or no WiFi at all (no .env, an
     # error): a logging-only board needs the pulses most
     if not PB_KEEPALIVE or wifi["state"] not in ("sleep", "not found", "no .env",
@@ -2748,10 +2748,10 @@ def _home_seen(aps):
     state = wifi["state"]
     if not WEB or state not in ("sleep", "not found"):
         return
-    homes = [_ssid_b(n) for n in wifi.get("nets") or [] if n.get("home")]
+    homes = [_ssid_b(n) for n in wifi["nets"] if n.get("home")]
     if not homes:
         return
-    mine = wifi.get("home_aps") or ()    # the hidden home's learned BSSIDs
+    mine = wifi["home_aps"]    # the hidden home's learned BSSIDs
     for rec in aps:
         if rec[3] < SEEN_MIN_RSSI:
             continue
@@ -2761,7 +2761,7 @@ def _home_seen(aps):
     else:
         return
     now = time.ticks_ms()
-    at = wifi.get("seen_at")
+    at = wifi["seen_at"]
     if at is not None and _age(now, at) < wifi["seen_wait"]:
         return
     wifi["seen_at"] = now
@@ -2847,34 +2847,34 @@ def wifi_tick():
         if wifi["state"] != "connected":
             _wifi_got_ip(w)
         else:
-            if wifi.get("learn"):
+            if wifi["learn"]:
                 _learn_home(w)
             if _age(now, wifi["last_check"]) >= WIFI_CHECK:
                 wifi["rssi"] = _rssi(w)
                 wifi["last_check"] = now
-            interval = wifi.get("roam_backoff") or ROAM_CHECK
-            if not wifi.get("home") and _has_home():
+            interval = wifi["roam_backoff"]
+            if not wifi["home"] and _has_home():
                 spd = st.get("speed")
                 moving = (has_fix(now) and spd is not None and spd >= 5
-                          and not (log.get("still") or {}).get("active"))
+                          and not (log["still"]).get("active"))
                 if moving:
                     wifi["moved_at"] = now
                     arrival = False
-                elif (wifi.get("moved_at") is not None
+                elif (wifi["moved_at"] is not None
                       and _age(now, wifi["moved_at"]) >= 60000):
                     wifi["moved_at"] = None
                     arrival = True
                 else:
                     arrival = False
                 due = (not moving
-                       and _age(now, wifi.get("roam_at") or now) >= interval)
+                       and _age(now, wifi["roam_at"] or now) >= interval)
                 if due or arrival:
                     wifi["roam_at"] = now
                     _try_roam_home(w, arrival=arrival and not due)
             if (wifi["state"] == "connected"
                     and _age(now, wifi["idle_at"]) >= WIFI_IDLE):
                 wifi["idle_at"] = now
-                if WEB and (wifi.get("home") or WEB_AWAY):
+                if WEB and (wifi["home"] or WEB_AWAY):
                     pass                 # the status page keeps it on
                 elif _ota_wants_radio():
                     pass                 # so does a firmware to confirm
@@ -2892,14 +2892,14 @@ def wifi_tick():
         wifi["fails"] = 0
         # a drop: what dropped decides whether _web_search searches
         wifi["down_at"] = now
-        wifi["down_home"] = bool(wifi.get("home"))
-        wifi["down_rssi"] = wifi.get("rssi")
-        wifi["down_ssid"] = wifi.get("ssid")   # whose return a scan must see
-        _wifi_diag("lost", "wifi lost %s rssi %s" % (wifi.get("ssid") or "",
-                                                    wifi.get("rssi")))
+        wifi["down_home"] = bool(wifi["home"])
+        wifi["down_rssi"] = wifi["rssi"]
+        wifi["down_ssid"] = wifi["ssid"]   # whose return a scan must see
+        _wifi_diag("lost", "wifi lost %s rssi %s" % (wifi["ssid"] or "",
+                                                    wifi["rssi"]))
         # a stay that began at home stays a home stay while the link is
         # down (a router restart): at_home() reads sleep_home off-line
-        wifi["sleep_home"] = bool(wifi.get("home") and (log.get("still")
+        wifi["sleep_home"] = bool(wifi["home"] and (log["still"]
                                                         or {}).get("active"))
         wifi["home"] = False
         wifi["ip"] = wifi["rssi"] = None
@@ -2908,7 +2908,7 @@ def wifi_tick():
         wifi["cand_i"] = 0
         wifi["learn"] = False            # (it may come back on a hotspot)
         wifi["rounds"] = 0               # the next round tries every network
-        print("wifi lost", wifi.get("ssid") or "")
+        print("wifi lost", wifi["ssid"] or "")
         return
     if wifi["state"] == "lost":
         if (s == network.STAT_CONNECTING or s == network.STAT_IDLE
@@ -2926,8 +2926,8 @@ def wifi_tick():
     if wifi["state"] == "sleep":
         # after WIFI_SLEEP, only once there is something to upload; sooner
         # when a backed-off upload is due again (wake_at)
-        if not wifi.get("wake"):
-            at = wifi.get("wake_at")
+        if not wifi["wake"]:
+            at = wifi["wake_at"]
             due = at is not None and not _waiting(now, at, UP_WAIT_MAX)
             if not due and _age(now, wifi["last_check"]) < WIFI_SLEEP:
                 return
@@ -2966,8 +2966,8 @@ def at_home():
     """Whether the connected network is configured as a home network, or
     the radio sleeps during a stay that began on one."""
     if wifi["state"] == "connected":
-        return wifi.get("home")
-    return wifi.get("sleep_home")
+        return wifi["home"]
+    return wifi["sleep_home"]
 
 # --- GPX logger -------------------------------------------------------------
 # Format of the lines (older firmware wrote them as they are, .trk; a rejected
@@ -3207,7 +3207,7 @@ _RPAD = b" " * RE_W                      # an empty _RE entry
 
 def log_reset():
     log.clear()
-    log.update(file=None, created=False, batch=[], points=0, err=0,
+    log.update(file=None, created=False, batch=[], points=0, err=0, herr=0,
                fix=False, lost_at=None, new_seg=False, seg_tc=[],
                full=False, wfail=False, wfails=0,
                still=_still_state(), clock=None, seq=0,
@@ -3354,7 +3354,7 @@ def flush(hold=None):
             log["fix"], log["lost_at"] = False, time.ticks_ms()
         return
     creating = not log["created"]
-    old = log.get("good_size")
+    old = log["good_size"]
     if not creating:
         sz0 = _file_size(path)
         if old is None or (sz0 is not None and old > sz0):
@@ -3416,7 +3416,7 @@ def flush(hold=None):
                 # the end is not where the last write left it: after a
                 # guessed newline a record could be split, and its half
                 # read as points. The batch goes on in a new file.
-                log["wfails"] = max(log.get("wfails", 0), WFAIL_SWITCH - 1)
+                log["wfails"] = max(log["wfails"], WFAIL_SWITCH - 1)
                 raise OSError(5)
             try:
                 start = f.tell()
@@ -3466,7 +3466,7 @@ def flush(hold=None):
             # keeps failing goes on under another name too (one second
             # on when that is the same: the name itself may be what
             # fails); all it held is in the batch.
-            log["wfails"] = log.get("wfails", 0) + 1
+            log["wfails"] = log["wfails"] + 1
             if log["wfails"] >= WFAIL_SWITCH and batch:
                 tc = batch[0][-17:-1]
                 name = _tcn(tc)
@@ -3478,7 +3478,7 @@ def flush(hold=None):
                             name = _tcn(tc)
                     _rm(path)
                 else:
-                    _cut_to_footer(path, log.get("good_size"), sz)
+                    _cut_to_footer(path, log["good_size"], sz)
                 print("track file failing, new file", path, name)
                 _diag_write("track %s failing %s new %s" % (
                     "create" if creating else "write", path[-19:], name))
@@ -3631,7 +3631,7 @@ def _hist_close(st, ok=True):
                 out += FOOTER.encode()
                 f.write(out)
             except (OSError, MemoryError):
-                log["herr"] = log.get("herr", 0) + 1
+                log["herr"] += 1
         try:
             f.close()
         except OSError:
@@ -4240,7 +4240,7 @@ def _stay_scan(aps):
     sl = log["still"]
     if not STAY_WIFI or not sl["active"] or sl["home"]:
         return
-    own = [_ssid_b(n) for n in wifi.get("nets") or []]
+    own = [_ssid_b(n) for n in wifi["nets"]]
     seen = []
     for rec in aps:
         raw = rec[0]
@@ -4475,7 +4475,7 @@ def log_tick():
     now = time.ticks_ms()
     # Close a long-open file on any WiFi network so it can upload while
     # logging continues. Offline driving keeps one file.
-    if (log["file"] is not None and log.get("file_at") is not None
+    if (log["file"] is not None and log["file_at"] is not None
             and wifi["state"] == "connected" and not log["still"]["active"]
             and log["points"] + len(log["batch"]) > 0
             and _age(now, log["file_at"]) >= NEW_FILE_GAP * 1000
@@ -4486,7 +4486,7 @@ def log_tick():
             # nothing is recorded, but NEW_FILE_GAP counts from the loss,
             # not from when space returns
             log["fix"], log["lost_at"] = False, now
-        last = log.get("full_check")
+        last = log["full_check"]
         if last is not None and _age(now, last) < FULL_CHECK:
             return
         log["full_check"] = now
@@ -4520,7 +4520,7 @@ def log_tick():
         log["fix"] = True
         if log["still"]["active"]:
             pass                         # same place: the stay keeps its file
-        elif (log["file"] is not None and log.get("lost_at") is not None
+        elif (log["file"] is not None and log["lost_at"] is not None
                 and _age(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
             _rt_trip()
             # A new file: the old track closes so it uploads, unless a write
@@ -4634,7 +4634,7 @@ def _rm_done(path):
     except OSError as e:
         if e.args and e.args[0] == 2:    # ENOENT
             return
-        errs = up.setdefault("rm_err", {})
+        errs = up["rm_err"]
         errs[path] = errs.get(path, 0) + 1
         if errs[path] < READ_ERR_MAX:
             raise
@@ -4646,7 +4646,7 @@ def _rm_done(path):
         print("upload: cannot delete, parked", path + ".err")
         _diag_write("upload: %s cannot be deleted, parked as .err" % path)
         return
-    up.get("rm_err", {}).pop(path, None)
+    up["rm_err"].pop(path, None)
 
 def _rm(path):
     try:
@@ -4734,7 +4734,8 @@ def up_reset():
               pos_err={}, enomem=0, last_err=None,
               guard_hits=_guard["hits"], lowidf_at=None, lowidf_seen=None,
               lowpy_at=None, lowpy_seen=None, ok_at=None,
-              lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
+              lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms(),
+              rm_err={}, env_u=None, env_k=None, srv=None)
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
     _tls_ctx[0] = None
@@ -5535,7 +5536,7 @@ def _hist_batch(path, off, end, key):
         ok = True
     except Exception as e:               # (best effort: the commit after
         print("hist", repr(e))           # it is what matters)
-        log["herr"] = log.get("herr", 0) + 1
+        log["herr"] += 1
     finally:
         _hist_close(st, ok)
 
@@ -5600,9 +5601,7 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     why = _append_bad(path, off, new_off, key)
     if why == "full":
         up["state"] = "bad full"
-        bf = up.get("bad_full") or {}
-        bf[path + ".bad"] = True
-        up["bad_full"] = bf
+        up["bad_full"][path + ".bad"] = True
         return False
     if why:                              # a flash or memory problem: the
         up["state"] = "fs err"           # .bad itself has room
@@ -5637,7 +5636,7 @@ def _up_err(state):
 
 def _schedule(now, ms=None):
     if ms is None:
-        b = up.get("backoff", BACKOFF_START) or BACKOFF_START
+        b = up["backoff"]
         ms = b
         up["backoff"] = min(max(b * 2, BACKOFF_START), BACKOFF_MAX)
     up["next_at"] = time.ticks_add(now, ms)
@@ -5648,15 +5647,13 @@ SRV_ERR_MAX = 3                          # the same batch answered with a code
 
 def _hold_file(path, now, ms):
     """Backoff one file so a stuck oldest track does not block the rest."""
-    h = up.get("hold") or {}
-    h[path] = time.ticks_add(now, ms)
-    up["hold"] = h
+    up["hold"][path] = time.ticks_add(now, ms)
 
 def _bad_full_left():
     """True while a .bad that hit MAX_BAD_BYTES still exists on flash and
     its track still waits on it (keyed by the .bad: pulled, deleted or
     uploaded, it no longer holds the track up)."""
-    bf = up.get("bad_full") or {}
+    bf = up["bad_full"]
     if not bf:
         return False
     keep = {}
@@ -5668,11 +5665,8 @@ def _bad_full_left():
 
 def _clear_bad_full(path):
     """path (a track, or its .bad) is done: no BAD FULL for it."""
-    bf = up.get("bad_full") or {}
-    b = path if path.endswith(".bad") else path + ".bad"
-    if b in bf:
-        bf.pop(b, None)
-        up["bad_full"] = bf
+    bf = up["bad_full"]
+    bf.pop(path if path.endswith(".bad") else path + ".bad", None)
 
 def _io_write(s, b):
     """All of b to a socket or TLS stream (MicroPython: write; CPython
@@ -5773,11 +5767,11 @@ def _tls_ready(now):
         return True
     except Exception as e:               # (MemoryError too)
         oom = _enomem(e)
-        up["enomem"] = up.get("enomem", 0) + 1 if oom else 0
+        up["enomem"] = up["enomem"] + 1 if oom else 0
         _up_err("low mem" if oom else "ca err")
         err = repr(e)[:60]
         print("upload ca", err)
-        if err != up.get("last_err"):
+        if err != up["last_err"]:
             up["last_err"] = err
             _diag_write("upload ca err %s" % err)
         gc.collect()
@@ -6023,18 +6017,18 @@ def _http_post(size):
         up["enomem"] = 0
         up["last_err"] = None
     except MemoryError:
-        up["enomem"] = up.get("enomem", 0) + 1
+        up["enomem"] = up["enomem"] + 1
         raise
     except Exception as e:
         # "in a row": any other failure ends a run of out-of-memory ones
-        up["enomem"] = up.get("enomem", 0) + 1 if _enomem(e) else 0
+        up["enomem"] = up["enomem"] + 1 if _enomem(e) else 0
         print("upload", repr(e))
-        if _guard["hits"] != up.get("guard_hits"):
+        if _guard["hits"] != up["guard_hits"]:
             up["guard_hits"] = _guard["hits"]
             print("upload: POST over %d s, aborted" % (HTTP_MAX // 1000))
             _diag_write("upload aborted after %d s" % (HTTP_MAX // 1000))
         err = repr(e)[:60]
-        if err != up.get("last_err"):    # one line per kind of error
+        if err != up["last_err"]:    # one line per kind of error
             up["last_err"] = err
             _diag_write("upload err %s" % err)
     finally:
@@ -6049,7 +6043,7 @@ def _mem_reboot_soon():
     """The last boot was a memory reboot (LOWIDF_MARK) under
     LOWIDF_REBOOT_GAP ago: no other one yet, for any of the reasons (a
     lasting cause rebooted every few minutes for ever)."""
-    return up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP
+    return up["lowidf_boot"] and uptime_s() * 1000 < LOWIDF_REBOOT_GAP
 
 def _mem_reboot(why):
     """Write what is in RAM, tell the next boot (LOWIDF_MARK), restart."""
@@ -6071,7 +6065,7 @@ def _tls_reboot():
     is fragmented for good. Write what is in RAM and restart; at most one
     per LOWIDF_REBOOT_GAP, as _low_reboot (one that does not help, a
     certificate chain over TLS_MIN_KB, rebooted every ~2.5 min)."""
-    if up.get("enomem", 0) < TLS_REBOOT_N or not at_home():
+    if up["enomem"] < TLS_REBOOT_N or not at_home():
         return False
     if _ota_wants_radio():
         return False                     # (a reset aborts a pending image)
@@ -6085,7 +6079,7 @@ def _low_ms(now, at, seen):
     """ms a low-heap episode (up[at]: its start, up[seen]: its last
     check) has lasted; a gap over LOWIDF_WAIT between checks starts a new
     one."""
-    t0, last = up.get(at), up.get(seen)
+    t0, last = up[at], up[seen]
     if t0 is None or last is None or _age(now, last) > LOWIDF_WAIT:
         t0 = up[at] = now
     up[seen] = now
@@ -6144,7 +6138,7 @@ def _low_stop(now, state, fmt, n, at, seen):
     up[seen]: _low_ms): counted, one diag line, and the reboot it may be
     time for (-> False: none, the caller schedules the retry)."""
     _up_err(state)
-    if up.get("last_err") != state:
+    if up["last_err"] != state:
         up["last_err"] = state
         _diag_write("upload low " + fmt % n)
     return _low_reboot(fmt, n, _low_ms(now, at, seen))
@@ -6158,7 +6152,7 @@ def upload_tick():
     if not up["url"] or not up["key"]:
         up["state"] = "no .env"
         return
-    if up.get("env_u") is not up["url"] or up.get("env_k") is not up["key"]:
+    if up["env_u"] is not up["url"] or up["env_k"] is not up["key"]:
         bad = _env_bad(up["url"], up["key"])  # (once: it allocates)
         if bad:
             # never sends (as no .env): the value is never printed
@@ -6169,7 +6163,7 @@ def upload_tick():
         up["env_u"], up["env_k"] = up["url"], up["key"]
     files = pending()
     up["files"] = len(files)
-    skip = up.get("skip")
+    skip = up["skip"]
     if skip and skip in files and len(files) > 1:
         # (no comprehension: it would make skip a cell, allocated every call,
         # also on the early returns above, ~40 times a second)
@@ -6178,11 +6172,11 @@ def upload_tick():
             if p != skip:
                 due.append(p)
         files = due
-    held = up.get("hold") or {}
+    held = up["hold"]
     files = _due(files, held, now)
-    if not files and up.get("allow_bad"):
+    if not files and up["allow_bad"]:
         files = _due([p for p in pending_bad()
-                      if (up.get("bad_try") or {}).get(p, 0) < MAX_BAD_RETRY],
+                      if (up["bad_try"]).get(p, 0) < MAX_BAD_RETRY],
                      held, now)
     if not files:
         if _bad_full_left():
@@ -6200,7 +6194,7 @@ def upload_tick():
         # the .pos is there but unreadable: hold the track (the newer ones
         # go) and try again; only after READ_ERR_MAX tries from 0 after
         # all (resent, Dawarich deduplicates) rather than never
-        pe = up.setdefault("pos_err", {})
+        pe = up["pos_err"]
         pe[path] = pe.get(path, 0) + 1
         print("upload pos read", path, repr(e))
         if pe[path] < READ_ERR_MAX:
@@ -6212,8 +6206,7 @@ def upload_tick():
         up["skip"] = path
         _low_mem(now)
         return
-    if up.get("pos_err"):
-        up["pos_err"].pop(path, None)
+    up["pos_err"].pop(path, None)
     try:
         _heap_mark()
         n, n_ok, size, new_off, eof = read_batch(path, off, key)
@@ -6341,9 +6334,7 @@ def upload_tick():
         up["backoff"] = BACKOFF_START
         up["allow_bad"] = True
         up["skip"] = None
-        held = up.get("hold") or {}
-        held.pop(path, None)
-        up["hold"] = held
+        up["hold"].pop(path, None)
         _clear_bad_full(path)
         if not _bad_full_left():
             up["state"] = "ok"
@@ -6355,11 +6346,10 @@ def upload_tick():
             # stop after MAX_BAD_RETRY good batches until the next boot.
             # Not in fail4: rejected .bad batches kept a normal track's
             # bad batch from quarantine until the next 2xx
-            bt = up.get("bad_try") or {}
+            bt = up["bad_try"]
             bt[path] = bt.get(path, 0) + 1
-            up["bad_try"] = bt
         else:
-            up["fail4"] = up.get("fail4", 0) + 1
+            up["fail4"] = up["fail4"] + 1
         if path.endswith(".bad") or up["fail4"] >= MAX_GLOBAL_PAYLOAD:
             up["state"] = "err payload"
             _hold_file(path, now, retry if retry else BACKOFF_MAX)
@@ -6381,7 +6371,7 @@ def upload_tick():
             # from one point, a 404 / 403 of a proxy): hold that track, the
             # others go (only the backoff: files[0] for ever, the rest
             # blocked behind it). The only one waiting: the backoff alone
-            se = up.get("srv")
+            se = up["srv"]
             if se and se[0] == path and se[1] == off:
                 se[2] += 1
             else:
@@ -7094,9 +7084,9 @@ def ota_tick(now):
     # bug held back the update that fixes it
     if not at_home():
         return
-    if (up.get("left") or up.get("files")
-            or str(up.get("state")).startswith("err")):
-        ok = up.get("ok_at")
+    if (up["left"] or up["files"]
+            or str(up["state"]).startswith("err")):
+        ok = up["ok_at"]
         if ota.get("held_at") is None or ok != ota.get("held_ok"):
             ota["held_at"] = now
             ota["held_ok"] = ok
@@ -7108,7 +7098,7 @@ def ota_tick(now):
         if not ota.get("stuck"):
             ota["stuck"] = True
             _diag_write("ota: uploads stuck %d h (%s), checking anyway" % (
-                OTA_STUCK // 3600000, up.get("state")))
+                OTA_STUCK // 3600000, up["state"]))
     elif ota.get("held_at") is not None:    # (no dict per loop pass)
         ota["held_at"] = None
         ota["stuck"] = False
@@ -7182,7 +7172,7 @@ def _web_open():
         s.setblocking(False)
         _web_poll = _web_poller(s)
         _web_sock = s
-        print("web http://%s/" % wifi.get("ip"))
+        print("web http://%s/" % wifi["ip"])
     except (OSError, MemoryError) as e:  # (no half-open socket left behind)
         if s is not None and _web_sock is not s:
             try:
@@ -7245,7 +7235,7 @@ def _web_rows():
     flash = _flash_kb()
     files, bad = _file_counts()
     heap = py_heap()
-    still = log.get("still") or {}
+    still = log["still"]
     return [
         ("fix", status()),
         ("sats", "%d / %s" % (view, sv_used())),
@@ -7269,7 +7259,7 @@ def _web_rows():
         ("sent", up["sent"]),
         ("upload", up["state"]),
         ("upload_err", up["err"]),
-        ("upload_age_s", _ago(up.get("ok_at"))),
+        ("upload_age_s", _ago(up["ok_at"])),
         ("days", _hist_days()),
         ("stay", "yes" if still.get("active") else "no"),
         ("uptime", uptime_s()),
@@ -7284,15 +7274,15 @@ def _web_rows():
         ("heap_kb", heap[1]),
         ("idf", "%s / %s" % idf_heap()),
         ("flash_kb", flash),
-        ("wifi", "%s %s" % (wifi["state"], wifi.get("ssid") or "")),
-        ("rssi", wifi.get("rssi")),
+        ("wifi", "%s %s" % (wifi["state"], wifi["ssid"] or "")),
+        ("rssi", wifi["rssi"]),
         ("pulses", wifi["pb_scans"]),
         ("fw", FW_COMMIT),
         ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
         ("web_errs", _web_errs[0]),      # page requests that hit a bug
-        ("track_drop", log.get("drop", 0)),   # points lost (full flash,
-        ("write_errs", log.get("err", 0)),    # MAX_BATCH, time back), track
+        ("track_drop", log["drop"]),   # points lost (full flash,
+        ("write_errs", log["err"]),    # MAX_BATCH, time back), track
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
     ]                                    # while the loop was blocked
 
@@ -7489,7 +7479,7 @@ def _web_host_ok(req):
     if h.endswith("."):
         h = h[:-1]
     name = HOSTNAME.lower()
-    return h in (wifi.get("ip") or "", name, name + ".local")
+    return h in (wifi["ip"] or "", name, name + ".local")
 
 def _web_head(c, code, ctype, extra=""):
     _web_out(c, ("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n%s"
@@ -7622,7 +7612,7 @@ def _web_reply(c, req):
     if not _web_host_ok(req):
         _web_send(c, "403 Forbidden", "text/plain",
                   ("open http://%s/ (or %s.local)" % (
-                      wifi.get("ip") or "<board ip>", HOSTNAME),))
+                      wifi["ip"] or "<board ip>", HOSTNAME),))
         return
     parts = req.split(None, 2)          # (HTTP/0.9: "GET /\r\n")
     path = parts[1] if len(parts) > 1 else b"/"
@@ -8340,13 +8330,13 @@ def _tft_state(now):
     fix = bool(has_fix(now))
     level = None
     if wifi["state"] == "connected":
-        level = _wifi_level(wifi.get("rssi"), _tft_b[2])
+        level = _wifi_level(wifi["rssi"], _tft_b[2])
     _tft_b[2] = level
     left = up["left"] or 0
     if left:
         text = str(left) if left < 10000 else "%dk" % (left // 1000)
     else:
-        text = "kész" if up.get("url") else " "
+        text = "kész" if up["url"] else " "
     return (_Rt.view, _Rt.km, fix, sv_used() or 0, _local_hm(), level, _gps_quality(fix),
             text, bool(left), _store_state(now))
 
