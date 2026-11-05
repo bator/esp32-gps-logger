@@ -319,6 +319,10 @@ TICKS_CAP = 86400000                     # ms after which gps_check forgets
                                          # a receiver timestamp (it would
                                          # read as fresh again after 2**30)
 
+def _recent(now, t, ms):
+    """t (ticks, or None: never) is under ms old."""
+    return t is not None and _age(now, t) < ms
+
 def _age(now, t):
     """ms since ticks t. A timestamp taken just after now (say read_uart()
     ran between the two ticks_ms() calls) is age 0; a wrapped (large
@@ -484,7 +488,7 @@ def _publish():
     st["alt"] = alt[0] / alt[1] if alt[1] else None
     if hd[1]:
         st["hdop"], st["hdop_at"] = hd[0] / hd[1], now
-    elif st["hdop_at"] is None or _age(now, st["hdop_at"]) >= STALE:
+    elif not _recent(now, st["hdop_at"], STALE):
         st["hdop"], st["hdop_at"] = None, now
     # (a second without a GGA HDOP, RMC only: the last one and its stamp
     # are kept, _fresh_hdop holds them STALE ms: an unknown HDOP passes
@@ -568,7 +572,7 @@ def gsa(talker, f):
     gps_check sets it up again."""
     st["fixtype"] = _num(f[2], int)
     now = time.ticks_ms()
-    if st["gsa_at"] is None or _age(now, st["gsa_at"]) >= 1000:
+    if not _recent(now, st["gsa_at"], 1000):
         st["gsa_at"], st["gsa_n"] = now, 0
     st["gsa_n"] += 1
     if st["gsa_n"] == GSA_MAX + 1:
@@ -740,8 +744,7 @@ def _uc_setup():
                 mask = "h%X" % UC_SYS
                 r = _uc_cmd("CFGSYS," + mask)
                 if r is True:            # it restarts: the setup comes back
-                    print("gps systems", mask)
-                    _diag_write("gps systems " + mask)
+                    _say("gps systems " + mask)
                     return True
                 if r is None:            # refused: its own stay, and the rest
                     print("gps refused", mask)
@@ -753,8 +756,7 @@ def _uc_setup():
             if r is False:
                 return False
             if r is None:
-                print("gps refused", cmd)
-                _diag_write("gps refused " + cmd)
+                _say("gps refused " + cmd)
                 if cmd.startswith("CFGNAV"):
                     st["rate_nak"] = True
         feed()
@@ -802,7 +804,7 @@ def _uc_gsa(f):
     round every second by the clock cut one in two (11 seen, 6 in use)."""
     u = _uc_sv
     now = time.ticks_ms()
-    if u["gsa"] is None or _age(now, u["gsa"]) >= UC_GSA_GAP:
+    if not _recent(now, u["gsa"], UC_GSA_GAP):
         u["used"] = []
     u["gsa"] = now
     g = _UC_SYS.get(_num(f[-1], int))
@@ -917,7 +919,7 @@ def _not_taken(now, why):
     """A diag line for a setup that was not taken, one per GPS_NOT_TAKEN_SAY
     (the ones between counted): a session left at 1 Hz leaves a trace."""
     said = st["nt_said"]
-    if said is not None and _age(now, said) < GPS_NOT_TAKEN_SAY:
+    if _recent(now, said, GPS_NOT_TAKEN_SAY):
         st["nt_more"] += 1
         return
     more = st["nt_more"]
@@ -963,7 +965,7 @@ def _gps_mute(now):
             st["mute_at"] = at
             _diag_write("gps silent %d s, no bytes from the receiver"
                         % (_age(now, at) // 1000))
-    elif rx is not None and _age(now, rx) < GPS_SILENT:
+    elif _recent(now, rx, GPS_SILENT):
         st["mute_at"] = None
         _diag_write("gps back after %d s" % (_age(rx, m) // 1000))
 
@@ -994,14 +996,14 @@ def _uc_watch(now):
     if st["setup_ok"] is not True or at is None or st["extra"]:
         return
     g = st["gst_at"]
-    if _age(now, at) < UC_GST_LOST or (g is not None and _age(now, g) < UC_GST_LOST):
+    if _age(now, at) < UC_GST_LOST or _recent(now, g, UC_GST_LOST):
         return
-    if st["rx"] is None or _age(now, st["rx"]) >= NO_DATA:
+    if not _recent(now, st["rx"], NO_DATA):
         return                           # silent: _gps_mute's case
     st["extra"] = 1                      # (its usual backoff, under a minute)
     print("gps setup lost: no GST")
     said = st["gst_said"]
-    if said is None or _age(now, said) >= GPS_NOT_TAKEN_SAY:
+    if not _recent(now, said, GPS_NOT_TAKEN_SAY):
         st["gst_said"] = now
         _diag_write("gps setup lost: no GST")
 
@@ -1022,7 +1024,7 @@ def gps_check(now):
     b = st["boot_at"]
     quiet = GPS_STORM_QUIET
     t = st["storm_at"]
-    if t is not None and _age(now, t) < GPS_FLAP_WINDOW:
+    if _recent(now, t, GPS_FLAP_WINDOW):
         # in a storm, quiet means twice its last gap between restarts (up
         # to GPS_STORM_WAIT): restarts 12 s apart each got a setup, 54 in
         # 10 min, over a third of the loop blocked
@@ -1065,7 +1067,7 @@ def _set_freq(mhz):
         return
     if mhz in _freq_bad:
         at = _freq_bad_at[0]
-        if at is not None and _age(time.ticks_ms(), at) < FREQ_RETRY:
+        if _recent(time.ticks_ms(), at, FREQ_RETRY):
             return
         del _freq_bad[:]                 # all of them get a new chance
     for _ in range(FREQ_TRIES):
@@ -1151,8 +1153,8 @@ def _diag_write(line):
         print("diag", repr(e))
 
 def _diag_utc():
-    t = _fix_secs()
-    return "-" if t is None else _stamp_at(t)[1]
+    t = _fix_s()
+    return "-" if t is None else _stamp_s(t)[1]
 
 def _diag_tail(path, n):
     """The last n lines of a diag file, [] if none. Reads only its last
@@ -1313,8 +1315,7 @@ def _heap_note(phase):
         k0, k = _heap_kb[0], py_heap()[1]
         _heap_kb[0] = k
         if k0 is not None and k >= k0 + 2:
-            print("heap grew in %s to %d KB" % (phase, k))
-            _diag_write("heap grew in %s to %d KB" % (phase, k))
+            _say("heap grew in %s to %d KB" % (phase, k))
     except Exception:                    # MemoryError: a note never fails
         pass                             # the upload
 
@@ -1529,32 +1530,14 @@ def _boot_ok():
 def _boot_fail_bump():
     n = 0
     try:
-        m = machine.RTC().memory()
-        if m:
-            if isinstance(m, bytes):
-                m = m.split(b"\x00", 1)[0].split(b"\n", 1)[0].decode()
-            s = str(m).strip()
-            for c in s:
-                if c < "0" or c > "9":
-                    break
-                n = n * 10 + (ord(c) - 48)
+        for c in machine.RTC().memory():
+            if not 48 <= c <= 57:
+                break
+            n = n * 10 + c - 48
+        n += 1
+        machine.RTC().memory(b"%d" % n)
     except Exception:
-        try:
-            with open("/boot_fail") as f:
-                n = int(f.read().strip() or "0")
-        except Exception:
-            n = 0
-    n += 1
-    raw = ("%d" % n).encode()
-    try:
-        machine.RTC().memory(raw)
-    except Exception:
-        try:
-            f = open("/boot_fail", "w")
-            f.write("%d" % n)
-            f.close()
-        except Exception:
-            pass
+        pass
     return n
 
 def feed():
@@ -1730,9 +1713,9 @@ def _static_ip(env, keys):
         print("static ip", dk, "invalid - using", gk)
     return (ip, mask or "255.255.255.0", gw, dns or gw)
 
-def _env_warn(line):
-    """A .env mistake, on the console and in the diag log. Key names only:
-    an SSID or a password never goes into either."""
+def _say(line):
+    """On the console and in the diag log: a .env mistake (key names only: an
+    SSID or a password never goes into either), a GPS or heap note."""
     print(line)
     _diag_write(line)
 
@@ -1741,42 +1724,37 @@ def _load_nets(env):
     wins, the later one is dropped (it took over the scan match, its
     password and its home flag). An empty WPA2 next to an SSID (an open
     network then) and an SSIDn / WPA2_n key not read here (SSID1, SSID4,
-    WPA2_1) are warned about (_env_warn)."""
+    WPA2_1) are warned about (_say)."""
     nets = []
     known = []
     seen = []
-    rows = (
-        ("SSID", "WPA2", "HOME1", "SSID_HOME", "SSID_HIDDEN", True,
-         ("IP", "MASK", "GW", "DNS")),
-        ("SSID2", "WPA2_2", "HOME2", "SSID2_HOME", "SSID2_HIDDEN", False,
-         ("IP2", "MASK2", "GW2", "DNS2")),
-        ("SSID3", "WPA2_3", "HOME3", "SSID3_HOME", "SSID3_HIDDEN", False,
-         ("IP3", "MASK3", "GW3", "DNS3")),
-    )
-    for sk, pk, hk, hk2, hidk, default_home, ipkeys in rows:
+    for x in ("", "2", "3"):
+        sk, pk, hk2, hidk = ("SSID" + x, "WPA2_" + x if x else "WPA2",
+                             "SSID" + x + "_HOME", "SSID" + x + "_HIDDEN")
         known += (sk, pk, hk2, hidk)
         s = env.get(sk)
         if not s:
             continue
         sb = s if isinstance(s, bytes) else s.encode()
         if sb in seen:
-            _env_warn("env %s: an SSID already set above, ignored" % sk)
+            _say("env %s: an SSID already set above, ignored" % sk)
             continue
         seen.append(sb)
         p = env.get(pk)
         if p is not None and not p:
-            _env_warn("env %s empty: %s is tried as an open network"
+            _say("env %s empty: %s is tried as an open network"
                       % (pk, sk))
-        home = default_home
+        home = not x                     # (the first network by default)
         t = _truthy(env.get(hk2))
         if t is None:
-            t = _truthy(env.get(hk))
+            t = _truthy(env.get("HOME" + (x or "1")))
         if t is not None:
             home = t
         hidden = bool(_truthy(env.get(hidk)))
         n = {"ssid": s, "pw": "" if p is None else p,
              "home": home, "hidden": hidden, "bssid": None,
-             "ip": _static_ip(env, ipkeys)}
+             "ip": _static_ip(env, ("IP" + x, "MASK" + x, "GW" + x,
+                                    "DNS" + x))}
         if isinstance(s, bytes):
             # not UTF-8 (an ANSI .env): the radio gets the bytes as they
             # are, the screen and the page one char per byte
@@ -1785,7 +1763,7 @@ def _load_nets(env):
         nets.append(n)
     for k in env:
         if k[:4] in ("SSID", "WPA2") and k not in known:
-            _env_warn("env %s ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, "
+            _say("env %s ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, "
                       "WPA2_3 only)" % k)
     return nets
 
@@ -1820,27 +1798,15 @@ def wifi_reset():
     wifi["down_rssi"] = None
     wifi["down_ssid"] = None             # (any home network may come up)
 
-def _set_hostname(name):
-    if not name:
-        return
+def _rssi(w):
     try:
-        network.hostname(name)
-        return
-    except (AttributeError, OSError, TypeError, ValueError,
-            RuntimeError):
-        pass
-    w = wifi.get("wlan")
-    if w is None:
-        return
-    try:
-        w.config(dhcp_hostname=name)
-    except (AttributeError, OSError, TypeError, ValueError,
-            RuntimeError):
-        pass
+        return w.status("rssi")
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 def _recently_failed(ssid, now):
     t = wifi["failed"].get(ssid)
-    return t is not None and _age(now, t) < FAIL_HOLD
+    return _recent(now, t, FAIL_HOLD)
 
 def _wifi_diag(kind, line):
     """A WiFi event in the diag log (a drop and why the reconnects failed
@@ -1849,7 +1815,7 @@ def _wifi_diag(kind, line):
     now = time.ticks_ms()
     at, more = wifi["diag_at"], wifi["diag_more"]
     t = at.get(kind)
-    if t is not None and _age(now, t) < WIFI_DIAG_GAP:
+    if _recent(now, t, WIFI_DIAG_GAP):
         more[kind] = more.get(kind, 0) + 1
         return
     n = more.pop(kind, 0)
@@ -1858,12 +1824,12 @@ def _wifi_diag(kind, line):
 
 def _mark_failed(ssid, why=""):
     wifi["failed"][ssid] = time.ticks_ms()
-    wifi["fails"] = wifi.get("fails", 0) + 1
+    wifi["fails"] = wifi["fails"] + 1
     print("wifi fail", ssid, why)
     _wifi_diag("fail", "wifi fail %s %s" % (ssid, why))
-    if wifi.get("roaming") and _net_home(ssid):
+    if wifi["roaming"] and _net_home(ssid):
         if not _net_hidden(ssid):
-            b = wifi.get("roam_backoff") or ROAM_CHECK
+            b = wifi["roam_backoff"]
             wifi["roam_backoff"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
         else:
             # Hidden home: roam_backoff stays (it would delay a visible
@@ -1874,11 +1840,11 @@ def _mark_failed(ssid, why=""):
             # of ours never is: one failed try shut our own router out for
             # an hour (hid_wait throttles the tries already).
             now = wifi["failed"][ssid]
-            b = wifi.get("hid_wait") or ROAM_CHECK
+            b = wifi["hid_wait"]
             wifi["hid_wait"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
             wifi["hid_at"] = now
-            b = wifi.get("blank_bssid")
-            if (b is not None and b not in (wifi.get("home_aps") or ())
+            b = wifi["blank_bssid"]
+            if (b is not None and b not in wifi["home_aps"]
                     and not _blank_bad(b, now)):
                 bad = [x for x in wifi["blank_bad"]
                        if _age(now, x[1]) < BLANK_BAD_HOLD]
@@ -1888,7 +1854,7 @@ def _mark_failed(ssid, why=""):
 
 def _blank_bad(bssid, now):
     """A hidden-home try on this empty-SSID AP failed within BLANK_BAD_HOLD."""
-    for b, t in wifi.get("blank_bad") or ():
+    for b, t in wifi["blank_bad"]:
         if b == bssid and _age(now, t) < BLANK_BAD_HOLD:
             return True
     return False
@@ -1905,7 +1871,7 @@ def _scan_empty(aps, k="empty"):
     if aps:
         wifi[k] = 0
         return False
-    n = wifi[k] = wifi.get(k, 0) + 1
+    n = wifi[k] = wifi[k] + 1
     return n == 1
 
 def _scan_known(w):
@@ -1939,7 +1905,7 @@ def _scan_found(aps):
     by = {}
     for n in wifi["nets"]:
         by[_ssid_b(n)] = n
-    mine = wifi.get("home_aps") or ()
+    mine = wifi["home_aps"]
     _stay_scan(aps)
     _home_seen(aps)
     now = time.ticks_ms()
@@ -1950,10 +1916,9 @@ def _scan_found(aps):
     for rec in aps:
         # SSIDs compared as bytes: a neighbour's Latin-1 or cut-off UTF-8
         # SSID raised UnicodeError on decode() and crashed the logger
-        raw = rec[0]
-        ssid = raw if isinstance(raw, bytes) else raw.encode()
+        ssid = rec[0]
         rssi = rec[3]
-        bssid = rec[1] if len(rec) > 1 else None
+        bssid = rec[1]
         if not ssid:
             wifi["blank_any"] = True     # some hidden AP is around
             if _blank_bad(bssid, now):
@@ -1992,17 +1957,14 @@ def home_in_range():
     On the home link the bar is SEEN_MIN_RSSI: ROAM_MIN_RSSI is for
     jumping to a weak AP; associated at -78 dBm the board is at home, and
     that False let a multipath jump end the home stay (_home_veto)."""
-    w = wifi.get("wlan")
+    w = wifi["wlan"]
     if w is None or not _has_home():
         return None
     state = wifi["state"]
     lim = ROAM_MIN_RSSI
-    if state == "connected" and wifi.get("home"):
+    if state == "connected" and wifi["home"]:
         lim = SEEN_MIN_RSSI
-        try:
-            r = w.status("rssi")
-        except (OSError, ValueError, RuntimeError):
-            r = None
+        r = _rssi(w)
         if r is not None:
             return r >= lim
         # unknown RSSI: a scan tells (it works while connected)
@@ -2034,7 +1996,7 @@ def _home_veto(now, sl):
     home stay and uploaded 80 drift points). After a veto, departures wait
     STILL_HOME_HOLD before the next check."""
     at = sl.get("veto_at")
-    if at is not None and _age(now, at) < STILL_HOME_HOLD:
+    if _recent(now, at, STILL_HOME_HOLD):
         return True
     if home_in_range():
         sl["veto_at"] = now
@@ -2045,8 +2007,8 @@ def _home_veto(now, sl):
 def _has_home():
     """Any home network configured (cached per nets list: wifi_tick asks
     every loop pass)."""
-    nets = wifi.get("nets") or []
-    c = wifi.get("hh")
+    nets = wifi["nets"]
+    c = wifi["hh"]
     if c is None or c[0] is not nets:
         c = wifi["hh"] = (nets, any(n.get("home") for n in nets))
     return c[1]
@@ -2055,14 +2017,14 @@ def _blank_home_ok(strict=False):
     """True if a hidden home is configured and a strong empty-SSID AP was
     seen. strict ("home in range"): once BSSIDs are learned, only one of
     them counts (_scan_known); else any strong blank AP does."""
-    r = wifi.get("blank_rssi")
+    r = wifi["blank_rssi"]
     if r is None or r < ROAM_MIN_RSSI:
         return False
-    if _blank_bad(wifi.get("blank_bssid"), time.ticks_ms()):
+    if _blank_bad(wifi["blank_bssid"], time.ticks_ms()):
         return False                     # a hidden-home try there failed
-    if strict and wifi.get("home_aps") and not wifi.get("blank_ours"):
+    if strict and wifi["home_aps"] and not wifi["blank_ours"]:
         return False                     # a stranger's (or unlearned) AP
-    for n in wifi.get("nets") or []:
+    for n in wifi["nets"]:
         if n.get("home") and n.get("hidden"):
             return True
     return False
@@ -2070,7 +2032,7 @@ def _blank_home_ok(strict=False):
 def _learn_home(w):
     """Connected to the hidden home: note its BSSID, so a neighbour's
     empty-SSID AP no longer counts as home in range (_scan_known). v1.29
-    has no config("bssid") getter: then a scan while connected, and a
+    has no config("bssid") getter: so a scan while connected, and a
     record carrying the hidden SSID (if the IDF names the AP it is on) or
     else the one blank AP on the link's channel within LEARN_RSSI dB of its
     RSSI is ours. Several such blank APs (or none): nothing learned.
@@ -2080,60 +2042,42 @@ def _learn_home(w):
     SSID, is dropped, so a wrong one does not stick. The list is kept in
     HOME_APS_FILE when it changes."""
     wifi["learn"] = False
-    ssid = wifi.get("ssid")
-    if not (wifi.get("home") and _net_hidden(ssid)):
+    ssid = wifi["ssid"]
+    if not (wifi["home"] and _net_hidden(ssid)):
         return
-    me = None
-    for n in wifi.get("nets") or []:
-        if n["ssid"] == ssid:
-            me = _ssid_b(n)
-            break
+    me = _ssid_b(_net(ssid))             # (hidden home: it is configured)
     try:
         found = []
         other = []                       # BSSIDs of visible networks
-        b = None
         try:
-            b = bytes(w.config("bssid"))
+            ch = w.config("channel")
         except (OSError, ValueError, TypeError, RuntimeError):
-            pass
-        if b:
-            found.append(b)
-        else:
-            try:
-                ch = w.config("channel")
-            except (OSError, ValueError, TypeError, RuntimeError):
-                ch = None
-            try:
-                r = w.status("rssi")
-            except (OSError, ValueError, RuntimeError):
-                r = None
-            feed()
-            read_uart()
-            try:
-                aps = w.scan()
-            except SCAN_ERR:
-                return
-            feed()
-            one, many = None, False
-            for rec in aps:
-                raw = rec[0]
-                if raw:
-                    if not isinstance(raw, bytes):
-                        raw = raw.encode()
-                    if raw == me:
-                        found.append(bytes(rec[1]))  # named by the IDF: ours
-                    else:
-                        other.append(bytes(rec[1]))
-                    continue
-                if ch is not None and rec[2] != ch:
-                    continue
-                if r is not None and abs(rec[3] - r) > LEARN_RSSI:
-                    continue
-                many = one is not None
-                one = bytes(rec[1])
-            if not found and one is not None and not many:
-                found.append(one)
-        found = [x for x in found if len(x) == 6]
+            ch = None
+        r = _rssi(w)
+        feed()
+        read_uart()
+        try:
+            aps = w.scan()
+        except SCAN_ERR:
+            return
+        feed()
+        one, many = None, False
+        for rec in aps:
+            raw = rec[0]
+            if raw:
+                if raw == me:
+                    found.append(rec[1])  # named by the IDF: ours
+                else:
+                    other.append(rec[1])
+                continue
+            if ch is not None and rec[2] != ch:
+                continue
+            if r is not None and abs(rec[3] - r) > LEARN_RSSI:
+                continue
+            many = one is not None
+            one = rec[1]
+        if not found and one is not None and not many:
+            found.append(one)
         if not found:
             return                       # cannot tell: nothing changes
         aps = wifi["home_aps"]
@@ -2163,21 +2107,6 @@ def _learn_home(w):
         # nothing is learned this time (learn stays cleared)
         gc.collect()
 
-_HEX = b"0123456789abcdef0123456789ABCDEF"
-
-def _hex_bssid(s):
-    """12 hex digits (a HOME_APS_FILE line, bytes) as 6 bytes, else None."""
-    s = s.strip()
-    if len(s) != 12:
-        return None
-    out = bytearray(6)
-    for i in range(12):
-        v = _HEX.find(s[i:i + 1])
-        if v < 0:
-            return None
-        out[i >> 1] = (out[i >> 1] << 4) | (v & 15)
-    return bytes(out)
-
 def _home_aps_load():
     """The hidden home's BSSIDs learned before the reboot: the keep-alive
     wake and "home in range" know it before it connected once. A missing
@@ -2194,8 +2123,11 @@ def _home_aps_load():
             line = f.readline(40)
             if not line:
                 break
-            b = _hex_bssid(line)
-            if b is not None and b not in aps:
+            try:
+                b = binascii.unhexlify(line.strip())
+            except ValueError:
+                continue                 # (no BSSID)
+            if len(b) == 6 and b not in aps:
                 aps.append(b)
                 if len(aps) >= HOME_AP_MAX:
                     break
@@ -2213,10 +2145,10 @@ def _home_aps_save():
         room = free()
         if room is not None and room < MIN_FREE:
             return
-        f = open(HOME_APS_FILE, "w")
+        f = open(HOME_APS_FILE, "wb")
         try:
             for b in wifi["home_aps"]:
-                f.write("%02x%02x%02x%02x%02x%02x\n" % tuple(b))
+                f.write(binascii.hexlify(b) + b"\n")
         finally:
             f.close()
     except (OSError, TypeError, ValueError, MemoryError) as e:
@@ -2231,12 +2163,12 @@ def _hidden_home_target(now, arrival=False):
         return None
     if not _blank_home_ok():
         return None
-    at = wifi.get("hid_at")
-    if at is not None and _age(now, at) < (wifi.get("hid_wait") or ROAM_CHECK):
+    at = wifi["hid_at"]
+    if _recent(now, at, wifi["hid_wait"]):
         return None                      # a hidden-home roam failed lately
-    for n in wifi.get("nets") or []:
+    for n in wifi["nets"]:
         if (n.get("home") and n.get("hidden")
-                and n["ssid"] != wifi.get("ssid")
+                and n["ssid"] != wifi["ssid"]
                 and not _recently_failed(n["ssid"], now)):
             target = dict(n)
             target["bssid"] = None
@@ -2253,18 +2185,18 @@ def _candidate_order(w):
     costs CONNECT_TIMEOUT with the radio on."""
     now = time.ticks_ms()
     scanned = _scan_known(w)
-    rounds = wifi.get("rounds") or 0
+    rounds = wifi["rounds"]
     wifi["rounds"] = rounds + 1
     if scanned is None:
         cands = [dict(n) for n in wifi["nets"]]
     else:
         seen = set(n["ssid"] for n in scanned)
         every = rounds % UNLISTED_EVERY == 0
-        blank = wifi.get("blank_any")
+        blank = wifi["blank_any"]
         cands = scanned + [dict(n) for n in wifi["nets"]
                            if n["ssid"] not in seen
                            and (every or (blank and n.get("hidden")))]
-    if _blank_home_ok() and wifi.get("blank_ours"):
+    if _blank_home_ok() and wifi["blank_ours"]:
         # a hidden home behind one of its learned BSSIDs gets the scan's
         # RSSI, so a failed first association is retried at once
         # (_wifi_failed); a stranger's blank AP is no reason for 2 x 12 s
@@ -2299,7 +2231,7 @@ def _wifi_clear(w):
     try:
         w.active(False)
         w.active(True)
-        _set_hostname(HOSTNAME)
+        network.hostname(HOSTNAME)
     except WLAN_ERR:
         pass
     t0 = time.ticks_ms()
@@ -2316,16 +2248,13 @@ def _wifi_clear(w):
 def _wifi_ip(w, net):
     """Apply this network's static IP, or DHCP. Once any network has a
     static IP, a DHCP network always asks for DHCP: the interface may keep
-    a static address the RAM flag no longer knows of (a soft reset)."""
+    a static address from before (a soft reset too)."""
     cfg = net.get("ip")
     try:
         if cfg:
             w.ifconfig(cfg)
-            wifi["static"] = True
-        elif wifi.get("static") or any(n.get("ip") for n in
-                                       wifi.get("nets") or []):
+        elif any(n.get("ip") for n in wifi["nets"]):
             w.ifconfig("dhcp")
-            wifi["static"] = False
     except (OSError, ValueError, TypeError, RuntimeError) as e:
         print("wifi ip", repr(e))
 
@@ -2347,30 +2276,24 @@ def _wifi_connect(w, net):
     _wifi_ip(w, net)
     ssid = net.get("raw") or net["ssid"]
     try:
-        bssid = net.get("bssid")
-        if bssid:
-            try:
-                w.connect(ssid, net["pw"], bssid=bssid)
-            except TypeError:
-                w.connect(ssid, net["pw"])
-        else:
-            w.connect(ssid, net["pw"])
+        w.connect(ssid, net["pw"], bssid=net.get("bssid"))
     except WLAN_ERR as e:
         _mark_failed(net["ssid"], "connect %r" % (e,))
         return _wifi_next(w)
     return True
 
-def _net_home(ssid):
-    for n in wifi.get("nets") or []:
+def _net(ssid):
+    """The configured network ssid ({}: none)."""
+    for n in wifi["nets"]:
         if n["ssid"] == ssid:
-            return bool(n.get("home"))
-    return False
+            return n
+    return {}
+
+def _net_home(ssid):
+    return bool(_net(ssid).get("home"))
 
 def _net_hidden(ssid):
-    for n in wifi.get("nets") or []:
-        if n["ssid"] == ssid:
-            return bool(n.get("hidden"))
-    return False
+    return bool(_net(ssid).get("hidden"))
 
 def _wifi_got_ip(w):
     wifi["state"] = "connected"
@@ -2378,21 +2301,18 @@ def _wifi_got_ip(w):
         wifi["ip"] = w.ifconfig()[0]
     except WLAN_ERR:
         wifi["ip"] = None
-    try:
-        wifi["rssi"] = w.status("rssi")
-    except (OSError, ValueError, RuntimeError):
-        wifi["rssi"] = None
-    wifi["home"] = _net_home(wifi.get("ssid"))
+    wifi["rssi"] = _rssi(w)
+    wifi["home"] = _net_home(wifi["ssid"])
     wifi["down_at"] = None
-    lost = wifi.get("lost_at")
+    lost = wifi["lost_at"]
     if lost is not None:
         _wifi_diag("back", "wifi back %s after %s, %d failed tries, rssi %s"
-                   % (wifi.get("ssid") or "", _hms(_age(time.ticks_ms(), lost)
+                   % (wifi["ssid"] or "", _hms(_age(time.ticks_ms(), lost)
                                                    // 1000),
-                      wifi.get("fails", 0), wifi["rssi"]))
+                      wifi["fails"], wifi["rssi"]))
         wifi["lost_at"] = None
     wifi["learn"] = False
-    if wifi["home"] and _net_hidden(wifi.get("ssid")):
+    if wifi["home"] and _net_hidden(wifi["ssid"]):
         # our hidden home answered: no blank AP stays blamed for an
         # earlier failed try, hidden roams are due again, and its BSSID is
         # learned on the next wifi_tick (_learn_home)
@@ -2402,14 +2322,14 @@ def _wifi_got_ip(w):
         wifi["learn"] = True
     wifi["sleep_home"] = False
     wifi["idle_at"] = time.ticks_ms()
-    wifi["failed"].pop(wifi.get("ssid"), None)
+    wifi["failed"].pop(wifi["ssid"], None)
     wifi["backoff"] = WIFI_RETRY
     wifi["roam_at"] = time.ticks_ms()
     wifi["roaming"] = False
     wifi["seen_wait"] = SEEN_WAIT
     if wifi["home"]:
         wifi["roam_backoff"] = ROAM_CHECK
-    print("wifi ok", wifi.get("ssid") or "")
+    print("wifi ok", wifi["ssid"] or "")
     return True
 
 def _wifi_failed(w, s, elapsed):
@@ -2419,10 +2339,10 @@ def _wifi_failed(w, s, elapsed):
     often fails after ~7.5 s with 202 (STAT_WRONG_PASSWORD) although the
     password is right, and the retry connects within ~1 s. Anything else is
     demoted for FAIL_HOLD and the round moves on."""
-    ssid = wifi.get("ssid")
+    ssid = wifi["ssid"]
     why = "status %s after %d ms" % (s, elapsed)
-    cands = wifi.get("cand") or []
-    i = wifi.get("cand_i", 0)
+    cands = wifi["cand"]
+    i = wifi["cand_i"]
     net = cands[i] if i < len(cands) else None
     rssi = net.get("rssi") if net else None
     # 202 (STAT_WRONG_PASSWORD, also v1.29's CONNECTION_FAIL) on a network
@@ -2430,7 +2350,7 @@ def _wifi_failed(w, s, elapsed):
     # -75 dBm, a dip under ROAM_MIN_RSSI skipped the retry the 202 quirk
     # needs, and the reconnect after a drop failed round after round
     quirk = s == getattr(network, "STAT_WRONG_PASSWORD", 202)
-    if (net is not None and net["ssid"] == ssid and not wifi.get("retried")
+    if (net is not None and net["ssid"] == ssid and not wifi["retried"]
             and rssi is not None and (quirk or rssi >= ROAM_MIN_RSSI)):
         wifi["retried"] = True
         print("wifi retry", ssid, why)
@@ -2439,10 +2359,10 @@ def _wifi_failed(w, s, elapsed):
     return _wifi_next(w)
 
 def _wifi_next(w):
-    i = wifi.get("cand_i", 0) + 1
+    i = wifi["cand_i"] + 1
     wifi["cand_i"] = i
     wifi["retried"] = False
-    cands = wifi.get("cand") or []
+    cands = wifi["cand"]
     if i < len(cands):
         return _wifi_connect(w, cands[i])
     # a roam is over: status() raising during it (no _mark_failed) left
@@ -2482,15 +2402,15 @@ def _web_search(now):
     drop)."""
     if not WEB or not (WEB_AWAY or _has_home()):
         return False
-    if not wifi.get("down_home"):
+    if not wifi["down_home"]:
         if not WEB_AWAY:
             return False                 # no page off home anyway
-    elif PB_KEEPALIVE and _home_seeable(wifi.get("down_ssid")):
-        r = wifi.get("down_rssi")
+    elif PB_KEEPALIVE and _home_seeable(wifi["down_ssid"]):
+        r = wifi["down_rssi"]
         if r is None or r >= SEEN_MIN_RSSI:
             return False                 # _home_seen wakes it
-    at = wifi.get("down_at")
-    return at is not None and _age(now, at) < WEB_SEARCH
+    at = wifi["down_at"]
+    return _recent(now, at, WEB_SEARCH)
 
 def _home_seeable(ssid=None):
     """A keep-alive scan can see home come back (_home_seen): for the home
@@ -2498,9 +2418,9 @@ def _home_seeable(ssid=None):
     with its BSSIDs known. None (boot: any of them may come up): every
     home network is. Before, a visible home in .env made a dropped hidden
     one with no BSSID learned "seeable": the page was down 1 h."""
-    aps = wifi.get("home_aps")
+    aps = wifi["home_aps"]
     any_ = False
-    for n in wifi.get("nets") or []:
+    for n in wifi["nets"]:
         if not n.get("home") or (ssid is not None and n["ssid"] != ssid):
             continue
         if n.get("hidden") and not aps:
@@ -2538,14 +2458,14 @@ def _upload_wait(now):
     flash or memory error backed off, or, with every waiting track held
     back (bad payloads), until the first hold ends. Before, "idle" with
     all tracks held kept the radio on for good."""
-    state = str(up.get("state") or "")
+    state = str(up["state"] or "")
     d = time.ticks_diff(up["next_at"], now)
     wait = d if 0 < d <= UP_WAIT_MAX else 0
     if state.startswith("err") or state in ("fs err", "low mem", "low idf"):
         return wait
     # "bad full": the rejected track is held (BACKOFF_MAX), its 15 s
     # next_at is no reason to keep the radio on: the holds below decide
-    held = up.get("hold") or {}
+    held = up["hold"]
     if not held:
         return 0
     first = None
@@ -2578,7 +2498,7 @@ def _wifi_begin_round(w):
     try:
         if not w.active():
             w.active(True)               # after _wifi_off
-            _set_hostname(HOSTNAME)
+            network.hostname(HOSTNAME)
     except WLAN_ERR:
         pass
     wifi["cand"] = _candidate_order(w)
@@ -2592,7 +2512,7 @@ def _wifi_begin_round(w):
 def _radio_idle_ok():
     """The radio may sleep: everything is uploaded, or only an away stay's
     open anchor file (and its RAM) waits. That file is closed every
-    STILL_FILE while connected and wakes the hourly round (_all_uploaded),
+    STILL_FILE while connected and wakes the hourly round (_nothing_to_send),
     so the radio and a phone hotspot do not idle on for the whole stay."""
     if _nothing_to_send():
         return True
@@ -2609,15 +2529,11 @@ def _ota_wants_radio():
 def _nothing_to_send():
     """All uploaded, or no GEO_URL/API_KEY ("no .env": never sends, so the
     waiting tracks are no reason for rounds every backoff or hour)."""
-    return _all_uploaded() or up.get("state") == "no .env"
-
-def _all_uploaded():
-    """Nothing left for the network: no finished track waiting, nothing in
-    RAM, and the open track (if any) holds no points yet. An open track
-    with points is closed by log_tick on WiFi, then uploaded."""
-    if log["batch"] or (log["file"] is not None and log["points"]):
-        return False
-    return not pending()
+    # nothing left for the network: no finished track waiting, nothing in RAM,
+    # and the open track (if any) holds no points yet. An open track with
+    # points is closed by log_tick on WiFi, then uploaded.
+    return (not log["batch"] and (log["file"] is None or not log["points"])
+            and not pending()) or up["state"] == "no .env"
 
 def wifi_wake():
     """A new stay: look for a network now instead of after WIFI_SLEEP or the
@@ -2636,7 +2552,7 @@ def wifi_wake():
 def _wifi_poll(w):
     """Advance a connecting attempt. Never sleeps. try_at is this attempt."""
     now = time.ticks_ms()
-    started = wifi.get("try_at")
+    started = wifi["try_at"]
     if started is None:
         wifi["try_at"] = now
         started = now
@@ -2655,7 +2571,7 @@ def _wifi_poll(w):
     # taken after it): that one is not this attempt's until CONNECT_TIMEOUT
     # elapses with no GOT_IP; any other failure status is (a fast fail: the
     # radio no longer stays on 12 s for every network that is not there)
-    leftover = s == wifi.get("prev_status")
+    leftover = s == wifi["prev_status"]
     if leftover and elapsed < CONNECT_TIMEOUT:
         return False
     return _wifi_failed(w, s, elapsed)
@@ -2673,7 +2589,7 @@ def _try_roam_home(w, arrival=False):
     target = None
     for n in found or ():
         if (n.get("home") and n.get("rssi", -100) >= ROAM_MIN_RSSI
-                and n["ssid"] != wifi.get("ssid")
+                and n["ssid"] != wifi["ssid"]
                 and not _recently_failed(n["ssid"], now)):
             target = n
             break
@@ -2686,12 +2602,8 @@ def _try_roam_home(w, arrival=False):
     if arrival:
         wifi["roam_backoff"] = ROAM_CHECK
         wifi["roam_at"] = now
-    cur = None
-    for x in wifi.get("nets") or []:
-        if x["ssid"] == wifi.get("ssid"):
-            cur = dict(x)
-            break
-    wifi["cand"] = [target] + ([cur] if cur else [])
+    cur = _net(wifi["ssid"])
+    wifi["cand"] = [target] + ([dict(cur)] if cur else [])
     wifi["cand_i"] = 0
     wifi["retried"] = False
     wifi["roaming"] = True
@@ -2773,7 +2685,7 @@ def keepalive_tick(now):
     out (_pb_pulse_radio). Not while the radio is on anyway (connected,
     connecting, lost). GPS seconds published during a pulse are queued, not
     lost."""
-    w = wifi.get("wlan")
+    w = wifi["wlan"]
     # radio idle: asleep, nothing found, or no WiFi at all (no .env, an
     # error): a logging-only board needs the pulses most
     if not PB_KEEPALIVE or wifi["state"] not in ("sleep", "not found", "no .env",
@@ -2815,23 +2727,21 @@ def _home_seen(aps):
     state = wifi["state"]
     if not WEB or state not in ("sleep", "not found"):
         return
-    homes = [_ssid_b(n) for n in wifi.get("nets") or [] if n.get("home")]
+    homes = [_ssid_b(n) for n in wifi["nets"] if n.get("home")]
     if not homes:
         return
-    mine = wifi.get("home_aps") or ()    # the hidden home's learned BSSIDs
+    mine = wifi["home_aps"]    # the hidden home's learned BSSIDs
     for rec in aps:
         if rec[3] < SEEN_MIN_RSSI:
             continue
         raw = rec[0]
-        if not isinstance(raw, bytes):
-            raw = raw.encode()
         if (raw and raw in homes) or (not raw and rec[1] in mine):
             break
     else:
         return
     now = time.ticks_ms()
-    at = wifi.get("seen_at")
-    if at is not None and _age(now, at) < wifi["seen_wait"]:
+    at = wifi["seen_at"]
+    if _recent(now, at, wifi["seen_wait"]):
         return
     wifi["seen_at"] = now
     wifi["seen_wait"] = min(wifi["seen_wait"] * 2, WIFI_BACKOFF_MAX)
@@ -2884,7 +2794,7 @@ def _wifi_make():
     (wifi_tick tries again after the backoff, doubling)."""
     try:
         w = wifi["wlan"] = network.WLAN(network.STA_IF)
-        _set_hostname(HOSTNAME)
+        network.hostname(HOSTNAME)
         w.active(True)
         return w
     except WLAN_ERR:
@@ -2916,37 +2826,34 @@ def wifi_tick():
         if wifi["state"] != "connected":
             _wifi_got_ip(w)
         else:
-            if wifi.get("learn"):
+            if wifi["learn"]:
                 _learn_home(w)
             if _age(now, wifi["last_check"]) >= WIFI_CHECK:
-                try:
-                    wifi["rssi"] = w.status("rssi")
-                except (OSError, ValueError, RuntimeError):
-                    wifi["rssi"] = None
+                wifi["rssi"] = _rssi(w)
                 wifi["last_check"] = now
-            interval = wifi.get("roam_backoff") or ROAM_CHECK
-            if not wifi.get("home") and _has_home():
+            interval = wifi["roam_backoff"]
+            if not wifi["home"] and _has_home():
                 spd = st.get("speed")
                 moving = (has_fix(now) and spd is not None and spd >= 5
-                          and not (log.get("still") or {}).get("active"))
+                          and not log["still"]["active"])
                 if moving:
                     wifi["moved_at"] = now
                     arrival = False
-                elif (wifi.get("moved_at") is not None
+                elif (wifi["moved_at"] is not None
                       and _age(now, wifi["moved_at"]) >= 60000):
                     wifi["moved_at"] = None
                     arrival = True
                 else:
                     arrival = False
                 due = (not moving
-                       and _age(now, wifi.get("roam_at") or now) >= interval)
+                       and _age(now, wifi["roam_at"] or now) >= interval)
                 if due or arrival:
                     wifi["roam_at"] = now
                     _try_roam_home(w, arrival=arrival and not due)
             if (wifi["state"] == "connected"
                     and _age(now, wifi["idle_at"]) >= WIFI_IDLE):
                 wifi["idle_at"] = now
-                if WEB and (wifi.get("home") or WEB_AWAY):
+                if WEB and (wifi["home"] or WEB_AWAY):
                     pass                 # the status page keeps it on
                 elif _ota_wants_radio():
                     pass                 # so does a firmware to confirm
@@ -2964,15 +2871,14 @@ def wifi_tick():
         wifi["fails"] = 0
         # a drop: what dropped decides whether _web_search searches
         wifi["down_at"] = now
-        wifi["down_home"] = bool(wifi.get("home"))
-        wifi["down_rssi"] = wifi.get("rssi")
-        wifi["down_ssid"] = wifi.get("ssid")   # whose return a scan must see
-        _wifi_diag("lost", "wifi lost %s rssi %s" % (wifi.get("ssid") or "",
-                                                    wifi.get("rssi")))
+        wifi["down_home"] = bool(wifi["home"])
+        wifi["down_rssi"] = wifi["rssi"]
+        wifi["down_ssid"] = wifi["ssid"]   # whose return a scan must see
+        _wifi_diag("lost", "wifi lost %s rssi %s" % (wifi["ssid"] or "",
+                                                    wifi["rssi"]))
         # a stay that began at home stays a home stay while the link is
         # down (a router restart): at_home() reads sleep_home off-line
-        wifi["sleep_home"] = bool(wifi.get("home") and (log.get("still")
-                                                        or {}).get("active"))
+        wifi["sleep_home"] = bool(wifi["home"] and log["still"]["active"])
         wifi["home"] = False
         wifi["ip"] = wifi["rssi"] = None
         wifi["try_at"] = now
@@ -2980,7 +2886,7 @@ def wifi_tick():
         wifi["cand_i"] = 0
         wifi["learn"] = False            # (it may come back on a hotspot)
         wifi["rounds"] = 0               # the next round tries every network
-        print("wifi lost", wifi.get("ssid") or "")
+        print("wifi lost", wifi["ssid"] or "")
         return
     if wifi["state"] == "lost":
         if (s == network.STAT_CONNECTING or s == network.STAT_IDLE
@@ -2998,8 +2904,8 @@ def wifi_tick():
     if wifi["state"] == "sleep":
         # after WIFI_SLEEP, only once there is something to upload; sooner
         # when a backed-off upload is due again (wake_at)
-        if not wifi.get("wake"):
-            at = wifi.get("wake_at")
+        if not wifi["wake"]:
+            at = wifi["wake_at"]
             due = at is not None and not _waiting(now, at, UP_WAIT_MAX)
             if not due and _age(now, wifi["last_check"]) < WIFI_SLEEP:
                 return
@@ -3034,15 +2940,12 @@ def wifi_stop():
     wifi["state"] = "off"
     wifi["home"] = False
 
-def online():
-    return wifi["state"] == "connected"
-
 def at_home():
     """Whether the connected network is configured as a home network, or
     the radio sleeps during a stay that began on one."""
     if wifi["state"] == "connected":
-        return wifi.get("home")
-    return wifi.get("sleep_home")
+        return wifi["home"]
+    return wifi["sleep_home"]
 
 # --- GPX logger -------------------------------------------------------------
 # Format of the lines (older firmware wrote them as they are, .trk; a rejected
@@ -3238,7 +3141,8 @@ def _kb_start():
 
 def _kb_part(lines, k, seg):
     """The next KB_CHUNK bytes or so of the .trb flush body of lines[:k]
-    (_kb_encode), from where _kq left off, and _kq moved on."""
+    (text lines; a keyframe first, the segment breaks before the indexes in
+    seg), from where _kq left off, and _kq moved on."""
     out = bytearray()
     s = _ke
     i, j, n = _kq
@@ -3258,16 +3162,6 @@ def _kb_part(lines, k, seg):
     _kq[0], _kq[1], _kq[2] = i, j, n
     return out
 
-def _kb_encode(lines, k, seg):
-    """lines[:k] (text lines) as the bytes of a .trb flush: a keyframe
-    first, the segment breaks before the indexes in seg. (flush writes it
-    a _kb_part at a time.)"""
-    _kb_start()
-    out = bytearray()
-    while _kq[0] < k:
-        out += _kb_part(lines, k, seg)
-    return out
-
 log = {}
 
 # The departure ring (see _still_active, _still_leave): the last
@@ -3277,24 +3171,21 @@ log = {}
 # the elevation and HDOP fields as the track line writes them (_fields: 8 and 4
 # bytes, space padded). A rebuilt line is the line _sample_line would have
 # written, rounding included: on the board a float is single
-# precision, the very value an array("f") keeps; a double (a test host)
-# takes three single floats, each what the ones before rounded off, which
-# add up to it exactly. The track lines are rebuilt on leaving. As tuples of
+# precision, the very value an array("f") keeps (a test host on doubles swaps
+# in an array("d")). The track lines are rebuilt on leaving. As tuples of
 # the line, its time and the position they took ~225 B a sample on the
 # board: 90 of them grew the heap to 116 of 124 kB and left no block over
 # 2 kB, so the next larger allocation took the heap mbedTLS needs.
 from array import array
-_NP = 1 if 1.0 + 1e-12 == 1.0 else 3     # floats a coordinate takes
-_RW = 2 * _NP + 1                        # floats a sample takes (d last)
 _RT = array("i", bytes(4 * STILL_DEP_MAX))         # (zeros, 4 B each:
-_RF = array("f", bytes(4 * _RW * STILL_DEP_MAX))   # a raw initialiser)
+_RF = array("f", bytes(4 * 3 * STILL_DEP_MAX))     # a raw initialiser)
 RE_W = 12                                # ele 8, hdop 4
 _RE = bytearray(RE_W * STILL_DEP_MAX)
 _RPAD = b" " * RE_W                      # an empty _RE entry
 
 def log_reset():
     log.clear()
-    log.update(file=None, created=False, batch=[], points=0, err=0,
+    log.update(file=None, created=False, batch=[], points=0, err=0, herr=0,
                fix=False, lost_at=None, new_seg=False, seg_tc=[],
                full=False, wfail=False, wfails=0,
                still=_still_state(), clock=None, seq=0,
@@ -3358,16 +3249,6 @@ def _spread(r, c, q, m=2 * STILL_RADIUS):
     return (q is not None and _dist(r[0], r[1], c[0], c[1]) > m
             and _dist(c[0], c[1], q[0], q[1]) > m)
 
-def _still_mean(sl, pos):
-    """Fold pos into the anchor, a running mean over STILL_MEAN_N fixes.
-    Kept as an offset from a fixed reference: in single precision a
-    latitude plus a centimetre-sized step is the same latitude."""
-    r, o = sl["aref"], sl["aoff"]
-    n = min(sl["n"] + 1, STILL_MEAN_N)
-    o = (o[0] + (pos[0] - r[0] - o[0]) / n,
-         o[1] + (_dlon(pos[1] - r[1]) - o[1]) / n)
-    sl.update(aoff=o, n=n, anchor=(r[0] + o[0], _lon(r[1] + o[1])))
-
 def free():
     try:
         s = os.statvfs(LOG_DIR)
@@ -3380,16 +3261,16 @@ def has_fix(now):
             and st["pos_at"] is not None
             and _age(now, st["pos_at"]) < STALE)
 
-def _stamp():
-    """YYYYMMDD_HHMMSS of the current fix (track file names)."""
-    return st["date"].replace("-", "") + "_" + st["time"].replace(":", "")
+def _tcn(tc):
+    """A compact time as a track file's name: YYYYMMDD_HHMMSS."""
+    return tc[:8] + "_" + tc[9:15]
 
 def start_file(stamp=None):
     try:
         os.mkdir(LOG_DIR)
     except OSError:
         pass                             # already exists
-    name = stamp or _stamp()
+    name = stamp or _tcn(_tc())
     # (wfail: a write that failed on the previous file must not keep the
     # next one from closing: log_tick)
     log.update(file=LOG_DIR + "/" + name + TRB,
@@ -3441,7 +3322,7 @@ def flush(hold=None):
             log["fix"], log["lost_at"] = False, time.ticks_ms()
         return
     creating = not log["created"]
-    old = log.get("good_size")
+    old = log["good_size"]
     if not creating:
         sz0 = _file_size(path)
         if old is None or (sz0 is not None and old > sz0):
@@ -3503,7 +3384,7 @@ def flush(hold=None):
                 # the end is not where the last write left it: after a
                 # guessed newline a record could be split, and its half
                 # read as points. The batch goes on in a new file.
-                log["wfails"] = max(log.get("wfails", 0), WFAIL_SWITCH - 1)
+                log["wfails"] = max(log["wfails"], WFAIL_SWITCH - 1)
                 raise OSError(5)
             try:
                 start = f.tell()
@@ -3533,7 +3414,11 @@ def flush(hold=None):
             _werr("close", e)
     landed = wrote and close_ok
     if not landed:
-        sz, gone = _stat_size(path)
+        gone = False                     # (only on ENOENT)
+        try:
+            sz = os.stat(path)[6]
+        except OSError as e:
+            sz, gone = None, _enoent(e)
         if expected is not None and sz == expected:
             landed = True
         else:
@@ -3553,19 +3438,19 @@ def flush(hold=None):
             # keeps failing goes on under another name too (one second
             # on when that is the same: the name itself may be what
             # fails); all it held is in the batch.
-            log["wfails"] = log.get("wfails", 0) + 1
+            log["wfails"] = log["wfails"] + 1
             if log["wfails"] >= WFAIL_SWITCH and batch:
                 tc = batch[0][-17:-1]
-                name = tc[:8] + "_" + tc[9:15]
+                name = _tcn(tc)
                 if creating:
                     if path[-19:-4] == name:
                         s = _kb_time(tc.encode(), 0)
                         if s is not None:
                             tc = _stamp_s(s + 1)[1]
-                            name = tc[:8] + "_" + tc[9:15]
+                            name = _tcn(tc)
                     _rm(path)
                 else:
-                    _cut_to_footer(path, log.get("good_size"), sz)
+                    _cut_to_footer(path, log["good_size"], sz)
                 print("track file failing, new file", path, name)
                 _diag_write("track %s failing %s new %s" % (
                     "create" if creating else "write", path[-19:], name))
@@ -3593,7 +3478,7 @@ def _werr(what, e=None):
     try:
         now = time.ticks_ms()
         at = log["err_at"]
-        if at is None or _age(now, at) >= WERR_EVERY:
+        if not _recent(now, at, WERR_EVERY):
             log["err_at"] = now
             _diag_write("track %s error %d %r %s" % (
                 what, log["err"], e, (log["file"] or "-")[-19:]))
@@ -3718,13 +3603,17 @@ def _hist_close(st, ok=True):
                 out += FOOTER.encode()
                 f.write(out)
             except (OSError, MemoryError):
-                log["herr"] = log.get("herr", 0) + 1
+                log["herr"] += 1
         try:
             f.close()
         except OSError:
             pass
     if new:
-        _hist_prune()
+        try:                             # the day files beyond the newest
+            for n in _hist_names()[:-HIST_DAYS]:  # HIST_DAYS go
+                _rm(HIST_DIR + "/" + n)
+        except OSError:
+            pass
 
 def _tail_nl(path, size):
     """False when a non-empty file does not end in a newline: an append
@@ -3768,31 +3657,15 @@ def _hist_trim(want):
         room = free()
     return room
 
-def _hist_prune():
-    """Delete the day files beyond the newest HIST_DAYS."""
-    try:
-        days = _hist_names()
-    except OSError:
-        return
-    for n in days[:-HIST_DAYS]:
-        _rm(HIST_DIR + "/" + n)
-
 def _dlon(d):
-    """A longitude difference across 180° the short way round. (Not the
-    modulo: on the board's single floats 19.000123 + 180 keeps 1.5 m.)"""
+    """A longitude difference across 180° the short way round, or a longitude
+    made of a reference plus an offset back within 180°. (Not the modulo: on
+    the board's single floats 19.000123 + 180 keeps 1.5 m.)"""
     if d > 180:
         return d - 360
     if d < -180:
         return d + 360
     return d
-
-def _lon(x):
-    """A longitude made of a reference plus an offset back within 180°."""
-    if x > 180:
-        return x - 360
-    if x < -180:
-        return x + 360
-    return x
 
 def _dist(lat1, lon1, lat2, lon2):
     """Metres between two nearby positions (equirectangular approximation),
@@ -3816,7 +3689,7 @@ def _fresh_std(now):
     None. Only this second's left 4 of 5 seconds unfiltered at 1 Hz (GST
     comes once per 5 epochs) and every second whose GST was lost."""
     std, at = st.get("std"), st.get("std_at")
-    if std is None or at is None or _age(now, at) >= GST_HOLD:
+    if std is None or not _recent(now, at, GST_HOLD):
         return None
     return std
 
@@ -3857,15 +3730,6 @@ def _sample_line(now, prev, last_t):
 TIME_BACK = 3600                         # s a fix behind the last line ...
 TIME_BACK_N = 10                         # ... in a row that drop last_t
 
-def _iso_s(t):
-    """Seconds since 2020 of an ISO time YYYY-MM-DDTHH:MM:SSZ, or None."""
-    try:
-        return ((_days(int(t[0:4]), int(t[5:7]), int(t[8:10])) - EPOCH_DAYS)
-                * 86400 + int(t[11:13]) * 3600 + int(t[14:16]) * 60
-                + int(t[17:19]))
-    except (TypeError, ValueError, IndexError):
-        return None
-
 def _time_back(t, lt):
     """A usable fix at t (ISO), older than the last line written, lt.
     TIME_BACK_N of them in a row over TIME_BACK behind it: lt was a false
@@ -3874,7 +3738,7 @@ def _time_back(t, lt):
     stamped after t still in RAM with it, a new segment starts, a diag
     line notes it. (One fix that far behind is a glitch itself: skipped
     as before.)"""
-    a, b = _iso_s(t), _iso_s(lt)
+    a, b = _dt_s(t, t, 11), _dt_s(lt, lt, 11)
     if a is None or b is None or b - a <= TIME_BACK:
         log["back"] = 0
         return
@@ -3889,8 +3753,7 @@ def _time_back(t, lt):
     q = log["seg_tc"]
     while q and (q[-1] is None or q[-1] > tc):
         q.pop()
-    print("time back", lt, t)
-    _diag_write("time back %s %s" % (lt, t))
+    _say("time back %s %s" % (lt, t))
     log.update(last_t=None, prev=None, back=0)
     _seg_break()
 
@@ -3979,22 +3842,17 @@ FIX_S_END = 2145916800                   # 2088-01-01 in seconds since 2020:
 
 def _fix_s():
     """Seconds since 2020 of the current fix's date and time, or None."""
-    d, t = st["date"], st["time"]
+    return _dt_s(st["date"], st["time"])
+
+def _dt_s(d, t, i=0):
+    """Seconds since 2020 of a date YYYY-MM-DD and, from index i of t, a time
+    HH:MM:SS (an ISO time is both: i 11), or None."""
     try:
         return ((_days(int(d[0:4]), int(d[5:7]), int(d[8:10])) - EPOCH_DAYS)
-                * 86400 + int(t[0:2]) * 3600 + int(t[3:5]) * 60
-                + int(t[6:8]))
+                * 86400 + int(t[i:i + 2]) * 3600 + int(t[i + 3:i + 5]) * 60
+                + int(t[i + 6:i + 8]))
     except (TypeError, ValueError, IndexError):
         return None
-
-def _fix_secs():
-    """UTC seconds (since 1970) of the current fix's date and time, or None."""
-    s = _fix_s()
-    return None if s is None else s + EPOCH_DAYS * 86400
-
-def _stamp_at(secs):
-    """(ISO time, compact track time) for UTC seconds since 1970."""
-    return _stamp_s(secs - EPOCH_DAYS * 86400)
 
 def _stamp_s(secs):
     """(ISO time, compact track time) for seconds since 2020."""
@@ -4055,8 +3913,6 @@ def _still_window(now, pos):
         sl.update(win_at=now, win_tc=_tc(), ref=pos, sum=[0.0, 0.0, 0],
                   qs=[])
     r, sm, qs = sl["ref"], sl["sum"], sl["qs"]
-    if qs is None:                       # (a window opened without them)
-        qs = sl["qs"] = []
     while len(qs) < 3 and (_age(now, sl["win_at"])
                            >= (len(qs) + 1) * (STILL_WINDOW // 4)):
         qs.append((sm[0], sm[1], sm[2]))   # the sums up to each quarter's
@@ -4070,7 +3926,7 @@ def _still_window(now, pos):
         return None                      # sparse fixes: collect more first
     c = None
     if sm[2] >= STILL_MIN_FIXES:
-        c = (r[0] + sm[0] / sm[2], _lon(r[1] + sm[1] / sm[2]))
+        c = (r[0] + sm[0] / sm[2], _dlon(r[1] + sm[1] / sm[2]))
         if _spread(r, c, pos, STILL_EXIT // 2) or _walking(r, sm, qs):
             # its ends STILL_EXIT apart through the centroid: a drive (a
             # bike from ~10 km/h) pairs with nothing. Out and back with the
@@ -4093,7 +3949,7 @@ def _still_window(now, pos):
         return None
     w = prev[2] + sm[2]
     a = (prev[0][0] + (c[0] - prev[0][0]) * sm[2] / w,
-         _lon(prev[0][1] + _dlon(c[1] - prev[0][1]) * sm[2] / w))
+         _dlon(prev[0][1] + _dlon(c[1] - prev[0][1]) * sm[2] / w))
     return a, prev[1], w, c
 
 STILL_TREND = 35                         # m a walking window's quarters
@@ -4148,7 +4004,7 @@ def _still_heartbeat(now):
     a = sl["anchor"]
     sl["hb_at"] = now
     if log["file"] is None:
-        start_file(tc[:8] + "_" + tc[9:15])
+        start_file(_tcn(tc))
         sl["file_at"] = now
     _record((t, _line("%.6f,%.6f" % (a[0], a[1]), ("", ""), tc)), a)
 
@@ -4182,12 +4038,12 @@ def _still_beat(now):
             and wifi["state"] == "connected"
             and _age(now, sl["file_at"]) >= STILL_FILE):
         _still_close(now)
-    if sl["hb_at"] is not None and _age(now, sl["hb_at"]) < STILL_HEARTBEAT:
+    if _recent(now, sl["hb_at"], STILL_HEARTBEAT):
         return
-    if (sl["last_at"] is not None and _age(now, sl["last_at"]) < STILL_GAP
+    if (_recent(now, sl["last_at"], STILL_GAP)
             and sl["last_d"] > STILL_NEAR):
         return
-    if (sl["far_at"] is not None and _age(now, sl["far_at"]) < STILL_BACK
+    if (_recent(now, sl["far_at"], STILL_BACK)
             and sl["hb_at"] is not None
             and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT):
         return
@@ -4222,7 +4078,7 @@ def _close_file():
     if hold is not None and b[0][-17:-1] >= hold:
         tc = b[0][-17:-1]
         seg = log["new_seg"], log["seg_tc"]
-        start_file(tc[:8] + "_" + tc[9:15])
+        start_file(_tcn(tc))
         log["new_seg"], log["seg_tc"] = seg    # a break among the held lines
         return True
     return False
@@ -4350,13 +4206,11 @@ def _stay_scan(aps):
     sl = log["still"]
     if not STAY_WIFI or not sl["active"] or sl["home"]:
         return
-    own = [_ssid_b(n) for n in wifi.get("nets") or []]
+    own = [_ssid_b(n) for n in wifi["nets"]]
     seen = []
     for rec in aps:
         raw = rec[0]
-        if not isinstance(raw, bytes):
-            raw = raw.encode()
-        b = bytes(rec[1])
+        b = rec[1]
         if (raw and raw in own) or not b or b[0] & 0x02:
             continue                     # (SSIDs compared as bytes: a
         seen.append((rec[3], b))         # Latin-1 one broke decode())
@@ -4405,11 +4259,10 @@ def _ring_add(sl, now, pos, d):
     cap = len(_RT)
     n, i = sl["rn"], sl["ri"]
     if n:
-        k = _RW * ((i + n - 1) % cap)
-        if d + STILL_TOL < _RF[k + _RW - 1]:
+        k = 3 * ((i + n - 1) % cap)
+        if d + STILL_TOL < _RF[k + 2]:
             n = 0
-        elif _dist(_ring_deg(k), _ring_deg(k + _NP),
-                   pos[0], pos[1]) <= STILL_DEP_STEP:
+        elif _dist(_RF[k], _RF[k + 1], pos[0], pos[1]) <= STILL_DEP_STEP:
             return
     if not n:
         sl["rt0"], i = s, 0
@@ -4421,10 +4274,10 @@ def _ring_add(sl, now, pos, d):
     sl["rn"], sl["ri"] = n, i
     _RT[j] = s - sl["rt0"]               # (seconds since 2020 overflowed it
                                          # from 2088 on: see _sample)
-    k = _RW * j
-    _ring_put(k, pos[0])
-    _ring_put(k + _NP, pos[1])
-    _RF[k + _RW - 1] = d
+    k = 3 * j
+    _RF[k] = pos[0]
+    _RF[k + 1] = pos[1]
+    _RF[k + 2] = d
     k = RE_W * j
     _RE[k:k + RE_W] = _RPAD
     o = 0
@@ -4432,25 +4285,6 @@ def _ring_add(sl, now, pos, d):
         if len(x) <= w:                  # (beyond 99999.9 m: none)
             _RE[k + o:k + o + len(x)] = x.encode()
         o += w
-
-def _ring_put(k, v):
-    """Keep coordinate v in _RF from k on (see _NP)."""
-    m = k + _NP
-    while k < m:
-        _RF[k] = v
-        v -= _RF[k]                      # (what single precision lost)
-        k += 1
-
-def _ring_deg(k):
-    """A coordinate kept in the departure ring from _RF[k] on (_NP floats,
-    added up largest first: exact)."""
-    v = _RF[k]
-    m = k + _NP
-    k += 1
-    while k < m:
-        v += _RF[k]
-        k += 1
-    return v
 
 def _still_leave(wifi_seen=False):
     """End the stay and write the way out: the samples in the departure
@@ -4463,14 +4297,14 @@ def _still_leave(wifi_seen=False):
     n, i0, cap = sl["rn"], sl["ri"], len(_RT)
     _rt_trip(sl["rt0"] + _RT[i0] if n else None)
     if (wifi_seen and n
-            and _RF[_RW * ((i0 + n - 1) % cap) + _RW - 1] <= STILL_NEAR):
+            and _RF[3 * ((i0 + n - 1) % cap) + 2] <= STILL_NEAR):
         n = 0
     i = 0
     prev = None
     while i < n:
         j = (i0 + i) % cap
         i += 1
-        p = (_ring_deg(_RW * j), _ring_deg(_RW * j + _NP))
+        p = (_RF[3 * j], _RF[3 * j + 1])
         t, tc = _stamp_s(sl["rt0"] + _RT[j])
         # only what comes after the last line (an anchor point may have
         # been written while the way out began), so the track stays in order
@@ -4483,7 +4317,7 @@ def _still_leave(wifi_seen=False):
                      (_RE[k:k + 8].decode().strip(),
                       _RE[k + 8:k + 12].decode().strip()), tc)
         if log["file"] is None:
-            start_file(tc[:8] + "_" + tc[9:15])
+            start_file(_tcn(tc))
         _record((t, line), p)
         prev = p
     print("stay end", int(sl["far_d"]))
@@ -4562,7 +4396,14 @@ def _still_active(now, pos):
         sl.update(gap_n=0, gap_at=None, gap_ref=None)
         _ring_add(sl, now, pos, d)
         if d <= STILL_NEAR:
-            _still_mean(sl, pos)
+            # pos into the anchor, a running mean over STILL_MEAN_N fixes.
+            # Kept as an offset from a fixed reference: in single precision
+            # a latitude plus a centimetre-sized step is the same latitude.
+            r, o = sl["aref"], sl["aoff"]
+            n = min(sl["n"] + 1, STILL_MEAN_N)
+            o = (o[0] + (pos[0] - r[0] - o[0]) / n,
+                 o[1] + (_dlon(pos[1] - r[1]) - o[1]) / n)
+            sl.update(aoff=o, n=n, anchor=(r[0] + o[0], _dlon(r[1] + o[1])))
             sl["win_at"] = sl["prev"] = sl["move_c"] = None
         else:
             # Settled between STILL_NEAR and STILL_EXIT (out of the car and
@@ -4607,7 +4448,7 @@ def log_tick():
     now = time.ticks_ms()
     # Close a long-open file on any WiFi network so it can upload while
     # logging continues. Offline driving keeps one file.
-    if (log["file"] is not None and log.get("file_at") is not None
+    if (log["file"] is not None and log["file_at"] is not None
             and wifi["state"] == "connected" and not log["still"]["active"]
             and log["points"] + len(log["batch"]) > 0
             and _age(now, log["file_at"]) >= NEW_FILE_GAP * 1000
@@ -4618,8 +4459,8 @@ def log_tick():
             # nothing is recorded, but NEW_FILE_GAP counts from the loss,
             # not from when space returns
             log["fix"], log["lost_at"] = False, now
-        last = log.get("full_check")
-        if last is not None and _age(now, last) < FULL_CHECK:
+        last = log["full_check"]
+        if _recent(now, last, FULL_CHECK):
             return
         log["full_check"] = now
         room = free()
@@ -4652,7 +4493,7 @@ def log_tick():
         log["fix"] = True
         if log["still"]["active"]:
             pass                         # same place: the stay keeps its file
-        elif (log["file"] is not None and log.get("lost_at") is not None
+        elif (log["file"] is not None and log["lost_at"] is not None
                 and _age(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
             _rt_trip()
             # A new file: the old track closes so it uploads, unless a write
@@ -4764,9 +4605,9 @@ def _rm_done(path):
     try:
         os.remove(path)
     except OSError as e:
-        if e.args and e.args[0] == 2:    # ENOENT
+        if _enoent(e):
             return
-        errs = up.setdefault("rm_err", {})
+        errs = up["rm_err"]
         errs[path] = errs.get(path, 0) + 1
         if errs[path] < READ_ERR_MAX:
             raise
@@ -4778,7 +4619,7 @@ def _rm_done(path):
         print("upload: cannot delete, parked", path + ".err")
         _diag_write("upload: %s cannot be deleted, parked as .err" % path)
         return
-    up.get("rm_err", {}).pop(path, None)
+    up["rm_err"].pop(path, None)
 
 def _rm(path):
     try:
@@ -4794,13 +4635,6 @@ def _enoent(e):
         except (AttributeError, IndexError):
             return False
     return n == 2
-
-def _stat_size(path):
-    """(size_or_None, missing). missing is True only on ENOENT."""
-    try:
-        return os.stat(path)[6], False
-    except OSError as e:
-        return None, _enoent(e)
 
 def _file_size(path):
     try:
@@ -4849,16 +4683,11 @@ def _seek_footer(f, old):
     f.seek(start + i + 1, 0)
     return False
 
-def _lowidf_mark_take():
-    """True once if the last boot was a low-idf reboot (LOWIDF_MARK)."""
-    try:
-        os.stat(LOWIDF_MARK)
-    except OSError:
-        return False
-    _rm(LOWIDF_MARK)
-    return True
-
 def up_reset():
+    # True once if the last boot was a low-idf reboot (LOWIDF_MARK)
+    lowboot = _file_size(LOWIDF_MARK) is not None
+    if lowboot:
+        _rm(LOWIDF_MARK)
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
@@ -4866,7 +4695,8 @@ def up_reset():
               pos_err={}, enomem=0, last_err=None,
               guard_hits=_guard["hits"], lowidf_at=None, lowidf_seen=None,
               lowpy_at=None, lowpy_seen=None, ok_at=None,
-              lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms())
+              lowidf_boot=lowboot, next_at=time.ticks_ms(),
+              rm_err={}, env_u=None, env_k=None, srv=None)
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
     _tls_ctx[0] = None
@@ -4945,9 +4775,6 @@ def read_pos(path):
     except OSError:
         return 0, None
     return off, key if tb else None
-
-def read_offset(path):
-    return read_pos(path)[0]
 
 def write_offset(path, off, key=None):
     """Sidecar update: write <file>.pos.tmp, then rename over .pos.
@@ -5293,30 +5120,22 @@ def count_points():
             gc.collect()
     return total
 
-def pending():
-    """Finished track files, oldest first (names are YYYYMMDD_HHMMSS).
-    Sidecars (.pos) and quarantined (.bad) files are not listed."""
+def _ls(ends):
+    """The paths with these endings, oldest first (YYYYMMDD_HHMMSS)."""
     try:
-        names = sorted(n for n in os.listdir(LOG_DIR)
-                       if n.endswith(_TRACKS))
-    except OSError:
-        return []
-    return [p for p in (LOG_DIR + "/" + n for n in names) if p != log["file"]]
-
-def pending_bad():
-    """Rejected-batch files left for later recovery."""
-    try:
-        names = sorted(n for n in os.listdir(LOG_DIR)
-                       if n.endswith(_BADS))
+        names = sorted(n for n in os.listdir(LOG_DIR) if n.endswith(ends))
     except OSError:
         return []
     return [LOG_DIR + "/" + n for n in names]
 
-def _finite(x):
-    try:
-        return math.isfinite(x)
-    except AttributeError:
-        return x == x and x != float("inf") and x != float("-inf")
+def pending():
+    """Finished track files. Sidecars (.pos) and quarantined (.bad) files
+    are not listed."""
+    return [p for p in _ls(_TRACKS) if p != log["file"]]
+
+def pending_bad():
+    """Rejected-batch files left for later recovery."""
+    return _ls(_BADS)
 
 def _ymd_ok(y, mo, d, hh, mi, ss):
     """A real UTC time in 2020-2099 (the ranges _kb_time checks, without
@@ -5415,7 +5234,7 @@ def _trk_field(i, a, b, fmt, imax):
     v = _fnum(a, b)
     if v is None:
         return 0 if _utf8(a, b) else -1
-    if not _finite(v):
+    if not math.isfinite(v):
         return 0
     return _ptnum(i, a, b, v, fmt, 1, imax)
 
@@ -5447,7 +5266,7 @@ def _trk_point(a, b):
     if not _tc_ok(rb, t):                # (a .trb keyframe _kb_parse did
         return 0                         # not take is passed here too)
     lat, lon = _fnum(a, c1), _fnum(c1 + 1, c2)
-    if (lat is None or lon is None or not _finite(lat) or not _finite(lon)
+    if (lat is None or lon is None or not math.isfinite(lat) or not math.isfinite(lon)
             or abs(lat) > 90 or abs(lon) > 180):
         return 0
     _pt[6] = t
@@ -5475,7 +5294,7 @@ def _trk_point(a, b):
         if v is None:
             if not _utf8(c3 + 1, c4):
                 return 0
-        elif _finite(v * HDOP_M):        # (1e308: finite, * HDOP_M inf:
+        elif math.isfinite(v * HDOP_M):        # (1e308: finite, * HDOP_M inf:
             _pt[10] = _pt[11] = 0        # invalid JSON, the batch a 400)
             _pt[12] = b"%.1f" % (v * HDOP_M)
             need += len(_J_ACC) + 1 + len(_pt[12])
@@ -5670,7 +5489,7 @@ def _hist_batch(path, off, end, key):
         ok = True
     except Exception as e:               # (best effort: the commit after
         print("hist", repr(e))           # it is what matters)
-        log["herr"] = log.get("herr", 0) + 1
+        log["herr"] += 1
     finally:
         _hist_close(st, ok)
 
@@ -5735,9 +5554,7 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     why = _append_bad(path, off, new_off, key)
     if why == "full":
         up["state"] = "bad full"
-        bf = up.get("bad_full") or {}
-        bf[path + ".bad"] = True
-        up["bad_full"] = bf
+        up["bad_full"][path + ".bad"] = True
         return False
     if why:                              # a flash or memory problem: the
         up["state"] = "fs err"           # .bad itself has room
@@ -5749,29 +5566,15 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
         # the copy landed but the offset did not: the next try copies the
         # batch again (duplicates in .bad, deduplicated by Dawarich)
         print("quarantine offset", repr(e))
-        up["err"] += 1
-        up["state"] = "fs err"
+        _up_err("fs err")
         return False
     up["allow_bad"] = False
     up["state"] = "quarantine"
     return True
 
-def _portal(r):
-    """The answer is an HTML page (Content-Type text/html)."""
-    hdrs = getattr(r, "headers", None) or {}
-    for k in hdrs:
-        if str(k).lower() == "content-type":
-            return "html" in str(hdrs[k]).lower()
-    return False
-
-def _retry_after_ms(r):
-    hdrs = getattr(r, "headers", None) or {}
-    v = None
-    if isinstance(hdrs, dict):
-        for k in hdrs:
-            if str(k).lower() == "retry-after":
-                v = hdrs[k]
-                break
+def _retry_after_ms(v):
+    """A Retry-After header's value (bytes or None) in ms, within the backoff's
+    limits; None when there is no number."""
     if v is None:
         return None
     try:
@@ -5780,9 +5583,13 @@ def _retry_after_ms(r):
         return None
     return min(max(ms, BACKOFF_START), BACKOFF_MAX)
 
+def _up_err(state):
+    up["err"] += 1
+    up["state"] = state
+
 def _schedule(now, ms=None):
     if ms is None:
-        b = up.get("backoff", BACKOFF_START) or BACKOFF_START
+        b = up["backoff"]
         ms = b
         up["backoff"] = min(max(b * 2, BACKOFF_START), BACKOFF_MAX)
     up["next_at"] = time.ticks_add(now, ms)
@@ -5793,15 +5600,13 @@ SRV_ERR_MAX = 3                          # the same batch answered with a code
 
 def _hold_file(path, now, ms):
     """Backoff one file so a stuck oldest track does not block the rest."""
-    h = up.get("hold") or {}
-    h[path] = time.ticks_add(now, ms)
-    up["hold"] = h
+    up["hold"][path] = time.ticks_add(now, ms)
 
 def _bad_full_left():
     """True while a .bad that hit MAX_BAD_BYTES still exists on flash and
     its track still waits on it (keyed by the .bad: pulled, deleted or
     uploaded, it no longer holds the track up)."""
-    bf = up.get("bad_full") or {}
+    bf = up["bad_full"]
     if not bf:
         return False
     keep = {}
@@ -5813,29 +5618,12 @@ def _bad_full_left():
 
 def _clear_bad_full(path):
     """path (a track, or its .bad) is done: no BAD FULL for it."""
-    bf = up.get("bad_full") or {}
-    b = path if path.endswith(".bad") else path + ".bad"
-    if b in bf:
-        bf.pop(b, None)
-        up["bad_full"] = bf
-
-class _Resp:
-    def __init__(self, code, retry, ctype=None):
-        self.status_code = code
-        self.headers = {"Retry-After": retry} if retry is not None else {}
-        if ctype is not None:
-            self.headers["Content-Type"] = ctype
-
-    def close(self):
-        pass
+    bf = up["bad_full"]
+    bf.pop(path if path.endswith(".bad") else path + ".bad", None)
 
 def _io_write(s, b):
-    """All of b to a socket or TLS stream (MicroPython: write; CPython
-    test doubles: sendall)."""
-    w = getattr(s, "write", None)
-    if w is None:
-        s.sendall(b)
-        return
+    """All of b to a socket or TLS stream."""
+    w = s.write
     mv = memoryview(b)
     i = 0
     t0 = time.ticks_ms()
@@ -5884,10 +5672,7 @@ def _tls_context():
     ctx = _tls_ctx[0]
     if ctx is not None:
         return ctx
-    try:
-        import tls
-    except ImportError:
-        import ssl as tls
+    import tls
     sz = _ca_size()
     if sz is not None and sz > CA_MAX:   # (not read: "ca err", no reboot)
         raise ValueError("%s over %d B" % (CA_FILE, CA_MAX))
@@ -5928,12 +5713,11 @@ def _tls_ready(now):
         return True
     except Exception as e:               # (MemoryError too)
         oom = _enomem(e)
-        up["enomem"] = up.get("enomem", 0) + 1 if oom else 0
-        up["err"] += 1
-        up["state"] = "low mem" if oom else "ca err"
+        up["enomem"] = up["enomem"] + 1 if oom else 0
+        _up_err("low mem" if oom else "ca err")
         err = repr(e)[:60]
         print("upload ca", err)
-        if err != up.get("last_err"):
+        if err != up["last_err"]:
             up["last_err"] = err
             _diag_write("upload ca err %s" % err)
         gc.collect()
@@ -6025,41 +5809,66 @@ def _guard_stop():
 _post_phase = [None]                     # "connect", "tls", "http" in a POST,
                                          # "ctx" while the SSLContext is made
 
-def _host_hdr(proto, host, port):
-    """The Host header: host:port unless it is the scheme's default port
-    (RFC 7230 5.4; a proxy on :8443 routes by it)."""
-    if port == (443 if proto == "https" else 80):
-        return host
-    return "%s:%d" % (host, port)
+def _http_open(method, url):
+    """The start of an HTTP/1.0 request, no redirects: a socket for url's
+    host. -> (socket, its address, https?, host, the request's first lines).
+    The Host header: host:port unless it is the scheme's default port (RFC
+    7230 5.4; a proxy on :8443 routes by it)."""
+    proto, _, rest = url.partition("://")
+    host, _, path = rest.partition("/")
+    dflt = port = 443 if proto == "https" else 80
+    if ":" in host:
+        host, _, p = host.rpartition(":")
+        port = int(p)
+    head = "%s /%s HTTP/1.0\r\nHost: %s\r\n" % (
+        method, path, host if port == dflt else "%s:%d" % (host, port))
+    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
+    return (socket.socket(ai[0], socket.SOCK_STREAM, ai[2]), ai[-1],
+            proto == "https", host, head)
+
+def _http_head(s, want, got):
+    """Read an answer's headers, in bounded pieces (a long header comes in
+    several, only a piece at a line start is a header or the end). The value
+    of a header named in want (lowercase) goes to got at the same index."""
+    bol = True
+    for _ in range(HTTP_LINES):
+        h = s.readline(HTTP_LINE)
+        if not h or (bol and h in (b"\r\n", b"\n")):
+            break
+        if bol:
+            k, _, v = h.partition(b":")
+            k = k.strip().lower()
+            if k in want:
+                got[want.index(k)] = v.strip()
+        bol = h[-1:] == b"\n"
+
+def _http_close(s):
+    _guard_stop()
+    try:
+        s.close()
+    except OSError:
+        pass
 
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
     followed one as a GET with the old Content-Length (the server then
     waits for a body) and the Bearer header, without the timeout. The body
     goes out in HTTP_CHUNK pieces and the wait for the answer polls, both
-    reading the UART meanwhile, so a slow server costs no NMEA. -> _Resp."""
-    proto, _, rest = url.partition("://")
-    host, _, path = rest.partition("/")
-    path = "/" + path
-    port = 443 if proto == "https" else 80
-    if ":" in host:
-        host, _, p = host.rpartition(":")
-        port = int(p)
+    reading the UART meanwhile, so a slow server costs no NMEA. -> (status
+    code, Retry-After, Content-Type), the two headers bytes, None when not
+    sent."""
     _post_phase[0] = "connect"
-    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
-    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
+    s, addr, https, host, hdr = _http_open("POST", url)
     _guard_start(s, HTTP_MAX)            # the raw socket: closing it fails
     try:                                 # a TLS call stuck on it
         s.settimeout(timeout)
-        s.connect(ai[-1])
-        if proto == "https":
+        s.connect(addr)
+        if https:
             _heap_note("connect")
             _post_phase[0] = "tls"       # the handshake
             s = _tls_wrap(s, host)
             _heap_note("tls_wrap")
         _post_phase[0] = "http"
-        hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (
-            path, _host_hdr(proto, host, port))
         for k in headers:
             hdr += "%s: %s\r\n" % (k, headers[k])
         hdr += "Content-Length: %d\r\nConnection: close\r\n\r\n" % len(data)
@@ -6079,34 +5888,17 @@ def _raw_post(url, data, headers, timeout):
                 raise OSError(110)       # ETIMEDOUT
         line = s.readline(HTTP_LINE)
         code = int(line.split(None, 2)[1])
-        retry = ctype = None
+        got = [None, None]
         try:
             # the status is in: a reset, a timeout or the guard closing
             # the socket in the headers must not turn a 2xx into a resend
-            # (a duplicate batch). Bounded reads: a long header comes in
-            # pieces, only a piece at a line start is a header or the end.
-            bol = True
-            for _ in range(HTTP_LINES):
-                h = s.readline(HTTP_LINE)
-                if not h or (bol and h in (b"\r\n", b"\n")):
-                    break
-                if bol:
-                    k, _, v = h.partition(b":")
-                    k = k.strip().lower()
-                    if k == b"retry-after":
-                        retry = v.strip().decode()
-                    elif k == b"content-type":
-                        ctype = v.strip().decode()
-                bol = h[-1:] == b"\n"
+            # (a duplicate batch)
+            _http_head(s, (b"retry-after", b"content-type"), got)
         except Exception as e:
             print("upload head", code, repr(e))
-        return _Resp(code, retry, ctype)
+        return code, got[0], got[1]
     finally:
-        _guard_stop()
-        try:
-            s.close()
-        except OSError:
-            pass
+        _http_close(s)
 
 HTTP_POST = _raw_post                    # (tests swap it)
 
@@ -6148,21 +5940,20 @@ def _enomem(e):
 def _http_post(size):
     """POST _body[:size]. Returns (status_code or None, retry_after_ms or None)."""
     feed()
-    r = None
     code, retry = None, None
     _post_phase[0] = None
     # only a hit during this POST is its abort: not the OTA download's (that
     # shares the guard), or one in the headers of the last, 2xx POST
     up["guard_hits"] = _guard["hits"]
     try:
-        r = HTTP_POST("%s/api/v1/overland/batches" % up["url"],
-                      memoryview(_body)[:size],
-                      {"Content-Type": "application/json",
-                       "Authorization": "Bearer %s" % up["key"]},
-                      HTTP_TIMEOUT)
-        code = r.status_code
-        retry = _retry_after_ms(r)
-        if code is not None and 200 <= code < 300 and _portal(r):
+        code, retry, ctype = HTTP_POST(
+            "%s/api/v1/overland/batches" % up["url"],
+            memoryview(_body)[:size],
+            {"Content-Type": "application/json",
+             "Authorization": "Bearer %s" % up["key"]},
+            HTTP_TIMEOUT)
+        retry = _retry_after_ms(retry)
+        if 200 <= code < 300 and ctype and b"html" in ctype.lower():
             # an HTML 2xx is a captive portal (or a proxy) answering, not
             # Dawarich (JSON): without CA_FILE nothing else tells, and the
             # batch counted as sent was deleted
@@ -6172,26 +5963,21 @@ def _http_post(size):
         up["enomem"] = 0
         up["last_err"] = None
     except MemoryError:
-        up["enomem"] = up.get("enomem", 0) + 1
+        up["enomem"] = up["enomem"] + 1
         raise
     except Exception as e:
         # "in a row": any other failure ends a run of out-of-memory ones
-        up["enomem"] = up.get("enomem", 0) + 1 if _enomem(e) else 0
+        up["enomem"] = up["enomem"] + 1 if _enomem(e) else 0
         print("upload", repr(e))
-        if _guard["hits"] != up.get("guard_hits"):
+        if _guard["hits"] != up["guard_hits"]:
             up["guard_hits"] = _guard["hits"]
             print("upload: POST over %d s, aborted" % (HTTP_MAX // 1000))
             _diag_write("upload aborted after %d s" % (HTTP_MAX // 1000))
         err = repr(e)[:60]
-        if err != up.get("last_err"):    # one line per kind of error
+        if err != up["last_err"]:    # one line per kind of error
             up["last_err"] = err
             _diag_write("upload err %s" % err)
     finally:
-        if r is not None:
-            try:
-                r.close()
-            except Exception:
-                pass
         feed()
         gc.collect()
     if code is not None and 300 <= code < 400:
@@ -6203,7 +5989,7 @@ def _mem_reboot_soon():
     """The last boot was a memory reboot (LOWIDF_MARK) under
     LOWIDF_REBOOT_GAP ago: no other one yet, for any of the reasons (a
     lasting cause rebooted every few minutes for ever)."""
-    return up.get("lowidf_boot") and uptime_s() * 1000 < LOWIDF_REBOOT_GAP
+    return up["lowidf_boot"] and uptime_s() * 1000 < LOWIDF_REBOOT_GAP
 
 def _mem_reboot(why):
     """Write what is in RAM, tell the next boot (LOWIDF_MARK), restart."""
@@ -6225,7 +6011,7 @@ def _tls_reboot():
     is fragmented for good. Write what is in RAM and restart; at most one
     per LOWIDF_REBOOT_GAP, as _low_reboot (one that does not help, a
     certificate chain over TLS_MIN_KB, rebooted every ~2.5 min)."""
-    if up.get("enomem", 0) < TLS_REBOOT_N or not at_home():
+    if up["enomem"] < TLS_REBOOT_N or not at_home():
         return False
     if _ota_wants_radio():
         return False                     # (a reset aborts a pending image)
@@ -6239,7 +6025,7 @@ def _low_ms(now, at, seen):
     """ms a low-heap episode (up[at]: its start, up[seen]: its last
     check) has lasted; a gap over LOWIDF_WAIT between checks starts a new
     one."""
-    t0, last = up.get(at), up.get(seen)
+    t0, last = up[at], up[seen]
     if t0 is None or last is None or _age(now, last) > LOWIDF_WAIT:
         t0 = up[at] = now
     up[seen] = now
@@ -6267,22 +6053,38 @@ def _env_bad(url, key):
     space or a "# comment" got a 400 / 401 for ever); GEO_URL http(s)://
     host[:port][/path], host letters, digits, "-" and "." (userinfo or
     IPv6 made _raw_post's int(port) raise: "err net" for ever)."""
-    for c in key:
-        if not "!" <= c <= "~":
-            return "API_KEY in .env: a space, control or non-ASCII character"
-    for c in url:
-        if not "!" <= c <= "~":
-            return "GEO_URL in .env: a space, control or non-ASCII character"
+    for v, name in ((key, "API_KEY"), (url, "GEO_URL")):
+        for c in v:
+            if not "!" <= c <= "~":
+                return name + " in .env: a space, control or non-ASCII character"
     proto, _, rest = url.partition("://")
     host = rest.partition("/")[0]
     h, _, p = host.partition(":")
-    if (proto not in ("http", "https") or not h
-            or (":" in host and not (p.isdigit() and 0 < int(p) < 65536))):
-        return "GEO_URL in .env: not http(s)://host[:port][/path]"
+    ok = (proto in ("http", "https") and h
+          and (":" not in host or (p.isdigit() and 0 < int(p) < 65536)))
     for c in h:
         if not (c.isalpha() or c.isdigit() or c in "-."):
-            return "GEO_URL in .env: not http(s)://host[:port][/path]"
-    return None
+            ok = False
+    return None if ok else "GEO_URL in .env: not http(s)://host[:port][/path]"
+
+def _due(files, held, now):
+    """files without those held back (_hold_file) for now."""
+    due = []
+    for p in files:
+        t = held.get(p)
+        if t is None or not _waiting(now, t, UP_WAIT_MAX):
+            due.append(p)
+    return due
+
+def _low_stop(now, state, fmt, n, at, seen):
+    """A heap margin for TLS is not met (fmt % n: what is low, up[at] and
+    up[seen]: _low_ms): counted, one diag line, and the reboot it may be
+    time for (-> False: none, the caller schedules the retry)."""
+    _up_err(state)
+    if up["last_err"] != state:
+        up["last_err"] = state
+        _diag_write("upload low " + fmt % n)
+    return _low_reboot(fmt, n, _low_ms(now, at, seen))
 
 def upload_tick():
     """Send one batch when WiFi is up and due. Runs on home and hotspot."""
@@ -6293,7 +6095,7 @@ def upload_tick():
     if not up["url"] or not up["key"]:
         up["state"] = "no .env"
         return
-    if up.get("env_u") is not up["url"] or up.get("env_k") is not up["key"]:
+    if up["env_u"] is not up["url"] or up["env_k"] is not up["key"]:
         bad = _env_bad(up["url"], up["key"])  # (once: it allocates)
         if bad:
             # never sends (as no .env): the value is never printed
@@ -6304,7 +6106,7 @@ def upload_tick():
         up["env_u"], up["env_k"] = up["url"], up["key"]
     files = pending()
     up["files"] = len(files)
-    skip = up.get("skip")
+    skip = up["skip"]
     if skip and skip in files and len(files) > 1:
         # (no comprehension: it would make skip a cell, allocated every call,
         # also on the early returns above, ~40 times a second)
@@ -6313,25 +6115,12 @@ def upload_tick():
             if p != skip:
                 due.append(p)
         files = due
-    held = up.get("hold") or {}
-    due = []
-    for p in files:
-        t = held.get(p)
-        if t is None or not _waiting(now, t, UP_WAIT_MAX):
-            due.append(p)
-    files = due
-    from_bad = False
-    if not files and up.get("allow_bad"):
-        files = pending_bad()
-        from_bad = bool(files)
-        files = [p for p in files
-                 if (up.get("bad_try") or {}).get(p, 0) < MAX_BAD_RETRY]
-        due = []
-        for p in files:
-            t = held.get(p)
-            if t is None or not _waiting(now, t, UP_WAIT_MAX):
-                due.append(p)
-        files = due
+    held = up["hold"]
+    files = _due(files, held, now)
+    if not files and up["allow_bad"]:
+        files = _due([p for p in pending_bad()
+                      if up["bad_try"].get(p, 0) < MAX_BAD_RETRY],
+                     held, now)
     if not files:
         if _bad_full_left():
             up["state"] = "bad full"
@@ -6339,7 +6128,7 @@ def upload_tick():
             up["state"] = "held"         # every waiting track held back
         else:
             up["state"] = "idle"
-        up["next_at"] = time.ticks_add(now, BACKOFF_START)
+        _schedule(now, BACKOFF_START)
         return
     path = files[0]
     try:
@@ -6348,7 +6137,7 @@ def upload_tick():
         # the .pos is there but unreadable: hold the track (the newer ones
         # go) and try again; only after READ_ERR_MAX tries from 0 after
         # all (resent, Dawarich deduplicates) rather than never
-        pe = up.setdefault("pos_err", {})
+        pe = up["pos_err"]
         pe[path] = pe.get(path, 0) + 1
         print("upload pos read", path, repr(e))
         if pe[path] < READ_ERR_MAX:
@@ -6360,8 +6149,7 @@ def upload_tick():
         up["skip"] = path
         _low_mem(now)
         return
-    if up.get("pos_err"):
-        up["pos_err"].pop(path, None)
+    up["pos_err"].pop(path, None)
     try:
         _heap_mark()
         n, n_ok, size, new_off, eof = read_batch(path, off, key)
@@ -6375,8 +6163,7 @@ def upload_tick():
         # unreadable (corrupt LittleFS block, EIO): hold it back so the
         # newer tracks still go, and after READ_ERR_MAX tries park it as
         # <file>.err (left for a manual look) instead of blocking for good
-        up["err"] += 1
-        up["state"] = "fs err"
+        _up_err("fs err")
         re_ = up["read_err"]
         re_[path] = re_.get(path, 0) + 1
         print("upload read", path, repr(e))
@@ -6418,7 +6205,7 @@ def upload_tick():
         except MemoryError:
             _low_mem(now)
             return
-        up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
+        _schedule(now, UPLOAD_GAP)
         return
     gc.collect()                         # frees an empty grown heap area
     # both margins keep the IDF block free for TLS: not for plain http
@@ -6428,17 +6215,9 @@ def upload_tick():
     if big is not None and big < TLS_MIN_KB:
         # TLS cannot get its block: every try would time out or fail to
         # allocate (seen as "err net" until a reboot on 2026-10-30)
-        up["err"] += 1
-        up["state"] = "low idf"
-        if up.get("last_err") != "low idf":
-            up["last_err"] = "low idf"
-            _diag_write("upload low idf %d KB" % big)
-        if not _low_reboot("idf %d KB", big,
-                           _low_ms(now, "lowidf_at", "lowidf_seen")):
-            if at_home():
-                _schedule(now, LOWIDF_RETRY)
-            else:
-                _schedule(now)
+        if not _low_stop(now, "low idf", "idf %d KB", big, "lowidf_at",
+                         "lowidf_seen"):
+            _schedule(now, LOWIDF_RETRY if at_home() else None)
         return
     up["lowidf_at"] = None
     pf = py_heap()[0] if tls else None
@@ -6448,13 +6227,8 @@ def upload_tick():
         # (a fixed retry: the doubling backoff waited up to BACKOFF_MAX
         # for a heap that is back after the next collect). It retried for
         # ever; at home, low for LOWIDF_WAIT, it reboots as low idf does
-        up["err"] += 1
-        up["state"] = "low mem"
-        if up.get("last_err") != "low mem":
-            up["last_err"] = "low mem"
-            _diag_write("upload low mem %d B" % pf)
-        if not _low_reboot("mem %d B", pf,
-                           _low_ms(now, "lowpy_at", "lowpy_seen")):
+        if not _low_stop(now, "low mem", "mem %d B", pf, "lowpy_at",
+                         "lowpy_seen"):
             _schedule(now, LOWIDF_RETRY)
         return
     up["lowpy_at"] = None
@@ -6465,7 +6239,8 @@ def upload_tick():
     if not _bad_full_left():
         up["state"] = "sending"
     read_uart()                          # drain NMEA before blocking
-    if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
+    fast = CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ
+    if fast:
         _set_freq(CPU_MHZ_UPLOAD)        # TLS handshake at full speed
     t_post = time.ticks_ms()
     try:
@@ -6477,7 +6252,7 @@ def upload_tick():
         _tls_reboot()
         return
     finally:
-        if CPU_MHZ_UPLOAD and CPU_MHZ and CPU_MHZ_UPLOAD != CPU_MHZ:
+        if fast:
             _set_freq(CPU_MHZ)
         _heap_note("post")
     read_uart()                          # catch up after a multi-second POST
@@ -6503,25 +6278,22 @@ def upload_tick():
         up["backoff"] = BACKOFF_START
         up["allow_bad"] = True
         up["skip"] = None
-        held = up.get("hold") or {}
-        held.pop(path, None)
-        up["hold"] = held
+        up["hold"].pop(path, None)
         _clear_bad_full(path)
         if not _bad_full_left():
             up["state"] = "ok"
-        up["next_at"] = time.ticks_add(now, gap)
+        _schedule(now, gap)
     elif code in PAYLOAD_ERR:
         up["err"] += 1
-        if from_bad:
+        if path.endswith(".bad"):
             # count the rejections of a .bad, not its successes: it used to
             # stop after MAX_BAD_RETRY good batches until the next boot.
             # Not in fail4: rejected .bad batches kept a normal track's
             # bad batch from quarantine until the next 2xx
-            bt = up.get("bad_try") or {}
+            bt = up["bad_try"]
             bt[path] = bt.get(path, 0) + 1
-            up["bad_try"] = bt
         else:
-            up["fail4"] = up.get("fail4", 0) + 1
+            up["fail4"] = up["fail4"] + 1
         if path.endswith(".bad") or up["fail4"] >= MAX_GLOBAL_PAYLOAD:
             up["state"] = "err payload"
             _hold_file(path, now, retry if retry else BACKOFF_MAX)
@@ -6531,21 +6303,19 @@ def upload_tick():
             _hold_file(path, now, BACKOFF_MAX)
             _schedule(now, gap)
             return
-        up["next_at"] = time.ticks_add(now, gap)
+        _schedule(now, gap)
     elif code == 401:
-        up["err"] += 1
-        up["state"] = "err 401"
+        _up_err("err 401")
         _schedule(now, retry if retry else AUTH_BACKOFF)
     else:
-        up["err"] += 1
-        up["state"] = "err " + ("net" if code is None else str(code))
+        _up_err("err " + ("net" if code is None else str(code)))
         _schedule(now, retry)
         if code is not None and len(files) > 1:
             # the same batch answered so SRV_ERR_MAX times in a row (a 5xx
             # from one point, a 404 / 403 of a proxy): hold that track, the
             # others go (only the backoff: files[0] for ever, the rest
             # blocked behind it). The only one waiting: the backoff alone
-            se = up.get("srv")
+            se = up["srv"]
             if se and se[0] == path and se[1] == off:
                 se[2] += 1
             else:
@@ -6556,14 +6326,12 @@ def upload_tick():
 
 def _fs_err(now):
     """A .pos write (or delete) failed: retry later, the track stays."""
-    up["err"] += 1
-    up["state"] = "fs err"
+    _up_err("fs err")
     _schedule(now)
 
 def _low_mem(now):
     gc.collect()
-    up["err"] += 1
-    up["state"] = "low mem"
+    _up_err("low mem")
     _schedule(now)
     print("upload MemoryError, free", py_heap()[0])
 
@@ -6751,39 +6519,22 @@ def _raw_get(url, sink, limit):
     in pieces, the UART read and the WDT fed between, at most limit bytes
     (more: ValueError). The guard closes the socket after OTA_MAX. -> the
     status code (sink only gets a 200's body)."""
-    proto, _, rest = url.partition("://")
-    host, _, path = rest.partition("/")
-    path = "/" + path
-    port = 443 if proto == "https" else 80
-    if ":" in host:
-        host, _, p = host.rpartition(":")
-        port = int(p)
-    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
-    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
+    s, addr, https, host, hdr = _http_open("GET", url)
     _guard_start(s, OTA_MAX)
     try:
         s.settimeout(HTTP_TIMEOUT)
-        s.connect(ai[-1])
-        if proto == "https":
+        s.connect(addr)
+        if https:
             s = _tls_wrap(s, host)
-        _io_write(s, ("GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close"
-                      "\r\n\r\n" % (path, _host_hdr(proto, host, port)))
-                  .encode())
+        _io_write(s, (hdr + "Connection: close\r\n\r\n").encode())
         code = int(s.readline(HTTP_LINE).split(None, 2)[1])
+        cl = [None]
+        _http_head(s, (b"content-length",), cl)
         clen = None
-        bol = True
-        for _ in range(HTTP_LINES):
-            h = s.readline(HTTP_LINE)
-            if not h or (bol and h in (b"\r\n", b"\n")):
-                break
-            if bol:
-                k, _, v = h.partition(b":")
-                if k.strip().lower() == b"content-length":
-                    try:
-                        clen = int(v.strip())
-                    except ValueError:
-                        pass
-            bol = h[-1:] == b"\n"
+        try:
+            clen = int(cl[0])
+        except (TypeError, ValueError):  # (TypeError: none sent)
+            pass
         if code != 200:
             return code
         if clen is not None and clen > limit:
@@ -6810,11 +6561,7 @@ def _raw_get(url, sink, limit):
             raise ValueError("ota body %d of %d" % (got, clen))
         return code
     finally:
-        _guard_stop()
-        try:
-            s.close()
-        except OSError:
-            pass
+        _http_close(s)
 
 HTTP_GET = _raw_get                      # (tests swap it)
 
@@ -6984,10 +6731,6 @@ def _ota_shadow(aside):
                 os.rename(p + ".ota-old", p)
         except OSError:
             pass
-
-def _ota_shadow_drop():
-    for p in OTA_SHADOW:
-        _rm(p + ".ota-old")
 
 def _ota_mark(what):
     """What ended a run while an OTA note is there, for the firmware that
@@ -7204,7 +6947,7 @@ def _ota_probe(now):
     like an outage (_ota_try): never blamed, a build whose update path is
     broken would be reinstalled for good."""
     at = ota.get("probe_at")
-    if at is not None and _age(now, at) < OTA_PROBE:
+    if _recent(now, at, OTA_PROBE):
         return
     ota["probe_at"] = now
     body = bytearray()
@@ -7241,8 +6984,9 @@ def _ota_health(now):
         ota["pend"] = None
         _ota_valid()
         _ota_promote(ota.get("paths") or ())
-        _ota_shadow_drop()               # (before the note: main.py puts
-        _rm(OTA_PENDING)                 # back what has no note)
+        for p in OTA_SHADOW:             # (before the note: main.py puts
+            _rm(p + ".ota-old")          # back what has no note)
+        _rm(OTA_PENDING)
         _rm(OTA_TRIES)
         _rm(OTA_MARK)
         ota["state"] = "ok"
@@ -7277,14 +7021,14 @@ def ota_tick(now):
         return
     # points waiting in files or an upload backing off: not now (the RAM
     # batch is flushed before the reset: a moving board kept one, and
-    # _all_uploaded() held the check back for good). Unless no 2xx came
+    # _nothing_to_send() held the check back for good). Unless no 2xx came
     # for OTA_STUCK: "err payload" is cleared by a 2xx only, and an upload
     # bug held back the update that fixes it
     if not at_home():
         return
-    if (up.get("left") or up.get("files")
-            or str(up.get("state")).startswith("err")):
-        ok = up.get("ok_at")
+    if (up["left"] or up["files"]
+            or str(up["state"]).startswith("err")):
+        ok = up["ok_at"]
         if ota.get("held_at") is None or ok != ota.get("held_ok"):
             ota["held_at"] = now
             ota["held_ok"] = ok
@@ -7296,7 +7040,7 @@ def ota_tick(now):
         if not ota.get("stuck"):
             ota["stuck"] = True
             _diag_write("ota: uploads stuck %d h (%s), checking anyway" % (
-                OTA_STUCK // 3600000, up.get("state")))
+                OTA_STUCK // 3600000, up["state"]))
     elif ota.get("held_at") is not None:    # (no dict per loop pass)
         ota["held_at"] = None
         ota["stuck"] = False
@@ -7370,7 +7114,7 @@ def _web_open():
         s.setblocking(False)
         _web_poll = _web_poller(s)
         _web_sock = s
-        print("web http://%s/" % wifi.get("ip"))
+        print("web http://%s/" % wifi["ip"])
     except (OSError, MemoryError) as e:  # (no half-open socket left behind)
         if s is not None and _web_sock is not s:
             try:
@@ -7416,7 +7160,7 @@ def _ago(t):
 def _web_rows():
     """(key, value) pairs of the JSON (web.html labels them)."""
     view = sv_seen()
-    t = _fix_secs()
+    t = _fix_s()
     pos = pos6 = None
     # a silent receiver keeps its last second's valid flag: no position
     # once that second is older than NO_DATA (the page would show it live)
@@ -7433,13 +7177,13 @@ def _web_rows():
     flash = _flash_kb()
     files, bad = _file_counts()
     heap = py_heap()
-    still = log.get("still") or {}
+    still = log["still"]
     return [
         ("fix", status()),
         ("sats", "%d / %s" % (view, sv_used())),
         ("hdop", st["hdop"]),
         ("std", st.get("std")),          # (GST: the receiver's own error, m)
-        ("utc", None if t is None else _stamp_at(t)[0]),
+        ("utc", None if t is None else _stamp_s(t)[0]),
         ("position", pos),
         ("pos6", pos6),
         ("nmea", "%d / %d" % (st["ok"], st["err"])),
@@ -7457,7 +7201,7 @@ def _web_rows():
         ("sent", up["sent"]),
         ("upload", up["state"]),
         ("upload_err", up["err"]),
-        ("upload_age_s", _ago(up.get("ok_at"))),
+        ("upload_age_s", _ago(up["ok_at"])),
         ("days", _hist_days()),
         ("stay", "yes" if still.get("active") else "no"),
         ("uptime", uptime_s()),
@@ -7472,15 +7216,15 @@ def _web_rows():
         ("heap_kb", heap[1]),
         ("idf", "%s / %s" % idf_heap()),
         ("flash_kb", flash),
-        ("wifi", "%s %s" % (wifi["state"], wifi.get("ssid") or "")),
-        ("rssi", wifi.get("rssi")),
+        ("wifi", "%s %s" % (wifi["state"], wifi["ssid"] or "")),
+        ("rssi", wifi["rssi"]),
         ("pulses", wifi["pb_scans"]),
         ("fw", FW_COMMIT),
         ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
         ("web_errs", _web_errs[0]),      # page requests that hit a bug
-        ("track_drop", log.get("drop", 0)),   # points lost (full flash,
-        ("write_errs", log.get("err", 0)),    # MAX_BATCH, time back), track
+        ("track_drop", log["drop"]),   # points lost (full flash,
+        ("write_errs", log["err"]),    # MAX_BATCH, time back), track
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
     ]                                    # while the loop was blocked
 
@@ -7490,7 +7234,7 @@ def _flash_kb():
     """Free flash in KB, at most every 30 s: statvfs walks the whole
     LittleFS (slow, and the page asks every WEB_REFRESH)."""
     now = time.ticks_ms()
-    if _fl[1] is not None and _age(now, _fl[1]) < 30000:
+    if _recent(now, _fl[1], 30000):
         return _fl[0]
     try:
         v = os.statvfs("/")
@@ -7507,7 +7251,7 @@ def _hist_days():
     once (.trb, or an older firmware's .trk), listed at most every 30 s
     (the page picks a day from them)."""
     now = time.ticks_ms()
-    if _hd[1] is not None and _age(now, _hd[1]) < 30000:
+    if _recent(now, _hd[1], 30000):
         return _hd[0]
     try:
         _hd[0] = sorted(set(n[:8] for n in _hist_names()))
@@ -7523,7 +7267,7 @@ def _file_counts():
     10 s: pending() and pending_bad() list, sort and build the paths of the
     whole log directory, twice per poll. ilistdir counts without a list."""
     now = time.ticks_ms()
-    if _fc[2] is not None and _age(now, _fc[2]) < 10000:
+    if _recent(now, _fc[2], 10000):
         return _fc[0], _fc[1]
     n = bad = 0
     cur = log["file"]
@@ -7543,9 +7287,6 @@ def _file_counts():
     _fc[0], _fc[1], _fc[2] = n, bad, now
     return n, bad
 
-def _sv_name(v):
-    return "%s %d" % (GNSS.get(v[6], "SV"), v[0])
-
 def _sv_list():
     """The satellite list for the page, used first, then by signal."""
     if st["svs"] is None:
@@ -7553,19 +7294,11 @@ def _sv_list():
     return sorted(st["svs"], key=lambda v: (not v[4], -v[1], v[6] or 0,
                                             v[0]))
 
-def _sv_age():
-    at = st["svs_at"]
-    return None if at is None else _age(time.ticks_ms(), at) // 1000
-
-def _web_json_parts(rows=None, svs=None):
+def _web_json_parts(rows, svs):
     """The JSON in small pieces (no 8 KB string and its encoded copy).
     rows, svs: _web_rows() and _sv_list(), built by _web_status before
     the 200 (a bug in one is a 500, not a cut JSON); the rows go first
     and are let go before the diag lines are read."""
-    if rows is None:
-        rows = _web_rows()
-    if svs is None:
-        svs = _sv_list()
     yield '{"device":' + json.dumps(DEVICE_ID) + ',"refresh_s":%d' % (
         WEB_REFRESH)
     for key, v in rows:
@@ -7586,20 +7319,17 @@ def _web_json_parts(rows=None, svs=None):
     try:
         for v in svs:
             yield sep + json.dumps({
-                "name": _sv_name(v), "system": GNSS.get(v[6]), "svid": v[0],
+                "name": "%s %d" % (GNSS.get(v[6], "SV"), v[0]), "system": GNSS.get(v[6]), "svid": v[0],
                 "cno": v[1], "elev": v[2], "azim": v[3], "used": v[4],
                 "unhealthy": v[5]})
             sep = ","
-        age = json.dumps(_sv_age())
+        at = st["svs_at"]
+        age = json.dumps(None if at is None
+                         else _age(time.ticks_ms(), at) // 1000)
     except Exception as e:
         _web_bug(e)
         age = "null"
     yield '],"satellites_age_s":' + age + "}"
-
-def _web_json():
-    """The whole JSON as one string: the tests' view of status.json (the
-    board streams _web_json_parts)."""
-    return "".join(_web_json_parts())
 
 _web_end = [None]                        # ticks_ms deadline of the request
 
@@ -7686,7 +7416,7 @@ def _web_host_ok(req):
     if h.endswith("."):
         h = h[:-1]
     name = HOSTNAME.lower()
-    return h in (wifi.get("ip") or "", name, name + ".local")
+    return h in (wifi["ip"] or "", name, name + ".local")
 
 def _web_head(c, code, ctype, extra=""):
     _web_out(c, ("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n%s"
@@ -7819,7 +7549,7 @@ def _web_reply(c, req):
     if not _web_host_ok(req):
         _web_send(c, "403 Forbidden", "text/plain",
                   ("open http://%s/ (or %s.local)" % (
-                      wifi.get("ip") or "<board ip>", HOSTNAME),))
+                      wifi["ip"] or "<board ip>", HOSTNAME),))
         return
     parts = req.split(None, 2)          # (HTTP/0.9: "GET /\r\n")
     path = parts[1] if len(parts) > 1 else b"/"
@@ -8134,7 +7864,7 @@ def _local_hm():
     receiver silent: its time stands still then."""
     d, t = st["date"], st["time"]
     rx = st["rx"]
-    if not d or not t or rx is None or _age(time.ticks_ms(), rx) >= NO_DATA:
+    if not d or not t or not _recent(time.ticks_ms(), rx, NO_DATA):
         return "--:--"
     try:
         y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
@@ -8188,7 +7918,7 @@ def _store_state(now):
     nothing is logged into it. Standing still costs next to nothing, so the time
     is the worst case."""
     c = _tft_fs
-    if c[1] is not None and _age(now, c[1]) < TFT_STORE:
+    if _recent(now, c[1], TFT_STORE):
         return c[0]
     c[1] = now
     c[0] = None
@@ -8500,7 +8230,7 @@ def _rt_tick(now):
     """Every ROUTE_DRAW: midnight, the current position, the pixels when any of it
     changed, the file when due. Without a fix the clock runs on from the last one."""
     R = _Rt
-    if R.pts is None or (R.drawn is not None and _age(now, R.drawn) < ROUTE_DRAW):
+    if R.pts is None or _recent(now, R.drawn, ROUTE_DRAW):
         return
     R.drawn = now
     c = log["clock"]
@@ -8523,7 +8253,7 @@ def _rt_tick(now):
     if R.moved:
         R.moved = False
         _rt_project()
-    if R.unsaved and (R.saved is None or _age(now, R.saved) >= ROUTE_SAVE
+    if R.unsaved and (not _recent(now, R.saved, ROUTE_SAVE)
                       or (log["still"]["active"] and R.save_ok)):
         _rt_save(now)
     _tft_t[4] = 0
@@ -8537,13 +8267,13 @@ def _tft_state(now):
     fix = bool(has_fix(now))
     level = None
     if wifi["state"] == "connected":
-        level = _wifi_level(wifi.get("rssi"), _tft_b[2])
+        level = _wifi_level(wifi["rssi"], _tft_b[2])
     _tft_b[2] = level
     left = up["left"] or 0
     if left:
         text = str(left) if left < 10000 else "%dk" % (left // 1000)
     else:
-        text = "kész" if up.get("url") else " "
+        text = "kész" if up["url"] else " "
     return (_Rt.view, _Rt.km, fix, sv_used() or 0, _local_hm(), level, _gps_quality(fix),
             text, bool(left), _store_state(now))
 
@@ -8555,7 +8285,7 @@ def tft_tick(now):
     t = _tft_t
     if _tft is None:
         return
-    if t[0] is None or _age(now, t[0]) >= TFT_STATE:
+    if not _recent(now, t[0], TFT_STATE):
         t[0] = now
         try:
             _tft.set_state(*_tft_state(now))
@@ -8563,7 +8293,7 @@ def tft_tick(now):
         except Exception as e:
             t[2] += 1
             _tft_bad(2, e)
-    if _tft is not None and (t[1] is None or _age(now, t[1]) >= TFT_FRAME):
+    if _tft is not None and not _recent(now, t[1], TFT_FRAME):
         t[1] = now
         try:
             _tft.frame()

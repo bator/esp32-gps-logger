@@ -64,10 +64,8 @@ IDF_DIR=${IDF_DIR:-$HOME/esp/esp-idf}
 MPY_DIR=${MPY_DIR:-$HOME/esp/micropython}
 BOARD_DIR=${BOARD_DIR:-$PWD/boards/GPS_LOGGER_S3}
 BOARD=$(basename "$BOARD_DIR")
-CHIP=${CHIP:-$(sed -n 's/^set(IDF_TARGET \(.*\))$/\1/p' "$BOARD_DIR/mpconfigboard.cmake" 2>/dev/null || true)}
-CHIP=${CHIP:-esp32s3}
-FLASH_MB=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\([0-9]*\)MB"$/\1/p' "$BOARD_DIR/sdkconfig.board" 2>/dev/null || true)
-FLASH_MB=${FLASH_MB:-8}
+CHIP=$(sed -n 's/^set(IDF_TARGET \(.*\))$/\1/p' "$BOARD_DIR/mpconfigboard.cmake")
+FLASH_MB=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\([0-9]*\)MB"$/\1/p' "$BOARD_DIR/sdkconfig.board")
 PORT=${PORT:-/dev/ttyUSB0}
 APP_SIZE=0x1c0000                         # one OTA app slot (partitions-ota.csv)
 APP1=$(printf '0x%x' $((0x10000 + APP_SIZE)))  # the second slot's offset
