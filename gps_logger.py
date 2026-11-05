@@ -1745,15 +1745,9 @@ def _load_nets(env):
     nets = []
     known = []
     seen = []
-    rows = (
-        ("SSID", "WPA2", "HOME1", "SSID_HOME", "SSID_HIDDEN", True,
-         ("IP", "MASK", "GW", "DNS")),
-        ("SSID2", "WPA2_2", "HOME2", "SSID2_HOME", "SSID2_HIDDEN", False,
-         ("IP2", "MASK2", "GW2", "DNS2")),
-        ("SSID3", "WPA2_3", "HOME3", "SSID3_HOME", "SSID3_HIDDEN", False,
-         ("IP3", "MASK3", "GW3", "DNS3")),
-    )
-    for sk, pk, hk, hk2, hidk, default_home, ipkeys in rows:
+    for x in ("", "2", "3"):
+        sk, pk, hk2, hidk = ("SSID" + x, "WPA2_" + x if x else "WPA2",
+                             "SSID" + x + "_HOME", "SSID" + x + "_HIDDEN")
         known += (sk, pk, hk2, hidk)
         s = env.get(sk)
         if not s:
@@ -1767,16 +1761,17 @@ def _load_nets(env):
         if p is not None and not p:
             _env_warn("env %s empty: %s is tried as an open network"
                       % (pk, sk))
-        home = default_home
+        home = not x                     # (the first network by default)
         t = _truthy(env.get(hk2))
         if t is None:
-            t = _truthy(env.get(hk))
+            t = _truthy(env.get("HOME" + (x or "1")))
         if t is not None:
             home = t
         hidden = bool(_truthy(env.get(hidk)))
         n = {"ssid": s, "pw": "" if p is None else p,
              "home": home, "hidden": hidden, "bssid": None,
-             "ip": _static_ip(env, ipkeys)}
+             "ip": _static_ip(env, ("IP" + x, "MASK" + x, "GW" + x,
+                                    "DNS" + x))}
         if isinstance(s, bytes):
             # not UTF-8 (an ANSI .env): the radio gets the bytes as they
             # are, the screen and the page one char per byte
@@ -1819,6 +1814,12 @@ def wifi_reset():
     wifi["down_home"] = True
     wifi["down_rssi"] = None
     wifi["down_ssid"] = None             # (any home network may come up)
+
+def _rssi(w):
+    try:
+        return w.status("rssi")
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 def _recently_failed(ssid, now):
     t = wifi["failed"].get(ssid)
@@ -1980,10 +1981,7 @@ def home_in_range():
     lim = ROAM_MIN_RSSI
     if state == "connected" and wifi.get("home"):
         lim = SEEN_MIN_RSSI
-        try:
-            r = w.status("rssi")
-        except (OSError, ValueError, RuntimeError):
-            r = None
+        r = _rssi(w)
         if r is not None:
             return r >= lim
         # unknown RSSI: a scan tells (it works while connected)
@@ -2064,11 +2062,7 @@ def _learn_home(w):
     ssid = wifi.get("ssid")
     if not (wifi.get("home") and _net_hidden(ssid)):
         return
-    me = None
-    for n in wifi.get("nets") or []:
-        if n["ssid"] == ssid:
-            me = _ssid_b(n)
-            break
+    me = _ssid_b(_net(ssid))             # (hidden home: it is configured)
     try:
         found = []
         other = []                       # BSSIDs of visible networks
@@ -2076,10 +2070,7 @@ def _learn_home(w):
             ch = w.config("channel")
         except (OSError, ValueError, TypeError, RuntimeError):
             ch = None
-        try:
-            r = w.status("rssi")
-        except (OSError, ValueError, RuntimeError):
-            r = None
+        r = _rssi(w)
         feed()
         read_uart()
         try:
@@ -2133,21 +2124,6 @@ def _learn_home(w):
         # nothing is learned this time (learn stays cleared)
         gc.collect()
 
-_HEX = b"0123456789abcdef0123456789ABCDEF"
-
-def _hex_bssid(s):
-    """12 hex digits (a HOME_APS_FILE line, bytes) as 6 bytes, else None."""
-    s = s.strip()
-    if len(s) != 12:
-        return None
-    out = bytearray(6)
-    for i in range(12):
-        v = _HEX.find(s[i:i + 1])
-        if v < 0:
-            return None
-        out[i >> 1] = (out[i >> 1] << 4) | (v & 15)
-    return bytes(out)
-
 def _home_aps_load():
     """The hidden home's BSSIDs learned before the reboot: the keep-alive
     wake and "home in range" know it before it connected once. A missing
@@ -2164,8 +2140,11 @@ def _home_aps_load():
             line = f.readline(40)
             if not line:
                 break
-            b = _hex_bssid(line)
-            if b is not None and b not in aps:
+            try:
+                b = binascii.unhexlify(line.strip())
+            except ValueError:
+                continue                 # (no BSSID)
+            if len(b) == 6 and b not in aps:
                 aps.append(b)
                 if len(aps) >= HOME_AP_MAX:
                     break
@@ -2183,10 +2162,10 @@ def _home_aps_save():
         room = free()
         if room is not None and room < MIN_FREE:
             return
-        f = open(HOME_APS_FILE, "w")
+        f = open(HOME_APS_FILE, "wb")
         try:
             for b in wifi["home_aps"]:
-                f.write("%02x%02x%02x%02x%02x%02x\n" % tuple(b))
+                f.write(binascii.hexlify(b) + b"\n")
         finally:
             f.close()
     except (OSError, TypeError, ValueError, MemoryError) as e:
@@ -2286,16 +2265,13 @@ def _wifi_clear(w):
 def _wifi_ip(w, net):
     """Apply this network's static IP, or DHCP. Once any network has a
     static IP, a DHCP network always asks for DHCP: the interface may keep
-    a static address the RAM flag no longer knows of (a soft reset)."""
+    a static address from before (a soft reset too)."""
     cfg = net.get("ip")
     try:
         if cfg:
             w.ifconfig(cfg)
-            wifi["static"] = True
-        elif wifi.get("static") or any(n.get("ip") for n in
-                                       wifi.get("nets") or []):
+        elif any(n.get("ip") for n in wifi.get("nets") or []):
             w.ifconfig("dhcp")
-            wifi["static"] = False
     except (OSError, ValueError, TypeError, RuntimeError) as e:
         print("wifi ip", repr(e))
 
@@ -2323,17 +2299,18 @@ def _wifi_connect(w, net):
         return _wifi_next(w)
     return True
 
-def _net_home(ssid):
+def _net(ssid):
+    """The configured network ssid ({}: none)."""
     for n in wifi.get("nets") or []:
         if n["ssid"] == ssid:
-            return bool(n.get("home"))
-    return False
+            return n
+    return {}
+
+def _net_home(ssid):
+    return bool(_net(ssid).get("home"))
 
 def _net_hidden(ssid):
-    for n in wifi.get("nets") or []:
-        if n["ssid"] == ssid:
-            return bool(n.get("hidden"))
-    return False
+    return bool(_net(ssid).get("hidden"))
 
 def _wifi_got_ip(w):
     wifi["state"] = "connected"
@@ -2341,10 +2318,7 @@ def _wifi_got_ip(w):
         wifi["ip"] = w.ifconfig()[0]
     except WLAN_ERR:
         wifi["ip"] = None
-    try:
-        wifi["rssi"] = w.status("rssi")
-    except (OSError, ValueError, RuntimeError):
-        wifi["rssi"] = None
+    wifi["rssi"] = _rssi(w)
     wifi["home"] = _net_home(wifi.get("ssid"))
     wifi["down_at"] = None
     lost = wifi.get("lost_at")
@@ -2649,12 +2623,8 @@ def _try_roam_home(w, arrival=False):
     if arrival:
         wifi["roam_backoff"] = ROAM_CHECK
         wifi["roam_at"] = now
-    cur = None
-    for x in wifi.get("nets") or []:
-        if x["ssid"] == wifi.get("ssid"):
-            cur = dict(x)
-            break
-    wifi["cand"] = [target] + ([cur] if cur else [])
+    cur = _net(wifi.get("ssid"))
+    wifi["cand"] = [target] + ([dict(cur)] if cur else [])
     wifi["cand_i"] = 0
     wifi["retried"] = False
     wifi["roaming"] = True
@@ -2880,10 +2850,7 @@ def wifi_tick():
             if wifi.get("learn"):
                 _learn_home(w)
             if _age(now, wifi["last_check"]) >= WIFI_CHECK:
-                try:
-                    wifi["rssi"] = w.status("rssi")
-                except (OSError, ValueError, RuntimeError):
-                    wifi["rssi"] = None
+                wifi["rssi"] = _rssi(w)
                 wifi["last_check"] = now
             interval = wifi.get("roam_backoff") or ROAM_CHECK
             if not wifi.get("home") and _has_home():
@@ -3312,7 +3279,7 @@ def _still_mean(sl, pos):
     n = min(sl["n"] + 1, STILL_MEAN_N)
     o = (o[0] + (pos[0] - r[0] - o[0]) / n,
          o[1] + (_dlon(pos[1] - r[1]) - o[1]) / n)
-    sl.update(aoff=o, n=n, anchor=(r[0] + o[0], _lon(r[1] + o[1])))
+    sl.update(aoff=o, n=n, anchor=(r[0] + o[0], _dlon(r[1] + o[1])))
 
 def free():
     try:
@@ -3326,16 +3293,16 @@ def has_fix(now):
             and st["pos_at"] is not None
             and _age(now, st["pos_at"]) < STALE)
 
-def _stamp():
-    """YYYYMMDD_HHMMSS of the current fix (track file names)."""
-    return st["date"].replace("-", "") + "_" + st["time"].replace(":", "")
+def _tcn(tc):
+    """A compact time as a track file's name: YYYYMMDD_HHMMSS."""
+    return tc[:8] + "_" + tc[9:15]
 
 def start_file(stamp=None):
     try:
         os.mkdir(LOG_DIR)
     except OSError:
         pass                             # already exists
-    name = stamp or _stamp()
+    name = stamp or _tcn(_tc())
     # (wfail: a write that failed on the previous file must not keep the
     # next one from closing: log_tick)
     log.update(file=LOG_DIR + "/" + name + TRB,
@@ -3502,13 +3469,13 @@ def flush(hold=None):
             log["wfails"] = log.get("wfails", 0) + 1
             if log["wfails"] >= WFAIL_SWITCH and batch:
                 tc = batch[0][-17:-1]
-                name = tc[:8] + "_" + tc[9:15]
+                name = _tcn(tc)
                 if creating:
                     if path[-19:-4] == name:
                         s = _kb_time(tc.encode(), 0)
                         if s is not None:
                             tc = _stamp_s(s + 1)[1]
-                            name = tc[:8] + "_" + tc[9:15]
+                            name = _tcn(tc)
                     _rm(path)
                 else:
                     _cut_to_footer(path, log.get("good_size"), sz)
@@ -3724,21 +3691,14 @@ def _hist_prune():
         _rm(HIST_DIR + "/" + n)
 
 def _dlon(d):
-    """A longitude difference across 180° the short way round. (Not the
-    modulo: on the board's single floats 19.000123 + 180 keeps 1.5 m.)"""
+    """A longitude difference across 180° the short way round, or a longitude
+    made of a reference plus an offset back within 180°. (Not the modulo: on
+    the board's single floats 19.000123 + 180 keeps 1.5 m.)"""
     if d > 180:
         return d - 360
     if d < -180:
         return d + 360
     return d
-
-def _lon(x):
-    """A longitude made of a reference plus an offset back within 180°."""
-    if x > 180:
-        return x - 360
-    if x < -180:
-        return x + 360
-    return x
 
 def _dist(lat1, lon1, lat2, lon2):
     """Metres between two nearby positions (equirectangular approximation),
@@ -4000,7 +3960,7 @@ def _still_window(now, pos):
         return None                      # sparse fixes: collect more first
     c = None
     if sm[2] >= STILL_MIN_FIXES:
-        c = (r[0] + sm[0] / sm[2], _lon(r[1] + sm[1] / sm[2]))
+        c = (r[0] + sm[0] / sm[2], _dlon(r[1] + sm[1] / sm[2]))
         if _spread(r, c, pos, STILL_EXIT // 2) or _walking(r, sm, qs):
             # its ends STILL_EXIT apart through the centroid: a drive (a
             # bike from ~10 km/h) pairs with nothing. Out and back with the
@@ -4023,7 +3983,7 @@ def _still_window(now, pos):
         return None
     w = prev[2] + sm[2]
     a = (prev[0][0] + (c[0] - prev[0][0]) * sm[2] / w,
-         _lon(prev[0][1] + _dlon(c[1] - prev[0][1]) * sm[2] / w))
+         _dlon(prev[0][1] + _dlon(c[1] - prev[0][1]) * sm[2] / w))
     return a, prev[1], w, c
 
 STILL_TREND = 35                         # m a walking window's quarters
@@ -4078,7 +4038,7 @@ def _still_heartbeat(now):
     a = sl["anchor"]
     sl["hb_at"] = now
     if log["file"] is None:
-        start_file(tc[:8] + "_" + tc[9:15])
+        start_file(_tcn(tc))
         sl["file_at"] = now
     _record((t, _line("%.6f,%.6f" % (a[0], a[1]), ("", ""), tc)), a)
 
@@ -4152,7 +4112,7 @@ def _close_file():
     if hold is not None and b[0][-17:-1] >= hold:
         tc = b[0][-17:-1]
         seg = log["new_seg"], log["seg_tc"]
-        start_file(tc[:8] + "_" + tc[9:15])
+        start_file(_tcn(tc))
         log["new_seg"], log["seg_tc"] = seg    # a break among the held lines
         return True
     return False
@@ -4391,7 +4351,7 @@ def _still_leave(wifi_seen=False):
                      (_RE[k:k + 8].decode().strip(),
                       _RE[k + 8:k + 12].decode().strip()), tc)
         if log["file"] is None:
-            start_file(tc[:8] + "_" + tc[9:15])
+            start_file(_tcn(tc))
         _record((t, line), p)
         prev = p
     print("stay end", int(sl["far_d"]))

@@ -1490,11 +1490,13 @@ try:
     w = start_wifi(single, [("home", -40)], ["home"])
     check("static ip: a DHCP-only config never calls ifconfig",
           WLAN.ifconfig_calls == [], str(WLAN.ifconfig_calls))
-    gl.wifi["static"] = True
+    gl.wifi["nets"] = [{"ssid": "home", "ip": ("192.168.1.60", "255.255.255.0",
+                                               "192.168.1.1", "192.168.1.1")},
+                       {"ssid": "phone", "ip": None}]
     WLAN.ifconfig_calls = []
-    gl._wifi_ip(WLAN(0), {"ssid": "phone", "ip": None})
+    gl._wifi_ip(WLAN(0), gl.wifi["nets"][1])
     check("static ip: leaving the static net hands the interface back to DHCP",
-          WLAN.ifconfig_calls == ["dhcp"] and not gl.wifi["static"],
+          WLAN.ifconfig_calls == ["dhcp"],
           str(WLAN.ifconfig_calls))
 
     w = start_wifi(triple, [("phone", -55)], ["phone"])
@@ -9578,7 +9580,6 @@ try:
         return ("192.168.1.99", "255.255.255.0", "192.168.1.1", "1.1.1.1")
     WLAN.ifconfig = rec_ifc
     try:
-        gl.wifi["static"] = False        # a soft reset forgot the flag
         gl.wifi["nets"] = rv_nets(("192.168.1.60", "255.255.255.0",
                                    "192.168.1.1", "192.168.1.1"))
         gl._wifi_ip(w, gl.wifi["nets"][1])
