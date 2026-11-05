@@ -499,9 +499,11 @@ WLAN.instances = []
 
 
 def FakeResp(code, headers=None):
-    """What HTTP_POST returns: (code, Retry-After, Content-Type)."""
+    """What HTTP_POST returns: (code, Retry-After, Content-Type), the headers
+    bytes as they came."""
     headers = headers or {}
-    return code, headers.get("Retry-After"), headers.get("Content-Type")
+    retry, ctype = headers.get("Retry-After"), headers.get("Content-Type")
+    return code, retry and retry.encode(), ctype and ctype.encode()
 
 
 def _post(url, data=None, headers=None, timeout=None):
@@ -11200,7 +11202,7 @@ try:
     r = gl._raw_post("https://d.example:8443/sub", body,
                      {"Authorization": "Bearer k"}, 15)
     sent = rv_sock[0].out
-    ok_post = (r[0] == 201 and r[1] == "7"
+    ok_post = (r[0] == 201 and r[1] == b"7"
                and sent.startswith(b"POST /sub HTTP/1.0\r\n"
                                    b"Host: d.example:8443\r\n")
                and b"Content-Length: %d\r\n" % len(body) in sent
@@ -11322,7 +11324,7 @@ finally:
 check("HEAD-ERR: reset/timeout/close in the headers keeps the 201",
       head_res == [201, 201, 201], repr(head_res))
 check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
-      r_long[0] == 429 and r_long[1] == "9"
+      r_long[0] == 429 and r_long[1] == b"9"
       and limits and all(0 < n_ <= 256 for n_ in limits),
       "%r %r" % (r_long, limits[:4]))
 

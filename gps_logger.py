@@ -5699,7 +5699,7 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     return True
 
 def _retry_after_ms(v):
-    """A Retry-After header's value (str or None) in ms, within the backoff's
+    """A Retry-After header's value (bytes or None) in ms, within the backoff's
     limits; None when there is no number."""
     if v is None:
         return None
@@ -5944,12 +5944,46 @@ def _guard_stop():
 _post_phase = [None]                     # "connect", "tls", "http" in a POST,
                                          # "ctx" while the SSLContext is made
 
-def _host_hdr(proto, host, port):
-    """The Host header: host:port unless it is the scheme's default port
-    (RFC 7230 5.4; a proxy on :8443 routes by it)."""
-    if port == (443 if proto == "https" else 80):
-        return host
-    return "%s:%d" % (host, port)
+def _http_open(method, url, guard_ms):
+    """The start of an HTTP/1.0 request, no redirects: a socket for url's host
+    with the guard armed on it (closing the raw socket fails a TLS call stuck
+    on it). -> (socket, its address, https?, host, the request's first lines).
+    The Host header: host:port unless it is the scheme's default port (RFC
+    7230 5.4; a proxy on :8443 routes by it)."""
+    proto, _, rest = url.partition("://")
+    host, _, path = rest.partition("/")
+    dflt = port = 443 if proto == "https" else 80
+    if ":" in host:
+        host, _, p = host.rpartition(":")
+        port = int(p)
+    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
+    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
+    _guard_start(s, guard_ms)
+    return s, ai[-1], proto == "https", host, "%s /%s HTTP/1.0\r\nHost: %s\r\n" % (
+        method, path, host if port == dflt else "%s:%d" % (host, port))
+
+def _http_head(s, want, got):
+    """Read an answer's headers, in bounded pieces (a long header comes in
+    several, only a piece at a line start is a header or the end). The value
+    of a header named in want (lowercase) goes to got at the same index."""
+    bol = True
+    for _ in range(HTTP_LINES):
+        h = s.readline(HTTP_LINE)
+        if not h or (bol and h in (b"\r\n", b"\n")):
+            break
+        if bol:
+            k, _, v = h.partition(b":")
+            k = k.strip().lower()
+            if k in want:
+                got[want.index(k)] = v.strip()
+        bol = h[-1:] == b"\n"
+
+def _http_close(s):
+    _guard_stop()
+    try:
+        s.close()
+    except OSError:
+        pass
 
 def _raw_post(url, data, headers, timeout):
     """A minimal HTTP/1.0 POST, no redirects: micropython-lib requests
@@ -5957,29 +5991,19 @@ def _raw_post(url, data, headers, timeout):
     waits for a body) and the Bearer header, without the timeout. The body
     goes out in HTTP_CHUNK pieces and the wait for the answer polls, both
     reading the UART meanwhile, so a slow server costs no NMEA. -> (status
-    code, Retry-After, Content-Type), the two headers None when not sent."""
-    proto, _, rest = url.partition("://")
-    host, _, path = rest.partition("/")
-    path = "/" + path
-    port = 443 if proto == "https" else 80
-    if ":" in host:
-        host, _, p = host.rpartition(":")
-        port = int(p)
+    code, Retry-After, Content-Type), the two headers bytes, None when not
+    sent."""
     _post_phase[0] = "connect"
-    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
-    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
-    _guard_start(s, HTTP_MAX)            # the raw socket: closing it fails
-    try:                                 # a TLS call stuck on it
+    s, addr, https, host, hdr = _http_open("POST", url, HTTP_MAX)
+    try:
         s.settimeout(timeout)
-        s.connect(ai[-1])
-        if proto == "https":
+        s.connect(addr)
+        if https:
             _heap_note("connect")
             _post_phase[0] = "tls"       # the handshake
             s = _tls_wrap(s, host)
             _heap_note("tls_wrap")
         _post_phase[0] = "http"
-        hdr = "POST %s HTTP/1.0\r\nHost: %s\r\n" % (
-            path, _host_hdr(proto, host, port))
         for k in headers:
             hdr += "%s: %s\r\n" % (k, headers[k])
         hdr += "Content-Length: %d\r\nConnection: close\r\n\r\n" % len(data)
@@ -5999,34 +6023,17 @@ def _raw_post(url, data, headers, timeout):
                 raise OSError(110)       # ETIMEDOUT
         line = s.readline(HTTP_LINE)
         code = int(line.split(None, 2)[1])
-        retry = ctype = None
+        got = [None, None]
         try:
             # the status is in: a reset, a timeout or the guard closing
             # the socket in the headers must not turn a 2xx into a resend
-            # (a duplicate batch). Bounded reads: a long header comes in
-            # pieces, only a piece at a line start is a header or the end.
-            bol = True
-            for _ in range(HTTP_LINES):
-                h = s.readline(HTTP_LINE)
-                if not h or (bol and h in (b"\r\n", b"\n")):
-                    break
-                if bol:
-                    k, _, v = h.partition(b":")
-                    k = k.strip().lower()
-                    if k == b"retry-after":
-                        retry = v.strip().decode()
-                    elif k == b"content-type":
-                        ctype = v.strip().decode()
-                bol = h[-1:] == b"\n"
+            # (a duplicate batch)
+            _http_head(s, (b"retry-after", b"content-type"), got)
         except Exception as e:
             print("upload head", code, repr(e))
-        return code, retry, ctype
+        return code, got[0], got[1]
     finally:
-        _guard_stop()
-        try:
-            s.close()
-        except OSError:
-            pass
+        _http_close(s)
 
 HTTP_POST = _raw_post                    # (tests swap it)
 
@@ -6081,7 +6088,7 @@ def _http_post(size):
              "Authorization": "Bearer %s" % up["key"]},
             HTTP_TIMEOUT)
         retry = _retry_after_ms(retry)
-        if 200 <= code < 300 and ctype and "html" in ctype.lower():
+        if 200 <= code < 300 and ctype and b"html" in ctype.lower():
             # an HTML 2xx is a captive portal (or a proxy) answering, not
             # Dawarich (JSON): without CA_FILE nothing else tells, and the
             # batch counted as sent was deleted
@@ -6665,39 +6672,21 @@ def _raw_get(url, sink, limit):
     in pieces, the UART read and the WDT fed between, at most limit bytes
     (more: ValueError). The guard closes the socket after OTA_MAX. -> the
     status code (sink only gets a 200's body)."""
-    proto, _, rest = url.partition("://")
-    host, _, path = rest.partition("/")
-    path = "/" + path
-    port = 443 if proto == "https" else 80
-    if ":" in host:
-        host, _, p = host.rpartition(":")
-        port = int(p)
-    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
-    s = socket.socket(ai[0], socket.SOCK_STREAM, ai[2])
-    _guard_start(s, OTA_MAX)
+    s, addr, https, host, hdr = _http_open("GET", url, OTA_MAX)
     try:
         s.settimeout(HTTP_TIMEOUT)
-        s.connect(ai[-1])
-        if proto == "https":
+        s.connect(addr)
+        if https:
             s = _tls_wrap(s, host)
-        _io_write(s, ("GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close"
-                      "\r\n\r\n" % (path, _host_hdr(proto, host, port)))
-                  .encode())
+        _io_write(s, (hdr + "Connection: close\r\n\r\n").encode())
         code = int(s.readline(HTTP_LINE).split(None, 2)[1])
+        cl = [None]
+        _http_head(s, (b"content-length",), cl)
         clen = None
-        bol = True
-        for _ in range(HTTP_LINES):
-            h = s.readline(HTTP_LINE)
-            if not h or (bol and h in (b"\r\n", b"\n")):
-                break
-            if bol:
-                k, _, v = h.partition(b":")
-                if k.strip().lower() == b"content-length":
-                    try:
-                        clen = int(v.strip())
-                    except ValueError:
-                        pass
-            bol = h[-1:] == b"\n"
+        try:
+            clen = int(cl[0])
+        except (TypeError, ValueError):  # (TypeError: none sent)
+            pass
         if code != 200:
             return code
         if clen is not None and clen > limit:
@@ -6724,11 +6713,7 @@ def _raw_get(url, sink, limit):
             raise ValueError("ota body %d of %d" % (got, clen))
         return code
     finally:
-        _guard_stop()
-        try:
-            s.close()
-        except OSError:
-            pass
+        _http_close(s)
 
 HTTP_GET = _raw_get                      # (tests swap it)
 
