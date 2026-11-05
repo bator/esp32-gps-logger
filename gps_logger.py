@@ -5691,8 +5691,7 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
         # the copy landed but the offset did not: the next try copies the
         # batch again (duplicates in .bad, deduplicated by Dawarich)
         print("quarantine offset", repr(e))
-        up["err"] += 1
-        up["state"] = "fs err"
+        _up_err("fs err")
         return False
     up["allow_bad"] = False
     up["state"] = "quarantine"
@@ -5708,6 +5707,10 @@ def _retry_after_ms(v):
     except (TypeError, ValueError):
         return None
     return min(max(ms, BACKOFF_START), BACKOFF_MAX)
+
+def _up_err(state):
+    up["err"] += 1
+    up["state"] = state
 
 def _schedule(now, ms=None):
     if ms is None:
@@ -5848,8 +5851,7 @@ def _tls_ready(now):
     except Exception as e:               # (MemoryError too)
         oom = _enomem(e)
         up["enomem"] = up.get("enomem", 0) + 1 if oom else 0
-        up["err"] += 1
-        up["state"] = "low mem" if oom else "ca err"
+        _up_err("low mem" if oom else "ca err")
         err = repr(e)[:60]
         print("upload ca", err)
         if err != up.get("last_err"):
@@ -6205,6 +6207,25 @@ def _env_bad(url, key):
             return "GEO_URL in .env: not http(s)://host[:port][/path]"
     return None
 
+def _due(files, held, now):
+    """files without those held back (_hold_file) for now."""
+    due = []
+    for p in files:
+        t = held.get(p)
+        if t is None or not _waiting(now, t, UP_WAIT_MAX):
+            due.append(p)
+    return due
+
+def _low_stop(now, state, fmt, n, at, seen):
+    """A heap margin for TLS is not met (fmt % n: what is low, up[at] and
+    up[seen]: _low_ms): counted, one diag line, and the reboot it may be
+    time for (-> False: none, the caller schedules the retry)."""
+    _up_err(state)
+    if up.get("last_err") != state:
+        up["last_err"] = state
+        _diag_write("upload low " + fmt % n)
+    return _low_reboot(fmt, n, _low_ms(now, at, seen))
+
 def upload_tick():
     """Send one batch when WiFi is up and due. Runs on home and hotspot."""
     now = time.ticks_ms()
@@ -6235,24 +6256,11 @@ def upload_tick():
                 due.append(p)
         files = due
     held = up.get("hold") or {}
-    due = []
-    for p in files:
-        t = held.get(p)
-        if t is None or not _waiting(now, t, UP_WAIT_MAX):
-            due.append(p)
-    files = due
-    from_bad = False
+    files = _due(files, held, now)
     if not files and up.get("allow_bad"):
-        files = pending_bad()
-        from_bad = bool(files)
-        files = [p for p in files
-                 if (up.get("bad_try") or {}).get(p, 0) < MAX_BAD_RETRY]
-        due = []
-        for p in files:
-            t = held.get(p)
-            if t is None or not _waiting(now, t, UP_WAIT_MAX):
-                due.append(p)
-        files = due
+        files = _due([p for p in pending_bad()
+                      if (up.get("bad_try") or {}).get(p, 0) < MAX_BAD_RETRY],
+                     held, now)
     if not files:
         if _bad_full_left():
             up["state"] = "bad full"
@@ -6260,7 +6268,7 @@ def upload_tick():
             up["state"] = "held"         # every waiting track held back
         else:
             up["state"] = "idle"
-        up["next_at"] = time.ticks_add(now, BACKOFF_START)
+        _schedule(now, BACKOFF_START)
         return
     path = files[0]
     try:
@@ -6296,8 +6304,7 @@ def upload_tick():
         # unreadable (corrupt LittleFS block, EIO): hold it back so the
         # newer tracks still go, and after READ_ERR_MAX tries park it as
         # <file>.err (left for a manual look) instead of blocking for good
-        up["err"] += 1
-        up["state"] = "fs err"
+        _up_err("fs err")
         re_ = up["read_err"]
         re_[path] = re_.get(path, 0) + 1
         print("upload read", path, repr(e))
@@ -6339,7 +6346,7 @@ def upload_tick():
         except MemoryError:
             _low_mem(now)
             return
-        up["next_at"] = time.ticks_add(now, UPLOAD_GAP)
+        _schedule(now, UPLOAD_GAP)
         return
     gc.collect()                         # frees an empty grown heap area
     # both margins keep the IDF block free for TLS: not for plain http
@@ -6349,17 +6356,9 @@ def upload_tick():
     if big is not None and big < TLS_MIN_KB:
         # TLS cannot get its block: every try would time out or fail to
         # allocate (seen as "err net" until a reboot on 2026-10-30)
-        up["err"] += 1
-        up["state"] = "low idf"
-        if up.get("last_err") != "low idf":
-            up["last_err"] = "low idf"
-            _diag_write("upload low idf %d KB" % big)
-        if not _low_reboot("idf %d KB", big,
-                           _low_ms(now, "lowidf_at", "lowidf_seen")):
-            if at_home():
-                _schedule(now, LOWIDF_RETRY)
-            else:
-                _schedule(now)
+        if not _low_stop(now, "low idf", "idf %d KB", big, "lowidf_at",
+                         "lowidf_seen"):
+            _schedule(now, LOWIDF_RETRY if at_home() else None)
         return
     up["lowidf_at"] = None
     pf = py_heap()[0] if tls else None
@@ -6369,13 +6368,8 @@ def upload_tick():
         # (a fixed retry: the doubling backoff waited up to BACKOFF_MAX
         # for a heap that is back after the next collect). It retried for
         # ever; at home, low for LOWIDF_WAIT, it reboots as low idf does
-        up["err"] += 1
-        up["state"] = "low mem"
-        if up.get("last_err") != "low mem":
-            up["last_err"] = "low mem"
-            _diag_write("upload low mem %d B" % pf)
-        if not _low_reboot("mem %d B", pf,
-                           _low_ms(now, "lowpy_at", "lowpy_seen")):
+        if not _low_stop(now, "low mem", "mem %d B", pf, "lowpy_at",
+                         "lowpy_seen"):
             _schedule(now, LOWIDF_RETRY)
         return
     up["lowpy_at"] = None
@@ -6430,10 +6424,10 @@ def upload_tick():
         _clear_bad_full(path)
         if not _bad_full_left():
             up["state"] = "ok"
-        up["next_at"] = time.ticks_add(now, gap)
+        _schedule(now, gap)
     elif code in PAYLOAD_ERR:
         up["err"] += 1
-        if from_bad:
+        if path.endswith(".bad"):
             # count the rejections of a .bad, not its successes: it used to
             # stop after MAX_BAD_RETRY good batches until the next boot.
             # Not in fail4: rejected .bad batches kept a normal track's
@@ -6452,14 +6446,12 @@ def upload_tick():
             _hold_file(path, now, BACKOFF_MAX)
             _schedule(now, gap)
             return
-        up["next_at"] = time.ticks_add(now, gap)
+        _schedule(now, gap)
     elif code == 401:
-        up["err"] += 1
-        up["state"] = "err 401"
+        _up_err("err 401")
         _schedule(now, retry if retry else AUTH_BACKOFF)
     else:
-        up["err"] += 1
-        up["state"] = "err " + ("net" if code is None else str(code))
+        _up_err("err " + ("net" if code is None else str(code)))
         _schedule(now, retry)
         if code is not None and len(files) > 1:
             # the same batch answered so SRV_ERR_MAX times in a row (a 5xx
@@ -6477,14 +6469,12 @@ def upload_tick():
 
 def _fs_err(now):
     """A .pos write (or delete) failed: retry later, the track stays."""
-    up["err"] += 1
-    up["state"] = "fs err"
+    _up_err("fs err")
     _schedule(now)
 
 def _low_mem(now):
     gc.collect()
-    up["err"] += 1
-    up["state"] = "low mem"
+    _up_err("low mem")
     _schedule(now)
     print("upload MemoryError, free", py_heap()[0])
 
