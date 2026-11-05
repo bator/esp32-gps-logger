@@ -79,7 +79,8 @@ firmware R6.0.0.0Build3700.
   standing costs next to nothing). The speed is on the status page and in
   `status.json`. It never scrolls. The backlight is always on. The route survives a
   reboot in `/route.bin` (at most one write per 5 min of driving and one when a stay
-  starts), shown again once a fix proves it is still the same day. `gps_tft.py`, its
+  starts) and shows again at once; the first fix empties it if it was another day, so
+  until then a board switched on the next morning shows yesterday's. `gps_tft.py`, its
   anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
