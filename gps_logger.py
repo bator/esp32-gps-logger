@@ -7971,7 +7971,7 @@ class _Rt:
     pts = xy = view = None               # lat << 1 | starts a trip, lon: 1e-6 degrees;
     km = ""                              # the pixels, y | 128 when starting a trip
     day = -1                             # Hungarian day number, -1 not known yet
-    waiting = False                      # read from flash, its day not proven yet
+    waiting = False                      # read from flash, shown, day not proven yet
     n = cm = ver = 0                     # points; centimetres today; views made
     step = ROUTE_STEP
     k = 1.0                              # the cosine of the latitude, lately
@@ -8170,8 +8170,9 @@ def _rt_project():
         R.km = "%d km" % ((R.cm + 50000) // 100000)
 
 def _rt_load():
-    """Today's route as last saved. Anything wrong with the file: as if none. Its
-    day counts once a fix proves it (a board without one does not know the date)."""
+    """The route as last saved. Anything wrong with the file: as if none. It shows at
+    once, whatever its day: a board indoors may wait long for a fix, the only thing that
+    tells the date. The first fix keeps it, or empties it if that was another day."""
     R = _Rt
     size = struct.calcsize(ROUTE_HEAD)
     try:
@@ -8241,8 +8242,8 @@ def _rt_tick(now):
                 _rt_reset(d)
             R.waiting = False
             R.moved = True
-    if R.waiting or R.day < 0:
-        return                           # (no view: the day is not known)
+    if R.day < 0:
+        return                           # (no view: nothing saved, no day known)
     t = None
     q = log["prev"]
     if q is not None and has_fix(now) and not log["still"]["active"]:

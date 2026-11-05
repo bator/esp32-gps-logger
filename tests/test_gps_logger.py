@@ -18215,8 +18215,28 @@ _short = abs(_Rt.cm - _c0 - 10000) < 15 and sum(_Rt.pts[2 * i] & 1 for i in rang
 _rboot(_good)
 _wait = (_Rt.waiting, _Rt.view, _Rt.km)
 _rview()
-_wait2 = (_Rt.waiting, _Rt.view)
+_wait2 = (_Rt.waiting, _Rt.view and _Rt.view[1], _Rt.km, _Rt.cm)
 _old_day = _rboot(_good, _DAY + 86400)
+_rboot(_good)
+_rview()
+_before = (_Rt.waiting, _Rt.view[1], _Rt.km, _Rt.view[3])
+with open(hl.ROUTE_FILE, "rb") as _f:
+    _kept = _f.read() == _good           # (a look without a fix writes nothing)
+_rview(_DAY + 86400)
+_after = (_Rt.waiting, _Rt.view[1], _Rt.km, _Rt.view[3] != _before[3])
+_rboot(_good)
+_rview()
+_rview(_DAY + 7100)
+_same = (_Rt.waiting, _Rt.view[1], _Rt.km, _Rt.cm)
+_rboot(None)
+_rview()
+_no_file = (_Rt.view, _Rt.km)
+check("ROUTE-BEFORE-FIX: a saved route shows at once without a fix, and writes nothing; the "
+      "first fix keeps it the same day and empties it, redrawn, another day; no file: no view",
+      _wait2 == (True, _n0, _km0, _c0) and _before[:3] == (True, _n0, _km0) and _kept
+      and _after == (False, 0, "0,0 km", True) and _same == (False, _n0, _km0, _c0)
+      and _no_file == (None, ""),
+      repr((_wait2, _before, _kept, _after, _same, _no_file)))
 _flip = bytearray(_good)
 _flip[40] ^= 1
 _bad_n = bytearray(_good)
@@ -18227,11 +18247,11 @@ _torn = [_good[:k] for k in (0, 1, 4, 23, 24, 27, 28, 40, len(_good) - 5, len(_g
 _junk = [bytes(_flip), bytes(_bad_n), bytes(_badm), b"\x00" * len(_good), b"\xff" * 700, _good + b"x"]
 _ign = [_rboot(d, _DAY + 7100) for d in _torn + _junk]
 _none_file = _rboot(None, _DAY + 7100)
-check("ROUTE-FILE: saved and read back the same day whole; shown only once a fix proves its "
-      "day; another day's, a torn or garbled one, or none: an empty day, nothing raised",
+check("ROUTE-FILE: saved and read back the same day whole; another day's, a torn or garbled "
+      "one, or none: an empty day once a fix tells the date, nothing raised",
       _size_ok and _same_day == (_n0, _c0, _km0) and _pts_back and _wait == (True, None, "")
       and _goes_on and _short
-      and _wait2 == (True, None) and _old_day == (0, 0, "0,0 km")
+      and _old_day == (0, 0, "0,0 km")
       and all(i == (0, 0, "0,0 km") for i in _ign) and _none_file == (0, 0, "0,0 km"),
       repr((_size_ok, _same_day, _pts_back, _wait, _wait2, _old_day, _ign, _none_file)))
 _tmp_left = _rfresh() or os.path.exists(hl.ROUTE_FILE + ".tmp")
