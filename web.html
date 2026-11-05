@@ -305,7 +305,6 @@ var BOOT = {0: "other reset", 1: "power on", 2: "hard reset", 3: "watchdog", 4: 
 var TLS_KB = 48;                        // TLS_MIN_KB in gps_logger.py
 var POINT_B = 7;                        // bytes per .trb point (7.0-7.3 on a 1 Hz drive; .trk ~46-51)
 var UERE = 2.5;                         // m per HDOP unit for the accuracy ring
-var MAX_HACC = 20;                      // PVT_MAX_HACC in gps_logger.py
 var ZOOM = 17;
 // the map tiles: OSM-carto through the homelab Atlas proxy (CT 146 adds the
 // Geoapify key; Cloudflare caches the tiles); it answers pages on a
@@ -315,7 +314,7 @@ var TILES = "https://atlas.crusand.org/tiles/geoapify/";
 // again only after ADDR_M metres and ADDR_S seconds
 var ADDR = "https://atlas.crusand.org/api/v1/photon/reverse";
 var ADDR_M = 25, ADDR_S = 20;
-var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA/UBX frame: amber, red
+var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA sentence: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
 
 function esc(v) {
@@ -384,8 +383,7 @@ var EVK = [
   ["wfail", /^wifi fail /, "WiFi connect failed", 2, "warn", "wifi"],
   ["wlost", /^wifi lost /, "WiFi lost", 2, "warn", "wifi"],
   ["low", /^upload low /, "Upload waits for memory", 2, "warn", "up"],
-  ["setup", /^gps (setup not taken|setup lost|rate |refused )/, "GPS setup refused", 2, "warn", "sat"],
-  ["pvt", /^gps pvt /, "NAV-PVT given up", 2, "warn", "sat"],
+  ["setup", /^gps (setup not taken|setup lost|refused )/, "GPS setup refused", 2, "warn", "sat"],
   ["env", /^(env |upload (API_KEY|GEO_URL) )/, "Config (.env)", 2, "warn", "cfg"],
   ["boot", /^boot cause /, "Boot", 1, "boot", "power"],
   ["wback", /^wifi back /, "WiFi back", 1, "ok", "wifi"],
@@ -718,7 +716,7 @@ function evTele(a, cols) {
     "</div></div></div>";
 }
 function bytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B"; }
-// The GPS link: seconds since the last whole NMEA/UBX frame (good_age_s,
+// The GPS link: seconds since the last whole NMEA sentence (good_age_s,
 // null: none since boot), the bytes a second between two polls (rx_bytes over
 // the uptime between them). -> {tone, rate, silent: s silent or 0, junk: bytes
 // arrive but no whole frame (wiring, baud)}, or null (a firmware without it)
@@ -790,8 +788,8 @@ function posOf(d) {
   var p = String(d.position || "").split(", ");
   return p.length === 2 && !isNaN(+p[0]) && !isNaN(+p[1]) ? [+p[0], +p[1]] : null;
 }
-// metres: NAV-PVT's hAcc as it is, else HDOP * UERE; null without either
-function accM(d) { return typeof d.hacc === "number" ? d.hacc : typeof d.hdop === "number" ? d.hdop * UERE : null; }
+// metres: HDOP * UERE; null without one
+function accM(d) { return typeof d.hdop === "number" ? d.hdop * UERE : null; }
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it;
 // prev: the poll before, for rates)
 function view(d, prev) {
@@ -803,11 +801,7 @@ function view(d, prev) {
   var q = String(d.idf || "").split(" / "), fr = +q[0], big = +q[1];
   var pk = typeof d.mem === "number" ? Math.round(d.mem / 1024) : null;
   var hd = typeof d.hdop === "number" ? d.hdop : null, q4 = wifiQ(d.rssi);
-  var ha = typeof d.hacc === "number" ? d.hacc : null;          // NAV-PVT: metres
-  var acc = accM(d);                                            // (else from HDOP)
-  var src = d.fix_src === "pvt" ? "NAV-PVT" : d.fix_src === "nmea" ? "NMEA" : "-";
-  var ub = String(d.ubx || "- / -").split(" / ");                 // UBX frames ok / bad
-  var ubp = +ub[0] + +ub[1] ? +ub[1] * 100 / (+ub[0] + +ub[1]) : 0;   // NAV-PVT path
+  var acc = accM(d);
   var gl = gpsLink(d, prev), ua = d.upload_age_s;
   var late = d.left > 0 && (ua == null ? d.uptime > UPLOAD_LATE_S : ua > UPLOAD_LATE_S);
   v.up = "UP " + esc(hms(d.uptime).toUpperCase());
@@ -816,13 +810,11 @@ function view(d, prev) {
       "nothing from the receiver: check its power and the TX wire") + "</em>" : "";
   v.tm = cell("FIX", esc(fix.replace(" fix", "")).toUpperCase(), "", fixTone(fix)) +
     cell("SATS", esc(sats[1]), "/" + esc(sats[0])) +
-    (ha !== null ? cell("ACC", "&plusmn;" + ha.toFixed(1), "m", ha > MAX_HACC ? "warn" : "") :
-      cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "")) +
+    cell("HDOP", hd === null ? "-" : hd.toFixed(2), "", hd !== null && hd > 5 ? "warn" : "") +
     cell("UPLINK", num(d.left), "pts", d.bad_files > 0 ? "bad" : d.upload_err > 0 || late ? "warn" : "") +
     (q4 ? cell("WIFI", wifiIcon(q4[0]) + q4[1] + '<em>%</em><em class="db">' + esc(d.rssi) + " dBm</em>", "", q4[2]) :
       cell("WIFI", esc(ws[0]).toUpperCase())) +
-    (d.fix_src === "pvt" ? cell("UBX BAD", ubp.toFixed(2), "%", ubp > 1 ? "warn" : "") :
-      cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : ""));
+    cell("NMEA BAD", pct.toFixed(2), "%", pct > 1 ? "warn" : "");
   var dots = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
   for (var i = 0; i < svs.length; i++) {
     var s = svs[i], up = s.elev !== null && s.elev >= 0;
@@ -858,8 +850,7 @@ function view(d, prev) {
   ];
   if (gl)                               // (a firmware without the counters: none)
     subs.splice(1, 0, ["GPS link", (gl.rate === null ? "" : num(Math.round(gl.rate)) + " B/s" + dot) +
-      (d.good_age_s === null ? "no frame yet" : "frame " + hms(d.good_age_s) + " ago") + dot + src +
-      (d.fix_src === "pvt" ? " " + esc(ub[0]) + "/" + esc(ub[1]) + " ubx" : "") +
+      (d.good_age_s === null ? "no frame yet" : "frame " + hms(d.good_age_s) + " ago") +
       (d.gps_boots > 0 ? dot + num(d.gps_boots) + " restarts" : "") + dot + bytes(d.rx_bytes) + " read", gl.tone]);
   if (d.fw !== undefined)
     subs.push(["Firmware", d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw),
@@ -1307,7 +1298,7 @@ function placeMap(d) {
       (hr ? '<path class="hl c" d="' + dh + '"/><path class="hl" d="' + dh + '"/>' : "") +
       ends(t, z, hr ? hr[0] : 0, hr ? hr[1] : hist.pts.length - 1, sc) + "</svg>" : "";
   }
-  // the ring's radius: NAV-PVT's hAcc as it is, else HDOP * UERE
+  // the ring's radius: HDOP * UERE
   var acc = document.getElementById("acc"), px = (accM(d) || 0) * 2 / t.mpp;
   acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
 }

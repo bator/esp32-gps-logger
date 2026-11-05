@@ -28,6 +28,8 @@ class _Obj:
 
 
 class _Dummy:
+    OUT = 1
+
     def __init__(self, *a, **k):
         pass
 
@@ -50,7 +52,7 @@ class _Uart(_Dummy):
 
 
 machine = _Obj()
-machine.Pin = machine.I2C = machine.WDT = machine.Timer = _Dummy
+machine.Pin = machine.WDT = machine.Timer = _Dummy
 machine.RTC = _Dummy
 machine.UART = _Uart
 machine.freq = lambda *a: 80000000

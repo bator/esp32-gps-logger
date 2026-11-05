@@ -1,11 +1,9 @@
 from machine import Pin, RTC
-import machine, sys, time
+import machine, time
 
-# Hold GPIO25 (GPIO10 on the ESP32-C6, which has no GPIO25; GPIO7 on the Heltec
-# Wireless Tracker, whose button GPIO0 is the download mode) at reset to skip
-# the logger (REPL + mpremote, no WDT).
-_M = getattr(sys.implementation, "_machine", "")
-SKIP_PIN = 10 if "ESP32C6" in _M else 7 if "Heltec" in _M else 25
+# Hold GPIO7 low at reset to skip the logger (REPL + mpremote, no WDT). (The
+# Heltec Wireless Tracker's button, GPIO0, is the download mode.)
+SKIP_PIN = 7
 BOOT_FAIL_MAX = 5
 BOOT_FAIL_FILE = "/boot_fail"
 BOOT_RETRY_MS = 1800000                  # in the REPL after BOOT_FAIL_MAX:

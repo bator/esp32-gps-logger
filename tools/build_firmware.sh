@@ -1,17 +1,15 @@
 #!/bin/bash
 # Build MicroPython with gps_logger frozen into the firmware, and optionally
 # flash or publish it. Frozen, the logger's bytecode runs from flash instead
-# of taking ~100 KB of the Python heap: the heap starts at 96 KB on the Heltec
-# (64 KB on the C6, ~38 KB live there), so far fewer allocations fail to fit and
-# grow it into the ESP-IDF heap that TLS uploads need (it still can:
-# MicroPython's split heap stays on).
+# of taking ~100 KB of the Python heap: the heap starts at 96 KB, so far fewer
+# allocations fail to fit and grow it into the ESP-IDF heap that TLS uploads need
+# (it still can: MicroPython's split heap stays on).
 #
 # Needs ESP-IDF (v5.5.2 for MicroPython 1.29) and a MicroPython v1.29.0 tree:
 #   IDF_DIR=~/esp/esp-idf  MPY_DIR=~/esp/micropython  (defaults)
-# BOARD_DIR picks the board, its chip and flash size read from it. The one in
-# use: BOARD_DIR=$PWD/boards/GPS_LOGGER_S3, the Heltec Wireless Tracker (ESP32-S3,
-# 8 MB). Without BOARD_DIR: boards/GPS_LOGGER_C6, the earlier board,
-# ESP32_GENERIC_C6 with two OTA app slots (partitions-ota.csv, 16 MB flash).
+# The board: boards/GPS_LOGGER_S3, the Heltec Wireless Tracker (ESP32-S3, 8 MB,
+# two OTA app slots: partitions-ota.csv); BOARD_DIR names another, its chip and
+# flash size read from it.
 # Usage:
 #   tools/build_firmware.sh                    build only
 #   PORT=/dev/ttyACM0 tools/build_firmware.sh --flash
@@ -64,12 +62,12 @@ cd "$(dirname "$0")/.."
 
 IDF_DIR=${IDF_DIR:-$HOME/esp/esp-idf}
 MPY_DIR=${MPY_DIR:-$HOME/esp/micropython}
-BOARD_DIR=${BOARD_DIR:-$PWD/boards/GPS_LOGGER_C6}
+BOARD_DIR=${BOARD_DIR:-$PWD/boards/GPS_LOGGER_S3}
 BOARD=$(basename "$BOARD_DIR")
 CHIP=${CHIP:-$(sed -n 's/^set(IDF_TARGET \(.*\))$/\1/p' "$BOARD_DIR/mpconfigboard.cmake" 2>/dev/null || true)}
-CHIP=${CHIP:-esp32c6}
+CHIP=${CHIP:-esp32s3}
 FLASH_MB=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\([0-9]*\)MB"$/\1/p' "$BOARD_DIR/sdkconfig.board" 2>/dev/null || true)
-FLASH_MB=${FLASH_MB:-16}
+FLASH_MB=${FLASH_MB:-8}
 PORT=${PORT:-/dev/ttyUSB0}
 APP_SIZE=0x1c0000                         # one OTA app slot (partitions-ota.csv)
 APP1=$(printf '0x%x' $((0x10000 + APP_SIZE)))  # the second slot's offset
@@ -107,17 +105,12 @@ freeze("\$(PORT_DIR)/modules")
 module("gps_logger.py", base_path="$OUT", opt=3)
 module("gps_frozen.py", base_path="$OUT")
 module("gps_boot.py", base_path="$OUT", opt=3)
-EOF
-# the Heltec's display: on its firmware only, and in the marker (deploy.sh
-# compares both)
-if [ "$BOARD" = GPS_LOGGER_S3 ]; then
-    printf 'TFT = "%s"\n' "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d" " -f1)" >> "$OUT/gps_frozen.py"
-    cp gps_tft.py gps_tft_font.py "$OUT/"
-    cat >> "$OUT/manifest.py" <<EOF
 module("gps_tft.py", base_path="$OUT", opt=3)
 module("gps_tft_font.py", base_path="$OUT", opt=3)
 EOF
-fi
+# the display's code, in the marker too (deploy.sh compares both)
+printf 'TFT = "%s"\n' "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d" " -f1)" >> "$OUT/gps_frozen.py"
+cp gps_tft.py gps_tft_font.py "$OUT/"
 
 # shellcheck disable=SC1091
 source "$IDF_DIR/export.sh" >/dev/null
@@ -231,15 +224,13 @@ case "$MODE" in
         exit 1
     fi
     LIVE_BUILD=0
-    # the manifest's "board": the C6's has none (boards in the field read it
-    # as ever), any other board's is signed and refused by a different board
-    MBOARD=$BOARD
-    [ "$BOARD" = GPS_LOGGER_C6 ] && MBOARD=
+    # the manifest's "board" is signed, and a board refuses another's
     if [ -n "$LIVE" ]; then
-        # ("?": unreadable, not the C6's empty name: LIVE_BUILD below says so)
+        # ("?": unreadable, not an empty name, an older board's manifest:
+        # LIVE_BUILD below says so)
         LIVE_BOARD=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read()).get("board") or "")' <<< "$LIVE" 2>/dev/null || echo "?")
-        if [ "$LIVE_BOARD" != "?" ] && [ "$LIVE_BOARD" != "$MBOARD" ]; then
-            echo "$OTA_DEST holds the firmware of another board (${LIVE_BOARD:-GPS_LOGGER_C6}): each board has its own folder" >&2
+        if [ "$LIVE_BOARD" != "?" ] && [ "$LIVE_BOARD" != "$BOARD" ]; then
+            echo "$OTA_DEST holds the firmware of another board (${LIVE_BOARD:-no name: the older board}): each board has its own folder" >&2
             exit 1
         fi
         LIVE_BUILD=$(python3 -c 'import json, sys; print(int(json.loads(sys.stdin.read())["build"]))' <<< "$LIVE" 2>/dev/null || echo x)
@@ -258,7 +249,7 @@ case "$MODE" in
     cp "$OUT/micropython.bin" "$OUT/ota/$BINF"
     # stripped and gzipped as deploy.sh does it, the firmware's own window
     python3 tools/web_min.py web.html "$OUT/ota/web-$COMMIT.html.gz"
-    python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" "$MBOARD" <<'EOF'
+    python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" "$BOARD" <<'EOF'
 import hashlib, hmac, json, os, sys
 d, key_file, build, commit, board = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 key = open(key_file, "rb").read().strip()
@@ -277,9 +268,8 @@ for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),):
 t = "%d|%s|%d|%s|%s" % (m["build"], m["commit"], m["size"], m["sha256"], m["url"])
 for f in m["files"]:
     t += "|%s|%d|%s|%s" % (f["path"], f["size"], f["sha256"], f["url"])
-if board:
-    m["board"] = board
-    t += "|board=" + board
+m["board"] = board
+t += "|board=" + board
 m["hmac"] = hmac.new(key, t.encode(), hashlib.sha256).hexdigest()
 with open(os.path.join(d, "manifest.json"), "w") as f:
     json.dump(m, f)
