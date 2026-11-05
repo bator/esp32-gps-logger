@@ -13313,6 +13313,34 @@ else:
               '<span class="hint">NO TRIP THIS DAY</span>',
               '<span class="hint">NO TRIP YET TODAY</span>'],
           repr((ft.get("trips"), ft.get("timeline"))))
+    check("PAGE-PLACE-NAME: a station by its name, else city and street (no number, no shop's "
+          "name), a road's own name, the district; a name once; nothing named: empty",
+          ft.get("placeOf") == ["Nagyváros-Kelet", "Kisváros, Fő utca",
+                                "Nagyváros, Hosszú út", "Kisváros, Fő utca",
+                                "Kisváros, Szélső", "Nagyváros", "", ""],
+          repr(ft.get("placeOf")))
+    _pl = ft.get("placeLine") or ""
+    check("PAGE-PLACE-LINE: a known place over its line, escaped, the row taller; an unknown one "
+          "leaves the row exactly as without places",
+          '<div class="tr go pl" onclick="hlTrip(0)"' in _pl and "<strong>A &lt;b&gt;</strong><br><b>" in _pl
+          and '<div class="tr st pl">' in _pl and "<strong>B</strong><br>stop 2 h 40 min" in _pl
+          and '<div class="tr go on" onclick="hlTrip(1)"' in _pl
+          and '<div class="tr end pl"><time>11:10</time><i></i><span><strong>C</strong></span>' in _pl
+          and ft.get("placeSame") is True, _pl[:400])
+    _pq = ft.get("placeQ") or {}
+    check("PAGE-PLACE-ASK: each place once and one at a time, a railway station within 150 m "
+          "first, then what is there; a trip still going not its end; kept, and known ones ask "
+          "nothing; no answer or an HTTP error waits and tries again",
+          _pq.get("first") == [["", ""], ["", ""]]
+          and _pq.get("queued") == ["47.000,18.000", "47.100,18.000"]
+          and _pq.get("oneAtATime") == 1
+          and "lat=47.00001&lon=18.00000&limit=1&radius=0.15&osm_tag=railway:station" in _pq.get("url0", "")
+          and _pq.get("url1", "").endswith("lat=47.00001&lon=18.00000&limit=1")
+          and "lat=47.10000&lon=18.00000&limit=1&radius=" in _pq.get("url2", "")
+          and _pq.get("after") == [3, 0, "C, S", "St"]
+          and _pq.get("known") == [["C, S", "St"], ["St", ""]] and _pq.get("again") == 3
+          and _pq.get("failed") == [False, 1, True] and _pq.get("waits") == 4
+          and _pq.get("http500") == [1, True] and _pq.get("none") == ["", 0], repr(_pq))
     check("PAGE-TIMELINE: km, moving time (min, then h:mm) and trips on "
           "top; a trip clicked is drawn on the map, clicked again the day",
           ft.get("kpis") == "<div><b>1.70</b><em>km</em></div><div><b>30</b>"
