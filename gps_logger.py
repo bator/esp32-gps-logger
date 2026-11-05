@@ -1724,7 +1724,7 @@ def _load_nets(env):
     wins, the later one is dropped (it took over the scan match, its
     password and its home flag). An empty WPA2 next to an SSID (an open
     network then) and an SSIDn / WPA2_n key not read here (SSID1, SSID4,
-    WPA2_1) are warned about (_env_warn)."""
+    WPA2_1) are warned about (_say)."""
     nets = []
     known = []
     seen = []
@@ -2512,7 +2512,7 @@ def _wifi_begin_round(w):
 def _radio_idle_ok():
     """The radio may sleep: everything is uploaded, or only an away stay's
     open anchor file (and its RAM) waits. That file is closed every
-    STILL_FILE while connected and wakes the hourly round (_all_uploaded),
+    STILL_FILE while connected and wakes the hourly round (_nothing_to_send),
     so the radio and a phone hotspot do not idle on for the whole stay."""
     if _nothing_to_send():
         return True
@@ -2529,15 +2529,11 @@ def _ota_wants_radio():
 def _nothing_to_send():
     """All uploaded, or no GEO_URL/API_KEY ("no .env": never sends, so the
     waiting tracks are no reason for rounds every backoff or hour)."""
-    return _all_uploaded() or up["state"] == "no .env"
-
-def _all_uploaded():
-    """Nothing left for the network: no finished track waiting, nothing in
-    RAM, and the open track (if any) holds no points yet. An open track
-    with points is closed by log_tick on WiFi, then uploaded."""
-    if log["batch"] or (log["file"] is not None and log["points"]):
-        return False
-    return not pending()
+    # nothing left for the network: no finished track waiting, nothing in RAM,
+    # and the open track (if any) holds no points yet. An open track with
+    # points is closed by log_tick on WiFi, then uploaded.
+    return (not log["batch"] and (log["file"] is None or not log["points"])
+            and not pending()) or up["state"] == "no .env"
 
 def wifi_wake():
     """A new stay: look for a network now instead of after WIFI_SLEEP or the
@@ -3254,16 +3250,6 @@ def _spread(r, c, q, m=2 * STILL_RADIUS):
     return (q is not None and _dist(r[0], r[1], c[0], c[1]) > m
             and _dist(c[0], c[1], q[0], q[1]) > m)
 
-def _still_mean(sl, pos):
-    """Fold pos into the anchor, a running mean over STILL_MEAN_N fixes.
-    Kept as an offset from a fixed reference: in single precision a
-    latitude plus a centimetre-sized step is the same latitude."""
-    r, o = sl["aref"], sl["aoff"]
-    n = min(sl["n"] + 1, STILL_MEAN_N)
-    o = (o[0] + (pos[0] - r[0] - o[0]) / n,
-         o[1] + (_dlon(pos[1] - r[1]) - o[1]) / n)
-    sl.update(aoff=o, n=n, anchor=(r[0] + o[0], _dlon(r[1] + o[1])))
-
 def free():
     try:
         s = os.statvfs(LOG_DIR)
@@ -3429,7 +3415,11 @@ def flush(hold=None):
             _werr("close", e)
     landed = wrote and close_ok
     if not landed:
-        sz, gone = _stat_size(path)
+        gone = False                     # (only on ENOENT)
+        try:
+            sz = os.stat(path)[6]
+        except OSError as e:
+            sz, gone = None, _enoent(e)
         if expected is not None and sz == expected:
             landed = True
         else:
@@ -3620,7 +3610,11 @@ def _hist_close(st, ok=True):
         except OSError:
             pass
     if new:
-        _hist_prune()
+        try:                             # the day files beyond the newest
+            for n in _hist_names()[:-HIST_DAYS]:  # HIST_DAYS go
+                _rm(HIST_DIR + "/" + n)
+        except OSError:
+            pass
 
 def _tail_nl(path, size):
     """False when a non-empty file does not end in a newline: an append
@@ -3663,15 +3657,6 @@ def _hist_trim(want):
         _rm(HIST_DIR + "/" + days.pop(0))
         room = free()
     return room
-
-def _hist_prune():
-    """Delete the day files beyond the newest HIST_DAYS."""
-    try:
-        days = _hist_names()
-    except OSError:
-        return
-    for n in days[:-HIST_DAYS]:
-        _rm(HIST_DIR + "/" + n)
 
 def _dlon(d):
     """A longitude difference across 180° the short way round, or a longitude
@@ -4412,7 +4397,14 @@ def _still_active(now, pos):
         sl.update(gap_n=0, gap_at=None, gap_ref=None)
         _ring_add(sl, now, pos, d)
         if d <= STILL_NEAR:
-            _still_mean(sl, pos)
+            # pos into the anchor, a running mean over STILL_MEAN_N fixes.
+            # Kept as an offset from a fixed reference: in single precision
+            # a latitude plus a centimetre-sized step is the same latitude.
+            r, o = sl["aref"], sl["aoff"]
+            n = min(sl["n"] + 1, STILL_MEAN_N)
+            o = (o[0] + (pos[0] - r[0] - o[0]) / n,
+                 o[1] + (_dlon(pos[1] - r[1]) - o[1]) / n)
+            sl.update(aoff=o, n=n, anchor=(r[0] + o[0], _dlon(r[1] + o[1])))
             sl["win_at"] = sl["prev"] = sl["move_c"] = None
         else:
             # Settled between STILL_NEAR and STILL_EXIT (out of the car and
@@ -4645,13 +4637,6 @@ def _enoent(e):
             return False
     return n == 2
 
-def _stat_size(path):
-    """(size_or_None, missing). missing is True only on ENOENT."""
-    try:
-        return os.stat(path)[6], False
-    except OSError as e:
-        return None, _enoent(e)
-
 def _file_size(path):
     try:
         return os.stat(path)[6]
@@ -4699,16 +4684,11 @@ def _seek_footer(f, old):
     f.seek(start + i + 1, 0)
     return False
 
-def _lowidf_mark_take():
-    """True once if the last boot was a low-idf reboot (LOWIDF_MARK)."""
-    try:
-        os.stat(LOWIDF_MARK)
-    except OSError:
-        return False
-    _rm(LOWIDF_MARK)
-    return True
-
 def up_reset():
+    # True once if the last boot was a low-idf reboot (LOWIDF_MARK)
+    lowboot = _file_size(LOWIDF_MARK) is not None
+    if lowboot:
+        _rm(LOWIDF_MARK)
     up.clear()
     up.update(url=None, key=None, state="idle", sent=0, err=0, files=0,
               left=0, fail4=0, backoff=BACKOFF_START, allow_bad=True,
@@ -4716,7 +4696,7 @@ def up_reset():
               pos_err={}, enomem=0, last_err=None,
               guard_hits=_guard["hits"], lowidf_at=None, lowidf_seen=None,
               lowpy_at=None, lowpy_seen=None, ok_at=None,
-              lowidf_boot=_lowidf_mark_take(), next_at=time.ticks_ms(),
+              lowidf_boot=lowboot, next_at=time.ticks_ms(),
               rm_err={}, env_u=None, env_k=None, srv=None)
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
@@ -6753,10 +6733,6 @@ def _ota_shadow(aside):
         except OSError:
             pass
 
-def _ota_shadow_drop():
-    for p in OTA_SHADOW:
-        _rm(p + ".ota-old")
-
 def _ota_mark(what):
     """What ended a run while an OTA note is there, for the firmware that
     reads the note next (the old one, after a rollback): "crash" (run()'s
@@ -7009,8 +6985,9 @@ def _ota_health(now):
         ota["pend"] = None
         _ota_valid()
         _ota_promote(ota.get("paths") or ())
-        _ota_shadow_drop()               # (before the note: main.py puts
-        _rm(OTA_PENDING)                 # back what has no note)
+        for p in OTA_SHADOW:             # (before the note: main.py puts
+            _rm(p + ".ota-old")          # back what has no note)
+        _rm(OTA_PENDING)
         _rm(OTA_TRIES)
         _rm(OTA_MARK)
         ota["state"] = "ok"
@@ -7045,7 +7022,7 @@ def ota_tick(now):
         return
     # points waiting in files or an upload backing off: not now (the RAM
     # batch is flushed before the reset: a moving board kept one, and
-    # _all_uploaded() held the check back for good). Unless no 2xx came
+    # _nothing_to_send() held the check back for good). Unless no 2xx came
     # for OTA_STUCK: "err payload" is cleared by a 2xx only, and an upload
     # bug held back the update that fixes it
     if not at_home():
@@ -7311,19 +7288,12 @@ def _file_counts():
     _fc[0], _fc[1], _fc[2] = n, bad, now
     return n, bad
 
-def _sv_name(v):
-    return "%s %d" % (GNSS.get(v[6], "SV"), v[0])
-
 def _sv_list():
     """The satellite list for the page, used first, then by signal."""
     if st["svs"] is None:
         return []
     return sorted(st["svs"], key=lambda v: (not v[4], -v[1], v[6] or 0,
                                             v[0]))
-
-def _sv_age():
-    at = st["svs_at"]
-    return None if at is None else _age(time.ticks_ms(), at) // 1000
 
 def _web_json_parts(rows, svs):
     """The JSON in small pieces (no 8 KB string and its encoded copy).
@@ -7350,11 +7320,13 @@ def _web_json_parts(rows, svs):
     try:
         for v in svs:
             yield sep + json.dumps({
-                "name": _sv_name(v), "system": GNSS.get(v[6]), "svid": v[0],
+                "name": "%s %d" % (GNSS.get(v[6], "SV"), v[0]), "system": GNSS.get(v[6]), "svid": v[0],
                 "cno": v[1], "elev": v[2], "azim": v[3], "used": v[4],
                 "unhealthy": v[5]})
             sep = ","
-        age = json.dumps(_sv_age())
+        at = st["svs_at"]
+        age = json.dumps(None if at is None
+                         else _age(time.ticks_ms(), at) // 1000)
     except Exception as e:
         _web_bug(e)
         age = "null"
