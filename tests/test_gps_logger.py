@@ -498,14 +498,10 @@ class WLAN(object):
 WLAN.instances = []
 
 
-class FakeResp(object):
-    def __init__(self, code, headers=None):
-        self.status_code = code
-        self.headers = dict(headers or {})
-        self.closed = False
-
-    def close(self):
-        self.closed = True
+def FakeResp(code, headers=None):
+    """What HTTP_POST returns: (code, Retry-After, Content-Type)."""
+    headers = headers or {}
+    return code, headers.get("Retry-After"), headers.get("Content-Type")
 
 
 def _post(url, data=None, headers=None, timeout=None):
@@ -11204,7 +11200,7 @@ try:
     r = gl._raw_post("https://d.example:8443/sub", body,
                      {"Authorization": "Bearer k"}, 15)
     sent = rv_sock[0].out
-    ok_post = (r.status_code == 201 and r.headers.get("Retry-After") == "7"
+    ok_post = (r[0] == 201 and r[1] == "7"
                and sent.startswith(b"POST /sub HTTP/1.0\r\n"
                                    b"Host: d.example:8443\r\n")
                and b"Content-Length: %d\r\n" % len(body) in sent
@@ -11261,7 +11257,7 @@ try:
         RvTls.SSLContext = real_ctx_cls
     rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
     r_again = gl._raw_post("https://d.example", b"{}", {}, 15)
-    ctx_retry = (ctx_fail is not None and r_again.status_code == 201
+    ctx_retry = (ctx_fail is not None and r_again[0] == 201
                  and getattr(gl, "_tls_ctx", [None])[0] is RvTls.made[-1])
     rv_sock[0] = RvSock(b"", polls=10 ** 6)
     t0 = _clock[0]
@@ -11282,7 +11278,7 @@ finally:
 check("U-11: POST body in chunks, UART read while writing and waiting",
       ok_post, repr(rv_sock[0].out[:80]))
 check("U-17: a 301 is returned, not followed (no GET, no Bearer elsewhere)",
-      r301.status_code == 301 and one_req)
+      r301[0] == 301 and one_req)
 check("TLS: with CA_FILE on flash the server is verified",
       ca_ctx.verify_mode == RvTls.CERT_REQUIRED and ca_ctx.ca == b"\x30\x82der")
 check("TLS-CTX: one SSLContext for every POST, CA_FILE read once",
@@ -11304,7 +11300,7 @@ try:
         rv_sock[0].fail = fail_
         try:
             head_res.append(gl._raw_post("https://d.example", b"{}", {},
-                                         15).status_code)
+                                         15)[0])
         except OSError as e:
             head_res.append(e)
     # a header longer than a read, then one cut right before its CRLF:
@@ -11326,9 +11322,9 @@ finally:
 check("HEAD-ERR: reset/timeout/close in the headers keeps the 201",
       head_res == [201, 201, 201], repr(head_res))
 check("HEAD-ERR: answer lines read in bounded pieces, Retry-After still found",
-      r_long.status_code == 429 and r_long.headers.get("Retry-After") == "9"
+      r_long[0] == 429 and r_long[1] == "9"
       and limits and all(0 < n_ <= 256 for n_ in limits),
-      "%r %r" % (r_long.headers, limits[:4]))
+      "%r %r" % (r_long, limits[:4]))
 
 # HOST-PORT: the Host header names a port that is not the scheme's default
 # (RFC 7230 5.4: a proxy or virtual host on :8443 routes by it)

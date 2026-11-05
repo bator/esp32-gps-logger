@@ -5698,22 +5698,9 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     up["state"] = "quarantine"
     return True
 
-def _portal(r):
-    """The answer is an HTML page (Content-Type text/html)."""
-    hdrs = getattr(r, "headers", None) or {}
-    for k in hdrs:
-        if str(k).lower() == "content-type":
-            return "html" in str(hdrs[k]).lower()
-    return False
-
-def _retry_after_ms(r):
-    hdrs = getattr(r, "headers", None) or {}
-    v = None
-    if isinstance(hdrs, dict):
-        for k in hdrs:
-            if str(k).lower() == "retry-after":
-                v = hdrs[k]
-                break
+def _retry_after_ms(v):
+    """A Retry-After header's value (str or None) in ms, within the backoff's
+    limits; None when there is no number."""
     if v is None:
         return None
     try:
@@ -5760,16 +5747,6 @@ def _clear_bad_full(path):
     if b in bf:
         bf.pop(b, None)
         up["bad_full"] = bf
-
-class _Resp:
-    def __init__(self, code, retry, ctype=None):
-        self.status_code = code
-        self.headers = {"Retry-After": retry} if retry is not None else {}
-        if ctype is not None:
-            self.headers["Content-Type"] = ctype
-
-    def close(self):
-        pass
 
 def _io_write(s, b):
     """All of b to a socket or TLS stream (MicroPython: write; CPython
@@ -5979,7 +5956,8 @@ def _raw_post(url, data, headers, timeout):
     followed one as a GET with the old Content-Length (the server then
     waits for a body) and the Bearer header, without the timeout. The body
     goes out in HTTP_CHUNK pieces and the wait for the answer polls, both
-    reading the UART meanwhile, so a slow server costs no NMEA. -> _Resp."""
+    reading the UART meanwhile, so a slow server costs no NMEA. -> (status
+    code, Retry-After, Content-Type), the two headers None when not sent."""
     proto, _, rest = url.partition("://")
     host, _, path = rest.partition("/")
     path = "/" + path
@@ -6042,7 +6020,7 @@ def _raw_post(url, data, headers, timeout):
                 bol = h[-1:] == b"\n"
         except Exception as e:
             print("upload head", code, repr(e))
-        return _Resp(code, retry, ctype)
+        return code, retry, ctype
     finally:
         _guard_stop()
         try:
@@ -6090,21 +6068,20 @@ def _enomem(e):
 def _http_post(size):
     """POST _body[:size]. Returns (status_code or None, retry_after_ms or None)."""
     feed()
-    r = None
     code, retry = None, None
     _post_phase[0] = None
     # only a hit during this POST is its abort: not the OTA download's (that
     # shares the guard), or one in the headers of the last, 2xx POST
     up["guard_hits"] = _guard["hits"]
     try:
-        r = HTTP_POST("%s/api/v1/overland/batches" % up["url"],
-                      memoryview(_body)[:size],
-                      {"Content-Type": "application/json",
-                       "Authorization": "Bearer %s" % up["key"]},
-                      HTTP_TIMEOUT)
-        code = r.status_code
-        retry = _retry_after_ms(r)
-        if code is not None and 200 <= code < 300 and _portal(r):
+        code, retry, ctype = HTTP_POST(
+            "%s/api/v1/overland/batches" % up["url"],
+            memoryview(_body)[:size],
+            {"Content-Type": "application/json",
+             "Authorization": "Bearer %s" % up["key"]},
+            HTTP_TIMEOUT)
+        retry = _retry_after_ms(retry)
+        if 200 <= code < 300 and ctype and "html" in ctype.lower():
             # an HTML 2xx is a captive portal (or a proxy) answering, not
             # Dawarich (JSON): without CA_FILE nothing else tells, and the
             # batch counted as sent was deleted
@@ -6129,11 +6106,6 @@ def _http_post(size):
             up["last_err"] = err
             _diag_write("upload err %s" % err)
     finally:
-        if r is not None:
-            try:
-                r.close()
-            except Exception:
-                pass
         feed()
         gc.collect()
     if code is not None and 300 <= code < 400:
