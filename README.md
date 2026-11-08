@@ -1014,7 +1014,9 @@ tell a stay from a drive, so the stay filter works on positions.
   flash every minute. On WiFi the anchor file is closed every 30 minutes so it
   uploads. A point due while the device is over 50 m from the anchor waits until
   it has been back within 50 m for 30 s, so a car leaving past the anchor writes
-  none. Drift out there delays a point by 5 minutes at most.
+  none. Nor while the device keeps receding, 15 m out already (a walk out
+  within 50 m): the way out keeps its first metres. Drift out there delays a
+  point by 5 minutes at most.
 - **At home** (a home network): no anchor points. If the home WiFi drops,
   anchor points start; it is still a stay.
 - **Arrival.** Entering a stay closes the current track on any network, so
@@ -1165,7 +1167,8 @@ the radio slept on purpose does not count as a drop.
 drops back. The UART runs off the fixed APB clock, so its baud rate is unaffected.
 `CPU_MHZ=0` leaves the firmware default. A failed clock change is tried
 again (3 tries); a clock refused every time is left alone for 30 minutes
-(`FREQ_RETRY`), then tried again, so one passing failure of the drop-back
+(`FREQ_RETRY`), then tried again (the main loop re-applies `CPU_MHZ` with
+each status line, POST or not), so one passing failure of the drop-back
 after a POST does not keep the board at 160 MHz.
 
 **Roaming home:** on a non-home network, when nearly stopped (speed below

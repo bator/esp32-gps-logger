@@ -429,7 +429,8 @@ def _acc(key, pos):
         ep[key] = [pos[0], pos[1], 0.0, 0.0, 1]
     else:
         a[2] += pos[0] - a[0]
-        a[3] += pos[1] - a[1]
+        a[3] += _dlon(pos[1] - a[1])     # (across 180° too: E and W fixes
+                                         # of a second averaged to ~36°)
         a[4] += 1
 
 _sec = [None, None]                      # HHMMSS last seen, its "HH:MM:SS"
@@ -486,7 +487,7 @@ def _publish():
         # stamped with the second, so the point is the second's first fix
         st["lat"], st["lon"] = a[0], a[1]
     else:
-        st["lat"], st["lon"] = a[0] + a[2] / n, a[1] + a[3] / n
+        st["lat"], st["lon"] = a[0] + a[2] / n, _dlon(a[1] + a[3] / n)
     alt, hd = ep["alt"], ep["hdop"]
     st["alt"] = alt[0] / alt[1] if alt[1] else None
     if hd[1]:
@@ -839,11 +840,11 @@ def _uc_gsv(talker, f):
     u = _uc_sv
     first = g == 0 and f[2] == "1" and f[-1] == "1"
     if first and u["open"]:
-        if u["new"]:
-            used = u["used"]
-            st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8)
-                         for k, v in u["new"].items()]
-            st["svs_at"] = time.ticks_ms()
+        # an empty round too: no signal at all, else the last sky stays
+        used = u["used"]
+        st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8)
+                     for k, v in u["new"].items()]
+        st["svs_at"] = time.ticks_ms()
         u["new"], u["open"] = {}, False
         u["until"] = time.ticks_add(time.ticks_ms(), GSV_EVERY * 1000)
         return
@@ -961,6 +962,11 @@ def _stamps_old(now):
     t = st["svs_at"]
     if t is not None and _age(now, t) >= TICKS_CAP:
         st["svs"] = st["svs_at"] = None
+    # a first fix this old is long past UC_SETTLE: settled, before the raw
+    # ticks_diff in _usable wraps negative (6.2 days) and holds it unsettled
+    t = st["fix_first"]
+    if not st["settled"] and t is not None and _age(now, t) >= TICKS_CAP:
+        st["settled"] = True
     t = st["setup_at"]
     if t is not None and _age(now, t) > TICKS_CAP:
         st["setup_at"] = time.ticks_add(now, -TICKS_CAP)
@@ -3725,7 +3731,9 @@ def _usable(now):
     if not st["settled"]:
         a = st["fix_first"]
         if a is not None:
-            if _age(now, a) >= UC_SETTLE:
+            # not _age: a second queued before a restart (_drain_q) is
+            # older than this fix_first, and TICKS_OLD would settle it
+            if time.ticks_diff(now, a) >= UC_SETTLE:
                 st["settled"] = True
             elif (st.get("speed") or 0) < UC_SETTLE_KMH:
                 return False
@@ -4079,6 +4087,17 @@ def _still_beat(now):
     if (_recent(now, sl["far_at"], STILL_BACK)
             and sl["hb_at"] is not None
             and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT):
+        return
+    # Nor while the departure ring is a run already STILL_RUN out from where
+    # it began, still within STILL_NEAR: a walk out. The anchor stamped 25 s
+    # into it at 2 m/s, and the way out (only what follows the last line)
+    # began 52 m out, a second after it. Late by at most one STILL_HEARTBEAT.
+    n, i = sl["rn"], sl["ri"]
+    if (n > 1 and _recent(now, sl["last_at"], STILL_GAP)
+            and sl["hb_at"] is not None
+            and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT
+            and _RF[3 * ((i + n - 1) % len(_RT)) + 2] - _RF[3 * i + 2]
+            >= STILL_RUN):
         return
     _still_heartbeat(now)
 
@@ -6176,6 +6195,10 @@ def upload_tick():
             if p != skip:
                 due.append(p)
         files = due
+        # one pass only: kept until a 2xx, a passing MemoryError starved that
+        # track all boot while the other one kept failing (never held either:
+        # the list here is 1 long). Still out of memory: it skips again
+        up["skip"] = None
     held = up["hold"]
     files = _due(files, held, now)
     if not files and up["allow_bad"]:
@@ -8123,6 +8146,22 @@ def ntp_tick(now):
     _tft_t[4] = 0
     _diag_write("clock ntp %s" % _stamp_s(t)[0])
 
+CLOCK_ON = 3600000                       # ms a clock stamp runs on before rebased
+
+def _clock_on(now, c):
+    """c, a (seconds since 2020, ticks) clock stamp (log["clock"], _ntp[0]), moved up
+    to now by whole seconds once it is CLOCK_ON old (called every loop). Only a fix
+    renews log["clock"], and past 2**29 ms (6.2 days indoors) its age reads
+    TICKS_OLD (--:--, the route's day stuck), past 2**30 young again (12 days
+    early)."""
+    if c is None:
+        return c
+    a = _age(now, c[1])
+    if a < CLOCK_ON or a >= TICKS_OLD:
+        return c
+    a //= 1000
+    return (c[0] + a, time.ticks_add(c[1], a * 1000))
+
 def _local_hm():
     """"HH:MM" in Hungary from the fix's UTC; with the receiver silent (its time
     stands still then) or no fix yet, from the last fix's clock run on by the
@@ -8766,6 +8805,9 @@ def _loop():
     while True:
         feed()
         uptime_s()                       # sums ticks before they wrap
+        now = time.ticks_ms()
+        log["clock"] = _clock_on(now, log["clock"])
+        _ntp[0] = _clock_on(now, _ntp[0])
         read_uart()
         gps_check(time.ticks_ms())
         log_tick()
@@ -8783,6 +8825,9 @@ def _loop():
             _boot_ok()
         if time.ticks_diff(now, status_at) >= STATUS:
             _guarded("status", _status)
+            # a refused drop-back is only retried here once no POST runs
+            # (all sent, radio asleep, no GEO_URL): FREQ_RETRY gates it
+            _set_freq(CPU_MHZ)
             status_at = now
         if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
             _guarded("diag", _diag, now)

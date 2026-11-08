@@ -3821,6 +3821,25 @@ try:
           gl.st["epochs"] == 2
           and abs(gl.st["lat"] - (47.5 + 0.0035 / 60)) < 1e-7,
           "epochs=%s lat=%r" % (gl.st["epochs"], gl.st["lat"]))
+    # AVG: a second's fixes across 180° average the short way round (the
+    # offsets of the W fixes were ~-360: the mean came out ~36°, 15000 km)
+    am_lon = []
+    for fixes in ((("17959.9988", "E"), ("17959.9994", "E"), ("18000.0000", "E"),
+                   ("17959.9994", "W"), ("17959.9988", "W")),
+                  (("17959.9988", "W"), ("17959.9994", "W"),
+                   ("17959.9994", "E"))):
+        gl.reset()
+        for k, (lo, ew) in enumerate(fixes):
+            gl.handle(nmea("GPGGA,120025.%02d,1700.000,S,%s,%s,1,08,1.0,"
+                           "10.0,M,40.0,M,," % (k * 20, lo, ew)))
+        gl.handle(nmea("GPGGA,120026.00,1700.000,S,17959.9988,E,1,08,1.0,"
+                       "10.0,M,40.0,M,,"))
+        am_lon.append(gl.st["lon"])
+    check("AVG: the mean of a second across 180° stays at 180° and in range",
+          len(am_lon) == 2 and all(-180 <= x <= 180 for x in am_lon)
+          and abs(abs(am_lon[0]) - 180) < 1e-6
+          and abs(am_lon[1] - (-180 + 0.00002 / 3)) < 1e-6,
+          repr(am_lon))
     gl.reset()
     gl.handle(nmea("GPRMC,120030.00,A,4730.000,N,01900.000,E,1.0,0.0,"
                    "171026,,,A"))
@@ -5134,6 +5153,30 @@ try:
     check("ORDER: the way out is still written from near the anchor",
           bool(out) and sv_m(out[0]) < 60.0,
           repr(out[0] if out else None))
+    # ... and on foot: an anchor point falling due 25 s into a 2 m/s walk out
+    # (still within STILL_NEAR) was stamped there, and the way out lost the
+    # 50 m before it: anchor to 52 m out in a second
+    rs = rnd.getstate()                  # (the later tests' drift unchanged)
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    n0 = len(sv_lines())
+    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 25000
+    for i in range(1, 201):
+        sv_fix(i * 2.0, 0, speed=2.0)
+    gl.flush()
+    lines = sv_lines()[n0:]
+    step = []
+    for a, b in zip(lines, lines[1:]):
+        dt = hb_secs(b) - hb_secs(a)
+        step.append(gl._dist(*(map(float, a.split(",")[:2])),
+                             *map(float, b.split(",")[:2])) / max(dt, 1))
+    out = [l for l in lines if l.split(",")[2] != ""]
+    check("ORDER: an anchor point due on a walk out waits; the way out keeps "
+          "its first metres",
+          sv_active() is False and bool(out) and sv_m(out[0]) < 15.0
+          and max(step) < 2 * gl.STILL_RUN,
+          repr((out[0] if out else None, max(step) if step else None)))
+    rnd.setstate(rs)
 
     # BEATPASS (2026-11-04, on the road): a walk to the car past STILL_NEAR held
     # the due anchor point back, the car then passed the anchor 44 m off, and
@@ -6386,6 +6429,45 @@ try:
     check("R2-d: a refused clock is tried again after FREQ_RETRY",
           stuck and held and back, "%s %s %s %r" % (stuck, held, back,
                                                      _freqs[-3:]))
+    # RV3: the retry needs a caller: the main loop re-applies CPU_MHZ, so a
+    # refused drop-back with no later POST did not keep the board at 160 MHz
+    fails = [0]
+    mach.freq = flaky_freq
+    stubs = ("read_uart", "gps_check", "log_tick", "wifi_tick",
+             "keepalive_tick", "upload_tick", "web_tick", "ota_tick",
+             "ntp_tick", "tft_tick", "_status", "_diag", "_boot_ok")
+    saved = dict((k, getattr(gl, k)) for k in stubs)
+    orig_sleep = time.sleep_ms
+    loops = [0]
+
+    def _tick_on(ms):
+        _clock[0] += gl.STATUS
+        loops[0] += 1
+        if loops[0] >= 5:
+            raise KeyboardInterrupt()
+    try:
+        for k in stubs:
+            setattr(gl, k, lambda *a, **kw: None)
+        gl._freq_bad[:] = []
+        real_freq(160000000)
+        fails[0] = gl.FREQ_TRIES
+        gl._set_freq(gl.CPU_MHZ)
+        pinned = _freqs[-1] == 160000000 and gl.CPU_MHZ in gl._freq_bad
+        time.sleep_ms = _tick_on
+        try:
+            gl._loop()
+        except KeyboardInterrupt:
+            pass
+        looped = (_freqs[-1] == gl.CPU_MHZ * 1000000
+                  and gl.CPU_MHZ not in gl._freq_bad)
+    finally:
+        time.sleep_ms = orig_sleep
+        for k in stubs:
+            setattr(gl, k, saved[k])
+        mach.freq = real_freq
+        gl._freq_bad[:] = []
+    check("RV3: the loop retries a refused CPU_MHZ without a POST",
+          pinned and looped, "%s %s %r" % (pinned, looped, _freqs[-3:]))
 
     # a round that finds no network: nothing to upload -> sleep; with a
     # track waiting -> the usual backoff, 15 s doubling to 10 min, until a
@@ -10941,6 +11023,45 @@ check("UPL-4: SRV_ERR_MAX server errors on one batch hold that track, the "
       u4 == [(500, True, 4, True, False, False),
              (404, True, 4, True, False, False)], repr(u4))
 
+# UPL-SKIP: one passing MemoryError on a track set up["skip"], cleared only
+# by a 2xx: the other track answered 500 for ever (and never held, the
+# filtered list was 1 long), the skipped one was never tried again this boot
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+make_trk(ok_p, 4)
+_sk_reads = []
+_sk_boom = [1]
+
+
+def _sk_rb(path, *a, **k):
+    _sk_reads.append(path)
+    if path == bad_p and _sk_boom[0]:
+        _sk_boom[0] = 0
+        raise MemoryError("heap")
+    return real_rb(path, *a, **k)
+
+
+gl.read_batch = _sk_rb
+_post_code[0] = 500
+try:
+    for _ in range(8):
+        pump()
+        _clock[0] += 1000
+    _sk_again = _sk_reads.count(bad_p)
+    _post_code[0] = 201
+    for _ in range(6):
+        gl.up["hold"] = {}
+        pump()
+        _clock[0] += 1000
+finally:
+    gl.read_batch = real_rb
+    _post_code[0] = 201
+check("UPL-SKIP: a track skipped after one MemoryError is tried again while "
+      "the other one keeps failing",
+      _sk_again > 1 and not os.path.exists(bad_p) and not os.path.exists(ok_p),
+      repr((_sk_again, gl.up["skip"], os.listdir(up_td))))
+
 # POS-ERR: a batch with nothing to send whose .pos write fails is a flash
 # error, not an unreadable track: READ_ERR_MAX of them must not park it
 pe_p = os.path.join(up_td, "20261002_100000.trk")
@@ -12207,6 +12328,38 @@ check("trk2gpx: a .trk.bad converts; damaged bytes and bad times dropped",
 check("trk2gpx: a non-digit time is not a time",
       trk2gpx._iso("2026102XT101501Z") is None
       and trk2gpx._iso("20261029T101501Z") == "2026-10-29T10:15:01Z")
+# a damaged byte 0x0D ('-' with bit 5 cleared) ends no line, as on the
+# board (universal newlines split it into a phantom TRK1 point at 0.3,120);
+# a cut-off last line ending in \r is still cut off
+t_cr = os.path.join(t_td, "20261029_101501.trk.bad")
+with open(t_cr, "wb") as f:
+    f.write(b"#TRK2\n47.500010,\r0.300010,120.0,3.0,1.5,20261029T101501Z\n"
+            b"47.5,19.0,100.0,3.0,1.5,20261029T101502Z\n"
+            b"47.5,19.0,100.0,3.0,1.5,20261029T101503Z\r")
+sys.stdout = io.StringIO()
+try:
+    rc = trk2gpx.main(["trk2gpx.py", t_cr])
+    gpx_cr = sys.stdout.getvalue()
+finally:
+    sys.stdout = saved_out
+check("trk2gpx: a byte 0x0D splits no line (only \\n ends one, as _rd_line)",
+      rc == 0 and 'lon="120.000000"' not in gpx_cr
+      and "10:15:03Z" not in gpx_cr and gpx_cr.count("<trkpt") <= 2,
+      gpx_cr[:400])
+# number fields float() takes that are no xsd:decimal are written as the
+# logger's _ptnum writes them ("%.1f"), plain decimals as written
+g_num = trk2gpx.convert(["#TRK1\n", "47.5,19.0,1_0.0,0.9,20261029T101500Z\n",
+                         "47.5,19.0,1e3,1E1,20261029T101501Z\n",
+                         "47.5,19.0, 10.0 ,100,20261029T101502Z\n",
+                         "#TRK2\n",
+                         "47.5,19.0,-2.5,1e0,5_0,20261029T101503Z\n"], "x")
+check("trk2gpx: ele/hdop/acc/speed are xsd:decimal (1_0.0, 1e3, ' 10.0 ')",
+      "<ele>10.0</ele>" in g_num and "<ele>1000.0</ele>" in g_num
+      and "<hdop>10.0</hdop>" in g_num and "<hdop>100</hdop>" in g_num
+      and "<ele>-2.5</ele>" in g_num and "<esp:acc>1.0</esp:acc>" in g_num
+      and "<esp:speed>50.0</esp:speed>" in g_num
+      and not re.search(r">[^<]*[_eE ][^<]*</(ele|hdop|esp:)", g_num),
+      g_num)
 shutil.rmtree(t_td, ignore_errors=True)
 
 
@@ -17562,6 +17715,14 @@ check("UC-GSV: one list from a round: a satellite once with its strongest band, 
 check("UC-GSV-SKIP: GSV_EVERY s of GSV not decoded after a list (1 Hz with a "
       "fix); then not from a round's middle, a whole round again",
       _skip and _mid and _again, repr((_skip, _mid, _again, hl.st["svs"])))
+_clock[0] += hl.GSV_EVERY * 1000 + 1
+_uc_feed(hl, _nmea("GPGSV,1,1,00,1"), _nmea("GAGSV,1,1,00,7"))
+_clock[0] += hl.GSV_EVERY * 1000 + 1
+_uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # closes the empty round
+check("UC-GSV-EMPTY: a round with no satellites (no signal) is the list: "
+      "none seen, not the last round's",
+      hl.st["svs"] == [] and hl.sv_seen() == 0 and hl._sv_list() == [],
+      repr((hl.st["svs"], hl.sv_seen())))
 
 # GPS_SYS: a mask set once, only when the receiver has another
 class _UcSys(_UcUart):
@@ -17723,6 +17884,31 @@ _r1 = hl.st["fix_first"]
 check("UC-SETTLE-RESTART: the banner starts the rule anew, and the unfinished second "
       "from before it does not count as the first fix",
       _r0 == (None, False) and _r1 is None, repr((_r0, _r1)))
+# a second queued before the restart, drained after the new first fix: it is
+# older than fix_first, which must not count as UC_SETTLE gone by
+_clock[0] = (_clock[0] // 1000 + 1) * 1000
+_uc_fixes(hl, 2)
+_q0 = hl.st["fix_first"]
+hl.st.update(speed=0.0)
+_q1 = hl._usable(time.ticks_add(_q0, -10000))
+_q2 = hl.st["settled"]
+_q3 = hl._usable(_clock[0])
+check("UC-SETTLE-QUEUED: a second from before fix_first does not settle the "
+      "receiver; standing still still waits",
+      _q0 is not None and _q1 is False and _q2 is False and _q3 is False,
+      repr((_q0, _q1, _q2, _q3)))
+# a first fix that never settled (a short fix, then days without one): the
+# stamps tick settles it at TICKS_CAP, long before _usable's ticks_diff would
+# wrap negative on the board (6.2 days) and drop every slow fix
+hl.st.update(settled=False, fix_first=time.ticks_add(_clock[0], 1 - hl.TICKS_CAP))
+hl._stamps_old(_clock[0])
+_w0 = hl.st["settled"]
+hl.st["fix_first"] = time.ticks_add(_clock[0], -hl.TICKS_CAP)
+hl._stamps_old(_clock[0])
+_w1 = (hl.st["settled"], hl.st["fix_first"] is not None)
+check("UC-SETTLE-WRAP: an unsettled first fix TICKS_CAP old is settled by the "
+      "stamps tick; younger it still waits",
+      _w0 is False and _w1 == (True, True), repr((_w0, _w1)))
 
 # a restart whose banner was lost: no GST with sentences coming
 hl.reset()
@@ -17877,6 +18063,41 @@ hl.log["clock"] = ((hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 +
 check("TFT-CLOCK-RUNS: with the receiver silent the last fix's clock runs on by the "
       "ticks (as the route's day does): a minute on, 11:43",
       _ls("2026-11-04", "10:42:10") == "11:43", _ls("2026-11-04", "10:42:10"))
+# 13 days with no fix, the loop rebasing both stamps: past 2**29 ms the age read
+# TICKS_OLD (--:--), past 2**30 young again (10:15 behind)
+_cw_ticks = (time.ticks_ms, time.ticks_diff, time.ticks_add)
+_CW = 1 << 30
+time.ticks_ms = lambda: _clock[0] & (_CW - 1)
+time.ticks_diff = lambda a, b: ((a - b + _CW // 2) & (_CW - 1)) - _CW // 2
+time.ticks_add = lambda a, b: (a + b) & (_CW - 1)
+_cw_s = (hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 + 42 * 60 + 10
+_cw_at, _cw_ntp, _cw_hm = _clock[0], hl._ntp[0], []
+hl.log["clock"] = (_cw_s, _clock[0] & (_CW - 1))
+hl._ntp[0] = (_cw_s + 7, _clock[0] & (_CW - 1))
+try:
+    for _cw_day in (7, 13):
+        while _clock[0] - _cw_at < _cw_day * 86400000:
+            _clock[0] += 1234567             # (not whole seconds: no drift either)
+            _cw_now = _clock[0] & (_CW - 1)
+            hl.log["clock"] = hl._clock_on(_cw_now, hl.log["clock"])
+            hl._ntp[0] = hl._clock_on(_cw_now, hl._ntp[0])
+        _cw_now = _clock[0] & (_CW - 1)
+        _cw_t = hl._stamp_s(_cw_s + (_clock[0] - _cw_at) // 1000)[0]   # (CET: UTC+1)
+        _cw_hm.append((_ls(None, None) == "%02d:%s" % ((int(_cw_t[11:13]) + 1) % 24, _cw_t[14:16]),
+                       [c[0] + hl._age(_cw_now, c[1]) // 1000 - _cw_s
+                        for c in (hl.log["clock"], hl._ntp[0])]))
+finally:
+    time.ticks_ms, time.ticks_diff, time.ticks_add = _cw_ticks
+_cw_el = (_clock[0] - _cw_at) // 1000
+check("TFT-CLOCK-WRAP: with no fix for 7 and 13 days the last fix's clock and NTP's run "
+      "on to the second, past the 2**29 and 2**30 ms of the ticks",
+      _cw_hm[0][0] and _cw_hm[1][0]
+      and _cw_hm[1][1] == [_cw_el, _cw_el + 7]
+      and 'log["clock"] = _clock_on(now, log["clock"])' in inspect.getsource(hl._loop)
+      and "_ntp[0] = _clock_on(now, _ntp[0])" in inspect.getsource(hl._loop),
+      repr((_cw_hm, _cw_el)))
+_clock[0] = _cw_at
+hl._ntp[0] = _cw_ntp
 hl.log["clock"] = None
 hl.st["rx"] = _clock[0]
 

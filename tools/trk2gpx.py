@@ -52,11 +52,16 @@ def _iso(tc):
 
 
 def _num(s):
-    """A finite number string kept as written, or "" (dropped)."""
+    """A finite number string kept as written when it is a plain decimal,
+    else as "%.1f" prints it (as the logger's _ptnum: float() also takes
+    "1_0", "1e3", " 10", which are no xsd:decimal), or "" (dropped)."""
     try:
-        return s if s and math.isfinite(float(s)) else ""
+        v = float(s) if s else math.inf
     except ValueError:
         return ""
+    if not math.isfinite(v):
+        return ""
+    return s if _NUM.fullmatch(s) else "%.1f" % v
 
 
 def _not_utf8(s):
@@ -315,7 +320,11 @@ def main(argv):
             sys.stdout.write(convert(trb_lines(f.read(), "surrogateescape"),
                                      name))
         return 0
-    with open(path, encoding="utf-8", errors="surrogateescape") as f:
+    # newline="\n": a line ends only at \n, as _rd_line reads it (with
+    # universal newlines, and also with newline="", a damaged byte 0x0D
+    # splits one point line into two)
+    with open(path, encoding="utf-8", errors="surrogateescape",
+              newline="\n") as f:
         sys.stdout.write(convert(f, name))
     return 0
 
