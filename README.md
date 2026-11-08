@@ -51,6 +51,7 @@ firmware R6.0.0.0Build3700.
 | Vext: high powers the UC6580, its LNA and the TFT | 3 |
 | TFT (ST7735S, 160×80): SCK / MOSI / CS / DC / RST / backlight | 41 / 42 / 38 / 40 / 39 / 21 |
 | Boot bypass → GND (GPIO0, the button, is the download mode) | 7 |
+| USER button (full backlight for a minute; held at a reset it is the download mode) | 0 |
 
 - **Build:** `tools/build_firmware.sh` with `--migrate` once, `--flash` after. It
   needs the S3 toolchain: `~/esp/esp-idf/install.sh esp32s3`. The app (~1.4 MB) fits
@@ -77,7 +78,11 @@ firmware R6.0.0.0Build3700.
   tile in its colour with a word) and how full the flash is with how long it still
   logs (a gauge, amber from 70%, red from 90%; the time assumes moving at 1 Hz,
   standing costs next to nothing). The speed is on the status page and in
-  `status.json`. It never scrolls. The backlight is always on. The route survives a
+  `status.json`. It never scrolls. The backlight (the one part that wears) is a 2 kHz PWM: `TFT_LIGHT`
+  per cent (default 30) by day, dark once a stay has lasted `TFT_IDLE` seconds (default 300:
+  the board has not moved, so nobody looks at it), and dim again when it moves. The USER
+  button gives full light for a minute, also in the dark; a tap is enough. A change is a
+  `tft light N` line in the diag. The route survives a
   reboot in `/route.bin` (at most one write per 5 min of driving and one when a stay
   starts) and shows again at once; the first fix or NTP answer empties it if it was
   another day, so until then a board switched on the next morning, away from any
@@ -160,6 +165,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
 | `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix came since the boot. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too. |
+| `TFT_LIGHT` / `TFT_IDLE` | The display's backlight: `TFT_LIGHT` 0–100 per cent while it is on (default 30; 0 keeps it dark, the USER button still lights it), `TFT_IDLE` 0–86400 seconds into a stay (the board has not moved) before it goes dark (default 300; 0: never). Read at boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |

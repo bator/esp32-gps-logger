@@ -658,6 +658,7 @@ if sys.implementation.name == "micropython":
 
 
     machine.SPI = _Spi
+    machine.PWM = _Dummy
     import gps_tft as tft
     tft.Pin = _Pin
     tft.time = _Obj()

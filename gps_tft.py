@@ -17,7 +17,7 @@
 import framebuf
 import struct
 import time
-from machine import Pin, SPI
+from machine import Pin, SPI, PWM
 
 import gps_tft_font as F
 
@@ -26,6 +26,8 @@ XO, YO = 1, 26                           # the panel inside the controller
 BAND_H = 16
 TOP_H, LOW_Y = 64, 64                    # the zones: rows 0-63 (4 bands), 64-79 (1)
 BL_PIN = 21
+BL_HZ = 2000                             # the backlight's PWM (no flicker, no whine)
+USER_PIN = 0                             # the USER button: low when pressed
 RIGHT = 158                              # the right column's text ends here
 BARS_X, BARS_Y = 140, 42                 # WiFi: the first bar's left, their foot
 KM_X = 92                                # today's km, on the bars' foot
@@ -61,6 +63,7 @@ _pal = {}
 
 class _D:
     spi = cs = dc = None
+    pwm = btn = None                     # (pwm False: none to be had, on or off only)
     buf = fb = None
     state = None
     top = low = None                     # what the panel shows
@@ -83,9 +86,33 @@ def _send(y, h):
     _window(0, y, W, h)
     _cmd(0x2C, memoryview(_D.buf)[:W * h * 2])
 
-def start():
-    """The panel on and blank, then the backlight (not before: no flash of its
-    random RAM)."""
+def light(pct):
+    """The backlight at pct per cent, 0 dark. PWM: a dimmer LED lives longer and
+    heats the case less. Where PWM cannot be had it is on (any pct) or off."""
+    p = _D.pwm
+    if p is None:
+        try:
+            p = _D.pwm = PWM(Pin(BL_PIN), freq=BL_HZ, duty_u16=0)
+        except Exception:
+            p = _D.pwm = False
+    if p:
+        p.duty_u16(pct * 65535 // 100)
+    else:
+        Pin(BL_PIN, Pin.OUT, value=pct > 0)
+
+def pressed():
+    """The USER button is down."""
+    b = _D.btn
+    if b is None:
+        try:
+            b = _D.btn = Pin(USER_PIN, Pin.IN, Pin.PULL_UP)
+        except Exception:
+            b = _D.btn = False
+    return bool(b) and not b.value()
+
+def start(pct=100):
+    """The panel on and blank, then the backlight at pct (not before: no flash of
+    its random RAM)."""
     Pin(BL_PIN, Pin.OUT, value=0)
     _D.cs = Pin(38, Pin.OUT, value=1)
     _D.dc = Pin(40, Pin.OUT, value=0)
@@ -110,11 +137,11 @@ def start():
     _D.fb.fill(_COL[PAPER])
     for y in range(0, H, BAND_H):
         _send(y, BAND_H)
-    Pin(BL_PIN, Pin.OUT, value=1)
+    light(pct)
 
 def off():
     """Dark: a frozen display must not stay lit. A dead SPI bus does not stop this."""
-    Pin(BL_PIN, Pin.OUT, value=0)
+    light(0)
 
 def _mono_palette(tone):
     k = 64 | tone

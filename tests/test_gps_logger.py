@@ -171,6 +171,27 @@ class Pin(object):
         return self.value(v)
 
 
+class _Pwm(object):
+    """machine.PWM: every duty set lands in _pin_levels as (pin, duty_u16, clock), so
+    a dark backlight reads (21, 0) as the Pin(value=0) before it did."""
+    fail = False                                # PWM cannot be had
+    live = {}                                   # pin number -> the PWM on it
+
+    def __init__(self, pin, freq=0, duty_u16=0):
+        if _Pwm.fail:
+            raise ValueError("no PWM")
+        self.n, self.freq, self.duty = pin.n, freq, duty_u16
+        _Pwm.live[pin.n] = self
+        _pin_levels.append((pin.n, duty_u16, _clock[0]))
+
+    def duty_u16(self, d=None):
+        if d is None:
+            return self.duty
+        self.duty = d
+        _pin_levels.append((self.n, d, _clock[0]))
+        return None
+
+
 class _TftSpi(object):
     """The TFT's SPI and the panel behind it: commands (DC low) and data (DC
     high) as an ST7735S takes them, in the controller's coordinates."""
@@ -549,6 +570,7 @@ def _install_mocks():
     machine = types.ModuleType("machine")
     machine.Pin = Pin
     machine.SPI = _TftSpi
+    machine.PWM = _Pwm
     machine.UART = _UcUart
     sys.modules["framebuf"] = _FakeFramebuf
     machine.WDT = WDT
@@ -13113,6 +13135,7 @@ else:
         ("upload ca err OSError(5)", "upl"),
         ("clock set 2026-11-02T11:38:31Z", "other"),
         ("clock ntp 2026-11-02T11:38:31Z", "other"),
+        ("tft light 0", "other"),
         ("upload err html 403 (captive portal?)", "upl"),
         ("upload aborted after 120 s", "upl"),
         ("upload err OSError(113)", "upl"),
@@ -17744,13 +17767,24 @@ class _BlPin(Pin):
             _order.append((k.get("value"), len(_TftSpi.out)))
 
 
-_ft.Pin = _BlPin
+class _BlPwm(_Pwm):
+    """The backlight's duty set after the panel's commands: the order, as for the Pin."""
+    def duty_u16(self, d=None):
+        if d is not None:
+            _order.append((1 if d else 0, len(_TftSpi.out)))
+        return super().duty_u16(d)
+
+
+_pwm0 = _ft.PWM
+_ft.Pin, _ft.PWM = _BlPin, _BlPwm
+_ft._D.pwm = None
 _TftSpi.out[:] = []
 _TftSpi.panel.clear()
 _TftSpi.fail = False
 _ft.start()
 _cmds0 = list(_TftSpi.out)
-_ft.Pin = _pin0
+_ft.Pin, _ft.PWM = _pin0, _pwm0
+_ft._D.pwm = None
 _PAPER_C = _ft._COL[_ft.PAPER]
 _INK_C, _RED_C, _AMB_C = _ft._COL[_ft.INK], _ft._COL[_ft.RED], _ft._COL[_ft.AMBER]
 _bg_all = len(_TftSpi.panel) == 160 * 80 and set(_TftSpi.panel.values()) == {_PAPER_C}
@@ -19083,7 +19117,7 @@ check("TFT-FAIL-STATE: values failing keep counting though frames succeed: no ol
 _ft_seen = []
 gl._tft = None
 gl._rt_start, _rs0 = (lambda: _ft_seen.append("route")), gl._rt_start
-sys.modules["gps_tft"] = types.SimpleNamespace(start=lambda: _ft_seen.append("start"))
+sys.modules["gps_tft"] = types.SimpleNamespace(start=lambda *a: _ft_seen.append("start%r" % (a,)))
 gl._tft_start()
 gl._tft_start()                           # (started: not again)
 sys.modules["gps_tft"] = _ft
@@ -19092,10 +19126,150 @@ with open(os.path.join(ROOT, "gps_logger.py")) as f:
     _lsrc = f.read()
 _runs = _lsrc[_lsrc.index("def run():"):]
 _loops = _lsrc[_lsrc.index("def _loop("):]
-check("TFT-WIRING: run() starts it, once, before the first GPS setup, the loop ticks it",
-      _ft_seen == ["start", "route"]
+check("TFT-WIRING: run() starts it, once, dark (the light is set when .env is read), "
+      "before the first GPS setup, reads TFT_LIGHT / TFT_IDLE after .env, the loop ticks it",
+      _ft_seen == ["start(0,)", "route"]
       and _runs.index("_tft_start()") < _runs.index("gps_setup()")
+      and _runs.index("load_env(ENV_FILE)") < _runs.index("_tft_env(env)") < _runs.index("gps_setup()")
       and "tft_tick(now)" in _loops, repr(_ft_seen))
+
+# --- the backlight: PWM, dark in a stay, full after the USER button (2026-11-08)
+_Pwm.live.clear()
+_pin_levels[:] = []
+_ft._D.pwm = None
+_ft.light(30)
+_pw = _Pwm.live.get(21)
+_l30 = _pw is not None and (_pw.freq, _pw.duty) == (2000, 30 * 65535 // 100)
+_ft.light(100)
+_l100 = _pw.duty == 65535
+_ft.light(0)
+_l0 = _pw.duty == 0
+_ft.off()
+_loff = _pw.duty == 0 and [p[:2] for p in _pin_levels if p[0] == 21][-1:] == [(21, 0)]
+_Pwm.fail, _ft._D.pwm = True, None
+_pin_levels[:] = []
+_ft.light(30)
+_ft.light(0)
+_lpin = [p[:2] for p in _pin_levels if p[0] == 21]
+_Pwm.fail, _ft._D.pwm = False, None
+check("TFT-LIGHT: the backlight is a PWM at 2 kHz, pct per cent of the duty (30, 100, 0), off() "
+      "is duty 0; without PWM it is on for any pct and off for 0, as before",
+      _l30 and _l100 and _l0 and _loff and _lpin == [(21, True), (21, False)],
+      repr((_l30, _l100, _l0, _loff, _lpin)))
+_ft._D.btn = None
+_pin_levels[:] = []
+_b0 = _ft.pressed()                       # (the stub pin reads 1: up)
+_bn = getattr(_ft._D.btn, "n", None)
+_ft._D.btn = types.SimpleNamespace(value=lambda: 0)
+_b1 = _ft.pressed()
+_ft._D.btn = None
+Pin.fail = (0,)
+_b2 = _ft.pressed()
+_bf = _ft._D.btn
+Pin.fail = ()
+_ft._D.btn = None
+check("TFT-BUTTON: the USER button is GPIO0, pulled up, low is pressed; a pin that cannot be had "
+      "reads as never pressed (once tried)",
+      _b0 is False and _bn == 0 and _b1 is True and _b2 is False and _bf is False,
+      repr((_b0, _bn, _b1, _b2, _bf)))
+
+
+class _LightTft(object):
+    """The display as the light logic sees it: the levels it was given."""
+    def __init__(self):
+        self.lv = []
+    def light(self, p):
+        self.lv.append(p)
+    def pressed(self):
+        return False
+
+
+_dl, _dw = [], hl._diag_write
+hl._diag_write = _dl.append
+_t0 = hl._tft
+hl._tft = _lt = _LightTft()
+_g0 = (hl.TFT_LIGHT, hl.TFT_IDLE, hl.TFT_WAKE)
+hl.TFT_LIGHT, hl.TFT_IDLE, hl.TFT_WAKE = 30, 300000, 60000
+hl._tft_l[:] = [None, None, None]
+_sl = hl.log["still"]
+_sl["active"] = False
+_T = 1000000
+_seq = []
+def _lv(dt):
+    hl._tft_light(_T + dt)
+    _seq.append(_lt.lv[-1])
+_lv(0)                                    # day: the dim level
+_sl["active"] = True
+_lv(1000)                                 # a stay begins
+_lv(1000 + 299000)                        # not yet 300 s old
+_lv(1000 + 300000)                        # 300 s: dark
+hl._tft_l[2] = _T + 400000                # the USER button
+_lv(400000 + 59000)                       # full light
+_lv(400000 + 60000)                       # 60 s: dark again (still in the stay)
+_sl["active"] = False
+_lv(500000)                               # moving: dim again
+_stay = list(_seq)
+_dln = list(_dl)
+hl.TFT_IDLE = 0                           # never dark
+_sl["active"] = True
+_lv(600000)
+_lv(600000 + 86400000 // 2)
+_never = list(_seq[-2:])
+hl.TFT_IDLE = 300000
+hl.TFT_LIGHT = 0                          # the display dark by choice, the button still lights it
+_sl["active"] = False
+hl._tft_l[:] = [None, None, None]
+_lt.lv[:] = []
+hl._tft_light(_T)
+hl._tft_l[2] = _T + 1000
+hl._tft_light(_T + 2000)
+hl._tft_light(_T + 1000 + 60000)
+_zero = list(_lt.lv)
+hl.TFT_LIGHT, hl.TFT_IDLE, hl.TFT_WAKE = _g0
+hl._tft = _t0
+_sl["active"] = False
+check("TFT-LIGHT-LOGIC: dim by day (TFT_LIGHT), dark TFT_IDLE into a stay, full for TFT_WAKE after "
+      "the USER button (even in the dark), dim again when it moves; every change is in the diag, "
+      "the first setting is not; TFT_IDLE 0 never goes dark; TFT_LIGHT 0 is dark, the button lights it",
+      _stay == [30, 30, 30, 0, 100, 0, 30]
+      and _dln == ["tft light 0", "tft light 100", "tft light 0", "tft light 30"]
+      and _never == [30, 30] and _zero == [0, 100, 0],
+      repr((_stay, _dln, _never, _zero)))
+_pressed0 = _ft.pressed
+_pr = [True]
+_ft.pressed = lambda: _pr[0]
+hl._tft, hl._tft_l[:] = _ft, [None, None, None]
+hl._diag_write = _dl.append
+_ft._D.pwm = None
+_pin_levels[:] = []
+hl._tft_t[:] = [_T, None, 0, 0, 0]        # the state was made just now: not due for 1 s
+hl._tft_l[0] = 30
+_cl = _T + 100
+hl.tft_tick(_cl)
+_tap1 = (hl._tft_l[2], hl._tft_t[0], [p[:2] for p in _pin_levels if p[0] == 21][-1:])
+_pr[0] = False
+_ft.pressed = _pressed0
+hl._tft_l[:] = [None, None, None]
+hl._tft, hl._diag_write = _t0, _dw
+_ft._D.pwm = None
+check("TFT-LIGHT-TAP: a press is seen on the tick it happens in (a tap is short) and lights the "
+      "display at once, not up to TFT_STATE later",
+      _tap1[0] == _cl and _tap1[2] == [(21, 65535)] and _tap1[1] == _cl, repr(_tap1))
+_g1 = (hl.TFT_LIGHT, hl.TFT_IDLE)
+hl._tft_env({"TFT_LIGHT": "55", "TFT_IDLE": "120"})
+_e1 = (hl.TFT_LIGHT, hl.TFT_IDLE)
+hl._tft_env({"TFT_LIGHT": "101", "TFT_IDLE": "x"})       # bad: kept
+hl._tft_env({"TFT_LIGHT": "-1", "TFT_IDLE": "86401"})
+_e2 = (hl.TFT_LIGHT, hl.TFT_IDLE)
+hl._tft_env({"TFT_LIGHT": "0", "TFT_IDLE": "0"})
+_e3 = (hl.TFT_LIGHT, hl.TFT_IDLE)
+hl._tft_env({})
+_e4 = (hl.TFT_LIGHT, hl.TFT_IDLE)
+hl.TFT_LIGHT, hl.TFT_IDLE = _g1
+check("TFT-LIGHT-ENV: TFT_LIGHT 0-100 and TFT_IDLE 0-86400 s read from .env; out of range or not a "
+      "number keeps what was; 0 is allowed for both",
+      _e1 == (55, 120000) and _e2 == (55, 120000) and _e3 == (0, 0) and _e4 == (0, 0),
+      repr((_e1, _e2, _e3, _e4)))
 
 # OTA: each board only its own firmware
 _mf = {"build": 5, "commit": "abc1234", "size": 9, "sha256": "0" * 64,
