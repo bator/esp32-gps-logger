@@ -11,7 +11,9 @@
 #
 # One band of 160x16 is all the RAM it keeps, not a 25.6 KB frame buffer, and the
 # glyphs are read from flash, 16-level (anti-aliased) GS4: a zone goes up band by
-# band, only when it changed. Colours are RGB565 byte-swapped: the panel's order.
+# band, only when it changed (the top zone four bands, the low zone one: row 63,
+# paper in both, belongs to the top). Colours are RGB565 byte-swapped: the
+# panel's order.
 import framebuf
 import struct
 import time
@@ -22,7 +24,7 @@ import gps_tft_font as F
 W, H = 160, 80
 XO, YO = 1, 26                           # the panel inside the controller
 BAND_H = 16
-TOP_H, LOW_Y = 63, 63                    # the zones: rows 0-62, rows 63-79
+TOP_H, LOW_Y = 64, 64                    # the zones: rows 0-63 (4 bands), 64-79 (1)
 BL_PIN = 21
 RIGHT = 158                              # the right column's text ends here
 BARS_X, BARS_Y = 140, 42                 # WiFi: the first bar's left, their foot
@@ -138,13 +140,19 @@ def _gs4_palette(tone, bg=PAPER):
     return p
 
 def _index(f, ch):
-    return max(f[0].find(ch), 0)
+    """The glyph of ch in the font f, -1 for one the font does not have: a
+    blank as wide as _gap (not glyph 0, a digit in place of the character)."""
+    return f[0].find(ch)
+
+def _gap(f):
+    return (f[4] + 1) // 2
 
 def width(font, s):
     f = font[0]
     n = 0
     for ch in s:
-        n += f[1][_index(f, ch)]
+        i = _index(f, ch)
+        n += f[1][i] if i >= 0 else _gap(f)
     return n
 
 def _text(fb, font, s, x, base, tone, bg=PAPER):
@@ -160,6 +168,9 @@ def _text(fb, font, s, x, base, tone, bg=PAPER):
     key = _COL[bg]
     for ch in s:
         i = _index(f, ch)
+        if i < 0:
+            x += _gap(f)
+            continue
         w = f[1][i]
         o = f[2][i * 2] | f[2][i * 2 + 1] << 8
         fb.blit((mv[o:o + (w + 1) // 2 * h], w, h, framebuf.GS4_HMSB), x, y, key, p)

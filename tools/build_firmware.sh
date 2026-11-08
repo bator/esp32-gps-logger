@@ -50,13 +50,15 @@
 # refused (FORCE=1 publishes it anyway). The manifest is signed with the
 # key in OTA_KEY_FILE (default ~/.config/gps-logger/ota.key, the board's
 # .env OTA_KEY: printable ASCII, e.g. openssl rand -hex 32); only a clean
-# tree is published (BUILD is the commit time).
+# tree is published (BUILD is the commit time). The OTA_DEST path goes to
+# scp as it is and to ssh shell-quoted: no spaces or shell specials in it.
 # firmware/gps_frozen.py records the SHA-256 of the frozen gps_logger.py
-# (deploy.sh stops when it differs from the one in the repo), the commit,
-# "-dirty" when the tree had uncommitted changes, and BUILD, which the
-# board's OTA compares: the commit time; for --flash and a dirty tree the
-# build time, so an OTA does not replace what was just flashed by hand
-# with an older published build.
+# (SHA), of gps_tft.py + gps_tft_font.py (TFT) and of gps_boot.py (BOOT;
+# deploy.sh stops when any differs from the repo's), the commit, "-dirty"
+# when the tree had uncommitted changes, and BUILD, which the board's OTA
+# compares: the commit time; for --flash and a dirty tree the build time,
+# so an OTA does not replace what was just flashed by hand with an older
+# published build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -106,8 +108,10 @@ module("gps_boot.py", base_path="$OUT", opt=3)
 module("gps_tft.py", base_path="$OUT", opt=3)
 module("gps_tft_font.py", base_path="$OUT", opt=3)
 EOF
-# the display's code, in the marker too (deploy.sh compares both)
+# the display's code and gps_boot.py, in the marker too (deploy.sh compares
+# all three; an older marker without TFT or BOOT still passes it)
 printf 'TFT = "%s"\n' "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d" " -f1)" >> "$OUT/gps_frozen.py"
+printf 'BOOT = "%s"\n' "$(sha256sum gps_boot.py | cut -d" " -f1)" >> "$OUT/gps_frozen.py"
 cp gps_tft.py gps_tft_font.py "$OUT/"
 
 # shellcheck disable=SC1091
@@ -206,6 +210,8 @@ case "$MODE" in
         exit 1
     fi
     : "${OTA_DEST:?OTA_DEST: where to copy firmware/ota (host:/path)}"
+    # (the path: no spaces or shell specials; scp takes it as it is, the
+    # ssh mv below %q-quoted, and the two agree only on a plain path)
     case "$OTA_DEST" in
         *:*) DHOST=${OTA_DEST%%:*}; DDIR=${OTA_DEST#*:}; DDIR=${DDIR:-.} ;;
         *) echo "OTA_DEST must be host:/path (scp and ssh)" >&2; exit 1 ;;

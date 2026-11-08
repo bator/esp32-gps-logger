@@ -6761,6 +6761,8 @@ import os, sys
 a = sys.argv[1:]
 if a[:1] == ["-c"]:
     sys.exit(0)
+if a and a[0].endswith("web_min.py"):      # the page's gzip: the real tool
+    os.execv(sys.executable, [sys.executable] + a)
 if os.environ.get("FAKE_PY_LOG"):
     with open(os.environ["FAKE_PY_LOG"], "a") as f:
         f.write(" ".join(a) + "\n")
@@ -6831,7 +6833,8 @@ def deploy_run(env_extra):
     """deploy.sh in a fresh copy of the repo files against a fake board
     that holds an older install: (rc, stdout, stderr, board dir, calls)."""
     work = tempfile.mkdtemp(dir=dp_td)
-    for n in ("deploy.sh", "gps_logger.py", "main.py", "web.html"):
+    for n in ("deploy.sh", "gps_logger.py", "main.py", "web.html", "gps_boot.py",
+              "gps_tft.py", "gps_tft_font.py"):
         shutil.copy(os.path.join(ROOT, n), work)
     os.makedirs(os.path.join(work, "tools"))
     if web_min:
@@ -6860,10 +6863,21 @@ def deploy_run(env_extra):
     if fz:                                      # built from this gps_logger.py
         with open(os.path.join(work, "gps_logger.py"), "rb") as f:
             sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(work, "gps_boot.py"), "rb") as f:
+            boot_sha = hashlib.sha256(f.read()).hexdigest()
+        tft_sha = hashlib.sha256()
+        for n in ("gps_tft.py", "gps_tft_font.py"):
+            with open(os.path.join(work, n), "rb") as f:
+                tft_sha.update(f.read())
         with open(os.path.join(dev, "gps_frozen.py"), "w") as f:
             f.write('COMMIT = "abc1234"\n')     # "old": no SHA (first builds)
             if fz != "old":
                 f.write('SHA = "%s"\n' % (sha if fz != "stale" else "0" * 64))
+            if fz in ("full", "tft-stale", "boot-stale"):   # a marker with the
+                f.write('TFT = "%s"\n' % (tft_sha.hexdigest()  # display's and
+                                          if fz != "tft-stale" else "0" * 64))
+                f.write('BOOT = "%s"\n' % (boot_sha           # gps_boot.py's SHA
+                                           if fz != "boot-stale" else "0" * 64))
     env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_LOGGER=os.path.join(work, "logger"),
@@ -7007,6 +7021,29 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY-STALE: frozen logger != gps_logger.py (or no SHA) stops; "
           "FORCE=1 deploys", stale == [True, True, True],
           "%r rc=%d %r %r" % (stale, rc, out[-200:], err[-300:]))
+    # DEPLOY-BOOT: the marker's BOOT (gps_boot.py: main.py's OTA and boot-retry
+    # helpers, frozen) and TFT (the display's modules) are compared too, each
+    # named when stale; a marker that has them all matching deploys. (A
+    # marker without them, an older firmware, is the "match" case above.)
+    rc_b, out_b, err_b, dev_b, calls_b = deploy_run({"FAKE_FROZEN": "boot-stale"})
+    rc_t, out_t, err_t, dev_t, calls_t = deploy_run({"FAKE_FROZEN": "tft-stale"})
+    rc_f, out_f, err_f, dev_f, calls_f = deploy_run({"FAKE_FROZEN": "full"})
+    check("DEPLOY-BOOT: a frozen gps_boot.py (or display module) not this one "
+          "stops like a stale logger, naming it; SHA, TFT and BOOT matching "
+          "deploys main.py and the page",
+          rc_b != 0 and "gps_boot.py" in err_b
+          and "tools/build_firmware.sh --flash" in err_b
+          and not [c for call in calls_b for c in call if c[0] == "cp"]
+          and dev_file(dev_b, "main.py") == b"old main"
+          and rc_t != 0 and "gps_tft.py" in err_t
+          and dev_file(dev_t, "main.py") == b"old main"
+          and rc_f == 0 and "Deployed" in out_f
+          and dev_file(dev_f, "main.py") != b"old main"
+          and dev_file(dev_f, "gps_logger.mpy") is None
+          and sorted(c[1] for call in calls_f for c in call if c[0] == "cp")
+          == ["main.py", "web.html.gz"],
+          "%r %r %r" % ((rc_b, err_b[-300:]), (rc_t, err_t[-200:]),
+                        (rc_f, out_f[-200:], err_f[-300:])))
     # DEPLOY-UNSURE: no clear frozen/plain answer -> stop, nothing installed
     rc, out, err, dev, calls = deploy_run({"FAKE_GARBLE": "1"})
     check("DEPLOY-UNSURE: no frozen/plain answer -> exit 1, no .mpy built or "
@@ -7449,6 +7486,13 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           "SHA-256 (deploy.sh compares it)",
           rc6 == 0 and 'module("gps_tft.py"' in m6
           and fr6.get("TFT") == hashlib.sha256(tft6).hexdigest(), repr((m6[-120:], fr6)))
+    with open(os.path.join(work6, "gps_boot.py"), "rb") as f:
+        boot6 = f.read()
+    check("BUILD-BOOT: gps_boot.py is frozen and the marker carries its SHA-256 as BOOT "
+          "(deploy.sh compares it: main.py's OTA and boot-retry helpers were unchecked)",
+          rc6 == 0 and 'module("gps_boot.py"' in m6
+          and fr6.get("BOOT") == hashlib.sha256(boot6).hexdigest(),
+          repr({k: fr6.get(k) for k in ("COMMIT", "SHA", "TFT", "BOOT")}))
     # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
     # names /web.html.gz alone, made with the board's small window (it
     # inflates it for a client without gzip); an older firmware (after a
@@ -13135,6 +13179,11 @@ else:
           and dom.get("nofix") == "map nofix" and dom.get("timer2") == 30000
           and dom.get("brokenBody") == "off" and dom.get("never") == "NO ANSWER",
           repr(dom))
+    check("PAGE-DOM-ERR: an error page from the board (503, 404: no JSON) is "
+          "a board error with its status, as a 500 is, not OFFLINE",
+          dom.get("err503") == ["off", "BOARD ERROR &middot; HTTP 503 "
+                                       "&lt;html&gt;busy&lt;/html&gt;"],
+          repr(dom.get("err503")))
     hd = v.get("hist", {})
     # the track's own line (the white casing under it has the same d)
     def main_path(svg):
@@ -13341,6 +13390,12 @@ else:
           and _pq.get("known") == [["C, S", "St"], ["St", ""]] and _pq.get("again") == 3
           and _pq.get("failed") == [False, 1, True] and _pq.get("waits") == 4
           and _pq.get("http500") == [1, True] and _pq.get("none") == ["", 0], repr(_pq))
+    _pr = ft.get("placeRetry") or {}
+    check("PAGE-PLACE-RETRY: a place asked in vain is asked again after PLACE_WAIT by "
+          "the poll itself, the track unchanged (a finished day, 1 trip: 2 places "
+          "queued); its name then shows and the next place is asked",
+          _pr.get("before") == [20, 1, 1, 2] and _pr.get("soon") == 1
+          and _pr.get("again") == 2 and _pr.get("after") == [3, True, 1], repr(_pr))
     check("PAGE-TIMELINE: km, moving time (min, then h:mm) and trips on "
           "top; a trip clicked is drawn on the map, clicked again the day",
           ft.get("kpis") == "<div><b>1.70</b><em>km</em></div><div><b>30</b>"
@@ -17785,6 +17840,29 @@ check("TFT-CHARS: every string the screen shows has its characters in its font",
       and all(c in _ff.SMALL[0] for s in _str_small + _str_km + [_ft.ROUTE_NOTE] for c in s)
       and _ft.ROUTE_NOTE == "nincs út",
       repr(_str_small))
+# a character no font has ('?' is in none): a blank half the font's height wide,
+# the glyphs around it where they would be; not glyph 0 (a digit in its place)
+
+
+def _band_text(s, x):
+    fb = _FakeFramebuf.FrameBuffer(bytearray(160 * _ft.BAND_H * 2), 160, _ft.BAND_H, _FakeFramebuf.RGB565)
+    fb.fill(_PAPER_C)
+    return fb, _ft._text(fb, _ft._SATS, s, x, 12, _ft.INK)
+
+
+_unk_fb, _unk_x = _band_text("1?2", 10)
+_unk_gap = (_ft._SATS[0][4] + 1) // 2
+_ref_fb, _ref_x = _band_text("1", 10)
+_ft._text(_ref_fb, _ft._SATS, "2", 10 + _ft.width(_ft._SATS, "1") + _unk_gap, 12, _ft.INK)
+_glyph0_fb, _g0 = _band_text("102", 10)
+check("TFT-UNKNOWN: a character the font lacks is a blank (half the height), the "
+      "string's width and the next glyph's place count it; glyph 0 is not drawn for it",
+      all("?" not in f[0] for f in (_ff.CLOCK, _ff.SATS, _ff.UP, _ff.WORD, _ff.SMALL))
+      and _ft._index(_ft._SATS[0], "?") == -1 and _unk_gap > 0
+      and _ft.width(_ft._SATS, "1?2") == _ft.width(_ft._SATS, "1") + _unk_gap + _ft.width(_ft._SATS, "2")
+      and _unk_x == 10 + _ft.width(_ft._SATS, "1?2")
+      and bytes(_unk_fb.buf) == bytes(_ref_fb.buf) and bytes(_unk_fb.buf) != bytes(_glyph0_fb.buf),
+      repr((_unk_gap, _unk_x, _ft.width(_ft._SATS, "1?2"))))
 _sw = _ft.width
 _store_room = _sw(_ft._SMALL, "100%") + _sw(_ft._SMALL, "<1 óra")
 _up_room = _sw(_ft._UP, "12345")
@@ -17826,10 +17904,28 @@ for _i in range(20):
 _still = sum(1 for b in _TftSpi.out if len(b) > 8) == 0
 check("TFT-ZONES: an unchanged state sends nothing, for 20 frames too; the route, km, "
       "satellites, WiFi level, clock, fix and upload redraw the top zone only (4 bands), "
-      "quality and flash the low zone only (2 bands); up_on alone nothing",
+      "quality and flash the low zone only (1 band); up_on alone nothing",
       _z == dict(same=0, same2=0, up_on=0, km=4, route=4, route_same=0, used=4, level=4,
-                 level_same=0, up=4, clock=4, fix=4, quality=2, store=2)
-      and _both == 6 and _still and _long, repr((_z, _both, _still, _long)))
+                 level_same=0, up=4, clock=4, fix=4, quality=1, store=1)
+      and _both == 5 and _still and _long, repr((_z, _both, _still, _long)))
+# the low zone is rows 64-79: one whole band to the panel's rows YO+64..YO+79
+# (it was rows 63-79: a 16-row band and a second one of a single row); the top
+# zone's last band ends at row 63, paper in both zones
+_sends()                                 # (the panel at _zcur again: _show() drew _STD)
+_sends(store=(9, "5 nap"))
+_low_data = [len(b) for b in _TftSpi.out if len(b) > 8]
+_low_win = [bytes(b) for b in _TftSpi.out if len(b) == 4]
+_sends(clock="11:44")
+_top_win = [bytes(b) for b in _TftSpi.out if len(b) == 4]
+_top_data = [len(b) for b in _TftSpi.out if len(b) > 8]
+_rows = lambda a, b: bytes((a >> 8, a & 255, b >> 8, b & 255))   # a 0x2B window (">HH")
+check("TFT-LOWBAND: the low zone goes up as one 16-row band (rows 64-79), the top "
+      "zone's last band ends at row 63; no 1-row band",
+      _low_data == [160 * 16 * 2] and _low_win.count(_rows(_ft.YO + 64, _ft.YO + 79)) == 1
+      and _rows(_ft.YO + 48, _ft.YO + 63) in _top_win and _top_data == [160 * 16 * 2] * 4
+      and _ft.TOP_H == _ft.LOW_Y == 64 and _ft.TILE_Y == 64
+      and _rect(0, 63, 160, 64) == {_PAPER_C},
+      repr((_low_data, _low_win, _top_data)))
 
 # today's route: the logger's side
 M_E6 = hl._CM_E6 / 100
