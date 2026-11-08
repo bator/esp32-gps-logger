@@ -17897,6 +17897,18 @@ check("UC-SETTLE-QUEUED: a second from before fix_first does not settle the "
       "receiver; standing still still waits",
       _q0 is not None and _q1 is False and _q2 is False and _q3 is False,
       repr((_q0, _q1, _q2, _q3)))
+# a first fix that never settled (a short fix, then days without one): the
+# stamps tick settles it at TICKS_CAP, long before _usable's ticks_diff would
+# wrap negative on the board (6.2 days) and drop every slow fix
+hl.st.update(settled=False, fix_first=time.ticks_add(_clock[0], 1 - hl.TICKS_CAP))
+hl._stamps_old(_clock[0])
+_w0 = hl.st["settled"]
+hl.st["fix_first"] = time.ticks_add(_clock[0], -hl.TICKS_CAP)
+hl._stamps_old(_clock[0])
+_w1 = (hl.st["settled"], hl.st["fix_first"] is not None)
+check("UC-SETTLE-WRAP: an unsettled first fix TICKS_CAP old is settled by the "
+      "stamps tick; younger it still waits",
+      _w0 is False and _w1 == (True, True), repr((_w0, _w1)))
 
 # a restart whose banner was lost: no GST with sentences coming
 hl.reset()

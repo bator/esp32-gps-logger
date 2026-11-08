@@ -962,6 +962,11 @@ def _stamps_old(now):
     t = st["svs_at"]
     if t is not None and _age(now, t) >= TICKS_CAP:
         st["svs"] = st["svs_at"] = None
+    # a first fix this old is long past UC_SETTLE: settled, before the raw
+    # ticks_diff in _usable wraps negative (6.2 days) and holds it unsettled
+    t = st["fix_first"]
+    if not st["settled"] and t is not None and _age(now, t) >= TICKS_CAP:
+        st["settled"] = True
     t = st["setup_at"]
     if t is not None and _age(now, t) > TICKS_CAP:
         st["setup_at"] = time.ticks_add(now, -TICKS_CAP)
