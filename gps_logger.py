@@ -8123,6 +8123,22 @@ def ntp_tick(now):
     _tft_t[4] = 0
     _diag_write("clock ntp %s" % _stamp_s(t)[0])
 
+CLOCK_ON = 3600000                       # ms a clock stamp runs on before rebased
+
+def _clock_on(now, c):
+    """c, a (seconds since 2020, ticks) clock stamp (log["clock"], _ntp[0]), moved up
+    to now by whole seconds once it is CLOCK_ON old (called every loop). Only a fix
+    renews log["clock"], and past 2**29 ms (6.2 days indoors) its age reads
+    TICKS_OLD (--:--, the route's day stuck), past 2**30 young again (12 days
+    early)."""
+    if c is None:
+        return c
+    a = _age(now, c[1])
+    if a < CLOCK_ON or a >= TICKS_OLD:
+        return c
+    a //= 1000
+    return (c[0] + a, time.ticks_add(c[1], a * 1000))
+
 def _local_hm():
     """"HH:MM" in Hungary from the fix's UTC; with the receiver silent (its time
     stands still then) or no fix yet, from the last fix's clock run on by the
@@ -8766,6 +8782,9 @@ def _loop():
     while True:
         feed()
         uptime_s()                       # sums ticks before they wrap
+        now = time.ticks_ms()
+        log["clock"] = _clock_on(now, log["clock"])
+        _ntp[0] = _clock_on(now, _ntp[0])
         read_uart()
         gps_check(time.ticks_ms())
         log_tick()

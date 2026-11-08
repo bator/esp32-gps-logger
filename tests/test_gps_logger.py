@@ -17877,6 +17877,41 @@ hl.log["clock"] = ((hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 +
 check("TFT-CLOCK-RUNS: with the receiver silent the last fix's clock runs on by the "
       "ticks (as the route's day does): a minute on, 11:43",
       _ls("2026-11-04", "10:42:10") == "11:43", _ls("2026-11-04", "10:42:10"))
+# 13 days with no fix, the loop rebasing both stamps: past 2**29 ms the age read
+# TICKS_OLD (--:--), past 2**30 young again (10:15 behind)
+_cw_ticks = (time.ticks_ms, time.ticks_diff, time.ticks_add)
+_CW = 1 << 30
+time.ticks_ms = lambda: _clock[0] & (_CW - 1)
+time.ticks_diff = lambda a, b: ((a - b + _CW // 2) & (_CW - 1)) - _CW // 2
+time.ticks_add = lambda a, b: (a + b) & (_CW - 1)
+_cw_s = (hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 + 42 * 60 + 10
+_cw_at, _cw_ntp, _cw_hm = _clock[0], hl._ntp[0], []
+hl.log["clock"] = (_cw_s, _clock[0] & (_CW - 1))
+hl._ntp[0] = (_cw_s + 7, _clock[0] & (_CW - 1))
+try:
+    for _cw_day in (7, 13):
+        while _clock[0] - _cw_at < _cw_day * 86400000:
+            _clock[0] += 1234567             # (not whole seconds: no drift either)
+            _cw_now = _clock[0] & (_CW - 1)
+            hl.log["clock"] = hl._clock_on(_cw_now, hl.log["clock"])
+            hl._ntp[0] = hl._clock_on(_cw_now, hl._ntp[0])
+        _cw_now = _clock[0] & (_CW - 1)
+        _cw_t = hl._stamp_s(_cw_s + (_clock[0] - _cw_at) // 1000)[0]   # (CET: UTC+1)
+        _cw_hm.append((_ls(None, None) == "%02d:%s" % ((int(_cw_t[11:13]) + 1) % 24, _cw_t[14:16]),
+                       [c[0] + hl._age(_cw_now, c[1]) // 1000 - _cw_s
+                        for c in (hl.log["clock"], hl._ntp[0])]))
+finally:
+    time.ticks_ms, time.ticks_diff, time.ticks_add = _cw_ticks
+_cw_el = (_clock[0] - _cw_at) // 1000
+check("TFT-CLOCK-WRAP: with no fix for 7 and 13 days the last fix's clock and NTP's run "
+      "on to the second, past the 2**29 and 2**30 ms of the ticks",
+      _cw_hm[0][0] and _cw_hm[1][0]
+      and _cw_hm[1][1] == [_cw_el, _cw_el + 7]
+      and 'log["clock"] = _clock_on(now, log["clock"])' in inspect.getsource(hl._loop)
+      and "_ntp[0] = _clock_on(now, _ntp[0])" in inspect.getsource(hl._loop),
+      repr((_cw_hm, _cw_el)))
+_clock[0] = _cw_at
+hl._ntp[0] = _cw_ntp
 hl.log["clock"] = None
 hl.st["rx"] = _clock[0]
 
