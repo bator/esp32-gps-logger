@@ -17562,6 +17562,14 @@ check("UC-GSV: one list from a round: a satellite once with its strongest band, 
 check("UC-GSV-SKIP: GSV_EVERY s of GSV not decoded after a list (1 Hz with a "
       "fix); then not from a round's middle, a whole round again",
       _skip and _mid and _again, repr((_skip, _mid, _again, hl.st["svs"])))
+_clock[0] += hl.GSV_EVERY * 1000 + 1
+_uc_feed(hl, _nmea("GPGSV,1,1,00,1"), _nmea("GAGSV,1,1,00,7"))
+_clock[0] += hl.GSV_EVERY * 1000 + 1
+_uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # closes the empty round
+check("UC-GSV-EMPTY: a round with no satellites (no signal) is the list: "
+      "none seen, not the last round's",
+      hl.st["svs"] == [] and hl.sv_seen() == 0 and hl._sv_list() == [],
+      repr((hl.st["svs"], hl.sv_seen())))
 
 # GPS_SYS: a mask set once, only when the receiver has another
 class _UcSys(_UcUart):

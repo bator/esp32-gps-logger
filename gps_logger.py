@@ -839,11 +839,11 @@ def _uc_gsv(talker, f):
     u = _uc_sv
     first = g == 0 and f[2] == "1" and f[-1] == "1"
     if first and u["open"]:
-        if u["new"]:
-            used = u["used"]
-            st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8)
-                         for k, v in u["new"].items()]
-            st["svs_at"] = time.ticks_ms()
+        # an empty round too: no signal at all, else the last sky stays
+        used = u["used"]
+        st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8)
+                     for k, v in u["new"].items()]
+        st["svs_at"] = time.ticks_ms()
         u["new"], u["open"] = {}, False
         u["until"] = time.ticks_add(time.ticks_ms(), GSV_EVERY * 1000)
         return
