@@ -3821,6 +3821,25 @@ try:
           gl.st["epochs"] == 2
           and abs(gl.st["lat"] - (47.5 + 0.0035 / 60)) < 1e-7,
           "epochs=%s lat=%r" % (gl.st["epochs"], gl.st["lat"]))
+    # AVG: a second's fixes across 180° average the short way round (the
+    # offsets of the W fixes were ~-360: the mean came out ~36°, 15000 km)
+    am_lon = []
+    for fixes in ((("17959.9988", "E"), ("17959.9994", "E"), ("18000.0000", "E"),
+                   ("17959.9994", "W"), ("17959.9988", "W")),
+                  (("17959.9988", "W"), ("17959.9994", "W"),
+                   ("17959.9994", "E"))):
+        gl.reset()
+        for k, (lo, ew) in enumerate(fixes):
+            gl.handle(nmea("GPGGA,120025.%02d,1700.000,S,%s,%s,1,08,1.0,"
+                           "10.0,M,40.0,M,," % (k * 20, lo, ew)))
+        gl.handle(nmea("GPGGA,120026.00,1700.000,S,17959.9988,E,1,08,1.0,"
+                       "10.0,M,40.0,M,,"))
+        am_lon.append(gl.st["lon"])
+    check("AVG: the mean of a second across 180° stays at 180° and in range",
+          len(am_lon) == 2 and all(-180 <= x <= 180 for x in am_lon)
+          and abs(abs(am_lon[0]) - 180) < 1e-6
+          and abs(am_lon[1] - (-180 + 0.00002 / 3)) < 1e-6,
+          repr(am_lon))
     gl.reset()
     gl.handle(nmea("GPRMC,120030.00,A,4730.000,N,01900.000,E,1.0,0.0,"
                    "171026,,,A"))
