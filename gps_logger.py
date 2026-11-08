@@ -4080,6 +4080,17 @@ def _still_beat(now):
             and sl["hb_at"] is not None
             and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT):
         return
+    # Nor while the departure ring is a run already STILL_RUN out from where
+    # it began, still within STILL_NEAR: a walk out. The anchor stamped 25 s
+    # into it at 2 m/s, and the way out (only what follows the last line)
+    # began 52 m out, a second after it. Late by at most one STILL_HEARTBEAT.
+    n, i = sl["rn"], sl["ri"]
+    if (n > 1 and _recent(now, sl["last_at"], STILL_GAP)
+            and sl["hb_at"] is not None
+            and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT
+            and _RF[3 * ((i + n - 1) % len(_RT)) + 2] - _RF[3 * i + 2]
+            >= STILL_RUN):
+        return
     _still_heartbeat(now)
 
 def _still_close(now=None):
