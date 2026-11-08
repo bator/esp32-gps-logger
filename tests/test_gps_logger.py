@@ -5134,6 +5134,30 @@ try:
     check("ORDER: the way out is still written from near the anchor",
           bool(out) and sv_m(out[0]) < 60.0,
           repr(out[0] if out else None))
+    # ... and on foot: an anchor point falling due 25 s into a 2 m/s walk out
+    # (still within STILL_NEAR) was stamped there, and the way out lost the
+    # 50 m before it: anchor to 52 m out in a second
+    rs = rnd.getstate()                  # (the later tests' drift unchanged)
+    sv_reset()
+    sv_drift(150, box=10.0, step=3.0)
+    n0 = len(sv_lines())
+    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 25000
+    for i in range(1, 201):
+        sv_fix(i * 2.0, 0, speed=2.0)
+    gl.flush()
+    lines = sv_lines()[n0:]
+    step = []
+    for a, b in zip(lines, lines[1:]):
+        dt = hb_secs(b) - hb_secs(a)
+        step.append(gl._dist(*(map(float, a.split(",")[:2])),
+                             *map(float, b.split(",")[:2])) / max(dt, 1))
+    out = [l for l in lines if l.split(",")[2] != ""]
+    check("ORDER: an anchor point due on a walk out waits; the way out keeps "
+          "its first metres",
+          sv_active() is False and bool(out) and sv_m(out[0]) < 15.0
+          and max(step) < 2 * gl.STILL_RUN,
+          repr((out[0] if out else None, max(step) if step else None)))
+    rnd.setstate(rs)
 
     # BEATPASS (2026-11-04, on the road): a walk to the car past STILL_NEAR held
     # the due anchor point back, the car then passed the anchor 44 m off, and
