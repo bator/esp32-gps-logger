@@ -10941,6 +10941,45 @@ check("UPL-4: SRV_ERR_MAX server errors on one batch hold that track, the "
       u4 == [(500, True, 4, True, False, False),
              (404, True, 4, True, False, False)], repr(u4))
 
+# UPL-SKIP: one passing MemoryError on a track set up["skip"], cleared only
+# by a 2xx: the other track answered 500 for ever (and never held, the
+# filtered list was 1 long), the skipped one was never tried again this boot
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+make_trk(ok_p, 4)
+_sk_reads = []
+_sk_boom = [1]
+
+
+def _sk_rb(path, *a, **k):
+    _sk_reads.append(path)
+    if path == bad_p and _sk_boom[0]:
+        _sk_boom[0] = 0
+        raise MemoryError("heap")
+    return real_rb(path, *a, **k)
+
+
+gl.read_batch = _sk_rb
+_post_code[0] = 500
+try:
+    for _ in range(8):
+        pump()
+        _clock[0] += 1000
+    _sk_again = _sk_reads.count(bad_p)
+    _post_code[0] = 201
+    for _ in range(6):
+        gl.up["hold"] = {}
+        pump()
+        _clock[0] += 1000
+finally:
+    gl.read_batch = real_rb
+    _post_code[0] = 201
+check("UPL-SKIP: a track skipped after one MemoryError is tried again while "
+      "the other one keeps failing",
+      _sk_again > 1 and not os.path.exists(bad_p) and not os.path.exists(ok_p),
+      repr((_sk_again, gl.up["skip"], os.listdir(up_td))))
+
 # POS-ERR: a batch with nothing to send whose .pos write fails is a flash
 # error, not an unreadable track: READ_ERR_MAX of them must not park it
 pe_p = os.path.join(up_td, "20261002_100000.trk")

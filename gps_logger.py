@@ -6176,6 +6176,10 @@ def upload_tick():
             if p != skip:
                 due.append(p)
         files = due
+        # one pass only: kept until a 2xx, a passing MemoryError starved that
+        # track all boot while the other one kept failing (never held either:
+        # the list here is 1 long). Still out of memory: it skips again
+        up["skip"] = None
     held = up["hold"]
     files = _due(files, held, now)
     if not files and up["allow_bad"]:
