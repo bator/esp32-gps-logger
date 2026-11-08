@@ -91,6 +91,12 @@ p.c.tick();
 st(p)[3].responseText = "{broken";
 st(p)[3].onload();
 dom.brokenBody = p.doc.body.className;
+// an error page from the board (no JSON): the board answered, its status shows
+p.c.tick();
+st(p)[4].status = 503;
+st(p)[4].responseText = "<html>busy</html>";
+st(p)[4].onload();
+dom.err503 = [p.doc.body.className, p.doc.getElementById("live").innerHTML];
 p = page(1100);
 p.xhrs[0].ontimeout();
 dom.never = p.doc.getElementById("live").innerHTML;
@@ -373,6 +379,42 @@ ft.placeQ = (() => {
   c.placeNext();
   answer(urls()[6], null);                     // names nothing: not asked again
   out.none = [c.places["47.500,18.000"], c.placeQ.length];
+  return out;
+})();
+// a place asked in vain is asked again after PLACE_WAIT by the poll itself:
+// a finished (past) day, nothing else changes (the queue used to wait for
+// the track to change)
+ft.placeRetry = (() => {
+  const q = page(1600), c = q.c, out = {};
+  let fake = new Date(2026, 10, 5, 12, 0, 0).getTime();
+  const RD = Date;
+  function D(...a) { return a.length ? new RD(...a) : new RD(fake); }
+  D.now = () => fake; D.UTC = RD.UTC; D.parse = RD.parse;
+  c.Date = D;
+  const status = JSON.stringify({refresh_s: 15, position: null, days: ["20261103"]});
+  const poll = (s) => { fake += s * 1000; c.tick(); const l = st(q); l[l.length - 1].responseText = status; l[l.length - 1].onload(); };
+  q.xhrs[0].responseText = status;
+  q.xhrs[0].onload();
+  answer(q, null, "");                   // today: nothing
+  c.pick("20261103");
+  const t0 = new RD(2026, 10, 3, 12, 0, 0).getTime();
+  let body = "#TRK2\n";
+  for (let k = 0; k < 20; k++) body += (47.1 + k * 0.001).toFixed(5) + ",18.4,100,2,3," + iso(t0 + k * 1000) + "\n";
+  answer(q, new RegExp("d=" + c.utcDay(t0) + "&o=0$"), body);
+  const asks = () => q.xhrs.filter((x) => x.url.indexOf(c.ADDR) === 0);
+  out.before = [c.hist.pts.length, c.hist.trips.length, asks().length, c.placeQ.length];
+  asks()[0].onerror();                   // away from the internet: no name
+  for (let i = 0; i < 3; i++) poll(15);
+  out.soon = asks().length;              // 45 s: within PLACE_WAIT, not yet
+  for (let i = 0; i < 2; i++) poll(15);
+  out.again = asks().length;             // 75 s: asked again, the track unchanged
+  const x = asks()[1];
+  if (!x) return out;                    // (never asked again: the check fails on out)
+  x.status = 200;
+  x.responseText = JSON.stringify({features: [{properties: {osm_key: "railway", name: "Kisfalu"}}]});
+  x.onload();
+  out.after = [asks().length, q.doc.getElementById("tline").innerHTML.indexOf("<strong>Kisfalu</strong>") >= 0,
+    c.placeQ.length];
   return out;
 })();
 ft.kpis = c0.kpis(trips);

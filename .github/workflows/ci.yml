@@ -48,8 +48,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install "mpy-cross==1.29.*"
-      - run: python -m mpy_cross -O3 -march=xtensawin -o "$RUNNER_TEMP/gps_logger.mpy" gps_logger.py
-      - run: ls -l "$RUNNER_TEMP/gps_logger.mpy"
+      # every module the firmware freezes (tools/build_firmware.sh manifest)
+      # and main.py: a construct xtensawin bytecode cannot take fails here,
+      # not at the next local build
+      - run: |
+          for m in gps_logger gps_boot gps_tft gps_tft_font main; do
+            python -m mpy_cross -O3 -march=xtensawin -o "$RUNNER_TEMP/$m.mpy" "$m.py"
+          done
+      - run: ls -l "$RUNNER_TEMP"/*.mpy
 
   test:
     name: tests (CPython + MicroPython unix)
@@ -61,7 +67,11 @@ jobs:
         with:
           python-version: "3.12"
       # the page checks run web.html's script in node (a missing node is a
-      # FAIL in CI, see tests/test_gps_logger.py PAGE)
+      # FAIL in CI, see tests/test_gps_logger.py PAGE): a pinned LTS, not
+      # whatever the runner image ships
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - run: node --version
 
       # MicroPython unix port: only built on a cache miss (~1-2 min), then

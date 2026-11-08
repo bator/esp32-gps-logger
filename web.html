@@ -681,10 +681,10 @@ function evTele(a, cols) {
   var an = a.drops > 0, mid = a.t0 + (a.t1 - a.t0) / 2;
   // a marker under the strip at each drop-out's start, its time below
   // (none closer than 9% to the one before: the dot stays, the time goes)
-  var ep = "", mk = "", span = Math.max(1, (k0 + nb) * 300000 - k0 * 300000), lastx = -1;
+  var ep = "", mk = "", span = nb * 300000, lastx = -1;   // (nb >= 2 here)
   for (i = 0; i < a.eps.length; i++) {
     var s0 = a.eps[i][1] - a.eps[i][2] * 60000, x = Math.max(0, Math.min(100, (s0 - k0 * 300000) / span * 100));
-    if (x < 0 || s0 < a.t0 - 300000) continue;
+    if (s0 < a.t0 - 300000) continue;
     mk += '<span class="gt-mk" style="left:' + x.toFixed(1) + '%"><i></i>' + (x - lastx >= 9 || lastx < 0 ? when(s0) : "") + "</span>";
     if (x - lastx >= 9 || lastx < 0) lastx = x;
   }
@@ -1084,7 +1084,8 @@ function placeOf(j) {
 // A place is asked once, one at a time: a railway station within PLACE_KM of it,
 // else what is there. Kept by the nearest 0.001 degree (about 100 m) while the page
 // is open, so a day shown again asks nothing. Unreachable, as away from the internet:
-// no name, the line as it was, a new try after PLACE_WAIT.
+// no name, the line as it was, a new try after PLACE_WAIT: each poll (tick) calls
+// placeNext, whether or not the track changed (a finished day, standing still).
 var PLACE_KM = .15, PLACE_WAIT = 60000, PLACE_MAX = 400;
 var places = {}, placeQ = [], placeBusy = false, placeOff = 0;
 function placeKey(p) { return p[1].toFixed(3) + "," + p[2].toFixed(3); }
@@ -1395,7 +1396,7 @@ function hereFor(pts, lat, lon, r, now) {
     var j = n - 1;
     while (j > 0 && pts[n - 1][0] - pts[j - 1][0] <= 60000) j--;
     var dt = pts[n - 1][0] - pts[j][0], dm = 0;
-    for (var k = j + 1; k < n; k++) dm += metres(pts[k - 1], pts[k]);
+    for (var m = j + 1; m < n; m++) dm += metres(pts[m - 1], pts[m]);
     kmh = dt > 0 ? dm / dt * 3600 : 0;
   }
   return {ms: ms, kmh: kmh};
@@ -1481,9 +1482,10 @@ function tick() {
     var d = null;
     try { d = JSON.parse(x.responseText); } catch (e) {
       stale();
-      // the board answered, a bug building the JSON: its error
-      if (x.status === 500) document.getElementById("live").innerHTML = "BOARD ERROR &middot; " +
-        esc(String(x.responseText).slice(0, 60));
+      // the board answered, not gone: a bug building the JSON (500) or an
+      // error page (404, 503): its words, with the status
+      if (x.status && x.status !== 200) document.getElementById("live").innerHTML = "BOARD ERROR &middot; " +
+        (x.status === 500 ? "" : "HTTP " + x.status + " ") + esc(String(x.responseText).slice(0, 60));
     }
     // a bug drawing a box is not the board gone: LIVE stays, the error shows
     if (d) try {
@@ -1496,6 +1498,7 @@ function tick() {
       boardDays = d.days || [];
       navPaint();
       placeMap(d);
+      placeNext();                      // (a place asked in vain: again after PLACE_WAIT)
       if (histDue()) histLoad();
       if (diagDue()) diagLoad();
     } catch (e) {

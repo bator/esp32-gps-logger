@@ -349,6 +349,10 @@ flashed by hand with an older published build.
 OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 ```
 
+The `OTA_DEST` path is a plain one: no spaces or shell specials (`scp` takes
+it as it is, the `ssh` rename shell-quoted; the two agree only on such a
+path).
+
 The board, with `OTA_URL` (the manifest's URL) and `OTA_KEY` (the same key)
 in `.env`, checks 2 minutes after boot and then every 10 minutes (a ~1 KB
 manifest on the LAN), only on a home
@@ -903,6 +907,14 @@ console line.
     cannot outgrow the decode buffer. A `.pos` keyframe of `-1` means none
     was read yet (a damaged first keyframe): the reader goes on from the
     offset and drops deltas up to the next keyframe.
+  - Known blind spot (the format has no sync marker): in a run of `0xFF`
+    bytes (an erased block) each byte is a 1-byte damaged record until the
+    last few, whose varints run into whatever follows; if a keyframe
+    follows within 31 bytes, its `=` and first bytes are eaten as varints
+    and that keyframe is lost with its deltas up to the next one. So flash
+    damage costs up to two keyframe spans, not one. The board's reader and
+    `tools/trk2gpx.py` take the same records (the upload and the GPX
+    agree); a fix would change the format, the `.pos` and both readers.
 - **Text tracks.** A `.trk` holds the same lines as text (a `#TRK1` header). None
   is written now, but they are read and uploaded: a `.trb.bad` is text, and it goes
   up again renamed `.trk`. A `#TRK2` file (`lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ`,
@@ -1424,18 +1436,22 @@ every pull request:
     `--migrate`'s flash size check and private backup, `--publish` moving each
     file in from a `.tmp` and refusing a build not newer than the published
     one.
-- `mpy-cross` 1.29 for `xtensawin`.
-- `pyflakes` on `gps_logger.py`, `main.py`, `tools/trk2gpx.py`, `tools/web_min.py`,
-  `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
+  The page checks run on Node 24 (`actions/setup-node`, pinned).
+- `mpy-cross` 1.29 for `xtensawin` on every frozen module (`gps_logger.py`,
+  `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
+  itself (ESP-IDF, `boards/GPS_LOGGER_S3`) is not built in CI: a board or
+  freeze-manifest breakage shows at the next local `tools/build_firmware.sh`.
+- `pyflakes` on `gps_logger.py`, `gps_tft.py`, `main.py`, `tools/trk2gpx.py`,
+  `tools/web_min.py`, `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
 
 The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
-.venv/bin/python -m pyflakes gps_logger.py main.py tools/trk2gpx.py tools/web_min.py tests/mpy_unix_logger.py tests/web_loopback.py
+.venv/bin/python -m pyflakes gps_logger.py gps_tft.py main.py tools/trk2gpx.py tools/web_min.py tests/mpy_unix_logger.py tests/web_loopback.py
 shellcheck deploy.sh tools/build_firmware.sh
-.venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/gps_logger.mpy gps_logger.py
+for m in gps_logger gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done
 MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \
     python3 tests/test_gps_logger.py
 ```
