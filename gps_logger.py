@@ -97,7 +97,7 @@ GPS_STORM_QUIET = 10000                  # ms without a restart (in a storm
 # high: the receiver, its LNA and the TFT). gps_tft.py drives the TFT once the
 # logger runs (dark until then). main.py keeps the boot-bypass pin.
 HELTEC_VEXT = 3                          # high: the rail of the UC6580
-HELTEC_TFT_BL = 21                       # the TFT's backlight (gps_tft.py)
+HELTEC_TFT_BL = 21                       # the TFT's backlight (given to gps_tft.start)
 GPS_UART, GPS_TX, GPS_RX = 1, 34, 33
 Pin(HELTEC_VEXT, Pin.OUT, value=1)
 Pin(HELTEC_TFT_BL, Pin.OUT, value=0)
@@ -588,7 +588,7 @@ def gsa(talker, f):
     st["gsa_n"] += 1
     if st["gsa_n"] == GSA_MAX + 1:
         _extra(talker, f)
-    _uc_gsa(f)
+    _uc_gsa(talker, f)
 
 def _extra(talker, f):
     """A sentence gps_setup turns off: the receiver did not take it."""
@@ -805,24 +805,27 @@ def _uc_gsv_skip():
     u["until"] = None
     return False
 
-def _uc_gsa(f):
+def _uc_gsa(talker, f):
     """One GSA: the satellites of its system in the fix. A pause before it
     starts a new list: the sentences of a round come in one burst, and a
-    round every second by the clock cut one in two (11 seen, 6 in use)."""
-    if len(f) < 19:
-        return                           # (no system id: NMEA before 4.10)
+    round every second by the clock cut one in two (11 seen, 6 in use).
+    The system is the last field (NMEA 4.10); before it (18 fields) the
+    talker's, and none for GN (mixed): that one adds nothing."""
+    n = len(f)
+    if n < 18:
+        return
     u = _uc_sv
     now = time.ticks_ms()
     if not _recent(now, u["gsa"], UC_GSA_GAP):
         u["used"] = []
     u["gsa"] = now
-    g = _UC_SYS.get(_num(f[-1], int))
+    g = _UC_SYS.get(_num(f[-1], int)) if n > 18 else _UC_GNSS.get(talker)
     if g is None:
         return
     for x in f[3:15]:
-        n = _num(x, int)
-        if n is not None:
-            _uc_sv["used"].append(g << 8 | n)
+        v = _num(x, int)
+        if v is not None:
+            _uc_sv["used"].append(g << 8 | v)
 
 def _uc_gsv(talker, f):
     """One GSV sentence into a round's list (the same satellite on two
@@ -3658,15 +3661,18 @@ def _hist_names():
                   and n[:8].isdigit())
 
 def _hist_trim(want):
-    """Older day files go (the newest, today's, stays) until want bytes are
-    free: the day history yields to the tracks. -> free bytes, or None."""
+    """Older days go, a day at a time (its .trb and .trk both; the newest
+    day, today's, stays) until want bytes are free: the day history yields
+    to the tracks. -> free bytes, or None."""
     room = free()
     try:
         days = _hist_names()
     except OSError:
         return room
-    while room is not None and room < want and len(days) > 1:
-        _rm(HIST_DIR + "/" + days.pop(0))
+    while room is not None and room < want and days and days[0][:8] != days[-1][:8]:
+        d = days[0][:8]
+        while days[0][:8] == d:
+            _rm(HIST_DIR + "/" + days.pop(0))
         room = free()
     return room
 
@@ -3740,14 +3746,16 @@ def _sample_line(now, prev, last_t):
         return None
     return t, _line("%.6f,%.6f" % (lat, lon), _fields(now), _tc())
 
-TIME_BACK = 3600                         # s a fix behind the last line ...
+TIME_BACK = 60                           # s a fix behind the last line ...
 TIME_BACK_N = 10                         # ... in a row that drop last_t
 
 def _time_back(t, lt):
     """A usable fix at t (ISO), older than the last line written, lt.
     TIME_BACK_N of them in a row over TIME_BACK behind it: lt was a false
-    time (a receiver glitch, plausible but ahead), and no line, no anchor
-    point either, could ever follow it until a reboot. It goes: the lines
+    time (a corrupt digit past the checksum, a receiver glitch: plausible
+    but ahead), and no line, no anchor point either, could follow it until
+    the real time caught up (an hour ahead: an hour) or a reboot. A receiver
+    does not step back a minute ten seconds running. It goes: the lines
     stamped after t still in RAM with it, a new segment starts, a diag
     line notes it. (One fix that far behind is a glitch itself: skipped
     as before.)"""
@@ -3859,13 +3867,16 @@ def _fix_s():
 
 def _dt_s(d, t, i=0):
     """Seconds since 2020 of a date YYYY-MM-DD and, from index i of t, a time
-    HH:MM:SS (an ISO time is both: i 11), or None."""
+    HH:MM:SS (an ISO time is both: i 11), or None: no number, or no real
+    time in 2020-2099 (_ymd_ok: a month 13, an hour 25 past the checksum)."""
     try:
-        return ((_days(int(d[0:4]), int(d[5:7]), int(d[8:10])) - EPOCH_DAYS)
-                * 86400 + int(t[i:i + 2]) * 3600 + int(t[i + 3:i + 5]) * 60
-                + int(t[i + 6:i + 8]))
+        y, m, dd = int(d[0:4]), int(d[5:7]), int(d[8:10])
+        h, mi, ss = int(t[i:i + 2]), int(t[i + 3:i + 5]), int(t[i + 6:i + 8])
     except (TypeError, ValueError, IndexError):
         return None
+    if not _ymd_ok(y, m, dd, h, mi, ss):
+        return None
+    return (_days(y, m, dd) - EPOCH_DAYS) * 86400 + h * 3600 + mi * 60 + ss
 
 def _stamp_s(secs):
     """(ISO time, compact track time) for seconds since 2020."""
@@ -5163,7 +5174,7 @@ def _ymd_ok(y, mo, d, hh, mi, ss):
     if not (2020 <= y <= 2099 and 1 <= mo <= 12 and d >= 1
             and hh < 24 and mi < 60 and ss < 60):
         return False
-    return d <= _days(y, mo + 1, 1) - _days(y, mo, 1)
+    return d <= 28 or d <= _days(y, mo + 1, 1) - _days(y, mo, 1)
 
 def _tc_ok(rb, t):
     """The compact time YYYYMMDDTHHMMSSZ at rb[t:t + 16], its digits
@@ -7889,8 +7900,10 @@ TFT_LIGHT = 30                           # .env TFT_LIGHT: per cent, 0-100
 TFT_IDLE = 300000                        # .env TFT_IDLE, in s: ms into a stay it goes
                                          # dark; 0: never
 TFT_WAKE = 60000                         # ms of full light after the USER button
-_tft_l = [None, None, None]              # the per cent set; the stay's first tick;
-                                         # the button's last press
+_tft_l = [None, None, None]              # the per cent set; the stay's first tick
+                                         # (kept TFT_IDLE old once dark); the
+                                         # button's last press (None once
+                                         # TFT_WAKE old): no stamp ages past 2**29 ms
 
 def _tft_env(env):
     """TFT_LIGHT=<0-100> per cent of backlight, TFT_IDLE=<0-86400> seconds of a
@@ -7919,17 +7932,24 @@ def _tft_env(env):
 
 def _tft_light(now):
     """The backlight: full for TFT_WAKE after the USER button, else dark once a
-    stay (the GPS says the board has not moved) is TFT_IDLE old, else
-    TFT_LIGHT. A change is said in the diag, the first setting is not."""
+    stay is TFT_IDLE old, else TFT_LIGHT. A stay: the GPS says the board has
+    not moved, or it is on the home network and no usable fix came for
+    STILL_GAP (on a desk indoors, where none proves a stay). A change is said
+    in the diag, the first setting is not."""
     L = _tft_l
-    if not log["still"]["active"]:
+    sl = log["still"]
+    if sl["active"] or (at_home() and not _recent(now, sl["last_at"], STILL_GAP)):
+        if L[1] is None:
+            L[1] = now
+    else:
         L[1] = None
-    elif L[1] is None:
-        L[1] = now
-    if _recent(now, L[2], TFT_WAKE):
+    if not _recent(now, L[2], TFT_WAKE):
+        L[2] = None                      # (a stamp left alone for 12 days reads young)
+    if L[2] is not None:
         pct = 100
     elif TFT_IDLE and L[1] is not None and not _recent(now, L[1], TFT_IDLE):
         pct = 0
+        L[1] = time.ticks_add(now, -TFT_IDLE)
     else:
         pct = TFT_LIGHT
     if pct != L[0]:
@@ -7945,7 +7965,7 @@ def _tft_start():
         return
     try:
         import gps_tft
-        gps_tft.start(0)                 # (dark: _tft_light sets it, .env read)
+        gps_tft.start(TFT_LIGHT, HELTEC_TFT_BL)   # (.env read: _tft_env)
         _tft = gps_tft
     except Exception as e:
         print("tft", repr(e))
@@ -7977,10 +7997,17 @@ def _utc_hours(y, m, day, h):
 # The display's clock and the route's day before the first fix, which indoors may
 # take long or never come: a fix is otherwise the only thing that tells the date.
 # Asked on any network until a fix has told the time, and then never again: a fix
-# wins, and this reaches neither a track line, nor the board clock, nor status.json.
+# wins. This reaches neither a track line nor status.json; it sets the board clock
+# (_rtc_sync) only while no fix has come since the boot.
 NTP_SERVER = "pool.ntp.org"              # .env NTP_SERVER; empty: never asked
-NTP_WAIT = 1000                          # ms an answer may take: the loop waits
-                                         # (the UART buffer holds 3 s of NMEA)
+NTP_WAIT = 1000                          # ms the answer may take. The name lookup
+                                         # is not bound by it (MicroPython's
+                                         # getaddrinfo has no timeout: lwIP's
+                                         # own, tens of s), feed() around it; the
+                                         # UART buffer holds 3.5 s of NMEA, so a
+                                         # slow DNS loses some (no fix yet then)
+NTP_ERA = 252460800                      # s (8 years): the next era (2036-02-07 on)
+                                         # is believed only for a build this young
 NTP_RETRY = 60000                        # ms after a failed try, doubling to ...
 NTP_RETRY_MAX = 3600000                  # ... this
 NTP_AGAIN = 21600000                     # ms an answer is used before a new one
@@ -7999,10 +8026,13 @@ def _ntp_ask():
     build was made). The request's ticks go out as its transmit time and must come
     back as the answer's originate time (a late or stray datagram is no answer).
     Past the NTP era (2036-02-07) the seconds count from there: the small value
-    is read as the next era."""
+    is read as the next era, but only up to NTP_ERA after this build was made
+    (a server saying 1900-1951 is not 2036-2088)."""
     s = None
     try:
+        feed()
         ai = socket.getaddrinfo(NTP_SERVER, 123, 0, socket.SOCK_DGRAM)[0]
+        feed()
         s = socket.socket(ai[0], socket.SOCK_DGRAM, ai[2])
         s.settimeout(NTP_WAIT / 1000)
         q = bytearray(48)
@@ -8022,9 +8052,12 @@ def _ntp_ask():
     if not v:
         return None
     t = v - _NTP_2020
+    lo = max(0, FW_BUILD - EPOCH_DAYS * 86400)
     if t < 0:
         t += 1 << 32
-    return t if max(0, FW_BUILD - EPOCH_DAYS * 86400) <= t < FIX_S_END else None
+        if t > lo + NTP_ERA:
+            return None
+    return t if lo <= t < FIX_S_END else None
 
 def ntp_tick(now):
     n = _ntp
@@ -8486,10 +8519,13 @@ def tft_tick(now):
     t = _tft_t
     if _tft is None:
         return
-    if _tft.pressed():                   # (every pass: a tap is short)
-        if not _recent(now, _tft_l[2], TFT_WAKE):
-            t[0] = None                  # lit at once, not up to TFT_STATE later
-        _tft_l[2] = now
+    try:
+        if _tft.pressed():               # (every pass: a tap is short)
+            if not _recent(now, _tft_l[2], TFT_WAKE):
+                t[0] = None              # lit at once, not up to TFT_STATE later
+            _tft_l[2] = now
+    except Exception:                    # (no reason to lose the display)
+        pass
     if not _recent(now, t[0], TFT_STATE):
         t[0] = now
         try:
@@ -8545,11 +8581,11 @@ def run():
         log_reset()
         wifi_reset()
         up_reset()
-        _tft_start()
         env = load_env(ENV_FILE)
         _gps_sys_env(env)
         _min_move_env(env)
         _tft_env(env)
+        _tft_start()                     # (at its light: .env is read)
         _diag_env(env)
         _diag_boot()
         ota_boot()

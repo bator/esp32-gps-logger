@@ -24,15 +24,14 @@ import gps_tft_font as F
 W, H = 160, 80
 XO, YO = 1, 26                           # the panel inside the controller
 BAND_H = 16
-TOP_H, LOW_Y = 64, 64                    # the zones: rows 0-63 (4 bands), 64-79 (1)
-BL_PIN = 21
+LOW_Y = 64                               # the zones: rows 0-63 (4 bands), 64-79 (1)
 BL_HZ = 2000                             # the backlight's PWM (no flicker, no whine)
 USER_PIN = 0                             # the USER button: low when pressed
 RIGHT = 158                              # the right column's text ends here
 BARS_X, BARS_Y = 140, 42                 # WiFi: the first bar's left, their foot
 KM_X = 92                                # today's km, on the bars' foot
 RULE_X, RULE_Y = 96, 47
-TILE_W, TILE_Y = 62, 64                  # the GPS tile
+TILE_W = 62                              # the GPS tile (from LOW_Y down)
 STORE_X, STORE_Y, STORE_W, STORE_H = 66, 75, 92, 3   # the flash's gauge
 STORE_WARN, STORE_BAD = 70, 90           # per cent: amber, red
 
@@ -63,7 +62,8 @@ _pal = {}
 
 class _D:
     spi = cs = dc = None
-    pwm = btn = None                     # (pwm False: none to be had, on or off only)
+    pwm = btn = bl = None                # (pwm False: none to be had, on or off only;
+                                         # bl: the backlight's pin, start's)
     buf = fb = None
     state = None
     top = low = None                     # what the panel shows
@@ -92,13 +92,13 @@ def light(pct):
     p = _D.pwm
     if p is None:
         try:
-            p = _D.pwm = PWM(Pin(BL_PIN), freq=BL_HZ, duty_u16=0)
+            p = _D.pwm = PWM(Pin(_D.bl), freq=BL_HZ, duty_u16=0)
         except Exception:
             p = _D.pwm = False
     if p:
         p.duty_u16(pct * 65535 // 100)
     else:
-        Pin(BL_PIN, Pin.OUT, value=pct > 0)
+        Pin(_D.bl, Pin.OUT, value=pct > 0)
 
 def pressed():
     """The USER button is down."""
@@ -110,10 +110,12 @@ def pressed():
             b = _D.btn = False
     return bool(b) and not b.value()
 
-def start(pct=100):
-    """The panel on and blank, then the backlight at pct (not before: no flash of
-    its random RAM)."""
-    Pin(BL_PIN, Pin.OUT, value=0)
+def start(pct, bl):
+    """The panel on and blank, then the backlight (pin bl) at pct (not before:
+    no flash of its random RAM). Called again, the backlight is made anew: the
+    Pin below takes the pin back from a PWM that was on it."""
+    _D.bl, _D.pwm = bl, None
+    Pin(bl, Pin.OUT, value=0)
     _D.cs = Pin(38, Pin.OUT, value=1)
     _D.dc = Pin(40, Pin.OUT, value=0)
     rst = Pin(39, Pin.OUT, value=1)
@@ -140,8 +142,14 @@ def start(pct=100):
     light(pct)
 
 def off():
-    """Dark: a frozen display must not stay lit. A dead SPI bus does not stop this."""
-    light(0)
+    """Dark: a frozen display must not stay lit. A dead SPI bus does not stop
+    this, nor a PWM that cannot be set: the pin is then taken back as an output
+    (low), whatever drove it."""
+    try:
+        light(0)
+    except Exception:
+        _D.pwm = None
+        Pin(_D.bl, Pin.OUT, value=0)
 
 def _mono_palette(tone):
     k = 64 | tone
@@ -254,7 +262,7 @@ def _draw_top(route, km, fix, used, clock, level, up):
     tone = INK if fix else RED
     used = str(used)
     x = RIGHT - width(_SATS, used)
-    for top in range(0, TOP_H, BAND_H):
+    for top in range(0, LOW_Y, BAND_H):
         fb.fill(_COL[PAPER])
         _route(fb, top, route)
         _right(fb, _CLOCK, clock, RIGHT, 14 - top, INK)
@@ -270,7 +278,7 @@ def _draw_top(route, km, fix, used, clock, level, up):
         fb.fill_rect(RULE_X, RULE_Y - top, W - RULE_X, 1, _COL[INK])
         if up.strip():
             _right(fb, _UP, up, RIGHT, 62 - top, INK)
-        _send(top, min(BAND_H, TOP_H - top))
+        _send(top, min(BAND_H, LOW_Y - top))
 
 def _draw_low(quality, store):
     """How good the GPS is, a tile; the flash, per cent and time over a gauge."""
@@ -283,7 +291,7 @@ def _draw_low(quality, store):
         pc = "%d%%" % pct
     for top in range(LOW_Y, H, BAND_H):
         fb.fill(_COL[PAPER])
-        fb.fill_rect(0, TILE_Y - top, TILE_W, H - TILE_Y, _COL[tile])
+        fb.fill_rect(0, LOW_Y - top, TILE_W, H - LOW_Y, _COL[tile])
         _text(fb, _WORD, word, x, 76 - top, PAPER, tile)
         if store:
             _text(fb, _SMALL, pc, STORE_X, 72 - top, tone)

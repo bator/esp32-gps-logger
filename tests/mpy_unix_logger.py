@@ -160,6 +160,20 @@ check("a non-digit in the time or date is a bad sentence, the track goes on",
       and gl.st["date"] == "2026-10-29")
 gl.reset()
 gl.log_reset()
+# a date or time that does not exist is none (a month 13, an hour 25), and a
+# fix a minute and more behind the last line lets go of it after ten in a row
+check("_dt_s: no month 13 or hour 25, Feb 29 only in a leap year",
+      gl._dt_s("2026-13-32", "12:00:00") is None
+      and gl._dt_s("2026-10-29", "25:61:00") is None
+      and gl._dt_s("2027-02-29", "00:00:00") is None
+      and gl._dt_s("2028-03-01", "00:00:00") - gl._dt_s("2028-02-29", "00:00:00") == 86400)
+gl.st.update(date="2026-10-29", time="12:00:00")
+gl.log["last_t"] = "2026-10-29T12:50:03Z"
+for i in range(gl.TIME_BACK_N):
+    gl._time_back("2026-10-29T12:00:00Z", gl.log["last_t"])
+check("time back: a false time 50 min ahead is let go of", gl.log["last_t"] is None)
+gl.reset()
+gl.log_reset()
 
 
 # what a second of NMEA allocates, read as on the board (read_uart, then
@@ -663,7 +677,7 @@ if sys.implementation.name == "micropython":
     tft.Pin = _Pin
     tft.time = _Obj()
     tft.time.sleep_ms = lambda ms: None
-    tft.start()
+    tft.start(100, 21)
     view = (bytearray(b"\x00\x80\x50\x19"), 2, 0, 1)
     states = ((view, "8,6 km", True, 22, "11:42", 3, 3, "1284", True, (42, "7 nap")),
               (None, "", False, 0, "--:--", None, 0, "", False, None),

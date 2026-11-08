@@ -4708,7 +4708,9 @@ try:
         gl.st.update(date="%04d-%02d-%02d" % (y, m, d),
                      time="%02d:%02d:%02d" % (hh, mi, ss))
         iso = "%04d-%02d-%02dT%02d:%02d:%02dZ" % (y, m, d, hh, mi, ss)
-        ok = ok and gl._fix_s() + _EPOCH_S == secs and gl._stamp_s(secs - _EPOCH_S)[0] == iso
+        fs = gl._fix_s()                 # (none outside 2020-2099: _ymd_ok)
+        ok = ok and (fs is None if y in (2000, 2100) else fs + _EPOCH_S == secs) \
+            and gl._stamp_s(secs - _EPOCH_S)[0] == iso
     ok = ok and gl._stamp_s(calendar.timegm((2026, 12, 31, 23, 59, 59, 0, 0, 0)) - _EPOCH_S
                              + 1)[0] == "2027-01-01T00:00:00Z"
     check("HB: UTC date arithmetic matches the calendar (year end, leap, 2100)",
@@ -17781,7 +17783,7 @@ _ft._D.pwm = None
 _TftSpi.out[:] = []
 _TftSpi.panel.clear()
 _TftSpi.fail = False
-_ft.start()
+_ft.start(100, 21)
 _cmds0 = list(_TftSpi.out)
 _ft.Pin, _ft.PWM = _pin0, _pwm0
 _ft._D.pwm = None
@@ -18023,7 +18025,7 @@ check("TFT-LOWBAND: the low zone goes up as one 16-row band (rows 64-79), the to
       "zone's last band ends at row 63; no 1-row band",
       _low_data == [160 * 16 * 2] and _low_win.count(_rows(_ft.YO + 64, _ft.YO + 79)) == 1
       and _rows(_ft.YO + 48, _ft.YO + 63) in _top_win and _top_data == [160 * 16 * 2] * 4
-      and _ft.TOP_H == _ft.LOW_Y == 64 and _ft.TILE_Y == 64
+      and _ft.LOW_Y == 64 and not hasattr(_ft, "TOP_H") and not hasattr(_ft, "TILE_Y")
       and _rect(0, 63, 160, 64) == {_PAPER_C},
       repr((_low_data, _low_win, _top_data)))
 
@@ -18571,10 +18573,13 @@ _NtpMod.echo = False
 _n_stray = _nask(_nreply(_DAY))
 _NtpMod.echo = True
 _n_era_s = (hl._days(2037, 1, 1) - hl.EPOCH_DAYS) * 86400 + 3600
+_n_fw = hl.FW_BUILD
+hl.FW_BUILD = hl._days(2033, 1, 1) * 86400      # (a build of 2033: NTP_ERA reaches 2037)
 _n_era = _nask(_nreply(_n_era_s))
+hl.FW_BUILD = _n_fw
 check("NTP-ASK-ECHO: the request carries the ticks as its transmit time; an answer whose "
       "originate time is not that (a stray or late datagram) is None; a time past the "
-      "NTP era of 2036 reads as the next era",
+      "NTP era of 2036 reads as the next era (for a build of 2033, RG-4 has the rest)",
       _n_tx and _n_stray is None and _n_era == _n_era_s, repr((_n_tx, _n_stray, _n_era, _n_era_s)))
 
 _n0a = _n0
@@ -19117,7 +19122,7 @@ check("TFT-FAIL-STATE: values failing keep counting though frames succeed: no ol
 _ft_seen = []
 gl._tft = None
 gl._rt_start, _rs0 = (lambda: _ft_seen.append("route")), gl._rt_start
-sys.modules["gps_tft"] = types.SimpleNamespace(start=lambda *a: _ft_seen.append("start%r" % (a,)))
+sys.modules["gps_tft"] = types.SimpleNamespace(start=lambda *a: _ft_seen.append("start(%d, %d)" % a))
 gl._tft_start()
 gl._tft_start()                           # (started: not again)
 sys.modules["gps_tft"] = _ft
@@ -19126,11 +19131,12 @@ with open(os.path.join(ROOT, "gps_logger.py")) as f:
     _lsrc = f.read()
 _runs = _lsrc[_lsrc.index("def run():"):]
 _loops = _lsrc[_lsrc.index("def _loop("):]
-check("TFT-WIRING: run() starts it, once, dark (the light is set when .env is read), "
-      "before the first GPS setup, reads TFT_LIGHT / TFT_IDLE after .env, the loop ticks it",
-      _ft_seen == ["start(0,)", "route"]
-      and _runs.index("_tft_start()") < _runs.index("gps_setup()")
-      and _runs.index("load_env(ENV_FILE)") < _runs.index("_tft_env(env)") < _runs.index("gps_setup()")
+check("TFT-WIRING: run() starts it, once, at TFT_LIGHT and the backlight pin (HELTEC_TFT_BL), "
+      "after .env is read (TFT_LIGHT / TFT_IDLE: no glow at a level of 0) and before the first GPS "
+      "setup; the loop ticks it",
+      _ft_seen == ["start(%d, %d)" % (gl.TFT_LIGHT, gl.HELTEC_TFT_BL), "route"]
+      and _runs.index("load_env(ENV_FILE)") < _runs.index("_tft_env(env)")
+      < _runs.index("_tft_start()") < _runs.index("gps_setup()")
       and "tft_tick(now)" in _loops, repr(_ft_seen))
 
 # --- the backlight: PWM, dark in a stay, full after the USER button (2026-11-08)
@@ -19270,6 +19276,331 @@ check("TFT-LIGHT-ENV: TFT_LIGHT 0-100 and TFT_IDLE 0-86400 s read from .env; out
       "number keeps what was; 0 is allowed for both",
       _e1 == (55, 120000) and _e2 == (55, 120000) and _e3 == (0, 0) and _e4 == (0, 0),
       repr((_e1, _e2, _e3, _e4)))
+
+# --- review 2026-11-08b: GPS/TFT (RG-n) --------------------------------------
+_rg_td = tempfile.mkdtemp(prefix="rg-")
+_rg_saved = (hl.LOG_DIR, hl.DIAG_FILE, hl.DIAG_OLD, hl._diag_write)
+hl.LOG_DIR = os.path.join(_rg_td, "trk")
+hl.DIAG_FILE, hl.DIAG_OLD = os.path.join(_rg_td, "diag"), os.path.join(_rg_td, "diag.1")
+os.makedirs(hl.LOG_DIR)
+_rg_k = [0]
+
+
+def _rg_reset():
+    hl.reset()
+    hl.log_reset()
+    hl.wifi_reset()
+    hl.up_reset()
+    hl.wifi.update(state="offline", home=False)
+    hl.uart = _UcUart()
+    _uart_rx[:] = b""
+    hl.st["settled"] = True
+    _clock[0] = (_clock[0] // 1000 + 1) * 1000
+    _rg_k[0] = 0
+    try:
+        os.remove(hl.DIAG_FILE)
+    except OSError:
+        pass
+
+
+def _rg_sec(t, date="041126", tg=None):
+    """One second of a moving fix (about 4 m a second) through the parser and
+    log_tick; tg: the time the GGA says (a corrupt one), its position 18 m off."""
+    _rg_k[0] += 1
+    r = "4711.%04d" % (_rg_k[0] * 20)
+    g = "4711.%04d" % (_rg_k[0] * 20 + (100 if tg else 0))
+    _uc_feed(hl, _nmea("GNRMC,%s,A,%s,N,01825.6160,E,5.0,,%s,,,A,V" % (t, r, date)),
+             _nmea("GNGGA,%s,%s,N,01825.6160,E,1,14,0.80,120.5,M,40.0,M,," % (tg or t, g)))
+    hl.log_tick()
+    _clock[0] += 1000
+
+
+def _rg_times():
+    return [l[-17:-1] for l in hl.log["batch"]]
+
+
+def _rg_diag():
+    try:
+        with open(hl.DIAG_FILE) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+# RG-1: a corrupt digit past the checksum that is a real time, 50 min ahead (the
+# minutes of a GGA): its fix was recorded and became last_t, and nothing was
+# written until the real time caught up (TIME_BACK was an hour)
+_rg_reset()
+for _i in range(50):
+    _rg_sec("1200%02d.00" % _i, tg="125003.00" if _i == 3 else None)
+_rg_tt = _rg_times()
+_rg_dg = _rg_diag()
+check("RG-1: a fix 50 min ahead (a corrupt digit past the checksum) lets go after "
+      "TIME_BACK_N fixes: the track goes on, the false line is gone, a diag line says so",
+      hl.TIME_BACK <= 60 and hl.log["last_t"] == "2026-11-04T12:00:48Z"
+      and "20261104T125003Z" not in _rg_tt and "20261104T120048Z" in _rg_tt
+      and len(_rg_tt) >= 50 - hl.TIME_BACK_N - 3 and "time back" in _rg_dg,
+      repr((hl.log["last_t"], len(_rg_tt), _rg_dg[-120:])))
+# ... and a fix some seconds behind (jitter, a step of the clock) never counts
+_rg_reset()
+hl.st.update(date="2026-11-04", time="12:00:00")
+hl.log["last_t"] = "2026-11-04T12:00:50Z"
+for _i in range(30):
+    hl._time_back("2026-11-04T12:00:00Z", hl.log["last_t"])
+_rg_b0 = (hl.log["last_t"], hl.log["back"])
+hl.log["last_t"] = "2026-11-04T12:01:01Z"
+for _i in range(hl.TIME_BACK_N - 1):
+    hl._time_back("2026-11-04T12:00:00Z", hl.log["last_t"])
+_rg_b1 = hl.log["last_t"]
+hl._time_back("2026-11-04T12:00:00Z", hl.log["last_t"])
+check("RG-1: 50 s behind never lets go (the clock may step), 61 s behind does after "
+      "TIME_BACK_N fixes in a row, not before",
+      _rg_b0 == ("2026-11-04T12:00:50Z", 0) and _rg_b1 == "2026-11-04T12:01:01Z"
+      and hl.log["last_t"] is None, repr((_rg_b0, _rg_b1, hl.log["last_t"])))
+
+# RG-2: no real time (month 13, day 32, hour 25, minute 61) is no time
+_rg_dts = [hl._dt_s(d, t) for d, t in (
+    ("2026-13-32", "12:00:00"), ("2026-11-04", "25:00:00"), ("2026-11-04", "12:61:00"),
+    ("2026-11-04", "12:00:61"), ("2026-02-29", "00:00:00"), ("2027-02-29", "00:00:00"),
+    ("2026-04-31", "00:00:00"), ("2019-12-31", "23:59:59"), ("2100-01-01", "00:00:00"),
+    ("2026-11-0x", "12:00:00"), ("", "12:00:00"))]
+_rg_ok = (hl._dt_s("2028-02-29", "23:59:59"), hl._dt_s("2026-11-04", "12:00:05"),
+          hl._dt_s("2026-11-04T12:00:05Z", "2026-11-04T12:00:05Z", 11))
+check("RG-2: _dt_s is None for a date or a time that does not exist (and outside 2020-2099), "
+      "as _kb_time says; real ones are as before",
+      _rg_dts == [None] * 11 and _rg_ok == (
+          calendar.timegm((2028, 2, 29, 23, 59, 59)) - calendar.timegm((2020, 1, 1, 0, 0, 0)),
+          calendar.timegm((2026, 11, 4, 12, 0, 5)) - calendar.timegm((2020, 1, 1, 0, 0, 0)),
+          calendar.timegm((2026, 11, 4, 12, 0, 5)) - calendar.timegm((2020, 1, 1, 0, 0, 0))),
+      repr((_rg_dts, _rg_ok)))
+_rg_reset()
+for _i in range(20):
+    if _i == 2:
+        _rg_sec("120002.00", date="321326")          # day 32, digits only
+    elif _i == 8:
+        _rg_sec("256100.00")                         # hour 25, minute 61
+    else:
+        _rg_sec("1200%02d.00" % _i)
+_rg_tt = _rg_times()
+check("RG-2: a second whose date or time does not exist is skipped alone: no line, no clock, "
+      "no 10 s gap (the sentences are not errors: the checksum held)",
+      len(_rg_tt) == 17 and hl.log["last_t"] == "2026-11-04T12:00:18Z"
+      and hl.st["err"] == 0 and hl.log["clock"][0] == hl._dt_s("2026-11-04", "12:00:18")
+      and not any(x[4:6] == "13" or x[9:11] == "25" for x in _rg_tt),
+      repr((len(_rg_tt), hl.log["last_t"], hl.st["err"], hl.log["clock"])))
+
+# RG-3: the display goes dark though the PWM cannot be set; start() twice
+class _RgBadPwm(object):
+    def duty_u16(self, d=None):
+        raise ValueError("pwm")
+
+
+_ft._D.bl, _ft._D.pwm = 21, _RgBadPwm()
+_pin_levels[:] = []
+_rg_oe = None
+try:
+    _ft.off()
+except Exception as e:
+    _rg_oe = e
+_rg_off = ([p[:2] for p in _pin_levels if p[0] == 21][-1:], _ft._D.pwm, _rg_oe)
+_Pwm.live.clear()
+try:
+    _ft.start(30, 21)
+    _rg_p1 = _Pwm.live.get(21)
+    _ft.start(30, 21)                     # again: a PWM made anew, at the level
+    _rg_p2 = _Pwm.live.get(21)
+except Exception:
+    _rg_p1 = _rg_p2 = None
+_rg_st = (_rg_p1 is not None and _rg_p2 is not _rg_p1 and _rg_p2.duty == 30 * 65535 // 100
+          and _ft._D.pwm is _rg_p2)
+_ft._D.pwm = None
+check("RG-3: off() ends with the pin low when the PWM raises (taken back as an output, "
+      "the PWM forgotten); start() again makes the PWM anew at the level it is given",
+      _rg_off == ([(21, 0)], None, None) and _rg_st, repr((_rg_off, _rg_st)))
+_rg_t0, _rg_p0, _rg_d0 = hl._tft, _ft.pressed, hl._diag_write
+hl._tft = _ft
+hl._tft_t[:] = [None, None, 0, 0, 0]
+hl._tft_l[:] = [None, None, None]
+hl._diag_write = lambda l: None
+
+
+def _rg_boom():
+    raise ValueError("pin")
+
+
+_ft.pressed = _rg_boom
+_rg_e = None
+try:
+    hl.tft_tick(_clock[0])
+    hl.tft_tick(_clock[0] + 1)
+except Exception as e:
+    _rg_e = e
+_rg_ok3 = (_rg_e, hl._tft is _ft, hl._tft_t[2:])
+_ft.pressed = _rg_p0
+hl._tft, hl._diag_write = _rg_t0, _rg_d0
+hl._tft_t[:] = [None, None, 0, 0, 0]
+check("RG-3: a button that raises leaves tft_tick quietly, the display and its counts are "
+      "as they were (nothing leaves tft_tick)",
+      _rg_ok3 == (None, True, [0, 0, 0]), repr(_rg_ok3))
+
+# RG-4: the next NTP era only for a young build
+class _RgNtpSock(object):
+    reply, ev = 0, []
+    SOCK_DGRAM = 2
+
+    def __init__(self, *a):
+        self.q = None
+
+    @staticmethod
+    def getaddrinfo(*a):
+        _RgNtpSock.ev.append("dns")
+        return [(2, 2, 0, "", ("192.0.2.1", 123))]
+
+    def settimeout(self, x):
+        pass
+
+    def sendto(self, q, a):
+        self.q = bytes(q)
+
+    def recv(self, n):
+        r = bytearray(48)
+        r[0], r[1] = 0x24, 2
+        r[24:32] = self.q[40:48]
+        r[40:44] = _RgNtpSock.reply.to_bytes(4, "big")
+        return bytes(r)
+
+    def close(self):
+        pass
+
+
+_RgNtpSock.socket = _RgNtpSock
+_rg_u = lambda y, mo, d: calendar.timegm((y, mo, d, 0, 0, 0))
+_rg_v = lambda u: (u + 2208988800) % (1 << 32)       # NTP seconds, 32 bits
+_rg_s = hl.socket, hl.FW_BUILD, hl.feed
+hl.socket = _RgNtpSock
+hl.feed = lambda: _RgNtpSock.ev.append("feed")
+
+
+def _rg_ask(v, build):
+    _RgNtpSock.reply, hl.FW_BUILD = v, build
+    return hl._ntp_ask()
+
+
+_rg_ev = None
+_rg_a = [_rg_ask(_rg_v(_rg_u(2026, 11, 20)), _rg_u(2026, 11, 8)),
+         _rg_ask(10, _rg_u(2026, 11, 8)),                     # 1900: not 2036
+         _rg_ask(10 + 3 * 86400, _rg_u(2026, 11, 8)),
+         _rg_ask(1000000000, _rg_u(2026, 11, 8)),             # 1931: not 2067
+         _rg_ask(_rg_v(_rg_u(2037, 6, 1)), _rg_u(2033, 1, 1)),  # a real 2037
+         _rg_ask(_rg_v(_rg_u(2037, 6, 1)), _rg_u(2026, 11, 8)),  # an old build
+         _rg_ask(0, _rg_u(2033, 1, 1))]
+_RgNtpSock.ev[:] = []
+_rg_ask(_rg_v(_rg_u(2026, 11, 20)), _rg_u(2026, 11, 8))
+_rg_ev = list(_RgNtpSock.ev)
+hl.socket, hl.FW_BUILD, hl.feed = _rg_s
+_rg_d20 = lambda u: u - _rg_u(2020, 1, 1)
+check("RG-4: _ntp_ask believes the next era only within NTP_ERA of the build (1900 and 1931 "
+      "are no 2036 and 2067; a real 2037 is, for a build of 2033); feed() before and "
+      "after the name lookup",
+      _rg_a == [_rg_d20(_rg_u(2026, 11, 20)), None, None, None, _rg_d20(_rg_u(2037, 6, 1)),
+                None, None] and _rg_ev == ["feed", "dns", "feed"], repr((_rg_a, _rg_ev)))
+
+# RG-5: a board on a desk without a usable fix goes dark too; no stamp ages past 2**30 ms
+_lt = _LightTft()
+_rg_t0, _rg_g, _rg_d0 = hl._tft, (hl.TFT_LIGHT, hl.TFT_IDLE, hl.TFT_WAKE), hl._diag_write
+hl._tft, hl._diag_write = _lt, lambda l: None
+hl.TFT_LIGHT, hl.TFT_IDLE, hl.TFT_WAKE = 30, 300000, 60000
+_rg_reset()
+hl._tft_l[:] = [None, None, None]
+_rg_sl = hl.log["still"]
+hl.wifi.update(state="connected", home=True)
+_T = 7000000
+_rg_d = []
+for _dd in (0, 299000, 301000):
+    hl._tft_light(_T + _dd)
+    _rg_d.append(_lt.lv[-1])
+_rg_sl["last_at"] = _T + 302000                # a usable fix: not a stay
+hl._tft_light(_T + 302000)
+_rg_d.append(_lt.lv[-1])
+_rg_sl["last_at"] = None
+hl._tft_light(_T + 303000)                 # no fix again: a stay, TFT_IDLE from now
+_rg_d.append(_lt.lv[-1])
+hl._tft_light(_T + 303000 + 301000)
+_rg_d.append(_lt.lv[-1])
+hl.wifi.update(state="offline", home=False)   # away without a fix: lit (in a bag, a tunnel)
+hl._tft_light(_T + 700000)
+_rg_d.append(_lt.lv[-1])
+hl._tft_light(_T + 700000 + 3600000)
+_rg_d.append(_lt.lv[-1])
+check("RG-5: at home on the home network with no usable fix for STILL_GAP counts as a stay "
+      "(dark after TFT_IDLE); a usable fix, or being away, does not",
+      _rg_d == [30, 30, 0, 30, 30, 0, 30, 30], repr(_rg_d))
+# 13 days of stay and one press of the button, one tick every 30 s, on a wrapping clock
+_wrap = 1 << 30
+_td0, _ta0 = time.ticks_diff, time.ticks_add
+time.ticks_diff = lambda a, b: (a - b + (_wrap >> 1)) % _wrap - (_wrap >> 1)
+time.ticks_add = lambda a, b: (a + b) % _wrap
+_rg_reset()
+hl.wifi.update(state="offline", home=False)
+hl.log["still"]["active"] = True
+_lt.lv[:] = []
+hl._tft_l[:] = [None, None, None]
+_n = 0
+try:
+    hl._tft_l[2] = 5000
+    for _n in range(13 * 86400 // 30 + 40):
+        hl._tft_light((5000 + _n * 30000) % _wrap)
+finally:
+    time.ticks_diff, time.ticks_add = _td0, _ta0
+_rg_w = list(_lt.lv)
+hl.log["still"]["active"] = False
+hl._tft, hl._diag_write = _rg_t0, _rg_d0
+hl.TFT_LIGHT, hl.TFT_IDLE, hl.TFT_WAKE = _rg_g
+hl._tft_l[:] = [None, None, None]
+check("RG-5: after 13 days of stay (12.4 d is 2**30 ms) the display is still dark, and the "
+      "button of day 0 does not light it again",
+      _rg_w == [100, 30, 0], repr(_rg_w))
+
+# RG-7: the history trims whole days; a GSA without a system id
+_rg_h = os.path.join(_rg_td, "hist")
+os.makedirs(_rg_h)
+_rg_hs = hl.HIST_DIR, hl.free
+hl.HIST_DIR = _rg_h
+for _n in ("20261101.trb", "20261101.trk", "20261102.trb", "20261103.trb"):
+    with open(os.path.join(_rg_h, _n), "w") as f:
+        f.write("x")
+hl.free = lambda: 0 if len(os.listdir(_rg_h)) > 3 else 1 << 30
+hl._hist_trim(1000)
+_rg_a1 = sorted(os.listdir(_rg_h))
+hl.free = lambda: 0
+hl._hist_trim(1000)
+_rg_a2 = sorted(os.listdir(_rg_h))
+shutil.rmtree(_rg_h)
+os.makedirs(_rg_h)
+for _n in ("20261103.trb", "20261103.trk"):
+    with open(os.path.join(_rg_h, _n), "w") as f:
+        f.write("x")
+hl._hist_trim(1000)
+_rg_a3 = sorted(os.listdir(_rg_h))
+hl.HIST_DIR, hl.free = _rg_hs
+check("RG-7: _hist_trim drops a day at a time (a day's .trb and .trk go together) and keeps "
+      "the newest day whole, whatever it holds",
+      _rg_a1 == ["20261102.trb", "20261103.trb"] and _rg_a2 == ["20261103.trb"]
+      and _rg_a3 == ["20261103.trb", "20261103.trk"], repr((_rg_a1, _rg_a2, _rg_a3)))
+_rg_u2 = []
+for _tk, _bd in (("GP", "GPGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2"),
+                 ("GL", "GLGSA,A,3,65,66,,,,,,,,,,,1.5,0.9,1.2"),
+                 ("GN", "GNGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2"),
+                 ("GN", "GNGSA,A,3,07,08,,,,,,,,,,,1.5,0.9,1.2,3")):
+    hl._uc_sv["gsa"] = None
+    _uc_feed(hl, _nmea(_bd))
+    _rg_u2.append(list(hl._uc_sv["used"]))
+check("RG-7: a GSA before NMEA 4.10 (no system id) counts for its talker's system, a GN one "
+      "for none; with the id (4.10) as before",
+      _rg_u2 == [[1, 2, 3], [6 << 8 | 65, 6 << 8 | 66], [], [2 << 8 | 7, 2 << 8 | 8]],
+      repr(_rg_u2))
+hl.LOG_DIR, hl.DIAG_FILE, hl.DIAG_OLD, hl._diag_write = _rg_saved
+shutil.rmtree(_rg_td, ignore_errors=True)
 
 # OTA: each board only its own firmware
 _mf = {"build": 5, "commit": "abc1234", "size": 9, "sha256": "0" * 64,
@@ -19752,9 +20083,9 @@ def _rb_panel(text):
 
 
 _TftSpi.fail = False
-_ft.start()
+_ft.start(100, 21)
 _rb_new = _rb_panel(_ft_saved)
-_ft.start()
+_ft.start(100, 21)
 _rb_old = _rb_panel(_ft_all)
 _rb_diff = [i for i in range(len(_rb_old)) if _rb_old[i] != _rb_new[i]]
 

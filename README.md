@@ -80,7 +80,9 @@ firmware R6.0.0.0Build3700.
   standing costs next to nothing). The speed is on the status page and in
   `status.json`. It never scrolls. The backlight (the one part that wears) is a 2 kHz PWM: `TFT_LIGHT`
   per cent (default 30) by day, dark once a stay has lasted `TFT_IDLE` seconds (default 300:
-  the board has not moved, so nobody looks at it), and dim again when it moves. The USER
+  the board has not moved, so nobody looks at it; on the home network with no usable fix
+  for 30 s, say on a desk indoors, counts as a stay too), and dim again when it moves. It
+  lights at that level when the display starts (after `.env` is read). The USER
   button gives full light for a minute, also in the dark; a tap is enough. A change is a
   `tft light N` line in the diag. The route survives a
   reboot in `/route.bin` (at most one write per 5 min of driving and one when a stay
@@ -164,7 +166,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix came since the boot. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too. |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix came since the boot. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). |
 | `TFT_LIGHT` / `TFT_IDLE` | The display's backlight: `TFT_LIGHT` 0–100 per cent while it is on (default 30; 0 keeps it dark, the USER button still lights it), `TFT_IDLE` 0–86400 seconds into a stay (the board has not moved) before it goes dark (default 300; 0: never). Read at boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
@@ -544,6 +546,10 @@ were), `gps setup not taken: …` (at most one per 10 minutes,
 `GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `gps setup lost: no
 GST`, `gps refused <command>`, `gps silent N s, no bytes from the receiver` and
 `gps back after N s` (no byte from the receiver for a minute, `GPS_SILENT`),
+`time back <false> <real>` (the fixes were ten seconds running more than a minute behind
+the last line written, `TIME_BACK`: a time with a corrupt digit had got past the
+checksum, so the track would have stopped until it came true; it goes on in a new
+segment),
 `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
