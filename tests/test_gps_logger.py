@@ -12207,6 +12207,38 @@ check("trk2gpx: a .trk.bad converts; damaged bytes and bad times dropped",
 check("trk2gpx: a non-digit time is not a time",
       trk2gpx._iso("2026102XT101501Z") is None
       and trk2gpx._iso("20261029T101501Z") == "2026-10-29T10:15:01Z")
+# a damaged byte 0x0D ('-' with bit 5 cleared) ends no line, as on the
+# board (universal newlines split it into a phantom TRK1 point at 0.3,120);
+# a cut-off last line ending in \r is still cut off
+t_cr = os.path.join(t_td, "20261029_101501.trk.bad")
+with open(t_cr, "wb") as f:
+    f.write(b"#TRK2\n47.500010,\r0.300010,120.0,3.0,1.5,20261029T101501Z\n"
+            b"47.5,19.0,100.0,3.0,1.5,20261029T101502Z\n"
+            b"47.5,19.0,100.0,3.0,1.5,20261029T101503Z\r")
+sys.stdout = io.StringIO()
+try:
+    rc = trk2gpx.main(["trk2gpx.py", t_cr])
+    gpx_cr = sys.stdout.getvalue()
+finally:
+    sys.stdout = saved_out
+check("trk2gpx: a byte 0x0D splits no line (only \\n ends one, as _rd_line)",
+      rc == 0 and 'lon="120.000000"' not in gpx_cr
+      and "10:15:03Z" not in gpx_cr and gpx_cr.count("<trkpt") <= 2,
+      gpx_cr[:400])
+# number fields float() takes that are no xsd:decimal are written as the
+# logger's _ptnum writes them ("%.1f"), plain decimals as written
+g_num = trk2gpx.convert(["#TRK1\n", "47.5,19.0,1_0.0,0.9,20261029T101500Z\n",
+                         "47.5,19.0,1e3,1E1,20261029T101501Z\n",
+                         "47.5,19.0, 10.0 ,100,20261029T101502Z\n",
+                         "#TRK2\n",
+                         "47.5,19.0,-2.5,1e0,5_0,20261029T101503Z\n"], "x")
+check("trk2gpx: ele/hdop/acc/speed are xsd:decimal (1_0.0, 1e3, ' 10.0 ')",
+      "<ele>10.0</ele>" in g_num and "<ele>1000.0</ele>" in g_num
+      and "<hdop>10.0</hdop>" in g_num and "<hdop>100</hdop>" in g_num
+      and "<ele>-2.5</ele>" in g_num and "<esp:acc>1.0</esp:acc>" in g_num
+      and "<esp:speed>50.0</esp:speed>" in g_num
+      and not re.search(r">[^<]*[_eE ][^<]*</(ele|hdop|esp:)", g_num),
+      g_num)
 shutil.rmtree(t_td, ignore_errors=True)
 
 
