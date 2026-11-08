@@ -158,7 +158,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track or the board clock. |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix came since the boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
@@ -391,10 +391,13 @@ firmware's files. A crash or reset before that and
 the bootloader boots the old slot; no WiFi or no manifest within 10 minutes
 (`OTA_HEALTH`) and it resets itself, with the same result (it never sets
 the old slot to boot itself: that left the old image pending, and the next
-reset fell back to `ota_0`). A download that fails its SHA-256, or a page
-file that fails its SHA-256 or cannot be written, is tried again an hour
-later (`OTA_RETRY`), not every check; an error (server down) goes to the
-diagnostic log once per kind. A build that crashed (the logger's crash
+reset fell back to `ota_0`). A download that fails its SHA-256 or is cut
+short (a network error, a short body), or a page file that fails its
+SHA-256 or cannot be written, is tried again an hour later (`OTA_RETRY`),
+not every check (the image came again every 10 minutes, the loop blocked
+for it); an error (server down) goes to the diagnostic log once per kind.
+Points waiting for upload hold the check back only with a `GEO_URL` and
+`API_KEY` to send them to (without, they would hold it for good). A build that crashed (the logger's crash
 branch notes it in `/ota.mark`) or whose watchdog fired while the logger
 ran is noted in `/ota.bad` and not tried again. Any other rollback may
 not be the build's fault and is a try instead, counted per build in
@@ -485,10 +488,12 @@ A bug in the WiFi, upload or OTA tick, the status page's or a status
 line's, no longer resets the board: it is
 one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
 (`TICK_PAUSE`) and logging goes on; an upload bug also backs the upload
-off. Ten MemoryErrors in a row there (`GUARD_MEM_MAX`) are a memory reboot,
-as the crash reset used to be. A bug in the logging itself, and anything
-while an OTA image is pending, still goes to the crash branch, except a
-MemoryError in the page or a status line: no reason to blame the new build.
+off. Ten MemoryErrors of one tick in a row (`GUARD_MEM_MAX`, counted per
+tick: the others running through meanwhile clear nothing) are a memory
+reboot, as the crash reset used to be. A bug in the logging itself, and any
+bug while an OTA image is pending, still goes to the crash branch, except a
+MemoryError in any guarded tick: no reason to blame the new build for a low
+heap in its first minutes (it went to `/ota.bad` for good).
 
 In the REPL after 5 a frozen firmware no longer waits for good: after 30
 minutes (`BOOT_RETRY_MS`) a timer sets the count back to 4 and resets, one
@@ -532,7 +537,8 @@ GST`, `gps refused <command>`, `gps silent N s, no bytes from the receiver` and
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
 used, `clock set <UTC>` once a boot when the board clock is set from the
-GPS, `clock ntp <UTC>` when NTP tells the display the time before a fix, `heap grew in <step> to N KB` when the
+GPS (`clock set <UTC> ntp`: from NTP, no fix since the boot), `clock ntp
+<UTC>` when NTP tells the display the time before a fix, `heap grew in <step> to N KB` when the
 Python heap grew during an upload step (`read_batch`, `connect`,
 `tls_wrap`, `post`, the whole POST: the step that took IDF heap), a
 `reboot tls memory` or
@@ -689,7 +695,8 @@ it the page shows a dark map and the system font. The page is a file on the
 board, kept only gzipped (`/web.html.gz`, ~27 KB instead of the ~94 KB
 `web.html`, whose comments and indentation `tools/web_min.py` takes out at build
 time; copied by `deploy.sh` or an OTA) and loads once: a browser
-(`Accept-Encoding: gzip`) gets the file as is; a client without gzip (curl
+(`Accept-Encoding: gzip`, in a bare-LF request too; a `gzip;q=0` token
+refuses it) gets the file as is; a client without gzip (curl
 without `--compressed`) gets it inflated on the board as it goes out
 (`deflate.DeflateIO`, no `Content-Length`; a firmware without the
 `deflate` module answers 406, one short of RAM for it 503). The file is
@@ -828,7 +835,8 @@ console line.
 - **Midnight.** Only `RMC` carries the date, and only with a fix (before one the
   UC6580's `RMC` carries a made-up date). A second that runs back past midnight
   without its own `RMC` has no date, so it is not a fix rather than a day off.
-- **Clock.** The board clock (for TLS certificate dates) is set from a fix.
+- **Clock.** The board clock (for TLS certificate dates) is set from a fix,
+  from NTP until the first one.
 
 ### Points and track files
 
@@ -1198,8 +1206,9 @@ home.
   2000-01-01 at every boot, so before a POST the logger sets it from a
   valid GPS fix (a date in 2020–2087): once a boot (`clock set …` in the
   diagnostic log), again only when it drifted more than 5 s
-  (`RTC_DRIFT`). With `/ca.der` and no fix since the boot, verified POSTs
-  fail until there is one.
+  (`RTC_DRIFT`). With no fix since the boot (indoors, at home) the NTP
+  answer sets it meanwhile (`clock set … ntp`; before, verified POSTs
+  failed until the first fix), and a fix sets it again when it differs.
 - **TLS memory:** five TLS allocation failures in a row at home
   (`TLS_REBOOT_N`; any other error ends the run) restart the board cleanly
   (`reboot tls memory` in the diagnostic log): the IDF heap stays
