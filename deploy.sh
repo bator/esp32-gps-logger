@@ -108,13 +108,11 @@ try:
           getattr(gps_frozen, 'BOOT', '-'))
 except ImportError:
     print('plain')" | tr -d '\r' | grep -E '^(frozen [A-Za-z0-9._-]+ [A-Za-z0-9._-]+( [A-Za-z0-9._-]+){0,2}|plain)$' | tail -n 1 || true)
-KEEP_MPY=0
 RM_MPY=0                                 # (a frozen logger: drop a gps_logger.mpy that shadows it)
 case "$FROZEN" in
     frozen*)
         read -r _ FCOMMIT FSHA FTFT FBOOT <<< "$FROZEN"
         if [ "${FORCE_MPY:-0}" = 1 ]; then
-            KEEP_MPY=1
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
             echo "WARNING: it shadows the frozen one and takes ~100 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
