@@ -13153,6 +13153,7 @@ else:
         ("ota a3f2271: download 404, sha256 mismatch", "otax"),
         ("ota a3f2271 installed (was 2e8bc6e), rebooting", "ota"),
         ("ota a3f2271 booted, checking", "ota"),
+        ("ota note unreadable, dropped (running 2e8bc6e)", "otax"),
         ("ota a3f2271 set to boot, not run yet: rebooting into it", "ota"),
         ("ota a3f2271 crashed, rolled back by the bootloader: bad (running "
          "2e8bc6e)", "ota"),
@@ -15803,9 +15804,12 @@ try:
         mp = os.path.join(ROOT, "main.py")
         ns = {"__name__": "boot_crash"}
         exec(compile(open(mp).read(), mp, "exec"), ns)
-        saved = (gb.OTA_PENDING, gb.OTA_MARK, ns["time"].sleep)
+        saved = (gb.OTA_PENDING, gb.OTA_MARK, ns["time"].sleep,
+                 sys.modules.get("gps_frozen"))
         gb.OTA_PENDING, gb.OTA_MARK = gl.OTA_PENDING, gl.OTA_MARK
         ns["time"].sleep = lambda s: None
+        fz = sys.modules["gps_frozen"] = types.ModuleType("gps_frozen")
+        fz.BUILD = 200                   # (the running firmware: the note's)
         out = []
         try:
             for pend in (True, False):
@@ -15816,7 +15820,11 @@ try:
                 ns["_boot_handle_error"]()
                 out.append(gl._ota_mark_get())
         finally:
-            gb.OTA_PENDING, gb.OTA_MARK, ns["time"].sleep = saved
+            gb.OTA_PENDING, gb.OTA_MARK, ns["time"].sleep = saved[:3]
+            if saved[3] is None:
+                del sys.modules["gps_frozen"]
+            else:
+                sys.modules["gps_frozen"] = saved[3]
             RTC.mem = b""
         return out
     mc = _guarded(_t_main_crash)
@@ -18614,7 +18622,10 @@ _n_asked = len(_NtpMod.asked)
 hl.ntp_tick(_clock[0] + hl.NTP_AGAIN - 1)
 _n_held = len(_NtpMod.asked) == _n_asked
 hl.log["clock"] = (_DAY, _clock[0])
+_n_url = hl.up["url"]
+hl.up["url"] = "http://d.example"        # (https asks on: RN2-5)
 hl.ntp_tick(_clock[0] + hl.NTP_AGAIN * 2)
+hl.up["url"] = _n_url
 _n_fixed = len(_NtpMod.asked) == _n_asked
 hl.log["clock"] = None
 hl.ntp_tick(_clock[0] + hl.NTP_AGAIN)
@@ -19360,7 +19371,12 @@ def _gm_zero():
     """Every guarded MemoryError count to 0 (one list entry before RN-3)."""
     gm = gl._guard_mem
     for k in (gm if isinstance(gm, dict) else range(len(gm))):
-        gm[k] = 0
+        gm[k] = [0, None] if isinstance(gm[k], list) else 0
+
+
+def _gm_set(name, n):
+    """A tick's guarded MemoryError count n, the last one just now."""
+    gl._guard_mem[name] = [n, gl.time.ticks_ms()]
 
 
 def _rb_web(home=False, away=False):
@@ -19514,32 +19530,35 @@ _rb_reboots = []
 _rb_saved = (gl._mem_reboot, gl._mem_reboot_soon, gl._bug_once)
 gl._mem_reboot = _rb_reboots.append
 gl._mem_reboot_soon = lambda: False
-_gm = gl._guard_mem                    # (a list of one count before RN-3)
-_gk = lambda n: n if isinstance(_gm, dict) else 0
+_gm = gl._guard_mem
 try:
     gl._tick_bug.clear()
-    _gm[_gk("web")] = gl.GUARD_MEM_MAX - 2
-    gl._guarded("web", lambda: None, None, True)
-    _rb_kept = _gm[_gk("web")]      # a page tick running through: no proof
+    _gm_set("web", gl.GUARD_MEM_MAX - 2)
+    gl._guarded("web", lambda: None)
+    _rb_kept = _gm["web"][0]        # a page tick running through: no proof
     gl.ota["pend"] = 200
-    _gm[_gk("web")] = gl.GUARD_MEM_MAX
-    gl._guarded("web", _rb_oom, None, True)
-    _rb_pend = list(_rb_reboots)         # (a reset would abort the image)
+    _gm_set("web", gl.GUARD_PEND_MAX - 1)
+    try:                            # (a persistent one with an image pending
+        gl._guarded("web", _rb_oom)  # raises: RN2-1; no memory reboot, a
+        _rb_pend = "swallowed"      # reset would abort the image)
+    except MemoryError:
+        _rb_pend = "raised"
+    _rb_pend = (_rb_pend, list(_rb_reboots))
     gl.ota["pend"] = None
     gl._tick_bug.clear()
-    _gm[_gk("web")] = gl.GUARD_MEM_MAX - 1
-    gl._guarded("web", _rb_oom, None, True)
+    _gm_set("web", gl.GUARD_MEM_MAX - 1)
+    gl._guarded("web", _rb_oom)
     _rb_due = list(_rb_reboots)
     gl._tick_bug.clear()
-    _gm[_gk("wifi")] = 3
+    _gm_set("wifi", 3)
     gl._guarded("wifi", lambda: None)
-    _rb_clear = _gm[_gk("wifi")]         # (its own count: RN-3)
+    _rb_clear = _gm["wifi"][0]           # (a pass clears no count: RN2-1)
     # the telling allocates too: out of memory it stays quiet, in the loop
     gl._tick_bug.clear()
     gl._bug_once = _rb_oom
     _rb_tell = "ok"
     try:
-        gl._guarded("diag", _rb_oom, 1, True)
+        gl._guarded("diag", _rb_oom, 1)
     except MemoryError:
         _rb_tell = "raised"
 finally:
@@ -19547,12 +19566,13 @@ finally:
     gl._mem_reboot, gl._mem_reboot_soon, gl._bug_once = _rb_saved
     _gm_zero()
     gl._tick_bug.clear()
-check("RB-OOM-COUNT: a page tick that runs through clears no count of a lasting "
-      "MemoryError (another tick's success clears its own), no memory reboot with "
-      "an image pending, one at GUARD_MEM_MAX without; a MemoryError in the "
+check("RB-OOM-COUNT: a tick that runs through clears no count of a lasting "
+      "MemoryError, no memory reboot with an image pending (it raises at "
+      "GUARD_PEND_MAX), one at GUARD_MEM_MAX without; a MemoryError in the "
       "telling stays in",
-      _rb_kept == gl.GUARD_MEM_MAX - 2 and _rb_pend == []
-      and _rb_due == ["guarded memory web"] and _rb_clear == 0 and _rb_tell == "ok",
+      _rb_kept == gl.GUARD_MEM_MAX - 2 and _rb_pend == ("raised", [])
+      and _rb_due == ["guarded memory web"] and _rb_clear == 3
+      and _rb_tell == "ok",
       repr((_rb_kept, _rb_pend, _rb_due, _rb_clear, _rb_tell)))
 
 # RB-KB-FEED: _kb_seek from the start of a long .trb, on no feed
@@ -20071,7 +20091,7 @@ try:
             rn1.append(("swallowed", "upload" in gl._tick_bug))
         except Exception as e:
             rn1.append(type(e).__name__)
-    rn1 += [_gm[_gk("upload")], list(_rn_reb)]
+    rn1 += [_gm["upload"][0], list(_rn_reb)]
     gl.ota["pend"] = None
     check("RN-1: a MemoryError in any guarded tick while an OTA image is "
           "pending is gc + TICK_PAUSE, not a crash that blames the build; a "
@@ -20087,7 +20107,7 @@ try:
         gl._tick_bug.clear()
         gl._guarded("upload", lambda: (_ for _ in ()).throw(MemoryError()))
         gl._guarded("wifi", lambda: None)
-    rn3 = (list(_rn_reb), _gm[_gk("upload")], _gm[_gk("wifi")])
+    rn3 = (list(_rn_reb), _gm["upload"][0], _gm["wifi"][0])
     check("RN-3: a tick's MemoryErrors are counted per tick: GUARD_MEM_MAX of "
           "the upload's in a row reboot while the WiFi tick runs through",
           rn3 == (["guarded memory upload"], 0, 0), repr(rn3))
@@ -20145,27 +20165,19 @@ try:
     check("RN-4: points waiting with no GEO_URL / API_KEY do not hold the "
           "update check back (they would for good); with one they do",
           rn4 == [1, False, 1], repr(rn4))
-    # RN-9: an /ota.pending that is there but cannot be read or parsed is a
-    # pending image with an unknown build: the health check runs as the
-    # running build's; it was "no note", the image confirmed unchecked
+    # RN-9: an /ota.pending that is there but cannot be read or parsed is
+    # reported as (None, "?", []) by _ota_pending; what ota_boot does with
+    # it is RN2-7 (dropped, the running image confirmed once)
     _ota_reset()
     gl.FW_BUILD = 200
     with open(gl.OTA_PENDING, "wb") as f:
         f.write(b"\xff\xfe garbage\n")
     rn9 = [gl._ota_pending()]
-    gl.ota_boot()
-    rn9 += [gl.ota["pend"], gl.ota["state"], ("valid",) in _ota_log]
     os.remove(gl.OTA_PENDING)
-    gl.ota.update(pend=None, state="idle")
     rn9.append(gl._ota_pending())
-    gl.ota_boot()
-    rn9.append(("valid",) in _ota_log)
-    gl.ota["pend"] = None
     gl.FW_BUILD = 100
-    check("RN-9: a damaged /ota.pending keeps the image pending (health check "
-          "as the running build), only a missing one confirms it",
-          rn9 == [(None, "?", []), 200, "pending", False, None, True],
-          repr(rn9))
+    check("RN-9: a damaged /ota.pending reads as an unknown build, a missing "
+          "one as none", rn9 == [(None, "?", []), None], repr(rn9))
     # RN-5: a head over HTTP_LINES pieces is an error, not the rest of the
     # head read as the body (a GET's Content-Length missed: the manifest no
     # JSON, the image's sha256 wrong at every check, no clue); a POST keeps
@@ -20301,6 +20313,463 @@ finally:
     gl.up_reset()
     diag_clear()
     shutil.rmtree(_rn_dir, ignore_errors=True)
+
+# --- review 2026-11-08b: net/OTA (RN2-n) ------------------------------------
+_n2_dir = tempfile.mkdtemp(prefix="rn2-")
+_n2_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
+             gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
+             gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES, gl.OTA_MARK, gl.OTA_SHADOW,
+             gl._mem_reboot, gl._mem_reboot_soon, _ota_dir, gl._diag_write,
+             gl.NTP_SERVER, gl._ntp_ask, gl.up["url"], gl._wifi_begin_round,
+             gl._try_roam_home, gl.socket, gl.read_uart, gl.feed,
+             gl._rtc_sync, gl._tls_wrap, gl._ota_promote, gl._rm,
+             gl.wifi["wlan"])
+_n2_log = dict((k, gl.log.get(k)) for k in ("clock",))
+_n2_ntp = list(gl._ntp)
+_n2_st = dict((k, gl.st.get(k)) for k in ("valid", "date", "time", "lat",
+                                          "pos_at"))
+_ota_dir = _n2_dir
+gl.esp32, gl.HTTP_GET = _FakeEsp32, _ota_get
+gl.OTA_URL, gl.OTA_KEY = "http://ota.lan/gps/manifest.json", b"secret"
+gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+for _k in ("PENDING", "BAD", "TRIES", "MARK"):
+    setattr(gl, "OTA_" + _k, os.path.join(_n2_dir, "ota." + _k.lower()))
+_n2_page = os.path.join(_n2_dir, "web.html.gz")
+gl.OTA_PAGES = (_n2_page,)
+gl.OTA_SHADOW = (os.path.join(_n2_dir, "gps_logger.mpy"),)
+gl.machine.reset = lambda: _ota_log.append(("reset",))
+gl.DIAG = 60000
+_n2_reb = []
+gl._mem_reboot = lambda why: _n2_reb.append(why)
+gl._mem_reboot_soon = lambda: False
+
+
+def _n2_oom(*a):
+    raise MemoryError("memory allocation failed")
+
+
+def _n2_pending(build=100):
+    """A pending image as _ota_check leaves it, health due."""
+    _ota_reset()
+    with open(_n2_page + ".new", "wb") as f:
+        f.write(_page)
+    with open(gl.OTA_PENDING, "w") as f:
+        f.write("%d abc%04d\n%s" % (build, build, _n2_page))
+    with open(gl.OTA_TRIES, "w") as f:
+        f.write("%d 1\n" % build)
+    with open(gl.OTA_MARK, "w") as f:
+        f.write("stop")
+    with open(gl.OTA_SHADOW[0] + ".ota-old", "w") as f:
+        f.write("old module")
+    gl.wifi["state"] = "connected"
+    gl.ota.update(pend=build, pend_at=_clock[0] - gl.OTA_VALID_AFTER - 1,
+                  wifi_seen=True, probed=True, paths=[_n2_page],
+                  state="pending")
+
+
+def _n2_flash():
+    """What is left on flash of a pending image, as a sorted list."""
+    return sorted(os.path.basename(f) for f in (
+        gl.OTA_PENDING, gl.OTA_TRIES, gl.OTA_MARK, _n2_page + ".new",
+        gl.OTA_SHADOW[0] + ".ota-old", _n2_page) if os.path.exists(f))
+
+
+try:
+    # RN2-1: a tick's MemoryErrors count within GUARD_MEM_QUIET of each
+    # other: a pass that runs through between them (an upload in its
+    # backoff, an idle WiFi or OTA tick) clears nothing, so a lasting one
+    # reaches the memory reboot; ones further apart than the window are
+    # sporadic and never add up (a page, status or diag tick once a day)
+    gl.wifi_reset()
+    gl.ota["pend"] = None
+    gl._tick_bug.clear()
+    _gm_zero()
+    del _n2_reb[:]
+    for _ in range(gl.GUARD_MEM_MAX):
+        _clock[0] += gl.TICK_PAUSE
+        gl._guarded("upload", _n2_oom)
+        _clock[0] += gl.TICK_PAUSE
+        gl._guarded("upload", lambda: None)
+    n2_1 = [list(_n2_reb), gl._guard_mem["upload"][0]]
+    del _n2_reb[:]
+    _gm_zero()
+    for name in ("status", "web", "wifi"):
+        for _ in range(3 * gl.GUARD_MEM_MAX):
+            _clock[0] += gl.GUARD_MEM_QUIET + 1000
+            gl._guarded(name, _n2_oom)
+            gl._guarded(name, lambda: None)
+    n2_1 += [list(_n2_reb), gl._guard_mem["status"][0]]
+    check("RN2-1: a tick's guarded MemoryErrors count within GUARD_MEM_QUIET "
+          "of each other, a pass between them clears nothing: GUARD_MEM_MAX "
+          "reboot; further apart they never add up",
+          n2_1 == [["guarded memory upload"], 0, [], 1], repr(n2_1))
+
+    # RN2-2: an image pending: a MemoryError is gc + TICK_PAUSE and counted;
+    # GUARD_PEND_MAX of one tick raise (the build crashes, is rolled back
+    # and marked bad: a persistent one is its defect); no memory reboot;
+    # sporadic ones (further apart than the window) never raise
+    gl.ota["pend"] = 200
+    gl._tick_bug.clear()
+    _gm_zero()
+    del _n2_reb[:]
+    n2_2 = []
+    for i in range(gl.GUARD_PEND_MAX):
+        _clock[0] += gl.TICK_PAUSE
+        try:
+            gl._guarded("upload", _n2_oom)
+            n2_2.append("swallowed")
+        except MemoryError:
+            n2_2.append("raised")
+    n2_2.append(list(_n2_reb))
+    _gm_zero()
+    gl._tick_bug.clear()
+    r_ = 0
+    for i in range(3 * gl.GUARD_PEND_MAX):
+        _clock[0] += gl.GUARD_MEM_QUIET + 1000
+        try:
+            gl._guarded("upload", _n2_oom)
+        except MemoryError:
+            r_ += 1
+    n2_2.append(r_)
+    gl.ota["pend"] = None
+    check("RN2-2: with an image pending a MemoryError is swallowed and "
+          "counted, GUARD_PEND_MAX of one tick raise (no memory reboot); "
+          "sporadic ones never do",
+          n2_2 == ["swallowed"] * (gl.GUARD_PEND_MAX - 1) + ["raised", [], 0],
+          repr(n2_2))
+    gl._tick_bug.clear()
+    _gm_zero()
+
+    # RN2-3: the pending state ends after the confirmation steps. A
+    # MemoryError in _ota_promote (swallowed by the guard) left the RAM
+    # state "done" over the note, the staged page, OTA_TRIES and .ota-old
+    # on flash, and ota_tick never came back to finish; now the next tick
+    # runs the steps again. One in the closing diag line changes nothing
+    _real_promote = gl._ota_promote
+    n2_boom = [1]
+
+    def _n2_promote(paths):
+        if n2_boom[0]:
+            n2_boom[0] = 0
+            raise MemoryError("m")
+        _real_promote(paths)
+    gl._ota_promote = _n2_promote
+    _n2_pending()
+    gl._tick_bug.clear()
+    gl._guarded("ota", gl.ota_tick, _clock[0])
+    n2_3 = [gl.ota["pend"], gl.ota["state"], _n2_flash()]
+    _clock[0] += gl.TICK_PAUSE
+    gl._guarded("ota", gl.ota_tick, _clock[0])
+    with open(_n2_page, "rb") as f:
+        n2_3 += [gl.ota["pend"], gl.ota["state"], _n2_flash(), f.read() == _page]
+    gl._ota_promote = _real_promote
+    _n2_pending()
+    _real_dw = gl._diag_write
+    gl._diag_write = lambda line: (_ for _ in ()).throw(MemoryError("m"))
+    gl._tick_bug.clear()
+    try:
+        gl._guarded("ota", gl.ota_tick, _clock[0])
+    finally:
+        gl._diag_write = _real_dw
+    n2_3 += [gl.ota["pend"], gl.ota["state"], _n2_flash()]
+    # run again (a retry): the page is up already, no "not put up" line
+    diag_clear()
+    gl._ota_promote([_n2_page])
+    n2_3.append([l for l in diag_lines() if "not put up" in l])
+    check("RN2-3: _ota_health ends the pending state after the steps: a "
+          "MemoryError in one leaves it (and the flash) as it was, the next "
+          "tick finishes; in the closing diag line nothing is left over; "
+          "_ota_promote can run twice",
+          n2_3 == [100, "pending",
+                   ["gps_logger.mpy.ota-old", "ota.mark", "ota.pending",
+                    "ota.tries", "web.html.gz.new"],
+                   None, "ok", ["web.html.gz"], True,
+                   None, "ok", ["web.html.gz"], []], repr(n2_3))
+
+    # RN2-4: the clock a fix gave this boot sets the board clock when the
+    # fix is gone and no POST has set it yet (it was NTP's, or nothing: a
+    # board that had a fix outdoors, indoors at home, failed every verified
+    # POST's dates); it wins over NTP's answer, a stale one sets nothing
+    gl.st.update(valid=False)
+    wd = _dt.date(2026, 10, 31).weekday()
+    secs = ((_dt.date(2026, 10, 31) - _dt.date(2020, 1, 1)).days * 86400
+            + 12 * 3600)
+    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
+    gl._rtc_set[0] = False
+    diag_clear()
+    gl._ntp[0] = (secs + 3600, _clock[0] - 1000)
+    gl.log["clock"] = (secs, _clock[0] - 30000)
+    gl._rtc_sync(_clock[0])
+    n2_4 = [RTC.sets[:], [l for l in diag_lines() if l.startswith("clock")]]
+    RTC.sets[:] = []
+    gl._rtc_set[0] = False
+    gl.log["clock"] = (secs, _clock[0] - gl.TICKS_OLD - 10)
+    gl._ntp[0] = None
+    gl._rtc_sync(_clock[0])
+    n2_4.append(RTC.sets[:])
+    check("RN2-4: no fix now, none set the board clock yet: the last fix's "
+          "clock run on by the ticks sets it (over NTP's answer), a stale "
+          "one does not",
+          n2_4 == [[(2026, 10, 31, wd, 12, 0, 30, 0)],
+                   ["clock set 2026-10-31T12:00:30Z gps"], []], repr(n2_4))
+    gl._rtc_set[0] = False
+    RTC.sets[:] = []
+    diag_clear()
+
+    # RN2-5: a fix told the time, the board clock is not set yet and https
+    # is in use (GEO_URL or OTA_URL): NTP is asked on (it was never again
+    # after a fix); an http board, or one with the clock set, is not asked
+    asked = []
+    gl._ntp_ask = lambda: asked.append(1)
+    gl.NTP_SERVER = "ntp.test"
+    gl.wifi["state"] = "connected"
+    gl.log["clock"] = (secs, _clock[0])
+    n2_5 = []
+    for url, ota_url, rtc_set, clk in (
+            ("https://d.example", "http://ota.lan/m.json", False, True),
+            ("http://d.example", "http://ota.lan/m.json", False, True),
+            ("http://d.example", "https://ota.lan/m.json", False, True),
+            ("https://d.example", "https://ota.lan/m.json", True, True),
+            ("http://d.example", "http://ota.lan/m.json", False, False)):
+        gl.up["url"], gl.OTA_URL = url, ota_url
+        gl._rtc_set[0] = rtc_set
+        gl.log["clock"] = (secs, _clock[0]) if clk else None
+        gl._ntp[:] = [None, None, gl.NTP_RETRY]
+        del asked[:]
+        gl.ntp_tick(_clock[0])
+        n2_5.append(len(asked))
+    check("RN2-5: after a fix NTP is asked while the board clock is not set "
+          "and https is used (GEO_URL or OTA_URL); not for http, not once "
+          "set; before a fix as before",
+          n2_5 == [1, 0, 1, 0, 1], repr(n2_5))
+    gl.OTA_URL = "http://ota.lan/gps/manifest.json"
+    gl._rtc_set[0] = False
+
+    # RN2-6: an https GET (the OTA's) sets the board clock first, as a POST
+    # does; an http one does not
+    class _N2Sock(_GetSock):
+        ev = []
+        def connect(self, a):
+            _N2Sock.ev.append("connect")
+    gl.socket, gl.read_uart = _gsock, lambda: None
+    gl._rtc_sync = lambda now: _N2Sock.ev.append("rtc")
+    gl._tls_wrap = lambda s, h: s
+    n2_6 = []
+    try:
+        for u in ("https://h/x", "http://h/x"):
+            del _N2Sock.ev[:]
+            _gs[0] = _N2Sock(b"HTTP/1.0 404 Not Found\r\n\r\n")
+            gl._raw_get(u, bytearray().extend, 100)
+            n2_6.append(list(_N2Sock.ev))
+        # RN2-8 (the answers): no status line, one token, a long head
+        n2_8 = []
+        for resp in (b"", b"HTTP/1.0\r\n\r\n"):
+            _gs[0] = _GetSock(resp)
+            try:
+                gl._raw_get("http://h/x", bytearray().extend, 100)
+                n2_8.append("ok")
+            except OSError:
+                n2_8.append("OSError")
+        hdrs = b"".join(b"X-Pad-%d: y\r\n" % i for i in range(gl.HTTP_LINES + 6))
+        _gs[0] = _GetSock(b"HTTP/1.0 404 Not Found\r\n" + hdrs + b"\r\n")
+        n2_8.append(gl._raw_get("http://h/x", bytearray().extend, 100))
+        # the DNS lookup is fed around
+        fed = []
+        gl.feed = lambda: fed.append("feed")
+        _gsock.getaddrinfo = lambda h, p, a=0, b=0: (
+            fed.append("dns") or [(2, 1, 6, "", (h, p))])
+        _gs[0] = _GetSock(b"HTTP/1.0 404 Not Found\r\n\r\n")
+        gl._http_open("GET", "http://h/x")
+        n2_6.append(fed)
+    finally:
+        gl.feed = _n2_saved[25]
+        gl._rtc_sync = _n2_saved[26]
+        gl._tls_wrap = _n2_saved[27]
+        gl.socket, gl.read_uart = _n2_saved[23], _n2_saved[24]
+    check("RN2-6: an https GET sets the board clock before it connects, an "
+          "http one not; getaddrinfo is fed around",
+          n2_6 == [["rtc", "connect"], ["connect"], ["feed", "dns", "feed"]],
+          repr(n2_6))
+    # RN2-8: _raw_get: a closed connection or a short status line is an
+    # OSError (it was an IndexError, outside what _ota_check noted), a non-200
+    # answer with a head over HTTP_LINES pieces still gives its status
+    gl.HTTP_GET = _ota_get
+    _ota_reset()
+    _serve(_manifest(200))
+    n2_dl = []
+    for exc in (IndexError("x"), MemoryError("m"), OSError(104)):
+        _ota_reset()
+        _serve(_manifest(200))
+
+        def _n2_get(url, sink, limit, exc=exc):
+            if url.endswith("micropython.bin"):
+                raise exc
+            return _ota_get(url, sink, limit)
+        gl.HTTP_GET = _n2_get
+        try:
+            gl._ota_check()
+        except Exception:
+            pass
+        f_ = gl.ota.get("failed")
+        n2_dl.append(f_ and f_[0::2])
+    gl.HTTP_GET = _ota_get
+    check("RN2-8: _raw_get gives an OSError for no or a short status line "
+          "and the status of a non-200 answer with a long head; a download "
+          "that raises anything is noted as failed (OTA_RETRY)",
+          n2_8 == ["OSError", "OSError", 404]
+          and n2_dl == [(200, "download err")] * 3, repr((n2_8, n2_dl)))
+
+    # RN2-7: an unreadable /ota.pending: its build is not known (this
+    # image or the old one after a rollback). Held as the running build's it
+    # kept the radio on, blocked the memory reboots and, away from WiFi,
+    # reset after OTA_HEALTH and counted a try (or a bad mark) against a
+    # build that may be the good old one, for ever if the note would not go.
+    # Dropped, with the staged page, and the running image confirmed once
+    n2_7 = []
+    for fwb in (200, 100):
+        _ota_reset()
+        gl.FW_BUILD = fwb
+        with open(gl.OTA_PENDING, "wb") as f:
+            f.write(b"\xff\xfe garbage\n")
+        with open(gl.OTA_MARK, "w") as f:
+            f.write("crash")
+        with open(_n2_page + ".new", "wb") as f:
+            f.write(_page)
+        diag_clear()
+        gl.ota_boot()
+        n2_7.append((gl.ota["pend"], _n2_flash(), ("valid",) in _ota_log,
+                     os.path.exists(gl.OTA_TRIES), os.path.exists(gl.OTA_BAD),
+                     gl._ota_wants_radio(),
+                     [l for l in diag_lines() if "unreadable" in l]))
+    # the note cannot be removed: still no pending state, no reset
+    _ota_reset()
+    with open(gl.OTA_PENDING, "wb") as f:
+        f.write(b"\xff\xfe garbage\n")
+    gl._rm = lambda path: None
+    try:
+        gl.ota_boot()
+        gl.ota_tick(_clock[0] + gl.OTA_HEALTH * 2)
+    finally:
+        gl._rm = _n2_saved[29]
+    n2_7.append((gl.ota["pend"], ("reset",) in _ota_log, gl._ota_wants_radio()))
+    gl.FW_BUILD = 100
+    check("RN2-7: an unreadable /ota.pending is dropped with the staged page "
+          "and the running image confirmed once: no pending state, no radio "
+          "held, no try or bad mark, no reset even if it cannot be removed",
+          n2_7 == [(None, [], True, False, False, False,
+                    ["ota note unreadable, dropped (running abc0100)"])] * 2
+          + [(None, False, False)], repr(n2_7))
+    _ota_reset()
+    gl.ota["pend"] = None
+
+    # RN2-9: gps_boot and the zero tick. unshadow: a remove of the stale
+    # .ota-old that fails must not fall into the rename that puts it over
+    # the module deployed since; crash(): only a note naming the running
+    # build is blamed (the old firmware failing after a rollback is not the
+    # new build's fault, nor is an unreadable note); a tick of 0 is a time
+    import gps_boot as gb
+    gb_saved = (gb.OTA_PENDING, gb.OTA_MARK, gb.OTA_SHADOW,
+                sys.modules.get("gps_frozen"), os.remove)
+    n2_9 = []
+    try:
+        gb.OTA_PENDING, gb.OTA_MARK = gl.OTA_PENDING, gl.OTA_MARK
+        gb.OTA_SHADOW = (os.path.join(_n2_dir, "m.mpy"),)
+        fz = sys.modules["gps_frozen"] = types.ModuleType("gps_frozen")
+        fz.BUILD = 100
+        _ota_reset()
+        with open(gb.OTA_PENDING, "w") as f:
+            f.write("200 abc0200\n")
+        for fresh in (True, False):
+            for q in (gb.OTA_SHADOW[0], gb.OTA_SHADOW[0] + ".ota-old"):
+                try:
+                    os.remove(q)
+                except OSError:
+                    pass
+            with open(gb.OTA_SHADOW[0] + ".ota-old", "w") as f:
+                f.write("stale")
+            if fresh:
+                with open(gb.OTA_SHADOW[0], "w") as f:
+                    f.write("fresh")
+            real_rm = os.remove
+
+            def _n2_rm(path, real_rm=real_rm):
+                if path.endswith(".ota-old"):
+                    raise OSError(5, "EIO")
+                real_rm(path)
+            os.remove = _n2_rm
+            try:
+                gb.unshadow()
+            finally:
+                os.remove = real_rm
+            with open(gb.OTA_SHADOW[0]) as f:
+                n2_9.append(f.read())
+        # crash(): note of the running build, of another, unreadable
+        for note in (b"100 abc0100\n", b"200 abc0200\n", b"\xff garbage"):
+            _ota_reset()
+            with open(gb.OTA_PENDING, "wb") as f:
+                f.write(note)
+            gb.crash()
+            n2_9.append(gl._ota_mark_get())
+    finally:
+        (gb.OTA_PENDING, gb.OTA_MARK, gb.OTA_SHADOW, fzm, os.remove) = gb_saved
+        if fzm is None:
+            del sys.modules["gps_frozen"]
+        else:
+            sys.modules["gps_frozen"] = fzm
+    check("RN2-9: unshadow keeps the module deployed since when the remove "
+          "of .ota-old fails (and puts it back when there is none); crash() "
+          "blames the build only when the note names the running one",
+          n2_9 == ["fresh", "stale", "crash", None, None], repr(n2_9))
+
+    class _N2W(object):
+        def status(self, *a):
+            return gl.network.STAT_CONNECTING
+        def disconnect(self):
+            pass
+        def active(self, *a):
+            return True
+    gl.wifi_reset()
+    gl.wifi.update(wlan=_N2W(), state="lost", try_at=0, home=False)
+    gl._wifi_begin_round = lambda w: gl.wifi.update(state="round")
+    _clock[0] = max(_clock[0], gl.LOST_GRACE + 5000)
+    gl.wifi_tick()
+    n2_0 = [gl.wifi["state"]]
+    # connected away from home, roam_at 0, due: the roam is tried
+    called = []
+    gl._try_roam_home = lambda w, arrival=False: called.append(1)
+    gl.wifi_reset()
+    gl.wifi.update(wlan=_N2W(), state="connected", home=False, roam_at=0,
+                   nets=[{"ssid": "h", "pw": "", "home": True,
+                          "hidden": False, "bssid": None, "ip": None}],
+                   idle_at=_clock[0], last_check=_clock[0])
+    _N2W.status = lambda self, *a: gl.network.STAT_GOT_IP
+    gl.wifi_tick()
+    n2_0.append(len(called))
+    check("RN2-9b: a tick of 0 is a time: a lost link past LOST_GRACE gives "
+          "up, a roam due from roam_at 0 is tried (both read 0 as unset)",
+          n2_0 == ["round", 1], repr(n2_0))
+finally:
+    (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
+     gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
+     gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES, gl.OTA_MARK, gl.OTA_SHADOW,
+     gl._mem_reboot, gl._mem_reboot_soon, _ota_dir, gl._diag_write,
+     gl.NTP_SERVER, gl._ntp_ask, gl.up["url"], gl._wifi_begin_round,
+     gl._try_roam_home, gl.socket, gl.read_uart, gl.feed,
+     gl._rtc_sync, gl._tls_wrap, gl._ota_promote, gl._rm,
+     gl.wifi["wlan"]) = _n2_saved
+    gl.log.update(_n2_log)
+    gl._ntp[:] = _n2_ntp
+    gl.st.update(_n2_st)
+    gl._rtc_set[0] = False
+    RTC.sets[:] = []
+    _gm_zero()
+    gl._tick_bug.clear()
+    gl.ota["pend"] = None
+    gl.wifi_reset()
+    gl.log_reset()
+    gl.up_reset()
+    diag_clear()
+    shutil.rmtree(_n2_dir, ignore_errors=True)
 
 print()
 print("%d passed, %d failed" % (passed, failed))
