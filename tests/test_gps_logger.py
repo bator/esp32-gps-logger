@@ -17865,6 +17865,19 @@ _r1 = hl.st["fix_first"]
 check("UC-SETTLE-RESTART: the banner starts the rule anew, and the unfinished second "
       "from before it does not count as the first fix",
       _r0 == (None, False) and _r1 is None, repr((_r0, _r1)))
+# a second queued before the restart, drained after the new first fix: it is
+# older than fix_first, which must not count as UC_SETTLE gone by
+_clock[0] = (_clock[0] // 1000 + 1) * 1000
+_uc_fixes(hl, 2)
+_q0 = hl.st["fix_first"]
+hl.st.update(speed=0.0)
+_q1 = hl._usable(time.ticks_add(_q0, -10000))
+_q2 = hl.st["settled"]
+_q3 = hl._usable(_clock[0])
+check("UC-SETTLE-QUEUED: a second from before fix_first does not settle the "
+      "receiver; standing still still waits",
+      _q0 is not None and _q1 is False and _q2 is False and _q3 is False,
+      repr((_q0, _q1, _q2, _q3)))
 
 # a restart whose banner was lost: no GST with sentences coming
 hl.reset()

@@ -3725,7 +3725,9 @@ def _usable(now):
     if not st["settled"]:
         a = st["fix_first"]
         if a is not None:
-            if _age(now, a) >= UC_SETTLE:
+            # not _age: a second queued before a restart (_drain_q) is
+            # older than this fix_first, and TICKS_OLD would settle it
+            if time.ticks_diff(now, a) >= UC_SETTLE:
                 st["settled"] = True
             elif (st.get("speed") or 0) < UC_SETTLE_KMH:
                 return False
