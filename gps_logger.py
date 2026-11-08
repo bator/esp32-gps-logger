@@ -443,8 +443,11 @@ def _second(s):
         return
     c = _sec
     if c[0] is None or not s.startswith(c[0]):
-        c[0] = s[0:6]
-        c[1] = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
+        h = s[0:6]
+        if not h.isdigit():              # a corrupt digit (see _num): the
+            raise ValueError(s)          # sentence is bad; one such time in
+        c[0] = h                         # a line stopped the track for good
+        c[1] = "%s:%s:%s" % (h[0:2], h[2:4], h[4:6])
     t = c[1]
     if t != ep["t"]:
         if ep["t"] is not None:
@@ -535,20 +538,28 @@ def _load(snap):
 # GGA quality 6 / RMC mode E: an estimate (dead reckoning, the last fix
 # carried on), no fix. GGA 1-5 are (GPS, DGPS, PPS, RTK fixed / float)
 GGA_FIX_MAX = 5
+GSA_EVERY = 5                            # s between GSA (fix type) rounds
+GSA_MAX = 8                              # GSA in a second beyond this: the
+                                         # receiver did not take its rate
 
 def rmc(talker, f):
     kn, pos = _num(f[7]), _position(f, 3)     # (all read first: _num)
-    _second(f[1])
-    st["speed"] = None if kn is None else kn * 1.852
-    if kn is not None and (ep["spd"] is None or st["speed"] > ep["spd"]):
-        ep["spd"] = st["speed"]          # the second's top speed
     d = f[9]
+    date = None
     # (a UC6580 without a fix sends a made-up date: 170126, measured)
     if len(d) == 6 and f[2] == "A":
         c = _day                         # (made once a day, as _second)
         if d != c[0]:
+            if not d.isdigit():          # (a corrupt digit: bad sentence)
+                raise ValueError(d)
             c[0], c[1] = d, "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
-        ep["date"] = c[1]
+        date = c[1]
+    _second(f[1])
+    st["speed"] = None if kn is None else kn * 1.852
+    if kn is not None and (ep["spd"] is None or st["speed"] > ep["spd"]):
+        ep["spd"] = st["speed"]          # the second's top speed
+    if date is not None:
+        ep["date"] = date
     if f[2] == "A" and pos and (len(f) < 13 or f[12] != "E"):
         _acc("r", pos)
 
@@ -669,10 +680,6 @@ def sv_seen():
     for c in st["view"].values():
         n += c
     return n
-
-GSA_EVERY = 5                            # s between GSA (fix type) rounds
-GSA_MAX = 8                              # GSA in a second beyond this: the
-                                         # receiver did not take its rate
 
 # --- UC6580 ----------------------------------------------------------------
 # The Heltec Wireless Tracker's Unicore UC6580 speaks no UBX: text commands
@@ -802,6 +809,8 @@ def _uc_gsa(f):
     """One GSA: the satellites of its system in the fix. A pause before it
     starts a new list: the sentences of a round come in one burst, and a
     round every second by the clock cut one in two (11 seen, 6 in use)."""
+    if len(f) < 19:
+        return                           # (no system id: NMEA before 4.10)
     u = _uc_sv
     now = time.ticks_ms()
     if not _recent(now, u["gsa"], UC_GSA_GAP):
@@ -1098,13 +1107,22 @@ def _mhz_env(env, key, default):
           "board, using", default)
     return default
 
+def _words():
+    """What the console status line and the diag line both end with: HDOP,
+    points logged/sent, WiFi state, keep-alive pulses, free Python heap,
+    IDF heap free/largest block (KB), Python heap size (KB: it doubles
+    into the IDF heap when an allocation does not fit)."""
+    fr, big = idf_heap()
+    pf, pk = py_heap()
+    return "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s heap %d" % (
+        st["hdop"], log["points"], up["sent"], wifi["state"].replace(" ", "_"),
+        wifi["pb_scans"], pf, fr, big, pk)
+
 def _status():
     """One console line: chip temperature (the die, not the GPS module),
-    fixes in the last second, satellites, HDOP, points and uploads."""
+    fixes in the last second, satellites, reset loops, then _words."""
     print("status temp", _temp(), "hz", st["epochs"], "used", st["used"],
-          "hdop", st["hdop"], "points", log["points"], "sent", up["sent"],
-          "wifi", wifi["state"], "pulses", wifi["pb_scans"],
-          "mem", py_heap()[0], "gpsloops", st["loops"])
+          "gpsloops", st["loops"], _words())
 
 def _diag_env(env):
     """DIAG=<seconds> in .env: 0 turns the diagnostic log off, otherwise
@@ -1322,21 +1340,12 @@ def _heap_note(phase):
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
-    HDOP, points logged/sent, WiFi state, keep-alive pulses, free Python
-    heap, IDF heap free/largest block (KB), Python heap size (KB: it
-    doubles into the IDF heap when an allocation does not fit)."""
-    view = sv_seen()
-    fr, big = idf_heap()
-    pf, pk = py_heap()
+    then _words."""
     _diag_write(
-        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
-        "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s "
-        "heap %d" % (
+        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
-            st["loops"], view, sv_used(), status().replace(" ", "_"),
-            st["hdop"], log["points"], up["sent"],
-            wifi["state"].replace(" ", "_"), wifi["pb_scans"],
-            pf, fr, big, pk))
+            st["loops"], sv_seen(), sv_used(), status().replace(" ", "_"),
+            _words()))
 
 def _diag_final():
     """A status line right before a deliberate reset: the next boot reads
@@ -2992,6 +3001,8 @@ _P10 = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000,
 _ke = [None] * 12                        # the encoder's (flush)
 _kt = [None] * 12                        # the line being encoded
 _ks = [None] * 12                        # the reader's
+_TDIG = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)   # the digits of
+                                         # YYYYMMDDTHHMMSSZ
 
 def _kb_num(buf, a, b, s, i):
     """buf[a:b] into s[i] (value) and s[i + 5] (decimals): empty, or a
@@ -3036,7 +3047,7 @@ def _kb_num(buf, a, b, s, i):
 def _kb_time(buf, t):
     """The compact time YYYYMMDDTHHMMSSZ at buf[t:t + 16] -> seconds since
     2020, or None (not a valid UTC time from 2020 up to FIX_S_END: the line
-    is then a keyframe)."""
+    is then a keyframe). The one check of a real date: _ymd_ok."""
     if buf[t + 8] != 84 or buf[t + 15] != 90:
         return None
     for k in _TDIG:
@@ -3049,13 +3060,9 @@ def _kb_time(buf, t):
     hh = (buf[t + 9] - 48) * 10 + buf[t + 10] - 48
     mi = (buf[t + 11] - 48) * 10 + buf[t + 12] - 48
     ss = (buf[t + 13] - 48) * 10 + buf[t + 14] - 48
-    if not (2020 <= y <= 2099 and 1 <= m <= 12 and d >= 1
-            and hh < 24 and mi < 60 and ss < 60):
+    if not _ymd_ok(y, m, d, hh, mi, ss):
         return None
-    z = _days(y, m, 1)
-    if d > _days(y, m + 1, 1) - z:       # (past the month's last day)
-        return None
-    t = (z + d - 1 - EPOCH_DAYS) * 86400 + hh * 3600 + mi * 60 + ss
+    t = (_days(y, m, d) - EPOCH_DAYS) * 86400 + hh * 3600 + mi * 60 + ss
     return t if t < FIX_S_END else None  # (_kb_dec reads no delta past it)
 
 def _kb_parse(buf, a, e, s):
@@ -3192,7 +3199,7 @@ def log_reset():
                still=_still_state(), clock=None, seq=0,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=None, file_at=None, good_size=None,
-               fmt=None, drop=0, full_tc=None, err_at=None, back=0)
+               fmt=None, drop=0, full_tc=None, err_at=None, back=0, hb=[])
 
 def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
@@ -3610,9 +3617,14 @@ def _hist_close(st, ok=True):
         except OSError:
             pass
     if new:
-        try:                             # the day files beyond the newest
-            for n in _hist_names()[:-HIST_DAYS]:  # HIST_DAYS go
-                _rm(HIST_DIR + "/" + n)
+        try:                             # the days beyond the newest
+            ns = _hist_names()           # HIST_DAYS go (a day written as
+            ds = sorted(set(n[:8] for n in ns))  # .trk and .trb is one)
+            if len(ds) > HIST_DAYS:
+                cut = ds[-HIST_DAYS]
+                for n in ns:
+                    if n[:8] < cut:
+                        _rm(HIST_DIR + "/" + n)
         except OSError:
             pass
 
@@ -3991,7 +4003,9 @@ def _still_heartbeat(now):
     """Write the anchor as a point. It is stamped with the last fix's GPS
     time plus the ticks since, so no fix is needed: the anchor is known, and
     indoors there is rarely a usable fix. Skipped when that time would not
-    come after the last line written (retried on the next tick)."""
+    come after the last line written (tried again a second later, not
+    every pass). Its time goes into log["hb"], what tells the route an
+    anchor from a fix without height and HDOP (_rt_line)."""
     sl = log["still"]
     c = log["clock"]
     if c is None:
@@ -4001,12 +4015,17 @@ def _still_heartbeat(now):
         return
     t, tc = _stamp_s(c[0] + age // 1000)
     if log["last_t"] is not None and t <= log["last_t"]:
+        sl["hb_at"] = time.ticks_add(now, 1000 - STILL_HEARTBEAT)
         return
     a = sl["anchor"]
     sl["hb_at"] = now
     if log["file"] is None:
         start_file(_tcn(tc))
         sl["file_at"] = now
+    h = log["hb"]
+    h.append(tc)
+    if len(h) > 8:                       # (never fed to the route: no TFT)
+        h.pop(0)
     _record((t, _line("%.6f,%.6f" % (a[0], a[1]), ("", ""), tc)), a)
 
 def _still_beat(now):
@@ -4544,13 +4563,13 @@ def _sample(now):
     """One second of the current fix (st): the heartbeat clock, then the
     stay logic and the track when the fix is usable."""
     secs = _fix_s()
-    if secs is not None:
-        if not 0 <= secs < FIX_S_END:
-            return                       # (see FIX_S_END)
-        log["clock"] = (secs, now)       # GPS time for the heartbeat (2020)
-    if not st["date"] or not _usable(now):
-        return                           # (a second with GGA only, e.g. the
-                                         # first one after a warm boot)
+    if secs is None or not 0 <= secs < FIX_S_END:
+        return                           # (no date: a second with GGA only,
+                                         # e.g. the first after a warm boot;
+                                         # or see FIX_S_END)
+    log["clock"] = (secs, now)           # GPS time for the heartbeat (2020)
+    if not _usable(now):
+        return
     lt = log["last_t"]
     if lt is not None:                   # (in a stay too: see _time_back)
         t = st["date"] + "T" + st["time"] + "Z"
@@ -7882,7 +7901,11 @@ def _ntp_env(env):
 
 def _ntp_ask():
     """Seconds since 2020 from NTP_SERVER, None: no answer, or none to believe (not
-    synchronised, no server, or a time before this build was made)."""
+    synchronised, no server, not an answer to this request, or a time before this
+    build was made). The request's ticks go out as its transmit time and must come
+    back as the answer's originate time (a late or stray datagram is no answer).
+    Past the NTP era (2036-02-07) the seconds count from there: the small value
+    is read as the next era."""
     s = None
     try:
         ai = socket.getaddrinfo(NTP_SERVER, 123, 0, socket.SOCK_DGRAM)[0]
@@ -7890,6 +7913,7 @@ def _ntp_ask():
         s.settimeout(NTP_WAIT / 1000)
         q = bytearray(48)
         q[0] = 0x23                      # version 4, a client
+        struct.pack_into(">I", q, 40, time.ticks_ms())
         s.sendto(q, ai[-1])
         b = s.recv(48)
     except (OSError, IndexError, ValueError):
@@ -7897,9 +7921,15 @@ def _ntp_ask():
     finally:
         if s is not None:
             s.close()
-    if len(b) < 48 or b[0] >> 6 == 3 or b[0] & 7 != 4 or not 0 < b[1] < 16:
+    if (len(b) < 48 or b[0] >> 6 == 3 or b[0] & 7 != 4 or not 0 < b[1] < 16
+            or b[24:32] != q[40:48]):
         return None
-    t = struct.unpack_from(">I", b, 40)[0] - _NTP_2020
+    v = struct.unpack_from(">I", b, 40)[0]
+    if not v:
+        return None
+    t = v - _NTP_2020
+    if t < 0:
+        t += 1 << 32
     return t if max(0, FW_BUILD - EPOCH_DAYS * 86400) <= t < FIX_S_END else None
 
 def ntp_tick(now):
@@ -7921,13 +7951,14 @@ def ntp_tick(now):
     _diag_write("clock ntp %s" % _stamp_s(t)[0])
 
 def _local_hm():
-    """"HH:MM" in Hungary from the fix's UTC, else from NTP's, "--:--" without either
-    or with the receiver silent: its time stands still then."""
+    """"HH:MM" in Hungary from the fix's UTC; with the receiver silent (its time
+    stands still then) or no fix yet, from the last fix's clock run on by the
+    ticks, else NTP's (as _rt_tick); "--:--" without any."""
     d, t = st["date"], st["time"]
     rx = st["rx"]
     now = time.ticks_ms()
     if not d or not t or not _recent(now, rx, NO_DATA):
-        c = _ntp[0]
+        c = log["clock"] or _ntp[0]
         if c is None or _age(now, c[1]) >= TICKS_OLD:
             return "--:--"
         d = _stamp_s(c[0] + _age(now, c[1]) // 1000)[0]
@@ -7997,8 +8028,10 @@ def _store_state(now):
     if total <= 0:
         return None
     try:
-        for n in _hist_names()[:-1]:
-            room += _file_size(HIST_DIR + "/" + n) or 0
+        ns = _hist_names()
+        for n in ns:
+            if n[:8] != ns[-1][:8]:      # (not the newest day's, .trk or .trb)
+                room += _file_size(HIST_DIR + "/" + n) or 0
     except OSError:
         pass
     left = room - MIN_FREE
@@ -8124,13 +8157,19 @@ def _rt_add(lat, lon, new):
 def _rt_line(line):
     """One line written to the track. The last point is always the last position:
     it moves along until about ROUTE_STEP from the one before (9 millionths of a
-    degree a metre, near enough for spacing: no float), then stays."""
+    degree a metre, near enough for spacing: no float), then stays. An anchor
+    point (its time in log["hb"], _still_heartbeat) is no way travelled: skipped.
+    (Told by its empty height and HDOP before, which a fix of a second without
+    GGA has too: those were skipped with it.)"""
     R = _Rt
+    tc = line[-17:-1]
+    h = log["hb"]
+    if tc in h:
+        h.remove(tc)
+        return
     a = line.find(",")
     b = line.find(",", a + 1)
     z = line.encode()
-    if z[b + 1] == 44 and z[b + 2] == 44:    # no height, no HDOP: an anchor point
-        return
     s = _kb_time(z, len(z) - 17)
     if s is None:
         return
@@ -8143,7 +8182,7 @@ def _rt_line(line):
         return                           # (held over midnight: yesterday's)
     lat, lon = _e6(line, 0, a), _e6(line, a + 1, b)
     new = R.n == 0 or (R.last_s is not None and s - R.last_s > NEW_FILE_GAP)
-    if R.trip is not None and line[-17:-1] >= R.trip:
+    if R.trip is not None and tc >= R.trip:
         R.trip = None
         new = True
     R.last_s = s

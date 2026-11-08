@@ -7901,6 +7901,52 @@ for _ in range(4):
 check("GPS-18: >GSA_MAX GSA a second -> extra; one round of 4 does not",
       flood >= 1 and gl.st["extra"] == 0, "%d %d" % (flood, gl.st["extra"]))
 
+# NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
+# bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
+# line "20A6-10-29T12:00:01Z" went into the track and became last_t, which no
+# real time ever sorted above: no line and no anchor point until a reboot.
+gl.reset()
+gl.log_reset()
+_nd_ld, gl.LOG_DIR = gl.LOG_DIR, os.path.join(diag_dir, "nd")
+settled()
+_nd_k = [0]
+
+
+def _nd_sec(t, date):
+    """One second of RMC + GGA, ~37 m north of the one before, then the tick."""
+    _nd_k[0] += 1
+    lat = "4728.%04d" % (_nd_k[0] * 20)
+    _clock[0] += 1000
+    gl.handle(rv_nmea("GNRMC,%s,A,%s,N,01900.0000,E,0.1,,%s,,,A,V" % (t, lat, date)))
+    gl.handle(rv_nmea("GNGGA,%s,%s,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,," % (t, lat)))
+    gl.log_tick()
+
+
+_nd_sec("120000.00", "291026")
+_nd_e0 = gl.st["err"]
+_nd_sec("120001.00", "2910A6")           # the RMC bad, its GGA still a fix
+_nd_sec("120002.00", "291026")
+_nd_e1 = gl.st["err"]
+_nd_sec("1B0003.00", "291026")           # both bad: no second started
+_nd_e2 = gl.st["err"]
+for _i in range(4, 12):
+    _nd_sec("1200%02d.00" % _i, "291026")
+_nd_lt, _nd_n, _nd_d = gl.log["last_t"], len(gl.log["batch"]), gl.st["date"]
+gl.st["date"] = "20A6-10-29"            # (st set by hand: _sample alone)
+_clock[0] += 1000
+_nd_c = gl.log["clock"]
+gl._sample(_clock[0])
+check("NMEA-DIGITS: a non-digit in the time or the date makes the sentence bad, "
+      "nothing of it used; the track goes on (10 lines of 11 good seconds, "
+      "last_t the last one); _sample writes nothing without a readable date",
+      _nd_e1 == _nd_e0 + 1 and _nd_e2 == _nd_e1 + 2 and _nd_d == "2026-10-29"
+      and _nd_lt == "2026-10-29T12:00:10Z" and _nd_n == 10
+      and len(gl.log["batch"]) == 10 and gl.log["clock"] == _nd_c,
+      repr((_nd_e0, _nd_e1, _nd_e2, _nd_d, _nd_lt, _nd_n, len(gl.log["batch"]))))
+gl.LOG_DIR = _nd_ld
+gl.reset()
+gl.log_reset()
+
 # SETUP-LATE: a receiver that answers late (overrun, still booting): the setup
 # ends at the first silent command, UC_ACK_WAIT later, not 10-30 s; what is
 # read meanwhile goes through the parser, the banner too, and its late answers
@@ -9157,13 +9203,17 @@ try:
     for d_ in range(1, 10):               # 9 old (text) days, then a new one
         with open(os.path.join(gl.HIST_DIR, "202610%02d.trk" % d_), "w") as f:
             f.write(_hl("202610%02d" % d_, "120000"))
+    with open(os.path.join(gl.HIST_DIR, "20261031.trk"), "w") as f:
+        f.write(_hl("20261031", "120000"))   # (a day as text and .trb: one day)
     hist_add([_hl("20261101", "080000")], 1)
     kept = sorted(os.listdir(gl.HIST_DIR))
     check("HIST: a new day's file drops the days beyond HIST_DAYS (.trk "
-          "and .trb alike)",
-          len(kept) == gl.HIST_DAYS and kept[-1] == "20261101.trb"
-          and kept[0] == "20261006.trk" and "20261030.trb" in kept,
+          "and .trb alike; a day written as both counts once)",
+          len(kept) == gl.HIST_DAYS + 1 and kept[-1] == "20261101.trb"
+          and kept[0] == "20261006.trk" and "20261030.trb" in kept
+          and "20261031.trk" in kept and "20261031.trb" in kept,
           repr(kept))
+    os.remove(os.path.join(gl.HIST_DIR, "20261031.trk"))
     free_saved = gl.free
     gl.free = lambda: gl.MIN_FREE
     try:
@@ -17492,6 +17542,12 @@ check("UC-GSA: the satellites in use of one burst stay together past a second's 
       "boundary; a pause starts the next round's",
       _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._uc_sv["used"] == [30],
       repr((_u1, hl._uc_sv["used"])))
+_e0 = hl.st["err"]
+_uc_feed(hl, _nmea("GNGSA,A,2,30,,,,,,,,,,,,1.2,0.8,0.9"))
+check("UC-GSA-OLD: a GSA without a system id (NMEA before 4.10, VDOP last) is a "
+      "good sentence: its fix type taken, the list of used satellites left alone",
+      hl.st["err"] == _e0 and hl.st["fixtype"] == 2 and hl._uc_sv["used"] == [30],
+      repr((hl.st["err"] - _e0, hl.st["fixtype"], hl._uc_sv["used"])))
 
 # the display: the fonts, the values, what goes to the panel
 import gps_tft as _ft
@@ -17563,6 +17619,12 @@ check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
 hl.st["rx"] = _clock[0] - hl.NO_DATA
 check("TFT-CLOCK-SILENT: a silent receiver's clock shows --:--, not a stopped time",
       _ls("2026-11-04", "10:42:10") == "--:--")
+hl.log["clock"] = ((hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 + 42 * 60 + 10,
+                   _clock[0] - 60000)
+check("TFT-CLOCK-RUNS: with the receiver silent the last fix's clock runs on by the "
+      "ticks (as the route's day does): a minute on, 11:43",
+      _ls("2026-11-04", "10:42:10") == "11:43", _ls("2026-11-04", "10:42:10"))
+hl.log["clock"] = None
 hl.st["rx"] = _clock[0]
 
 # the flash: per cent taken, how long a drive still fits
@@ -17582,6 +17644,7 @@ _stores = (_store(4412), _store(1136), _store(182), _store(64), _store(33), _sto
 # an older day's file counts as room, today's and a vanished one do not
 _sh = _store(100, (("20261101.trb", 1024 * 1024), ("20261102.trb", None), ("20261103.trb", 500 * 1024)))
 _sh0 = _store(100, (("20261103.trb", 1024 * 1024),))
+_sh1 = _store(100, (("20261103.trb", 1024 * 1024), ("20261103.trk", 1024 * 1024)))
 _sv_n[:] = []
 _sa = _store(4412, at=_clock[0])
 _sb = hl._store_state(_clock[0] + hl.TFT_STORE - 1)
@@ -17610,6 +17673,8 @@ check("TFT-STORE: the flash in per cent and the time a 1 Hz drive still fits: da
       and _sf is None and _st9[9] is None
       and all(c in _ff.SMALL[0] for _p, _l in _stores for c in "%d%%" % _p + _l),
       repr((_stores, _sh, _sh0, _n1, _n2, _sf, _st9[9])))
+check("TFT-STORE-PAIR: today's day written as .trk and .trb: neither counts as room",
+      _sh1 == _sh0, repr((_sh1, _sh0)))
 
 # the drawing, on a model of the panel: real pixels, at real coordinates
 _order = []
@@ -17856,9 +17921,13 @@ def _rfresh():
 
 
 def _rline(lat, lon, s, anchor=False):
-    """A track line as _sample_line and _still_heartbeat write them, format 1."""
+    """A track line as _sample_line and _still_heartbeat write them, format 1 (an
+    anchor's time noted in log["hb"], as _still_heartbeat does)."""
     tc = hl._stamp_s(s)[1]
-    return "%.6f,%.6f,,,%s\n" % (lat, lon, tc) if anchor else "%.6f,%.6f,120.5,1.0,%s\n" % (lat, lon, tc)
+    if anchor:
+        hl.log.setdefault("hb", []).append(tc)
+        return "%.6f,%.6f,,,%s\n" % (lat, lon, tc)
+    return "%.6f,%.6f,120.5,1.0,%s\n" % (lat, lon, tc)
 
 
 def _rfeed(*lines):
@@ -17974,6 +18043,37 @@ _rfeed(_rat(0, 0, _DAY + 90, True), _rat(44, 0, _DAY + 100), _rat(55, 0, _DAY + 
 check("ROUTE-JUMP: a stay's end: the anchor and the way out's first line 44 m on (158 km/h, "
       "measured) count nothing, only the way out itself; a new trip",
       abs(_Rt.cm - 1100) < 15 and _Rt.pts[2] & 1 == 1, repr((_Rt.cm, _Rt.n)))
+
+# a fix of a second without GGA has no height and no HDOP either: it is track,
+# only the logger's own anchor points (told by their time) add nothing
+_rfresh()
+hl.log_reset()
+_rfeed(_rat(0, 0, _DAY), _rat(0, 55, _DAY + 1).replace(",120.5,1.0,", ",,,"),
+       _rat(0, 110, _DAY + 2).replace(",120.5,1.0,", ",,,"), _rat(0, 165, _DAY + 3))
+_rmc = (_Rt.n, _Rt.cm)
+_rfeed(_rat(5000, 0, _DAY + 20, True))
+check("ROUTE-RMC-ONLY: a line without height and HDOP (a second with RMC only) is a "
+      "point of the route like any other, 3 x 55 m; an anchor point is told by its time",
+      _rmc[0] == 4 and abs(_rmc[1] - 16500) < 20 and (_Rt.n, _Rt.cm) == _rmc
+      and hl.log.get("hb") == [], repr((_rmc, _Rt.n, _Rt.cm, hl.log.get("hb"))))
+
+# a heartbeat whose stamp would not follow the last line waits a second, not a pass
+hl.log_reset()
+_sl = hl.log["still"]
+_sl.update(active=True, anchor=(10.5, 20.5))
+hl.log["clock"] = (_DAY, _clock[0])
+hl.log["last_t"] = hl._stamp_s(_DAY + 30)[0]
+hl._still_heartbeat(_clock[0])
+_hb_wait = (len(hl.log["batch"]), _sl["hb_at"] is not None
+            and hl._recent(_clock[0] + 999, _sl["hb_at"], hl.STILL_HEARTBEAT)
+            and not hl._recent(_clock[0] + 1000, _sl["hb_at"], hl.STILL_HEARTBEAT))
+hl.log["last_t"] = None
+hl._still_heartbeat(_clock[0] + 1000)
+check("ROUTE-HB-WAIT: an anchor point whose time would not follow the last line is not "
+      "written, and the next try is a second on, not every pass; then it is written",
+      _hb_wait == (0, True) and len(hl.log["batch"]) == 1 and _sl["hb_at"] == _clock[0] + 1000,
+      repr((_hb_wait, len(hl.log["batch"]), _sl["hb_at"], _clock[0])))
+hl.log_reset()
 
 # through the logger itself: only what flush() really wrote counts
 _rfresh()
@@ -18272,6 +18372,7 @@ check("ROUTE-BEFORE-FIX: a saved route shows at once without a fix, and writes n
 class _NtpMod:
     SOCK_DGRAM = 2
     reply = None
+    echo = True                          # the answer's originate time: the request's
     addr = [(2, 2, 17, "", ("192.0.2.1", 123))]
     asked, closed, sent, wait = [], [], [], []
 
@@ -18293,9 +18394,12 @@ class _NtpMod:
             _NtpMod.sent.append(bytes(b))
 
         def recv(self, n):
-            if isinstance(_NtpMod.reply, Exception):
-                raise _NtpMod.reply
-            return _NtpMod.reply
+            r = _NtpMod.reply
+            if isinstance(r, Exception):
+                raise r
+            if _NtpMod.echo and len(r) >= 32:
+                r = r[:24] + _NtpMod.sent[-1][40:48] + r[32:]
+            return r
 
         def close(self):
             _NtpMod.closed.append(1)
@@ -18304,7 +18408,7 @@ class _NtpMod:
 def _nreply(s, first=0x24, stratum=2, size=48):
     b = bytearray(48)
     b[0], b[1] = first, stratum
-    b[40:44] = (s + hl._NTP_2020).to_bytes(4, "big")
+    b[40:44] = ((s + hl._NTP_2020) & 0xFFFFFFFF).to_bytes(4, "big")
     return bytes(b[:size])
 
 
@@ -18331,6 +18435,16 @@ check("NTP-ASK: a good answer in seconds since 2020; short, not a server's, unsy
       "the socket always closed",
       _n_good == _DAY and _n_query and _n_bad == [None] * 9 and _n_closed
       and _n_nodns == [None, None], repr((_n_good, _n_bad, _n_closed, _n_nodns)))
+_n_tx = _NtpMod.sent[-1][40:48] == _clock[0].to_bytes(4, "big") + bytes(4)
+_NtpMod.echo = False
+_n_stray = _nask(_nreply(_DAY))
+_NtpMod.echo = True
+_n_era_s = (hl._days(2037, 1, 1) - hl.EPOCH_DAYS) * 86400 + 3600
+_n_era = _nask(_nreply(_n_era_s))
+check("NTP-ASK-ECHO: the request carries the ticks as its transmit time; an answer whose "
+      "originate time is not that (a stray or late datagram) is None; a time past the "
+      "NTP era of 2036 reads as the next era",
+      _n_tx and _n_stray is None and _n_era == _n_era_s, repr((_n_tx, _n_stray, _n_era, _n_era_s)))
 
 _n0a = _n0
 hl._ntp[:] = [None, None, hl.NTP_RETRY]

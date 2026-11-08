@@ -3,6 +3,7 @@
 # pure paths. Catches CPython-only idioms the CPython suite cannot see.
 # Run: /path/to/micropython tests/mpy_unix_logger.py   (or python3)
 import sys
+import os
 import json
 import time
 import gc
@@ -124,6 +125,41 @@ gl.handle(nm("GNGGA,120001.00,4728.0000,N,01900.0000,E,1,12,0.9,100.0,M,"
 check("NMEA parsed (GN talker)", gl.st["ok"] == 2 and gl.st["err"] == 0)
 gl.handle(b"$GNGGA,1200" + nm("GNGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2,1"))
 check("cut-off sentence glued to a whole one", gl.st["fixtype"] == 3)
+
+# a time or date digit flipped past the checksum (two flipped bits pass the
+# XOR): the sentence is bad and the track goes on; before, one such line in
+# the track made a last_t no real time ever sorted above (no line, no anchor
+# point until a reboot). Through the parser and log_tick, on the board's
+# floats too.
+gl.reset()
+gl.log_reset()
+gl.st["settled"] = True
+k = [0]
+
+
+def nd_sec(t, date):
+    k[0] += 1
+    lat = "4728.%04d" % (k[0] * 20)                      # ~37 m a second
+    gl.handle(nm("GNRMC,%s,A,%s,N,01900.0000,E,0.1,,%s,,,A,V" % (t, lat, date)))
+    gl.handle(nm("GNGGA,%s,%s,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,," % (t, lat)))
+    gl.log_tick()
+
+
+nd_sec("120000.00", "291026")
+e0 = gl.st["err"]
+nd_sec("120001.00", "2910A6")
+nd_sec("120002.00", "291026")
+e1 = gl.st["err"]
+nd_sec("1B0003.00", "291026")
+e2 = gl.st["err"]
+for i in range(4, 12):
+    nd_sec("1200%02d.00" % i, "291026")
+check("a non-digit in the time or date is a bad sentence, the track goes on",
+      e1 == e0 + 1 and e2 == e1 + 2 and len(gl.log["batch"]) == 10
+      and gl.log["last_t"] == "2026-10-29T12:00:10Z"
+      and gl.st["date"] == "2026-10-29")
+gl.reset()
+gl.log_reset()
 
 
 # what a second of NMEA allocates, read as on the board (read_uart, then
@@ -347,7 +383,6 @@ try:
     n, n_ok, size, new_off, eof = gl.read_batch(trk, 0)
     locs = json.loads(bytes(gl._body[:size]))["locations"]
 finally:
-    import os
     os.remove(trk)
 check("read_batch .trk in place", (n, n_ok, eof) == (4, 2, True)
       and locs[0]["geometry"]["coordinates"] == [19.0, 47.5]
@@ -401,7 +436,6 @@ try:
     mid = gl.read_batch(base + ".trb", new_off, gl._rk[0])
     tail = bytes(gl._body[:mid[2]])
 finally:
-    import os
     for ext in (".trb", ".trk"):
         os.remove(base + ext)
 check("trb: same JSON as the .trk, %d B for %d points"
@@ -429,7 +463,6 @@ if hasattr(gc, "mem_alloc"):
             used[ext] = gc.mem_alloc() - a0
             gc.enable()
     finally:
-        import os
         for ext in (".trb", ".trk"):
             os.remove(base + ext)
     print("read_batch alloc", used)
@@ -474,8 +507,8 @@ def hist_day(day):
 # lines (it built ~100 objects right after the POST): what a batch of 50
 # allocates beyond one of 10 is under 40 bytes a point
 if hasattr(gc, "mem_alloc"):
-    import os
     base = "/tmp/gps-logger-hist-%d" % time.ticks_ms()
+    hist_dir0, free0 = gl.HIST_DIR, gl.free
     gl.HIST_DIR = base + "-hist"
     gl.free = lambda: None
     hist_alloc = {}
@@ -501,7 +534,6 @@ if hasattr(gc, "mem_alloc"):
                 i7(471853560 + i * 1311), i7(184269340 - i * 977),
                 120.0 + (i % 9) * 0.3, 2 + i % 3, 12.0 + (i % 11) * 0.4,
                 gl._stamp_s(215697600 + i + i // 500)[1]))
-        import os
         for i in range(0, 2000, 50):
             with open(base + "-h.trb", "wb") as f:
                 f.write(b"#TRKB\n" + _kb_encode(tl4[i:i + 50], 50, None) + b"#END\n")
@@ -524,6 +556,7 @@ if hasattr(gc, "mem_alloc"):
         for n in os.listdir(gl.HIST_DIR):
             os.remove(gl.HIST_DIR + "/" + n)
         os.rmdir(gl.HIST_DIR)
+        gl.HIST_DIR, gl.free = hist_dir0, free0
     print("hist alloc", hist_alloc, "web", web_alloc)
     check("trb: an uploaded batch goes to the day history as its records, "
           "read back as its text, under 40 bytes allocated a point",
@@ -537,6 +570,7 @@ if hasattr(gc, "mem_alloc"):
 # the hidden home's learned BSSIDs survive a reboot (/home_aps: hex lines,
 # bytes.find and a bytearray parse, no binascii); garbage lines are skipped
 gl.HOME_APS_FILE = "/tmp/gps-logger-smoke-aps-%d" % time.ticks_ms()
+free0 = gl.free
 gl.free = lambda: None
 try:
     gl.wifi["home_aps"] = [b"\x01\x02\x03\xaa\xbb\xcc", b"\xff" * 6]
@@ -546,7 +580,7 @@ try:
     gl._home_aps_load()
     aps = gl.wifi["home_aps"]
 finally:
-    import os
+    gl.free = free0
     try:
         os.remove(gl.HOME_APS_FILE)
     except OSError:

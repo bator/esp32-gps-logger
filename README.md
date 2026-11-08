@@ -82,7 +82,8 @@ firmware R6.0.0.0Build3700.
   starts) and shows again at once; the first fix or NTP answer empties it if it was
   another day, so until then a board switched on the next morning, away from any
   WiFi, shows yesterday's. Before the first fix the clock comes from NTP on any WiFi
-  (`NTP_SERVER`), and `--:--` without one. `gps_tft.py`, its
+  (`NTP_SERVER`), and `--:--` without one; while the receiver is silent it runs on
+  from the last fix by the board's ticks. `gps_tft.py`, its
   anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
@@ -158,7 +159,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track or the board clock. |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track or the board clock. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
@@ -451,7 +452,7 @@ and shows the route and its state on the display (see [Hardware](#hardware)).
 | `wifi home in range` | With `WEB`, a keep-alive scan saw home: a round starts now |
 | `upload <file> … <ms> ms` / `GEO_URL redirects (N)` / `parked <file>.err` | POST time; a redirect (not followed); an unreadable track set aside |
 | `stay left, wifi: none of N access points in M scans` | An away stay ended without a fix: its access points are gone (also in the diagnostic log as `stay left wifi`) |
-| `status temp … hz … used … hdop … points … sent … wifi … pulses … mem … gpsloops …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, HDOP, points, uploads, keep-alive pulses so far, free heap, GPS reset-loop warnings so far |
+| `status temp … hz … used … gpsloops … hdop … points … sent … wifi … pulses … mem … idf … heap …` | Every 10 minutes: chip temperature (the ESP die, not the GPS), fixes in the last second, satellites, GPS reset-loop warnings so far, then what the diag line ends with: HDOP, points, uploads, WiFi state, keep-alive pulses so far, free heap, IDF heap free/largest block (KB), Python heap size (KB) |
 | `wifi off until upload retry N s` | Uploads back off for N s (server down, 401): the radio sleeps until then |
 | `cpu freq N …` | The board refused that CPU clock; it runs at the firmware default |
 
@@ -729,7 +730,8 @@ uploads; points still waiting are not drawn. (A `.trk` written by older firmware
 went there when written, and is not added again.) A track
 uploaded after a newer one (held back, retried) lands later in the day
 file; the page puts the points in time order again. The newest 7 days are
-kept (`HIST_DAYS`). The history yields to the tracks: under 1 MB
+kept (`HIST_DAYS`; a day written both as text and as `.trb` is one day). The
+history yields to the tracks: under 1 MB
 free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
 batch would be dropped on a full flash, and nothing is added under
 2 × `MIN_FREE`. An append cut short (the flash full mid-write) leaves no
@@ -823,8 +825,11 @@ console line.
   checksum misses two flipped bits, so the numbers are checked too: a
   coordinate's degrees must be digits, its minutes 0 to under 60 (no
   exponent), at most 90° / 180° with its own hemisphere letters; a number
-  field plain decimal (no exponent, `nan` or `inf`). Anything else makes the whole sentence bad
-  (counted in `nmea` good / bad), none of it used.
+  field plain decimal (no exponent, `nan` or `inf`); the time's six digits
+  (`HHMMSS`) and a fix's date (`DDMMYY`) digits. Anything else makes the whole sentence bad
+  (counted in `nmea` good / bad), none of it used. (One such date in a track
+  line became a "last time" no real time ever came after: no line and no anchor
+  point until a reboot.)
 - **Midnight.** Only `RMC` carries the date, and only with a fix (before one the
   UC6580's `RMC` carries a made-up date). A second that runs back past midnight
   without its own `RMC` has no date, so it is not a fix rather than a day off.
