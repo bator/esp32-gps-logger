@@ -29,8 +29,14 @@
 # aborted OTA).
 #
 # Usage: ./deploy.sh            (PORT=/dev/ttyUSB1 ./deploy.sh to override;
-#                                VENV=path for a venv other than ./.venv)
+#                                VENV=path for a venv other than ./.venv,
+#                                relative to where you run it)
 set -euo pipefail
+# (a relative VENV is the caller's: resolved before the cd below)
+case "${VENV:-.venv}" in
+    /*) ;;
+    *) [ -z "${VENV:-}" ] || VENV=$PWD/$VENV ;;
+esac
 cd "$(dirname "$0")"
 
 PORT=${PORT:-/dev/ttyUSB0}
@@ -40,7 +46,7 @@ MPREMOTE=$VENV/bin/mpremote
 FILES="gps_logger.mpy main.py web.html.gz"
 
 # mpy-cross must match the firmware's .mpy version (MicroPython 1.29)
-if ! $PY -c "import mpy_cross" 2>/dev/null; then
+if ! "$PY" -c "import mpy_cross" 2>/dev/null; then
     "$VENV/bin/pip" install -q "mpy-cross==1.29.*"
 fi
 
@@ -50,10 +56,10 @@ fi
 restart_logger() {
     local rc=$?
     if [ "${OTAPEND:-}" = False ]; then
-        $MPREMOTE connect "$PORT" reset >/dev/null 2>&1 || true
+        "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1 || true
     else
         echo "Running the logger again without a reset (OTA pending or unknown)" >&2
-        $MPREMOTE connect "$PORT" exec --no-follow \
+        "$MPREMOTE" connect "$PORT" exec --no-follow \
             "import gps_logger; gps_logger.run()" >/dev/null 2>&1 || true
     fi
     exit "$rc"
@@ -62,7 +68,7 @@ trap restart_logger EXIT
 
 # An OTA being validated? And is it the board: a Heltec Wireless Tracker (an
 # ESP32-S3: Xtensa); the logger runs on nothing else
-BOARD=$($MPREMOTE connect "$PORT" exec "
+BOARD=$("$MPREMOTE" connect "$PORT" exec "
 import os, sys
 print('ota.pending', 'ota.pending' in os.listdir())
 print(sys.implementation._machine)" | tr -d '\r' || true)
@@ -95,23 +101,22 @@ echo "Board: $MACHINE ($ARCH)"
 # go up. Only an explicit answer counts: anything else (a garbled or missing
 # reply) stops. An older marker has no TFT or BOOT ('-'): those are not
 # compared then.
-FROZEN=$($MPREMOTE connect "$PORT" exec "
+FROZEN=$("$MPREMOTE" connect "$PORT" exec "
 try:
     import gps_frozen
     print('frozen', gps_frozen.COMMIT, getattr(gps_frozen, 'SHA', '-'), getattr(gps_frozen, 'TFT', '-'),
           getattr(gps_frozen, 'BOOT', '-'))
 except ImportError:
-    print('plain')" | tr -d '\r' | grep -E '^(frozen [^ ]+ [^ ]+( [^ ]+){0,2}|plain)$' | tail -n 1 || true)
-KEEP_MPY=0
+    print('plain')" | tr -d '\r' | grep -E '^(frozen [A-Za-z0-9._-]+ [A-Za-z0-9._-]+( [A-Za-z0-9._-]+){0,2}|plain)$' | tail -n 1 || true)
+RM_MPY=0                                 # (a frozen logger: drop a gps_logger.mpy that shadows it)
 case "$FROZEN" in
     frozen*)
         read -r _ FCOMMIT FSHA FTFT FBOOT <<< "$FROZEN"
         if [ "${FORCE_MPY:-0}" = 1 ]; then
-            KEEP_MPY=1
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
             echo "WARNING: it shadows the frozen one and takes ~100 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
-            $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
+            "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
         else
             # (the display's code and gps_boot.py on the board that has them
             # in the marker: an older firmware has no TFT or BOOT, the
@@ -133,10 +138,11 @@ case "$FROZEN" in
                 echo "FORCE=1: deploying main.py and the page next to a stale frozen logger" >&2
             fi
             FILES="main.py web.html.gz"
+            RM_MPY=1
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
         fi ;;
-    plain) $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
+    plain) "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
@@ -144,12 +150,12 @@ esac
 # (Accept-Encoding: gzip), inflated on the board for other clients (curl).
 # tools/web_min.py strips it and makes the gzip, with the firmware's
 # WEB_GZ_WBITS window (see there); web.html itself keeps its comments.
-$PY tools/web_min.py web.html web.html.gz
+"$PY" tools/web_min.py web.html web.html.gz
 
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
 # of metadata, while the old one still exists
-FREE=$($MPREMOTE connect "$PORT" exec "
+FREE=$("$MPREMOTE" connect "$PORT" exec "
 import os
 for n in os.listdir():
     if n.endswith('.dpl'):
@@ -177,7 +183,7 @@ for f in $FILES; do
     CP+=(cp "$f" ":$f.dpl" +)
     EXPECT+="$f $(( $(wc -c < "$f") )) $(sha256sum "$f" | cut -d' ' -f1)"$'\n'
 done
-GOT=$($MPREMOTE connect "$PORT" "${CP[@]}" exec "
+GOT=$("$MPREMOTE" connect "$PORT" "${CP[@]}" exec "
 import os, hashlib, binascii
 b = bytearray(512)
 for n in '$FILES'.split():
@@ -196,7 +202,7 @@ if [ "$GOT"$'\n' != "$EXPECT" ]; then
     printf '%s' "$EXPECT" >&2
     echo "Got:" >&2
     printf '%s\n' "$GOT" >&2
-    $MPREMOTE connect "$PORT" exec "
+    "$MPREMOTE" connect "$PORT" exec "
 import os
 for n in '$FILES'.split():
     try:
@@ -220,7 +226,7 @@ echo "Copied and checked: $FILES"
 # count from the next boot.
 RESET=(+ reset)
 [ "$OTAPEND" = False ] || RESET=()
-$MPREMOTE connect "$PORT" \
+"$MPREMOTE" connect "$PORT" \
     exec "
 import os
 for n in '$FILES'.split():
@@ -231,7 +237,7 @@ for n in '$FILES'.split():
         os.rename(n + '.dpl', n)
 'web.html' in os.listdir() and os.remove('web.html')
 'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
-'$FROZEN'.startswith('frozen') and not $KEEP_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')" \
+$RM_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
     ${RESET[@]+"${RESET[@]}"}

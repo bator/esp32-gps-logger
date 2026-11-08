@@ -80,7 +80,9 @@ firmware R6.0.0.0Build3700.
   standing costs next to nothing). The speed is on the status page and in
   `status.json`. It never scrolls. The backlight (the one part that wears) is a 2 kHz PWM: `TFT_LIGHT`
   per cent (default 30) by day, dark once a stay has lasted `TFT_IDLE` seconds (default 300:
-  the board has not moved, so nobody looks at it), and dim again when it moves. The USER
+  the board has not moved, so nobody looks at it; on the home network with no usable fix
+  for 30 s, say on a desk indoors, counts as a stay too), and dim again when it moves. It
+  lights at that level when the display starts (after `.env` is read). The USER
   button gives full light for a minute, also in the dark; a tap is enough. A change is a
   `tft light N` line in the diag. The route survives a
   reboot in `/route.bin` (at most one write per 5 min of driving and one when a stay
@@ -164,7 +166,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix came since the boot. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too. |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has (with an https `GEO_URL` / `OTA_URL` it is asked on after a fix until the clock is set; a fix's clock is preferred). An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). |
 | `TFT_LIGHT` / `TFT_IDLE` | The display's backlight: `TFT_LIGHT` 0–100 per cent while it is on (default 30; 0 keeps it dark, the USER button still lights it), `TFT_IDLE` 0–86400 seconds into a stay (the board has not moved) before it goes dark (default 300; 0: never). Read at boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
@@ -200,6 +202,9 @@ DNS=192.168.1.111
 ```bash
 ./deploy.sh                      # default port /dev/ttyUSB0
 PORT=/dev/ttyACM0 ./deploy.sh    # the board's USB Serial/JTAG
+VENV=../venv ./deploy.sh         # python, pip and mpremote from another venv
+                                 # (default ./.venv; a relative path is
+                                 # relative to where you run the script)
 ```
 
 The script asks the board what it is (anything but the Heltec is refused:
@@ -287,13 +292,18 @@ The firmware also freezes `gps_boot.py`: what `main.py` does around the
 logger's start for OTA and the boot-fail retry. Frozen, its code is not
 compiled into the heap at every boot; `main.py` runs without it on a
 plain firmware. And it carries a small `gps_frozen` module with the commit
-(`-dirty` when the tree had uncommitted changes) and the SHA-256 of the
-frozen `gps_logger.py`. When `deploy.sh` finds it, it copies only `main.py`
-and the page and removes a stray `gps_logger.mpy`, but first compares that
-SHA-256 with the repo's `gps_logger.py`: when they differ (or a firmware
-built before the SHA was recorded) it stops and asks for
-`tools/build_firmware.sh --flash`; `FORCE=1 ./deploy.sh` deploys main.py
-and the page anyway. A logger change means building and flashing the
+(`-dirty` when the tree had uncommitted changes), the BUILD time and three
+SHA-256s: `SHA` of the frozen `gps_logger.py`, `TFT` of `gps_tft.py` +
+`gps_tft_font.py` (cat'ed in that order) and `BOOT` of `gps_boot.py`. When
+`deploy.sh` finds it, it copies only `main.py` and the page and removes a
+stray `gps_logger.mpy`, but first compares the three with the repo's files:
+when `SHA` differs (or a firmware built before it was recorded) it stops and
+asks for `tools/build_firmware.sh --flash`, naming the file that differs
+(`gps_logger.py`, `gps_tft.py / gps_tft_font.py` or `gps_boot.py`, the first
+in that order). A marker without `TFT` or `BOOT` (an older build, read as
+`-`) skips that comparison. A marker whose words are not plain
+(`A-Za-z0-9._-`) is no answer: it stops like a missing one. `FORCE=1
+./deploy.sh` deploys main.py and the page anyway. A logger change means building and flashing the
 firmware again. In an emergency `FORCE_MPY=1 ./deploy.sh` installs
 `gps_logger.mpy` on a frozen firmware too, with a warning: it shadows the
 frozen module and takes its ~100 KB of Python heap again. To roll back,
@@ -346,7 +356,9 @@ manifest carries the build (the commit time), the commit, size and SHA-256
 of each file, and an HMAC-SHA256 over them with the key in `OTA_KEY_FILE`
 (default `~/.config/gps-logger/ota.key`). The key is printable ASCII without
 quotes or spaces, 16 characters or more (the board reads it from `.env`):
-`openssl rand -hex 32 > ~/.config/gps-logger/ota.key`. Only a clean,
+`openssl rand -hex 32 > ~/.config/gps-logger/ota.key`. A key file readable
+by everyone is refused (`chmod 600` it), one readable by its group is
+warned about; the key itself is never printed. Only a clean,
 committed tree is published. A `--flash` or dirty build carries the build
 time instead of the commit time, so the OTA does not replace what was just
 flashed by hand with an older published build.
@@ -355,9 +367,11 @@ flashed by hand with an older published build.
 OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 ```
 
-The `OTA_DEST` path is a plain one: no spaces or shell specials (`scp` takes
-it as it is, the `ssh` rename shell-quoted; the two agree only on such a
-path).
+The `OTA_DEST` path is a plain one: only letters, digits and `_ . / -` (no
+`~`, spaces or shell specials; `scp` takes it as it is, the `ssh` rename
+shell-quoted, and the two agree only on such a path). Anything else, or a
+host starting with a dash, is refused before the build, long before an
+upload.
 
 The board, with `OTA_URL` (the manifest's URL) and `OTA_KEY` (the same key)
 in `.env`, checks 2 minutes after boot and then every 10 minutes (a ~1 KB
@@ -424,7 +438,14 @@ hour after the next boot (`OTA_RETRY`) and is bad after 2 tries
 (`OTA_TRIES_MAX`); the health reset removes the note before it counts its
 try, so a power cut between them cannot count one attempt twice, and it
 writes the points in RAM first. A boot without a pending note confirms
-the running image. Points waiting for upload hold the check back, but not
+the running image. A note that is there but cannot be read or parsed is
+dropped with the staged pages and the running image is confirmed once
+(`ota note unreadable, dropped`): which build it named, and whether this
+is it or the old one after a rollback, is not known, and holding it as
+pending kept the radio on, blocked the memory reboots and could reset a
+good build in a loop when the note would not go. The pending state ends
+only after the confirmation steps (page promotion, `.ota-old`, the notes)
+ran: a MemoryError in one is retried by the next tick. Points waiting for upload hold the check back, but not
 for good: with no successful upload for 24 hours (`OTA_STUCK`; `err
 payload` is cleared by a 2xx only, so an upload bug held back the update
 that fixes it) it checks anyway, one diag line `ota: uploads stuck`.
@@ -499,12 +520,20 @@ A bug in the WiFi, upload or OTA tick, the status page's or a status
 line's, no longer resets the board: it is
 one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
 (`TICK_PAUSE`) and logging goes on; an upload bug also backs the upload
-off. Ten MemoryErrors of one tick in a row (`GUARD_MEM_MAX`, counted per
-tick: the others running through meanwhile clear nothing) are a memory
-reboot, as the crash reset used to be. A bug in the logging itself, and any
-bug while an OTA image is pending, still goes to the crash branch, except a
-MemoryError in any guarded tick: no reason to blame the new build for a low
-heap in its first minutes (it went to `/ota.bad` for good).
+off. Ten MemoryErrors of one tick, each within 40 minutes of the one before
+(`GUARD_MEM_MAX`, `GUARD_MEM_QUIET`: over the longest upload backoff, so a
+lasting one in a backed-off tick keeps counting; counted per tick, and a
+pass that runs through between them, an upload in its backoff or an idle
+WiFi tick, clears nothing; sporadic ones further apart never add up) are a
+memory reboot, as the crash reset used to be. A bug in the logging itself,
+and any bug while an OTA image is pending, still goes to the crash branch.
+A MemoryError in a guarded tick is the exception while an image is
+pending: no reason to blame the new build for a low heap in its first
+minutes (it went to `/ota.bad` for good), so it is swallowed (gc, the
+pause) and counted, but a persistent one is the build's defect: the
+`GUARD_PEND_MAX`-th (5) of one tick raises, the image crashes and is
+rolled back and marked bad. No memory reboot while an image is pending (it
+would abort it).
 
 In the REPL after 5 a frozen firmware no longer waits for good: after 30
 minutes (`BOOT_RETRY_MS`) a timer sets the count back to 4 and resets, one
@@ -544,11 +573,16 @@ were), `gps setup not taken: …` (at most one per 10 minutes,
 `GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `gps setup lost: no
 GST`, `gps refused <command>`, `gps silent N s, no bytes from the receiver` and
 `gps back after N s` (no byte from the receiver for a minute, `GPS_SILENT`),
+`time back <false> <real>` (the fixes were ten seconds running more than a minute behind
+the last line written, `TIME_BACK`: a time with a corrupt digit had got past the
+checksum, so the track would have stopped until it came true; it goes on in a new
+segment),
 `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
 used, `clock set <UTC>` once a boot when the board clock is set from the
-GPS (`clock set <UTC> ntp`: from NTP, no fix since the boot), `clock ntp
+GPS (`clock set <UTC> gps`: the last fix's clock run on, the fix gone;
+`clock set <UTC> ntp`: from NTP, no fix since the boot), `clock ntp
 <UTC>` when NTP tells the display the time before a fix, `heap grew in <step> to N KB` when the
 Python heap grew during an upload step (`read_batch`, `connect`,
 `tls_wrap`, `post`, the whole POST: the step that took IDF heap), a
@@ -683,8 +717,10 @@ to fill the column next to *Systems*; signal bars and *Systems* on the right):
   time, km, duration, mean km/h) and a hollow dot and a dashed line per stop
   (its length). Over each line the place where it starts or ends, from Atlas'
   Photon, as for the position (a railway station within 150 m, else city and
-  street, once a place, kept while the page is open); no answer, as offline:
-  the line alone. A trip still going has no end place yet. A trip is a run of
+  street, once a place, kept while the page is open, the 400 newest);
+  no answer, as offline: the line alone, tried again once a minute (one
+  request at a time); a place the geocoder keeps failing on goes to the back
+  of the queue after 3 tries, so the others still get their names. A trip still going has no end place yet. A trip is a run of
   points without a gap over 5 min that
   covers 100 m at least; a few fixes while standing belong to the stop. A
   trip clicked is drawn white on the map, which zooms to it (clicked again:
@@ -702,7 +738,9 @@ wire): useful while moving the wires with the page open.
 
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
-it the page shows a dark map and the system font. The page is a file on the
+it the page shows a dark map and the system font (the font sheet loads
+without blocking the first paint, so an offline phone does not wait for it).
+The page is a file on the
 board, kept only gzipped (`/web.html.gz`, ~27 KB instead of the ~94 KB
 `web.html`, whose comments and indentation `tools/web_min.py` takes out at build
 time; copied by `deploy.sh` or an OTA) and loads once: a browser
@@ -725,8 +763,13 @@ only `/web.html.gz`; then it asks
 for `/status.json` every 15 s (`WEB_REFRESH`, sent in the JSON) and redraws
 only the boxes; the map tiles reload only when the position moves to
 another tile. When the board does not answer (asleep, out of range) the
-panels fade and `LIVE` turns into `OFFLINE · 2 MIN 10 S AGO`. HDOP is
-rounded to two decimals on the page; the JSON keeps the receiver's value.
+panels fade and `LIVE` turns into `OFFLINE · 2 MIN 10 S AGO`. A reply that
+is not the JSON is told apart: the board's own error (a bug building the
+JSON is a 500, or its text/plain 403, 404, 503) shows as `BOARD ERROR` with
+the first words it said (`HTTP 503 ...`; a 500 without the status); a
+gateway's or a captive portal's HTML page (502, 504, 403) is not the
+board's and stays `OFFLINE`. HDOP is rounded to two decimals on the page;
+the JSON keeps the receiver's value.
 
 **Day history on the map.** The page draws today's track (since local
 midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
@@ -1229,9 +1272,12 @@ home.
   2000-01-01 at every boot, so before a POST the logger sets it from a
   valid GPS fix (a date in 2020–2087): once a boot (`clock set …` in the
   diagnostic log), again only when it drifted more than 5 s
-  (`RTC_DRIFT`). With no fix since the boot (indoors, at home) the NTP
-  answer sets it meanwhile (`clock set … ntp`; before, verified POSTs
-  failed until the first fix), and a fix sets it again when it differs.
+  (`RTC_DRIFT`). With the fix gone and the clock not set yet (a board that
+  had a fix outdoors and is indoors at home now) the last fix's clock run on
+  by the ticks sets it (`clock set … gps`), with no fix since the boot the
+  NTP answer does (`clock set … ntp`; before, verified POSTs failed until a
+  fix coincided with one), and a fix sets it again when it differs. An
+  https OTA GET sets it first too.
 - **TLS memory:** five TLS allocation failures in a row at home
   (`TLS_REBOOT_N`; any other error ends the run) restart the board cleanly
   (`reboot tls memory` in the diagnostic log): the IDF heap stays
@@ -1435,27 +1481,33 @@ every pull request:
   - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
     board-side code under CPython): copy, check and rename, too little
     flash, a cut copy, frozen firmware (stale, `FORCE`, `FORCE_MPY`, no
-    clear answer), an OTA pending (`FORCE_PENDING`);
+    clear answer, a marker that is not plain words, a relative `VENV`), an OTA
+    pending (`FORCE_PENDING`);
   - `tools/build_firmware.sh` with a fake ESP-IDF, MicroPython tree,
     `esptool.py`, `mpremote`, `scp` and `ssh`: the `gps_frozen` marker,
     `--flash` touching nothing on the board before a successful write,
     `--migrate`'s flash size check and private backup, `--publish` moving each
     file in from a `.tmp` and refusing a build not newer than the published
-    one.
-  The page checks run on Node 24 (`actions/setup-node`, pinned).
+    one, a key file readable by everyone, and an `OTA_DEST` that is not a
+    plain path.
+  The page checks run on Node 24 (`actions/setup-node`, pinned). The page's
+  layout check (headless Chrome at 375 and 800 px) runs where `google-chrome`
+  or `chromium` is on the `PATH`, else it is skipped; the workflow installs
+  neither. The suite removes every temporary directory it made when it ends
+  (`KEEP_TMP=1` keeps them to look at after a failure).
 - `mpy-cross` 1.29 for `xtensawin` on every frozen module (`gps_logger.py`,
   `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
   itself (ESP-IDF, `boards/GPS_LOGGER_S3`) is not built in CI: a board or
   freeze-manifest breakage shows at the next local `tools/build_firmware.sh`.
-- `pyflakes` on `gps_logger.py`, `gps_tft.py`, `main.py`, `tools/trk2gpx.py`,
-  `tools/web_min.py`, `tests/mpy_unix_logger.py` and `tests/web_loopback.py`.
+- `pyflakes` on every Python file: `gps_logger.py`, `gps_boot.py`,
+  `gps_tft.py`, `gps_tft_font.py`, `main.py`, `tools/` and `tests/`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
 
 The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
-.venv/bin/python -m pyflakes gps_logger.py gps_tft.py main.py tools/trk2gpx.py tools/web_min.py tests/mpy_unix_logger.py tests/web_loopback.py
+.venv/bin/python -m pyflakes gps_logger.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 shellcheck deploy.sh tools/build_firmware.sh
 for m in gps_logger gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done
 MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \

@@ -12,7 +12,11 @@
      homelab Atlas proxy and the
      fonts from Google Fonts when the phone is online. -->
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<!-- (media=print + onload: the font sheet does not hold the first paint back
+     when the phone has no internet; without scripts or fonts the page still
+     renders in the system fonts) -->
+<link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap"></noscript>
 <style>
 :root{--b:#09090b;--l:#26262b;--t:#ececee;--m:#8e8e96;--a:#e4e4e7;--ok:#4ade80;--warn:#f59e0b;--bad:#ef4444}
 body{margin:0;background:var(--b);color:var(--t);font:14px Inter,system-ui,sans-serif}
@@ -342,7 +346,7 @@ function hms(s) {                       // as _hms() in gps_logger.py
   if (s < 86400) return Math.floor(s / 3600) + " h " + two(Math.floor(s / 60) % 60) + " min";
   return Math.floor(s / 86400) + " d " + two(Math.floor(s / 3600) % 24) + " h";
 }
-function num(n) { return n == null ? "-" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
+function num(n) { return n == null ? "-" : esc(String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ")); }
 function gid(sv) { return GNSS[sv.system] === undefined ? 1 : GNSS[sv.system]; }
 function cls(sv) { return "g" + gid(sv) + (sv.used ? "" : " u"); }
 function tip(sv) { return esc(sv.name) + " " + esc(sv.cno || "-") + " dBHz"; }
@@ -389,6 +393,7 @@ var EVK = [
   ["boot", /^boot cause /, "Boot", 1, "boot", "power"],
   ["wback", /^wifi back /, "WiFi back", 1, "ok", "wifi"],
   ["stay", /^stay left /, "Stay ended", 0, "mut", "dot"],
+  ["disp", /^tft light /, "Display backlight", 0, "mut", "bulb"],
   ["grx", /^gps /, "Receiver start", 0, "mut", "sat"],
   ["other", /^/, "Other", -1, "mut", "dot"]
 ];
@@ -404,6 +409,7 @@ var EVI = {
   wifi: '<path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M2 9a14 14 0 0 1 20 0M12 19.5h.01"/>',
   sat: '<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
   cfg: '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+  bulb: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
   dot: '<circle cx="12" cy="12" r="2.5"/>'
 };
 var EV_STATUS = /^up \d+ utc (\S+) .*? sats (\d+)\/(\S+) fix (\S+)/, EV_PEND = 500;
@@ -554,6 +560,7 @@ var EVD = {
   pvt: function (d, l) { evText(d, l.replace(/^gps pvt /, "")); return 1; },
   tback: function (d, l) { evText(d, l.replace(/^time back /, "")); return 1; },
   stay: function (d, l) { evText(d, l.replace(/^stay left /, "")); return 1; },
+  disp: function (d, l) { evText(d, l.replace(/^tft light (\d+)$/, "$1 %")); return 1; },
   other: function (d, l) {              // its first two words
     evText(d, l.split(" ").slice(0, 2).join(" "));
     d.x = d.x.length > 1 && d.x[0] > d.x[1] ? [d.x[1], d.x[0]] : d.x;
@@ -855,7 +862,7 @@ function view(d, prev) {
       (d.gps_boots > 0 ? dot + num(d.gps_boots) + " restarts" : "") + dot + bytes(d.rx_bytes) + " read", gl.tone]);
   if (d.fw !== undefined)
     subs.push(["Firmware", d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw),
-      /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : "", esc(OTA[d.ota] || "ota " + d.ota)]);
+      /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : "", esc(OTA[d.ota] || (d.ota == null ? null : "ota " + d.ota))]);
   var nom = 0, worst = "";
   for (var k = 0; k < subs.length; k++) {
     if (!subs[k][2]) nom++;
@@ -1086,7 +1093,9 @@ function placeOf(j) {
 // is open, so a day shown again asks nothing. Unreachable, as away from the internet:
 // no name, the line as it was, a new try after PLACE_WAIT: each poll (tick) calls
 // placeNext, whether or not the track changed (a finished day, standing still).
-var PLACE_KM = .15, PLACE_WAIT = 60000, PLACE_MAX = 400;
+// A place that fails PLACE_TRIES times in a row goes to the back of the queue,
+// so one the geocoder cannot answer does not hold the others up.
+var PLACE_KM = .15, PLACE_WAIT = 60000, PLACE_MAX = 400, PLACE_TRIES = 3;
 var places = {}, placeQ = [], placeBusy = false, placeOff = 0;
 function placeKey(p) { return p[1].toFixed(3) + "," + p[2].toFixed(3); }
 // each trip's [from, to] as known, the unknown ones queued. A trip still going has
@@ -1096,14 +1105,16 @@ function tripPlaces(trips, pts, open) {
     var p = pts[i], k = placeKey(p);
     if (k in places) return places[k];
     for (var q = 0; q < placeQ.length; q++) if (placeQ[q].k === k) return "";
-    placeQ.push({k: k, lat: p[1], lon: p[2], any: false});
+    placeQ.push({k: k, lat: p[1], lon: p[2], any: false, fails: 0});
     return "";
   };
   return trips.map(function (t, n) { return [one(t.i0), open && n === trips.length - 1 ? "" : one(t.i1)]; });
 }
 function placeGot(q, name) {
-  placeQ.shift();
-  if (Object.keys(places).length >= PLACE_MAX) places = {};
+  var i = placeQ.indexOf(q), ks = Object.keys(places);
+  if (i >= 0) placeQ.splice(i, 1);
+  // the oldest goes (insertion order), not all: the day on show keeps its names
+  if (ks.length >= PLACE_MAX && !(q.k in places)) delete places[ks[0]];
   places[q.k] = name;
   tpKey = "";
   trackPaint();
@@ -1111,7 +1122,16 @@ function placeGot(q, name) {
 function placeNext() {
   if (placeBusy || !placeQ.length || Date.now() < placeOff) return;
   var q = placeQ[0], x = new XMLHttpRequest();
-  var failed = function () { placeBusy = false; placeOff = Date.now() + PLACE_WAIT; };
+  var failed = function () {
+    placeBusy = false;
+    placeOff = Date.now() + PLACE_WAIT;
+    q.fails = (q.fails || 0) + 1;
+    if (q.fails >= PLACE_TRIES && placeQ.length > 1 && placeQ[0] === q) {
+      q.fails = 0;
+      q.any = false;
+      placeQ.push(placeQ.shift());
+    }
+  };
   placeBusy = true;
   x.open("GET", ADDR + "?lat=" + q.lat.toFixed(5) + "&lon=" + q.lon.toFixed(5) + "&limit=1" +
     (q.any ? "" : "&radius=" + PLACE_KM + "&osm_tag=railway:station"), true);
@@ -1121,6 +1141,7 @@ function placeNext() {
     var n = "";
     try { n = placeOf(JSON.parse(x.responseText)); } catch (e) { return failed(); }
     placeBusy = false;
+    q.fails = 0;
     if (n || q.any) placeGot(q, n); else q.any = true;
     placeNext();
   };
@@ -1482,10 +1503,14 @@ function tick() {
     var d = null;
     try { d = JSON.parse(x.responseText); } catch (e) {
       stale();
-      // the board answered, not gone: a bug building the JSON (500) or an
-      // error page (404, 503): its words, with the status
-      if (x.status && x.status !== 200) document.getElementById("live").innerHTML = "BOARD ERROR &middot; " +
-        (x.status === 500 ? "" : "HTTP " + x.status + " ") + esc(String(x.responseText).slice(0, 60));
+      // the board answered, not gone: a bug building the JSON (500) or one of
+      // its own text/plain errors (403, 404, 503): its words, with the status.
+      // A gateway's or a captive portal's page (HTML, 502, 504...) is not the
+      // board's: that stays OFFLINE
+      var ct = x.status ? String(x.getResponseHeader("Content-Type") || "") : "";
+      if (x.status === 500 || x.status && x.status !== 200 && /^text\/plain/i.test(ct))
+        document.getElementById("live").innerHTML = "BOARD ERROR &middot; " +
+          (x.status === 500 ? "" : "HTTP " + x.status + " ") + esc(String(x.responseText).slice(0, 60));
     }
     // a bug drawing a box is not the board gone: LIVE stays, the error shows
     if (d) try {
