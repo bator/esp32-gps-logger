@@ -5192,7 +5192,6 @@ _J_SPD = b'"speed":'
 _J_FIX = len(_J_PT) + 1 + len(_J_TS) + 20 + 2   # "," time '",'
 _ISO = (0, 1, 2, 3, -45, 4, 5, -45, 6, 7, 8, 9, 10, -58, 11, 12, -58, 13,
         14, 15)                          # YYYYMMDDTHHMMSSZ -> ISO (-c: chr c)
-_TDIG = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)
 _pt = [0] * 16                           # the parsed .trk point (_trk_point)
 _dev = [None, b""]                       # DEVICE_ID, its JSON tail
 
