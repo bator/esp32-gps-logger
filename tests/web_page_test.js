@@ -91,12 +91,25 @@ p.c.tick();
 st(p)[3].responseText = "{broken";
 st(p)[3].onload();
 dom.brokenBody = p.doc.body.className;
-// an error page from the board (no JSON): the board answered, its status shows
-p.c.tick();
-st(p)[4].status = 503;
-st(p)[4].responseText = "<html>busy</html>";
-st(p)[4].onload();
-dom.err503 = [p.doc.body.className, p.doc.getElementById("live").innerHTML];
+// an error of the board's own (text/plain, no JSON): the board answered, its
+// status shows
+const errReply = (n, status, ctype, body) => {
+  p.c.tick();
+  const x = st(p)[n];
+  x.status = status;
+  x.headers = ctype === null ? {} : {"Content-Type": ctype};
+  x.responseText = body;
+  x.onload();
+  return [p.doc.body.className, p.doc.getElementById("live").innerHTML];
+};
+dom.err503 = errReply(4, 503, "text/plain", "busy");
+// RT2-3: a gateway's or a captive portal's page (HTML) is not the board's:
+// OFFLINE, not a board error; a 500 is the board's whatever it says
+dom.err502 = errReply(5, 502, "text/html", "<html>Bad Gateway</html>");
+dom.err403 = errReply(6, 403, "text/html; charset=utf-8", "<html>Sign in</html>");
+dom.err404 = errReply(7, 404, "text/plain", "not found");
+dom.err500 = errReply(8, 500, null, "TypeError('x')");
+dom.err204 = errReply(9, 204, null, "");
 p = page(1100);
 p.xhrs[0].ontimeout();
 dom.never = p.doc.getElementById("live").innerHTML;
@@ -416,6 +429,93 @@ ft.placeRetry = (() => {
   out.after = [asks().length, q.doc.getElementById("tline").innerHTML.indexOf("<strong>Kisfalu</strong>") >= 0,
     c.placeQ.length];
   return out;
+})();
+// RT2-1: a place the geocoder cannot answer (a 429 for good) does not hold the
+// others up: after PLACE_TRIES failed tries it goes to the back of the queue,
+// the next one is asked and named; one request at a time all along, and the
+// failing one is still tried now and then
+ft.placeHol = (() => {
+  const q = page(1600), c = q.c, out = {};
+  let fake = new Date(2026, 10, 5, 12, 0, 0).getTime();
+  const RD = Date;
+  function D(...a) { return a.length ? new RD(...a) : new RD(fake); }
+  D.now = () => fake; D.UTC = RD.UTC; D.parse = RD.parse;
+  c.Date = D;
+  const status = JSON.stringify({refresh_s: 15, position: null, days: ["20261103"]});
+  const asks = () => q.xhrs.filter((x) => x.url.indexOf(c.ADDR) === 0);
+  const open = () => asks().filter((x) => !x.served);
+  out.maxFlight = 0;
+  out.headAsks = 0;
+  out.namedAt = null;
+  const serve = () => {
+    while (open().length) {
+      out.maxFlight = Math.max(out.maxFlight, open().length);
+      const x = open()[0];
+      x.served = true;
+      if (x.url.indexOf("lat=47.10000") >= 0) { out.headAsks++; x.status = 429; x.responseText = ""; }
+      else {
+        x.status = 200;
+        x.responseText = JSON.stringify({features: [{properties: {osm_key: "railway", name: "Tesztfalu"}}]});
+      }
+      x.onload();
+    }
+  };
+  q.xhrs[0].responseText = status;
+  q.xhrs[0].onload();
+  answer(q, null, "");
+  c.pick("20261103");
+  const t0 = new RD(2026, 10, 3, 12, 0, 0).getTime();
+  let body = "#TRK2\n";
+  for (let k = 0; k < 20; k++) body += (47.1 + k * 0.001).toFixed(5) + ",18.4,100,2,3," + iso(t0 + k * 1000) + "\n";
+  answer(q, new RegExp("d=" + c.utcDay(t0) + "&o=0$"), body);
+  out.queued = c.placeQ.map((x) => x.k);
+  serve();
+  for (let i = 1; i <= 48; i++) {         // 12 minutes of polls
+    fake += 15000;
+    c.tick();
+    const l = st(q);
+    l[l.length - 1].responseText = status;
+    l[l.length - 1].onload();
+    serve();
+    if (out.namedAt === null && q.doc.getElementById("tline").innerHTML.indexOf("<strong>Tesztfalu</strong>") >= 0)
+      out.namedAt = i * 15;
+  }
+  out.left = c.placeQ.map((x) => x.k);
+  return out;
+})();
+// RT2-9: a full place cache drops its oldest name, not all of them
+ft.placeEvict = (() => {
+  const c = page(1600).c, out = {};
+  c.PLACE_MAX = 3;
+  for (const k of ["a", "b", "c", "d", "e"]) {
+    const x = {k: k, lat: 47.1, lon: 18.4, any: false, fails: 0};
+    c.placeQ.push(x);
+    c.placeGot(x, k.toUpperCase());
+  }
+  out.keys = Object.keys(c.places);
+  out.queue = c.placeQ.length;
+  return out;
+})();
+// RT2-2: the counters go into the HTML escaped, whatever type the JSON gave
+ft.numEsc = (() => {
+  const X = "<i>X9";
+  const w = c0.view({left: X, sent: X, upload_err: X, bad_files: X, points: X, files: X, pulses: X, gps_loops: X,
+    gps_boots: X, rx_bytes: 5, good_age_s: 1, uptime: 9, upload: "ok"});
+  return [Object.keys(w).filter((k) => w[k].indexOf("<i>X9") >= 0), w.sys.indexOf("&lt;i&gt;X9") >= 0,
+    c0.num(1234567), c0.num(null), c0.num("<b>")];
+})();
+// RT2-9: a firmware with an fw but no ota in the JSON shows a dash, not "ota undefined"
+ft.otaMissing = (() => {
+  const w = c0.view({fw: "abc1234", uptime: 5});
+  return [w.sys.indexOf("undefined") < 0, w.sys.indexOf("Firmware <em>") >= 0];
+})();
+// RT2-9: "tft light N" is a Display backlight group, not Other
+ft.dispKind = (() => {
+  const a = c0.evNew();
+  for (const l of ["tft light 0", "tft light 30", "tft light 100"]) c0.evLine(a, l);
+  const gs = c0.evGroups(a);
+  const html = c0.evView(a, {done: true}).evg;
+  return [gs.map((g) => [g.k, g.name, g.n, g.det]), html.indexOf("undefined") < 0, html.indexOf("Display backlight") >= 0];
 })();
 ft.kpis = c0.kpis(trips);
 ft.kpisLong = c0.kpis([{t0: 0, t1: 4500000, km: 12.345}]);

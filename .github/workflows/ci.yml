@@ -26,7 +26,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pyflakes
-      - run: python -m pyflakes gps_logger.py gps_tft.py main.py tools/trk2gpx.py tools/web_min.py tests/mpy_unix_logger.py tests/web_loopback.py
+      # every Python file of the repo (the board's modules, tools and tests)
+      - run: python -m pyflakes gps_logger.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 
   shellcheck:
     name: shellcheck
@@ -69,7 +70,7 @@ jobs:
       # the page checks run web.html's script in node (a missing node is a
       # FAIL in CI, see tests/test_gps_logger.py PAGE): a pinned LTS, not
       # whatever the runner image ships
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       - run: node --version

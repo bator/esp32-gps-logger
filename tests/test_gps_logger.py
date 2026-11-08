@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import array
+import atexit
 import builtins
 import calendar
 import gc as real_gc
@@ -21,6 +22,35 @@ import time
 import stat
 import types
 import zlib
+
+# every temp directory the suite makes is removed when it ends (the test run
+# used to leave about a dozen in /tmp each time); KEEP_TMP=1 keeps them to
+# look at after a failure
+_tmp_made = []
+_mkdtemp0 = tempfile.mkdtemp
+
+
+def _mkdtemp(*a, **k):
+    d = _mkdtemp0(*a, **k)
+    _tmp_made.append(d)
+    return d
+
+
+tempfile.mkdtemp = _mkdtemp
+
+
+@atexit.register
+def _tmp_clean():
+    if os.environ.get("KEEP_TMP") != "1":
+        for d in _tmp_made:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def _slurp(path):
+    """A text file's content, closed."""
+    with builtins.open(path) as f:
+        return f.read()
+
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -1341,12 +1371,12 @@ try:
     gl._loop = boom
     try:
         gl.run()
-        check("crash handler: machine.reset() called", False, "run() returned")
+        check("crash handler: machine.reset() called (run() returned)", False, "run() returned")
     except SystemExit as e:
         check("crash handler: machine.reset() called",
               bool(_resets) and "reset" in str(e))
     except Exception as e:
-        check("crash handler: machine.reset() called", False, repr(e))
+        check("crash handler: machine.reset() called (other exception)", False, repr(e))
     finally:
         gl._loop = orig_loop
 
@@ -1361,11 +1391,11 @@ try:
     gl.reset = boom_init
     try:
         gl.run()
-        check("startup OSError: machine.reset()", False, "returned")
+        check("startup OSError: machine.reset() (run() returned)", False, "returned")
     except SystemExit:
         check("startup OSError: machine.reset()", bool(_resets))
     except Exception as e:
-        check("startup OSError: machine.reset()", False, repr(e))
+        check("startup OSError: machine.reset() (other exception)", False, repr(e))
     finally:
         gl.reset = orig_reset
 
@@ -1385,7 +1415,7 @@ try:
         check("Ctrl-C: raised KeyboardInterrupt (no reset)",
               not _resets)
     except SystemExit:
-        check("Ctrl-C: raised KeyboardInterrupt (no reset)", False, "reset")
+        check("Ctrl-C: raised KeyboardInterrupt (a reset instead)", False, "reset")
     finally:
         gl._loop = orig_loop
     check("Ctrl-C: Timer started to keep feeding WDT",
@@ -1784,7 +1814,7 @@ try:
         check("B2: count_points/up_reset catch MemoryError (no reset)",
               True)
     except MemoryError:
-        check("B2: count_points/up_reset catch MemoryError (no reset)", False)
+        check("B2: count_points/up_reset catch MemoryError (it escaped)", False)
     finally:
         setattr(gl, rl_name, orig_rl)
         gl.up["url"] = "https://dawarich.example.com"
@@ -1797,7 +1827,7 @@ try:
         check("B2: upload_tick MemoryError skips the file (no infinite loop)",
               gl.up["skip"] == path and gl.up["state"] == "low mem")
     except MemoryError:
-        check("B2: upload_tick MemoryError skips the file (no infinite loop)",
+        check("B2: upload_tick MemoryError skips the file (it escaped)",
               False, "MemoryError escaped")
     finally:
         setattr(gl, rl_name, orig_rl)
@@ -2261,7 +2291,7 @@ try:
     # --- K2: boot-failure counter ------------------------------------------
     RTC.mem = b""
     boot_path = os.path.join(ROOT, "main.py")
-    boot_src = open(boot_path).read()
+    boot_src = _slurp(boot_path)
     boot_ns = {
         "Pin": Pin, "RTC": RTC, "machine": sys.modules["machine"],
         "time": time, "__name__": "boot_helpers",
@@ -2514,7 +2544,7 @@ try:
           w["home"] is False, "home=%s" % w["home"])
 
     # --- REG1: no str.isalnum (MicroPython 1.29) ---------------------------
-    src = open(os.path.join(ROOT, "gps_logger.py")).read()
+    src = _slurp(os.path.join(ROOT, "gps_logger.py"))
     check("REG1: gps_logger.py does not call str.isalnum()",
           ".isalnum(" not in src)
     check("REG1: _ok_char accepts the README default id",
@@ -3451,7 +3481,7 @@ try:
     _reset_cause[0] = 3  # WDT_RESET
     RTC.mem = b"4"
     boot_path = os.path.join(ROOT, "main.py")
-    boot_src = open(boot_path).read()
+    boot_src = _slurp(boot_path)
     boot_ns = {
         "Pin": Pin, "RTC": RTC, "machine": sys.modules["machine"],
         "time": time, "__name__": "boot_helpers",
@@ -3516,7 +3546,7 @@ try:
               '3: "watchdog", 4: "deep sleep", 5: "soft reset"};' in page_boot)
 
     # K2-6: BOOT_OK_MS is counted from the first _loop iteration, not run()
-    src = open(os.path.join(ROOT, "gps_logger.py")).read()
+    src = _slurp(os.path.join(ROOT, "gps_logger.py"))
     check("K2-6: _loop measures BOOT_OK from loop_start",
           "loop_start = time.ticks_ms()" in src
           and "ticks_diff(now, loop_start)" in src)
@@ -6895,10 +6925,11 @@ def deploy_run(env_extra):
             with open(os.path.join(work, n), "rb") as f:
                 tft_sha.update(f.read())
         with open(os.path.join(dev, "gps_frozen.py"), "w") as f:
-            f.write('COMMIT = "abc1234"\n')     # "old": no SHA (first builds)
+            f.write('COMMIT = "%s"\n' % {"quote": "ab'c", "dirty": "abc1234-dirty"}.get(
+                fz, "abc1234"))                 # "old": no SHA (first builds)
             if fz != "old":
                 f.write('SHA = "%s"\n' % (sha if fz != "stale" else "0" * 64))
-            if fz in ("full", "tft-stale", "boot-stale"):   # a marker with the
+            if fz in ("full", "tft-stale", "boot-stale", "quote", "dirty"):  # a marker with the
                 f.write('TFT = "%s"\n' % (tft_sha.hexdigest()  # display's and
                                           if fz != "tft-stale" else "0" * 64))
                 f.write('BOOT = "%s"\n' % (boot_sha           # gps_boot.py's SHA
@@ -6908,8 +6939,16 @@ def deploy_run(env_extra):
                FAKE_LOGGER=os.path.join(work, "logger"),
                FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
     env.update(env_extra)
+    cwd = None
+    if env_extra.get("ALT_VENV"):               # VENV=venv, relative to where it is
+        alt = os.path.join(work, "alt")         # run (not to the repo): the venv
+        os.makedirs(alt)                        # is moved there, .venv is gone
+        shutil.move(os.path.join(work, ".venv"), os.path.join(alt, "venv"))
+        env.update(VENV="venv",
+                   FAKE_SHIM=os.path.join(alt, "venv", "bin", "shim.py"))
+        cwd = alt
     r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=60, cwd=cwd)
     try:
         with open(env["FAKE_LOG"]) as f:
             calls = [json.loads(line) for line in f]
@@ -7069,6 +7108,27 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           == ["main.py", "web.html.gz"],
           "%r %r %r" % ((rc_b, err_b[-300:]), (rc_t, err_t[-200:]),
                         (rc_f, out_f[-200:], err_f[-300:])))
+    # DEPLOY-RT2 (RT2-5): the marker's words go to the shell only as words: a
+    # quote in the commit is no answer (it used to be spliced into the Python
+    # run on the board, a SyntaxError after the copy); a "-dirty" commit is one;
+    # a relative VENV is the caller's (it was the repo's, after the cd)
+    rc_q, out_q, err_q, dev_q, calls_q = deploy_run({"FAKE_FROZEN": "quote"})
+    rc_d, out_d, err_d, dev_d, calls_d = deploy_run({"FAKE_FROZEN": "dirty"})
+    rc_v, out_v, err_v, dev_v, calls_v = deploy_run({"FAKE_FROZEN": "full",
+                                                     "ALT_VENV": "1"})
+    check("DEPLOY-RT2: a quote in the frozen marker's commit -> 'Could not "
+          "tell', nothing copied; a -dirty commit deploys, the shadowing "
+          "gps_logger.mpy removed; VENV=venv relative to the caller's cwd works",
+          rc_q != 0 and "Could not tell" in err_q
+          and not [c for call in calls_q for c in call if c[0] == "cp"]
+          and dev_file(dev_q, "main.py") == b"old main"
+          and rc_d == 0 and "Deployed" in out_d
+          and dev_file(dev_d, "gps_logger.mpy") is None
+          and dev_file(dev_d, "main.py") != b"old main"
+          and rc_v == 0 and "Deployed" in out_v
+          and dev_file(dev_v, "main.py") != b"old main",
+          "%r %r %r" % ((rc_q, err_q[-200:]), (rc_d, err_d[-200:]),
+                        (rc_v, out_v[-100:], err_v[-300:])))
     # DEPLOY-UNSURE: no clear frozen/plain answer -> stop, nothing installed
     rc, out, err, dev, calls = deploy_run({"FAKE_GARBLE": "1"})
     check("DEPLOY-UNSURE: no frozen/plain answer -> exit 1, no .mpy built or "
@@ -7428,6 +7488,8 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
         f.write('"quoted key with spaces"\n')
     with open(key_file, "w") as f:
         f.write("0123456789abcdef0123456789abcdef\n")
+    os.chmod(key_file, 0o600)
+    os.chmod(bad_key, 0o600)
     dest = tempfile.mkdtemp(dir=dp_td)
     penv = {"OTA_KEY_FILE": key_file, "OTA_DEST": "fakehost:" + dest}
     rc_dirty = build_run(["--publish"], penv, dirty=True)[0]
@@ -7456,6 +7518,42 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and named[:1] == ["micropython-%s.bin" % man.get("commit")]
           and all(os.path.exists(os.path.join(dest, n)) for n in named),
           repr((rc_dirty, rc_nokey, rc_badkey, rc, man, scp, err[-200:])))
+    # BUILD-PUBLISH-RT2 (RT2-6): the key file's mode (everyone: refused, the
+    # group: warned, the key never printed) and OTA_DEST's directory (a plain
+    # path only), both before any upload; the second also before the build
+    key_secret = "0123456789abcdef0123456789abcdef"
+    k644, k640 = (os.path.join(key_dir, n) for n in ("k644.key", "k640.key"))
+    for kf, mode in ((k644, 0o644), (k640, 0o640)):
+        with open(kf, "w") as f:
+            f.write(key_secret + "\n")
+        os.chmod(kf, mode)
+    dest_k = tempfile.mkdtemp(dir=dp_td)
+    rc_k4, out_k4, err_k4, _w, calls_k4 = build_run(
+        ["--publish"], {"OTA_KEY_FILE": k644, "OTA_DEST": "fakehost:" + dest_k})
+    rc_k0, out_k0, err_k0, _w, calls_k0 = build_run(
+        ["--publish"], {"OTA_KEY_FILE": k640, "OTA_DEST": "fakehost:" + dest_k})
+    bad_dests = {}
+    for d_ in ("~/ota", "/srv/my ota", "/srv/$x", "/srv/a;b", "/srv/a'b"):
+        bad_dests[d_] = build_run(["--publish"], {"OTA_KEY_FILE": key_file,
+                                                  "OTA_DEST": "fakehost:" + d_})
+    bad_dests["-oProxyCommand=x:/d"] = build_run(
+        ["--publish"], {"OTA_KEY_FILE": key_file,
+                        "OTA_DEST": "-oProxyCommand=x:/d"})
+    check("BUILD-PUBLISH-RT2: a key file readable by everyone (644) is refused "
+          "before any upload, one readable by its group (640) is published "
+          "with a warning, the key itself never printed; an OTA_DEST "
+          "directory with ~, a space or a shell special (or a host starting "
+          "with a dash) is refused before the build and any scp or ssh",
+          rc_k4 != 0 and "readable by everyone" in err_k4
+          and not [c for c in calls_k4 if c[0] in ("scp", "ssh")]
+          and rc_k0 == 0 and "WARNING" in err_k0 and "group" in err_k0
+          and os.path.exists(os.path.join(dest_k, "manifest.json"))
+          and key_secret not in out_k4 + err_k4 + out_k0 + err_k0
+          and all(r_[0] != 0 and "OTA_DEST" in r_[2] and "Built" not in r_[1]
+                  and not [c for c in r_[4] if c[0] in ("scp", "ssh")]
+                  for r_ in bad_dests.values()),
+          repr((rc_k4, err_k4[-200:], rc_k0, err_k0[-200:],
+                {k_: (r_[0], r_[2][-120:]) for k_, r_ in bad_dests.items()})))
     # BUILD-PUBLISH-BOARD: the board names itself in the manifest (signed); a
     # folder holding another board's manifest (an older board's had no name) is
     # refused
@@ -7913,7 +8011,7 @@ try:
         gl._diag_write("up 65 utc 20261101T132141Z nmea 1/0 x")
         gl._diag_final()
         gl._diag_write("ota 86fb9c8 installed (was 8416d67), rebooting")
-        pf, _, tf = prev_after(open(gl.DIAG_FILE).read())
+        pf, _, tf = prev_after(_slurp(gl.DIAG_FILE))
     finally:
         gl.uptime_s = gl._uptime_saved
     check("UPTIME: a deliberate reset (OTA, TLS memory, low IDF, rollback) "
@@ -12878,16 +12976,23 @@ else:
                 v.get("coord"))))
     # BOOT: when this run started (local time) and how long the one before
     # it lasted, until when; FIRMWARE: the build date, the commit after it
-    jb = json.loads(page_json)
-    now_ = time.time()
-    jb.update(uptime=10492, boot_cause=2, prev_uptime=150,
-              prev_run="2 min 30 s (last line x)",
-              prev_end=time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                     time.gmtime(now_ - 10492 - 30)),
-              fw="86fb9c8", fw_build=1793548800, ota="current")
-    rb_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
-                          os.path.join(here, "..", "web.html")],
-                         input=json.dumps(jb), capture_output=True, text=True)
+    # (RT2-8: the page takes its "now" when node runs, this test its own
+    # before: across local midnight the two would disagree on "today", so the
+    # run is repeated once when the day changed meanwhile)
+    for _midnight in range(2):
+        jb = json.loads(page_json)
+        now_ = time.time()
+        jb.update(uptime=10492, boot_cause=2, prev_uptime=150,
+                  prev_run="2 min 30 s (last line x)",
+                  prev_end=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                         time.gmtime(now_ - 10492 - 30)),
+                  fw="86fb9c8", fw_build=1793548800, ota="current")
+        rb_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
+                              os.path.join(here, "..", "web.html")],
+                             input=json.dumps(jb), capture_output=True,
+                             text=True)
+        if time.localtime()[:3] == time.localtime(now_)[:3]:
+            break
     syb = json.loads(rb_.stdout).get("sys", "")
 
     def _hm(t):
@@ -13103,8 +13208,8 @@ else:
           and (ev.get("utf") or [0, 0, False])[2] is True,
           repr((ev.get("no404"), ev.get("utf"))))
     # PAGE-EV-KINDS: one line of every diag format gps_logger.py writes;
-    # the important ones in their own kind, Other only for the clock and
-    # the heap notes. Every format in the source must have a sample here
+    # the important ones in their own kind (the display's backlight too),
+    # Other only for the clock and the heap notes. Every format in the source must have a sample here
     ev_samples = [
         ("gps reset loop 5 restarts in 6 s", "gloop"),
         ("gps reset loop 3 more windows", "gloop"),
@@ -13137,7 +13242,8 @@ else:
         ("upload ca err OSError(5)", "upl"),
         ("clock set 2026-11-02T11:38:31Z", "other"),
         ("clock ntp 2026-11-02T11:38:31Z", "other"),
-        ("tft light 0", "other"),
+        ("tft light 0", "disp"),
+        ("tft light 100", "disp"),
         ("upload err html 403 (captive portal?)", "upl"),
         ("upload aborted after 120 s", "upl"),
         ("upload err OSError(113)", "upl"),
@@ -13210,8 +13316,8 @@ else:
     check("PAGE-EV-KINDS: every diag format gps_logger.py writes has a "
           "sample (%d formats), each sample in its kind: crashes, bugs, "
           "upload errors, OTA, GPS silent / reset loop / setup, WiFi, "
-          "track and clock, reboots, boots, receiver; Other only the clock "
-          "set and heap notes" % len(ev_fmts),
+          "track and clock, reboots, boots, receiver, display backlight; "
+          "Other only the clock set and heap notes" % len(ev_fmts),
           len(ev_fmts) >= 45 and not ev_nomatch and isinstance(ev_kinds, list)
           and len(ev_kinds) == len(ev_samples) and not ev_bad,
           repr((len(ev_fmts), ev_nomatch, ev_bad,
@@ -13256,11 +13362,20 @@ else:
           and dom.get("nofix") == "map nofix" and dom.get("timer2") == 30000
           and dom.get("brokenBody") == "off" and dom.get("never") == "NO ANSWER",
           repr(dom))
-    check("PAGE-DOM-ERR: an error page from the board (503, 404: no JSON) is "
-          "a board error with its status, as a 500 is, not OFFLINE",
-          dom.get("err503") == ["off", "BOARD ERROR &middot; HTTP 503 "
-                                       "&lt;html&gt;busy&lt;/html&gt;"],
-          repr(dom.get("err503")))
+    check("PAGE-DOM-ERR: an error of the board's own (text/plain: 503, 404; no "
+          "JSON) is a board error with its status, as a 500 is, not OFFLINE",
+          dom.get("err503") == ["off", "BOARD ERROR &middot; HTTP 503 busy"]
+          and dom.get("err404") == ["off", "BOARD ERROR &middot; HTTP 404 "
+                                           "not found"]
+          and dom.get("err500") == ["off", "BOARD ERROR &middot; "
+                                           "TypeError(&#39;x&#39;)"],
+          repr((dom.get("err503"), dom.get("err404"), dom.get("err500"))))
+    check("PAGE-DOM-ERR-GATEWAY (RT2-3): a gateway's or a captive portal's "
+          "HTML page (502, 403) or an empty 204 is not the board's: OFFLINE, "
+          "not BOARD ERROR",
+          all(dom.get(k) == ["off", "OFFLINE &middot; 0 S AGO"]
+              for k in ("err502", "err403", "err204")),
+          repr([dom.get(k) for k in ("err502", "err403", "err204")]))
     hd = v.get("hist", {})
     # the track's own line (the white casing under it has the same d)
     def main_path(svg):
@@ -13473,6 +13588,37 @@ else:
           "queued); its name then shows and the next place is asked",
           _pr.get("before") == [20, 1, 1, 2] and _pr.get("soon") == 1
           and _pr.get("again") == 2 and _pr.get("after") == [3, True, 1], repr(_pr))
+    _ph = ft.get("placeHol") or {}
+    check("PAGE-PLACE-HOL (RT2-1): a place the geocoder never answers (429) goes "
+          "to the back of the queue after 3 failed tries, so the next one is "
+          "asked and named within 3 min 15 s; one request at a time, the "
+          "failing one still tried about once a minute (12 min: 8-14 asks)",
+          _ph.get("queued") == ["47.100,18.400", "47.119,18.400"]
+          and _ph.get("namedAt") is not None and _ph["namedAt"] <= 195
+          and _ph.get("maxFlight") == 1 and 8 <= _ph.get("headAsks", 0) <= 14
+          and _ph.get("left") == ["47.100,18.400"], repr(_ph))
+    check("PAGE-PLACE-EVICT (RT2-9): a full place cache (PLACE_MAX) drops its "
+          "oldest name, not all of them",
+          (ft.get("placeEvict") or {}).get("keys") == ["c", "d", "e"]
+          and (ft.get("placeEvict") or {}).get("queue") == 0,
+          repr(ft.get("placeEvict")))
+    check("PAGE-NUM-ESC (RT2-2): the counters (left, sent, upload_err, "
+          "bad_files, points, files, pulses, gps_loops, gps_boots) are "
+          "escaped whatever type the JSON gave; the digits still grouped",
+          (ft.get("numEsc") or [None])[0] == []
+          and (ft.get("numEsc") or [0, 0])[1] is True
+          and (ft.get("numEsc") or [0] * 5)[2:] == ["1\u202f234\u202f567", "-",
+                                                    "&lt;b&gt;"],
+          repr(ft.get("numEsc")))
+    check("PAGE-OTA-MISSING (RT2-9): an fw without an ota in the JSON shows a "
+          "dash, not \"ota undefined\"",
+          ft.get("otaMissing") == [True, True], repr(ft.get("otaMissing")))
+    check("PAGE-EV-DISP (RT2-9): the display's \"tft light N\" diag lines are "
+          "their own quiet Display backlight group (count, last values), "
+          "not Other",
+          ft.get("dispKind") == [[["disp", "Display backlight", 3,
+                                   "30 %, 100 %"]], True, True],
+          repr(ft.get("dispKind")))
     check("PAGE-TIMELINE: km, moving time (min, then h:mm) and trips on "
           "top; a trip clicked is drawn on the map, clicked again the day",
           ft.get("kpis") == "<div><b>1.70</b><em>km</em></div><div><b>30</b>"
@@ -13705,6 +13851,22 @@ check("PAGE-STATIC-GONE: no Static test panel, code, CSS or browser "
 # (the map: OSM-carto tiles through the homelab Atlas proxy, as Dawarich
 # uses: one cache, Geoapify's key stays on CT 146; OSM's own tile servers
 # ask apps not to use them for this)
+# PAGE-FONTS (RT2-9): the Google Fonts sheet must not hold the first paint back
+# when the phone has no internet (a render-blocking <link rel=stylesheet>
+# waits for its fetch to fail): media=print, switched to all by its own load;
+# <noscript> keeps it for a browser without scripts
+_fonts_links = re.findall(r"<link[^>]*fonts\.googleapis\.com[^>]*>", page_src)
+_fonts_min = web_min.minify(page_src) if web_min else page_src
+check("PAGE-FONTS (RT2-9): the font sheet loads as media=print and is switched "
+      "on by its onload (no render blocking offline), a <noscript> link keeps "
+      "it for no-script browsers",
+      len(_fonts_links) == 2
+      and 'media="print"' in _fonts_links[0]
+      and "onload=\"this.media='all'\"" in _fonts_links[0]
+      and "media=" not in _fonts_links[1]
+      and "<noscript>" + _fonts_links[1] + "</noscript>" in page_src
+      and "media=\"print\"" in _fonts_min and "<noscript>" in _fonts_min
+      , repr(_fonts_links))
 check("PAGE: polls status.json at the board's refresh_s, no reload; Atlas "
       "map tiles, credited",
       "/status.json" in page_src and "refresh_s" in page_src
@@ -13719,7 +13881,9 @@ check("PAGE: polls status.json at the board's refresh_s, no reload; Atlas "
 # PAGE-LAYOUT: the page in headless Chrome at phone and tablet width, a
 # status.json with long values, offline with a day's km (the HUD's longest
 # state): no horizontal scrolling, the HUD items inside the screen and not
-# over each other. Not in CI (no Chrome there): SKIP.
+# over each other. Runs wherever google-chrome or chromium is on the PATH, else
+# SKIP; the CI workflow installs neither, so there it runs only if the runner
+# image has one.
 chrome = shutil.which("google-chrome") or shutil.which("chromium")
 if chrome is None:
     print("SKIP  PAGE-LAYOUT: google-chrome not installed")
@@ -15556,7 +15720,7 @@ try:
                 sys.modules.pop("gps_frozen", None)
             else:
                 sys.modules["gps_frozen"] = prev
-        src = open(mp).read()
+        src = _slurp(mp)
         return out, src.index("gps_boot.unshadow()") < src.index(
             "import gps_logger")
     shm = _guarded(_t_shadow_main)
@@ -15763,7 +15927,7 @@ try:
     def _t_safe():
         mp = os.path.join(ROOT, "main.py")
         ns = {"__name__": "boot_safe"}
-        exec(compile(open(mp).read(), mp, "exec"), ns)
+        exec(compile(_slurp(mp), mp, "exec"), ns)
         out = []
         for how in ("start", "error"):
             del _timers[:]
@@ -15805,7 +15969,7 @@ try:
         import gps_boot as gb
         mp = os.path.join(ROOT, "main.py")
         ns = {"__name__": "boot_crash"}
-        exec(compile(open(mp).read(), mp, "exec"), ns)
+        exec(compile(_slurp(mp), mp, "exec"), ns)
         saved = (gb.OTA_PENDING, gb.OTA_MARK, ns["time"].sleep,
                  sys.modules.get("gps_frozen"))
         gb.OTA_PENDING, gb.OTA_MARK = gl.OTA_PENDING, gl.OTA_MARK

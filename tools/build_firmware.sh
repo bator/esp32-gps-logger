@@ -50,8 +50,11 @@
 # refused (FORCE=1 publishes it anyway). The manifest is signed with the
 # key in OTA_KEY_FILE (default ~/.config/gps-logger/ota.key, the board's
 # .env OTA_KEY: printable ASCII, e.g. openssl rand -hex 32); only a clean
-# tree is published (BUILD is the commit time). The OTA_DEST path goes to
-# scp as it is and to ssh shell-quoted: no spaces or shell specials in it.
+# tree is published (BUILD is the commit time); a key file readable by
+# everyone is refused, one readable by its group warned about (chmod 600).
+# The OTA_DEST path goes to scp as it is and to ssh shell-quoted: only
+# letters, digits and _ . / - in it (no ~, spaces or shell specials), checked
+# before the build.
 # firmware/gps_frozen.py records the SHA-256 of the frozen gps_logger.py
 # (SHA), of gps_tft.py + gps_tft_font.py (TFT) and of gps_boot.py (BOOT;
 # deploy.sh stops when any differs from the repo's), the commit, "-dirty"
@@ -77,6 +80,25 @@ case "$MODE" in
     ""|--flash|--migrate|--publish) ;;
     *) echo "usage: $0 [--flash|--migrate|--publish]" >&2; exit 2 ;;
 esac
+
+# A published destination is checked before the build (and long before any
+# upload): the path goes to scp as it is and to ssh shell-quoted, which agree
+# only on a plain one ("~/x" would be a directory called "~" for the ssh half)
+if [ "$MODE" = --publish ] && [ -n "${OTA_DEST:-}" ]; then
+    case "$OTA_DEST" in
+        *:*) _dhost=${OTA_DEST%%:*}; _ddir=${OTA_DEST#*:} ;;
+        *) _dhost=x; _ddir=. ;;          # (the check in --publish says what is wrong)
+    esac
+    case "$_dhost" in
+        -*|"") echo "OTA_DEST: the host part must not be empty or start with a dash: '$OTA_DEST'" >&2; exit 1 ;;
+    esac
+    case "$_ddir" in
+        "~"*|*[!A-Za-z0-9_./-]*)
+            echo "OTA_DEST: the directory '$_ddir' must be a plain path (letters, digits, _ . / -; no ~," >&2
+            echo "spaces or shell specials: scp and the ssh rename would read it differently)" >&2
+            exit 1 ;;
+    esac
+fi
 
 mkdir -p "$OUT"
 # the frozen files: the logger, main.py's boot helpers (gps_boot.py: OTA
@@ -203,6 +225,19 @@ case "$MODE" in
         echo "No OTA key in $KEY_FILE (the board's .env OTA_KEY)" >&2
         exit 1
     fi
+    # the key is a secret: readable by everyone is refused, by the group warned
+    # (its content is never printed here)
+    KMODE=$(stat -c %a "$KEY_FILE" 2>/dev/null || stat -f %Lp "$KEY_FILE" 2>/dev/null || true)
+    case "$KMODE" in
+        ""|*[!0-7]*) echo "Could not read the mode of $KEY_FILE (chmod 600 it)" >&2 ;;
+        *)
+            if [ $(( 8#$KMODE & 4 )) -ne 0 ]; then
+                echo "The OTA key file $KEY_FILE is readable by everyone (mode $KMODE): chmod 600 it" >&2
+                exit 1
+            elif [ $(( 8#$KMODE & 32 )) -ne 0 ]; then
+                echo "WARNING: the OTA key file $KEY_FILE is readable by its group (mode $KMODE): chmod 600 it" >&2
+            fi ;;
+    esac
     # the board reads it from .env: printable ASCII, no quotes or spaces
     if ! tr -d '\n' < "$KEY_FILE" | LC_ALL=C grep -qE "^[!#-&(-~]{16,}$"; then
         echo "The OTA key in $KEY_FILE must be 16+ printable ASCII characters" >&2
