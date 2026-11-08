@@ -429,7 +429,8 @@ def _acc(key, pos):
         ep[key] = [pos[0], pos[1], 0.0, 0.0, 1]
     else:
         a[2] += pos[0] - a[0]
-        a[3] += pos[1] - a[1]
+        a[3] += _dlon(pos[1] - a[1])     # (across 180° too: E and W fixes
+                                         # of a second averaged to ~36°)
         a[4] += 1
 
 _sec = [None, None]                      # HHMMSS last seen, its "HH:MM:SS"
@@ -486,7 +487,7 @@ def _publish():
         # stamped with the second, so the point is the second's first fix
         st["lat"], st["lon"] = a[0], a[1]
     else:
-        st["lat"], st["lon"] = a[0] + a[2] / n, a[1] + a[3] / n
+        st["lat"], st["lon"] = a[0] + a[2] / n, _dlon(a[1] + a[3] / n)
     alt, hd = ep["alt"], ep["hdop"]
     st["alt"] = alt[0] / alt[1] if alt[1] else None
     if hd[1]:
