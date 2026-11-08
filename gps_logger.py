@@ -8817,6 +8817,9 @@ def _loop():
             _boot_ok()
         if time.ticks_diff(now, status_at) >= STATUS:
             _guarded("status", _status)
+            # a refused drop-back is only retried here once no POST runs
+            # (all sent, radio asleep, no GEO_URL): FREQ_RETRY gates it
+            _set_freq(CPU_MHZ)
             status_at = now
         if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
             _guarded("diag", _diag, now)

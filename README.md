@@ -1167,7 +1167,8 @@ the radio slept on purpose does not count as a drop.
 drops back. The UART runs off the fixed APB clock, so its baud rate is unaffected.
 `CPU_MHZ=0` leaves the firmware default. A failed clock change is tried
 again (3 tries); a clock refused every time is left alone for 30 minutes
-(`FREQ_RETRY`), then tried again, so one passing failure of the drop-back
+(`FREQ_RETRY`), then tried again (the main loop re-applies `CPU_MHZ` with
+each status line, POST or not), so one passing failure of the drop-back
 after a POST does not keep the board at 160 MHz.
 
 **Roaming home:** on a non-home network, when nearly stopped (speed below
