@@ -6386,6 +6386,45 @@ try:
     check("R2-d: a refused clock is tried again after FREQ_RETRY",
           stuck and held and back, "%s %s %s %r" % (stuck, held, back,
                                                      _freqs[-3:]))
+    # RV3: the retry needs a caller: the main loop re-applies CPU_MHZ, so a
+    # refused drop-back with no later POST did not keep the board at 160 MHz
+    fails = [0]
+    mach.freq = flaky_freq
+    stubs = ("read_uart", "gps_check", "log_tick", "wifi_tick",
+             "keepalive_tick", "upload_tick", "web_tick", "ota_tick",
+             "ntp_tick", "tft_tick", "_status", "_diag", "_boot_ok")
+    saved = dict((k, getattr(gl, k)) for k in stubs)
+    orig_sleep = time.sleep_ms
+    loops = [0]
+
+    def _tick_on(ms):
+        _clock[0] += gl.STATUS
+        loops[0] += 1
+        if loops[0] >= 5:
+            raise KeyboardInterrupt()
+    try:
+        for k in stubs:
+            setattr(gl, k, lambda *a, **kw: None)
+        gl._freq_bad[:] = []
+        real_freq(160000000)
+        fails[0] = gl.FREQ_TRIES
+        gl._set_freq(gl.CPU_MHZ)
+        pinned = _freqs[-1] == 160000000 and gl.CPU_MHZ in gl._freq_bad
+        time.sleep_ms = _tick_on
+        try:
+            gl._loop()
+        except KeyboardInterrupt:
+            pass
+        looped = (_freqs[-1] == gl.CPU_MHZ * 1000000
+                  and gl.CPU_MHZ not in gl._freq_bad)
+    finally:
+        time.sleep_ms = orig_sleep
+        for k in stubs:
+            setattr(gl, k, saved[k])
+        mach.freq = real_freq
+        gl._freq_bad[:] = []
+    check("RV3: the loop retries a refused CPU_MHZ without a POST",
+          pinned and looped, "%s %s %r" % (pinned, looped, _freqs[-3:]))
 
     # a round that finds no network: nothing to upload -> sleep; with a
     # track waiting -> the usual backoff, 15 s doubling to 10 min, until a
