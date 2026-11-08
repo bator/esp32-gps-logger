@@ -7883,6 +7883,61 @@ _tft_t = [None, None, 0, 0, 0]           # last values, last frame, the errors
                                          # in a row of each (4: today's route)
 _tft_b = [None, None, None]              # (2: the WiFi level last shown)
 
+# The backlight is the one part that wears: dim by day, dark in a stay (the
+# board sits on a desk, or is not looked at), full after the USER button.
+TFT_LIGHT = 30                           # .env TFT_LIGHT: per cent, 0-100
+TFT_IDLE = 300000                        # .env TFT_IDLE, in s: ms into a stay it goes
+                                         # dark; 0: never
+TFT_WAKE = 60000                         # ms of full light after the USER button
+_tft_l = [None, None, None]              # the per cent set; the stay's first tick;
+                                         # the button's last press
+
+def _tft_env(env):
+    """TFT_LIGHT=<0-100> per cent of backlight, TFT_IDLE=<0-86400> seconds of a
+    stay before it goes dark (0: never); anything else keeps the default."""
+    global TFT_LIGHT, TFT_IDLE
+    v = _plain(env.get("TFT_LIGHT"))
+    if v:
+        try:
+            n = int(v)
+        except ValueError:
+            n = -1
+        if 0 <= n <= 100:
+            TFT_LIGHT = n
+        else:
+            print("TFT_LIGHT not 0-100, using", TFT_LIGHT)
+    v = _plain(env.get("TFT_IDLE"))
+    if v:
+        try:
+            n = int(v)
+        except ValueError:
+            n = -1
+        if 0 <= n <= 86400:
+            TFT_IDLE = n * 1000
+        else:
+            print("TFT_IDLE not 0-86400 s, using", TFT_IDLE // 1000)
+
+def _tft_light(now):
+    """The backlight: full for TFT_WAKE after the USER button, else dark once a
+    stay (the GPS says the board has not moved) is TFT_IDLE old, else
+    TFT_LIGHT. A change is said in the diag, the first setting is not."""
+    L = _tft_l
+    if not log["still"]["active"]:
+        L[1] = None
+    elif L[1] is None:
+        L[1] = now
+    if _recent(now, L[2], TFT_WAKE):
+        pct = 100
+    elif TFT_IDLE and L[1] is not None and not _recent(now, L[1], TFT_IDLE):
+        pct = 0
+    else:
+        pct = TFT_LIGHT
+    if pct != L[0]:
+        _tft.light(pct)
+        if L[0] is not None:
+            _diag_write("tft light %d" % pct)
+        L[0] = pct
+
 def _tft_start():
     """A failure leaves the logger running without it."""
     global _tft
@@ -7890,7 +7945,7 @@ def _tft_start():
         return
     try:
         import gps_tft
-        gps_tft.start()
+        gps_tft.start(0)                 # (dark: _tft_light sets it, .env read)
         _tft = gps_tft
     except Exception as e:
         print("tft", repr(e))
@@ -8431,9 +8486,14 @@ def tft_tick(now):
     t = _tft_t
     if _tft is None:
         return
+    if _tft.pressed():                   # (every pass: a tap is short)
+        if not _recent(now, _tft_l[2], TFT_WAKE):
+            t[0] = None                  # lit at once, not up to TFT_STATE later
+        _tft_l[2] = now
     if not _recent(now, t[0], TFT_STATE):
         t[0] = now
         try:
+            _tft_light(now)
             _tft.set_state(*_tft_state(now))
             t[2] = 0
         except Exception as e:
@@ -8489,6 +8549,7 @@ def run():
         env = load_env(ENV_FILE)
         _gps_sys_env(env)
         _min_move_env(env)
+        _tft_env(env)
         _diag_env(env)
         _diag_boot()
         ota_boot()
