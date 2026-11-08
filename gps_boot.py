@@ -14,13 +14,8 @@ OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py")
 _retry = None                            # the BOOT_RETRY_MS timer (REPL:
                                          # gps_boot._retry.deinit() stops it)
 
-def unshadow():
-    """An OTA install moves /gps_logger.mpy (.py) aside as <name>.ota-old so
-    the new firmware's frozen logger is imported, not it. Unless that build
-    runs pending (the note names the running BUILD), it comes back here,
-    before the import: after a rollback, and after the health reset (the
-    note gone) the old firmware gets the module it ran. One deployed since
-    stays (the .ota-old goes)."""
+def _note():
+    """(the build OTA_PENDING names or None, the running firmware's BUILD)."""
     try:
         from gps_frozen import BUILD
     except ImportError:
@@ -30,6 +25,17 @@ def unshadow():
             note = int(f.read().split(None, 1)[0])
     except Exception:
         note = None
+    return note, BUILD
+
+def unshadow():
+    """An OTA install moves /gps_logger.mpy (.py) aside as <name>.ota-old so
+    the new firmware's frozen logger is imported, not it. Unless that build
+    runs pending (the note names the running BUILD), it comes back here,
+    before the import: after a rollback, and after the health reset (the
+    note gone) the old firmware gets the module it ran. One deployed since
+    stays (the .ota-old goes). A failing remove leaves the .ota-old: only
+    a module that is not there is replaced by it."""
+    note, BUILD = _note()
     if note is not None and note == BUILD:
         return
     import os
@@ -40,23 +46,28 @@ def unshadow():
             continue
         try:
             os.stat(p)
-            os.remove(p + ".ota-old")
         except OSError:
             try:
                 os.rename(p + ".ota-old", p)
             except OSError:
                 pass
+            continue
+        try:
+            os.remove(p + ".ota-old")
+        except OSError:
+            pass
 
 def crash():
     """main.py caught the logger failing (its import, or run() before its
-    own crash branch): with an OTA note there, "crash" in OTA_MARK, as
-    run()'s crash branch writes, so the old firmware after the rollback
-    blames the build. Without it a pending image that cannot even import
-    counted as an external reset: a try, installed again OTA_TRIES_MAX
-    times. Never raises."""
-    try:
-        open(OTA_PENDING).close()
-    except Exception:
+    own crash branch): with an OTA note naming the running build there,
+    "crash" in OTA_MARK, as run()'s crash branch writes, so the old firmware
+    after the rollback blames the build. Without it a pending image that
+    cannot even import counted as an external reset: a try, installed again
+    OTA_TRIES_MAX times. Not for a note of another build (the old firmware,
+    running after a rollback, failed: the new build's note is not cleared
+    before ota_boot) or one that cannot be read. Never raises."""
+    note, BUILD = _note()
+    if note is None or note != BUILD:
         return
     try:
         with open(OTA_MARK, "w") as f:

@@ -2858,8 +2858,9 @@ def wifi_tick():
                     arrival = True
                 else:
                     arrival = False
-                due = (not moving
-                       and _age(now, wifi["roam_at"] or now) >= interval)
+                ra = wifi["roam_at"]     # (is None: tick 0 is a time)
+                due = (not moving and ra is not None
+                       and _age(now, ra) >= interval)
                 if due or arrival:
                     wifi["roam_at"] = now
                     _try_roam_home(w, arrival=arrival and not due)
@@ -2904,7 +2905,8 @@ def wifi_tick():
     if wifi["state"] == "lost":
         if (s == network.STAT_CONNECTING or s == network.STAT_IDLE
                 or s is None):
-            if _age(now, wifi["try_at"] or now) < LOST_GRACE:
+            ta = wifi["try_at"]
+            if ta is not None and _age(now, ta) < LOST_GRACE:
                 return
         wifi["state"] = "offline"
         wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
@@ -5764,18 +5766,21 @@ def _rtc_sync(now):
     """mbedTLS checks the server certificate's dates against the board
     clock, which starts at 2000-01-01 each boot: with CA_FILE every
     verified POST failed. Set it from the GPS fix (valid, a date in
-    2020-2087) before a POST, or from NTP's answer while no fix came since
-    the boot: once a boot, again only when it drifted more than RTC_DRIFT
-    s. Seconds since 2020 (small ints)."""
+    2020-2087) before a POST; while it was not set yet and the fix is gone
+    (a board that had one outdoors and is indoors now), from the last fix's
+    clock run on by the ticks (log["clock"], as _local_hm does), else from
+    NTP's answer (ntp_tick: no fix since the boot, or none to set it
+    with): once a boot, again only when it drifted more than RTC_DRIFT s.
+    Seconds since 2020 (small ints)."""
     src = ""
     if has_fix(now):
         at = st["pos_at"]
         s = _fix_s()
-    elif not _rtc_set[0] and _ntp[0] is not None:
-        # no fix since boot (indoors, at home): NTP's answer, until a fix
-        # sets it (every verified POST failed the dates until the first fix)
-        s, at = _ntp[0]
-        src = " ntp"
+    elif not _rtc_set[0] and (log["clock"] or _ntp[0]):
+        # no fix now: the clock a fix gave this boot, else NTP's answer,
+        # until a fix sets it
+        s, at = log["clock"] or _ntp[0]
+        src = " gps" if log["clock"] else " ntp"
     else:
         return
     if s is None or _age(now, at) >= TICKS_OLD:
@@ -5863,7 +5868,12 @@ def _http_open(method, url):
         port = int(p)
     head = "%s /%s HTTP/1.0\r\nHost: %s\r\n" % (
         method, path, host if port == dflt else "%s:%d" % (host, port))
+    # (lwIP resolves for as long as its own retries take, ~30 s a server: no
+    # socket yet for a timeout or the guard to close, so only the WDT, fed
+    # before and after, bounds it)
+    feed()
     ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
+    feed()
     return (socket.socket(ai[0], socket.SOCK_STREAM, ai[2]), ai[-1],
             proto == "https", host, head)
 
@@ -6572,12 +6582,19 @@ def _raw_get(url, sink, limit):
     s, addr, https, host, hdr = _http_open("GET", url)
     _guard_start(s, OTA_MAX)
     try:
+        if https:
+            _rtc_sync(time.ticks_ms())   # (the certificate's dates)
         s.settimeout(HTTP_TIMEOUT)
         s.connect(addr)
         if https:
             s = _tls_wrap(s, host)
         _io_write(s, (hdr + "Connection: close\r\n\r\n").encode())
-        code = int(s.readline(HTTP_LINE).split(None, 2)[1])
+        line = s.readline(HTTP_LINE).split(None, 2)
+        if len(line) < 2:                # (closed before a status line)
+            raise OSError(104)           # ECONNRESET
+        code = int(line[1])
+        if code != 200:                  # (its head is of no use: the code
+            return code                  # comes back, however long it is)
         cl = [None]
         _http_head(s, (b"content-length",), cl)
         clen = None
@@ -6585,8 +6602,6 @@ def _raw_get(url, sink, limit):
             clen = int(cl[0])
         except (TypeError, ValueError):  # (TypeError: none sent)
             pass
-        if code != 200:
-            return code
         if clen is not None and clen > limit:
             raise ValueError("ota body %d over %d" % (clen, limit))
         buf = bytearray(1024)
@@ -6742,23 +6757,26 @@ def _ota_promote(paths):
     gzip (_web_page). Only here, with the firmware valid: a rollback keeps
     the old firmware's files, and the gzip a manifest names is made with
     WEB_GZ_WBITS (one from an older deploy.sh may have a window too wide
-    to inflate: its plain page stays until the next deploy)."""
+    to inflate: its plain page stays until the next deploy). Safe to run
+    again (_ota_health tries again after a MemoryError): a page already up
+    has no .new."""
     for p in paths:
-        try:
-            os.rename(p + ".new", p)
-        except OSError:
+        if _file_size(p + ".new") is not None:  # (not again after a retry)
             try:
-                os.rename(p, p + ".old")
+                os.rename(p + ".new", p)
+            except OSError:
                 try:
-                    os.rename(p + ".new", p)
-                except OSError:
-                    os.rename(p + ".old", p)
-                    raise
-                _rm(p + ".old")
-            except OSError as e:
-                _diag_write("ota %s page %s not put up: %r" % (FW_COMMIT, p,
-                                                              e))
-                continue
+                    os.rename(p, p + ".old")
+                    try:
+                        os.rename(p + ".new", p)
+                    except OSError:
+                        os.rename(p + ".old", p)
+                        raise
+                    _rm(p + ".old")
+                except OSError as e:
+                    _diag_write("ota %s page %s not put up: %r" % (
+                        FW_COMMIT, p, e))
+                    continue
         if p.endswith(".gz") and p[:-3] not in paths:
             _rm(p[:-3])
 
@@ -6869,9 +6887,10 @@ def _ota_check():
     w = _SlotWriter(part)
     try:
         code = HTTP_GET(_ota_url(m["url"]), w, m["size"])
-    except (OSError, ValueError):
+    except Exception:
         # a download cut short waits OTA_RETRY like a bad one: it came
-        # again (2 MB, the loop blocked) every OTA_CHECK
+        # again (2 MB, the loop blocked) every OTA_CHECK (whatever it
+        # raised: an empty status line, a MemoryError)
         ota["failed"] = (build, time.ticks_ms(), "download err")
         raise
     got = w.close()
@@ -6927,8 +6946,7 @@ def _ota_valid():
 def _ota_pending():
     """(build, commit, staged paths) of OTA_PENDING, None without one. A
     note that is there but cannot be read or parsed is (None, "?", []):
-    an image is pending, its build unknown (ota_boot then runs the health
-    check as the running build's; before, it was confirmed unchecked)."""
+    an image may be pending, its build unknown (ota_boot drops it)."""
     try:
         with open(OTA_PENDING) as f:
             lines = f.read().split("\n")
@@ -6956,10 +6974,26 @@ def ota_boot():
             _ota_valid()
         return
     build, c, paths = p
+    if build is None:
+        # an unreadable note: whose build, and whether this is it or the
+        # old one after a rollback, is not known. Held as the running
+        # build's, the health check (the radio kept on, no memory reboot,
+        # a reset away from WiFi, a try or a bad mark for a build that may
+        # be the old good one) looped when the note could not be removed.
+        # Dropped instead, with the staged pages (the OTA_PAGES it may
+        # name), and the running image confirmed once: it ran this far.
+        _ota_drop(OTA_PAGES)
+        _rm(OTA_PENDING)
+        _rm(OTA_MARK)
+        _ota_wait_tried()
+        if esp32 is not None:
+            _ota_valid()
+        _diag_write("ota note unreadable, dropped (running %s)" % FW_COMMIT)
+        return
     mark = _ota_mark_get()
-    if build is None or build == FW_BUILD:
+    if build == FW_BUILD:
         _rm(OTA_MARK)                    # (a run before this one stopped)
-        ota.update(pend=FW_BUILD, pend_at=time.ticks_ms(), wifi_seen=False,
+        ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
                    probed=False, probe_at=None, probe_err=None,
                    state="pending", paths=paths)
         _diag_write("ota %s booted, checking" % c)
@@ -7044,7 +7078,6 @@ def _ota_health(now):
     age = _age(now, ota["pend_at"])
     if (ota["wifi_seen"] and (ota.get("probed") or not OTA_URL)
             and age >= OTA_VALID_AFTER):
-        ota["pend"] = None
         _ota_valid()
         _ota_promote(ota.get("paths") or ())
         for p in OTA_SHADOW:             # (before the note: main.py puts
@@ -7052,6 +7085,11 @@ def _ota_health(now):
         _rm(OTA_PENDING)
         _rm(OTA_TRIES)
         _rm(OTA_MARK)
+        # the pending state ends last: a MemoryError in a step above (the
+        # guard swallows it) leaves it set, and the next tick runs the
+        # steps again (they are safe to), not a RAM state of "done" over
+        # a note, staged pages and .ota-old still on flash
+        ota["pend"] = None
         ota["state"] = "ok"
         _diag_write("ota %s ok" % FW_COMMIT)
         return
@@ -7997,8 +8035,9 @@ def _utc_hours(y, m, day, h):
 # The display's clock and the route's day before the first fix, which indoors may
 # take long or never come: a fix is otherwise the only thing that tells the date.
 # Asked on any network until a fix has told the time, and then never again: a fix
-# wins. This reaches neither a track line nor status.json; it sets the board clock
-# (_rtc_sync) only while no fix has come since the boot.
+# wins, and this reaches neither a track line nor status.json. The board clock (TLS
+# dates, _rtc_sync) takes it when no fix has: an https GEO_URL / OTA_URL keeps it
+# asked until that clock is set, even after a fix (which _rtc_sync prefers).
 NTP_SERVER = "pool.ntp.org"              # .env NTP_SERVER; empty: never asked
 NTP_WAIT = 1000                          # ms the answer may take. The name lookup
                                          # is not bound by it (MicroPython's
@@ -8059,9 +8098,16 @@ def _ntp_ask():
             return None
     return t if lo <= t < FIX_S_END else None
 
+def _need_rtc():
+    """The board clock matters (a verified TLS request checks the dates of
+    the certificate) and nothing has set it yet."""
+    return not _rtc_set[0] and ((up["url"] or "").startswith("https")
+                                or (OTA_URL or "").startswith("https"))
+
 def ntp_tick(now):
     n = _ntp
-    if (not NTP_SERVER or wifi["state"] != "connected" or log["clock"] is not None
+    if (not NTP_SERVER or wifi["state"] != "connected"
+            or (log["clock"] is not None and not _need_rtc())
             or _recent(now, n[1], n[2])):
         return
     n[1] = now
@@ -8626,13 +8672,27 @@ def run():
 TICK_PAUSE = 5000                        # ms a side tick that raised sits out
 _tick_bug = {}                           # its name -> ticks of the bug
 
-GUARD_MEM_MAX = 10                       # a tick's guarded MemoryErrors in
-_guard_mem = {"wifi": 0, "upload": 0,    # a row: a memory reboot (_mem_reboot);
-              "ota": 0, "web": 0,        # counted per tick (one tick's lasting
-              "ntp": 0, "status": 0,     # one never summed up while the others
-              "diag": 0}                 # ran through: the reboot never came)
+GUARD_MEM_MAX = 10                       # a tick's guarded MemoryErrors
+GUARD_MEM_QUIET = 2400000                # within this gap of each other: a
+                                         # memory reboot (_mem_reboot). 40 min,
+                                         # over BACKOFF_MAX: a lasting one in a
+                                         # backed-off tick (the upload) comes
+                                         # at most that far apart and keeps
+                                         # counting; sporadic ones further
+                                         # apart start again at 1
+GUARD_PEND_MAX = 5                       # with an OTA image pending: this many
+                                         # of one tick raise (the build crashes
+                                         # and rolls back). TICK_PAUSE apart,
+                                         # 5 is over 20 s of one tick failing
+                                         # for good; a transient one in the
+                                         # first minutes (the heap at its
+                                         # worst) stays under it
+_guard_mem = {"wifi": [0, None], "upload": [0, None],   # name -> [count, ticks
+              "ota": [0, None], "web": [0, None],       # of the last one]:
+              "ntp": [0, None], "status": [0, None],    # made here, not under
+              "diag": [0, None]}                        # a MemoryError
 
-def _guarded(name, fn, arg=None, side=False):
+def _guarded(name, fn, arg=None):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
     (once a kind), the tick skipped for TICK_PAUSE (no retry every 20 ms;
     after a MemoryError a gc.collect) and the loop, the logging, goes on.
@@ -8642,14 +8702,15 @@ def _guarded(name, fn, arg=None, side=False):
     GPS reads (the logging itself: a reset is their recovery), and no bug
     while an OTA image is pending (its crash rolls it back). Nothing is
     fed here: a tick that hangs still fires the WDT.
-    A MemoryError is no crash of a pending image in any tick (the page's
-    wrote /ota.mark and blamed a good build; an upload's or a scan's would
-    the same, in the first minutes when the heap is at its worst): gc, the
-    pause, and the memory reboot waits (it would abort the image).
-    side: the page and the status lines, which only need a little RAM at a
-    bad moment: their running through says nothing about a lasting one
-    (one idle page tick allocates nothing, and no reboot would ever have
-    come), so only a non-side tick's success clears its count."""
+    A MemoryError is no crash of a pending image at once, in any tick (the
+    page's wrote /ota.mark and blamed a good build; an upload's or a scan's
+    would the same, in the first minutes when the heap is at its worst):
+    gc, the pause, and the memory reboot waits (it would abort the image).
+    It is counted per tick (_guard_mem), not cleared by a pass that runs
+    through (an upload in its backoff, an idle WiFi or OTA tick are no
+    proof the memory is back): GUARD_MEM_MAX within GUARD_MEM_QUIET of each
+    other are a memory reboot, GUARD_PEND_MAX with an image pending raise
+    (a persistent one is the build's defect)."""
     at = _tick_bug.get(name)
     if at is not None:
         if _age(time.ticks_ms(), at) < TICK_PAUSE:
@@ -8661,21 +8722,28 @@ def _guarded(name, fn, arg=None, side=False):
             fn()
         else:
             fn(arg)
-        if not side and _guard_mem.get(name):
-            _guard_mem[name] = 0
     except Exception as e:
         pending_ota = pend is not None or ota["pend"] is not None
-        if pending_ota and not isinstance(e, MemoryError):
+        mem = isinstance(e, MemoryError)
+        if pending_ota and not mem:
             raise
         now = time.ticks_ms()
-        if isinstance(e, MemoryError):
+        if mem:
             gc.collect()
             # the crash reset was a lasting MemoryError's recovery (the
-            # heap fragmented for good): GUARD_MEM_MAX in a row reboot
-            n = _guard_mem[name] = _guard_mem.get(name, 0) + 1
-            if (n >= GUARD_MEM_MAX and not pending_ota
-                    and not _mem_reboot_soon()):
-                _guard_mem[name] = 0
+            # heap fragmented for good)
+            c = _guard_mem.get(name)
+            if c is None:
+                c = _guard_mem[name] = [0, None]
+            if not _recent(now, c[1], GUARD_MEM_QUIET):
+                c[0] = 0
+            c[0] += 1
+            c[1] = now
+            if pending_ota:
+                if c[0] >= GUARD_PEND_MAX:
+                    raise
+            elif c[0] >= GUARD_MEM_MAX and not _mem_reboot_soon():
+                c[0] = 0
                 _mem_reboot("guarded memory " + name)
         if name == "upload":
             # (after the POST, before the commit: the same batch went up
@@ -8705,18 +8773,18 @@ def _loop():
         keepalive_tick(time.ticks_ms())
         feed()
         _guarded("upload", upload_tick)
-        _guarded("web", web_tick, None, True)
+        _guarded("web", web_tick)
         _guarded("ota", ota_tick, time.ticks_ms())
-        _guarded("ntp", ntp_tick, time.ticks_ms(), True)
+        _guarded("ntp", ntp_tick, time.ticks_ms())
         now = time.ticks_ms()
         tft_tick(now)
         if (not _boot_ok_done
                 and time.ticks_diff(now, loop_start) >= BOOT_OK_MS):
             _boot_ok()
         if time.ticks_diff(now, status_at) >= STATUS:
-            _guarded("status", _status, None, True)
+            _guarded("status", _status)
             status_at = now
         if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
-            _guarded("diag", _diag, now, True)
+            _guarded("diag", _diag, now)
             diag_at = now
         time.sleep_ms(20)

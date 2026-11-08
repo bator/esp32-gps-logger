@@ -632,7 +632,7 @@ if sys.implementation.name == "micropython":
             break
     poll_up = gl._web_sock is not None and gl._web_poll is not None
     idle = _alloc(gl.web_tick)
-    guard = _alloc(lambda: gl._guarded("web", gl.web_tick, None, True))
+    guard = _alloc(lambda: gl._guarded("web", gl.web_tick))
     print("web idle alloc", idle, "guarded", guard)
     check("web: a real poll on the listening socket; no client: 0 bytes a pass",
           poll_up and idle == 0 and guard == 0)
