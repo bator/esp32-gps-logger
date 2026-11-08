@@ -173,7 +173,12 @@ def trb_lines(data, errors="replace"):
     after it up to the next keyframe, are left out: the same records as the
     logger's decoder (_kb_rec), so both read the same points. A flag byte
     whose varints run past REC_MAX bytes (an erased block reads 0xFF) is a
-    damaged record of 1 byte, as the logger's _rd_rec has it.
+    damaged record of 1 byte, as the logger's _rd_rec has it. Blind spot
+    (no sync marker in the format): the last few 0xFF bytes of such a run
+    scan as a record of up to REC_MAX bytes that runs into what follows, so
+    a keyframe within 31 bytes after the damage is eaten as varints and
+    lost with its deltas up to the next keyframe; the logger loses the same
+    (README, "Binary tracks").
 
     errors: how bytes that are not UTF-8 in a text line are decoded
     ("surrogateescape" lets read_points tell them from a U+FFFD)."""

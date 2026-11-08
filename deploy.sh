@@ -28,18 +28,20 @@
 # raw REPL; left stopped, the WDT reset the board: a boot failure, and an
 # aborted OTA).
 #
-# Usage: ./deploy.sh            (PORT=/dev/ttyUSB1 ./deploy.sh to override)
+# Usage: ./deploy.sh            (PORT=/dev/ttyUSB1 ./deploy.sh to override;
+#                                VENV=path for a venv other than ./.venv)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 PORT=${PORT:-/dev/ttyUSB0}
-PY=.venv/bin/python
-MPREMOTE=.venv/bin/mpremote
+VENV=${VENV:-.venv}                      # python, pip and mpremote come from it
+PY=$VENV/bin/python
+MPREMOTE=$VENV/bin/mpremote
 FILES="gps_logger.mpy main.py web.html.gz"
 
 # mpy-cross must match the firmware's .mpy version (MicroPython 1.29)
 if ! $PY -c "import mpy_cross" 2>/dev/null; then
-    .venv/bin/pip install -q "mpy-cross==1.29.*"
+    "$VENV/bin/pip" install -q "mpy-cross==1.29.*"
 fi
 
 # The logger stopped by the sessions below runs again on every exit (the
@@ -87,19 +89,23 @@ echo "Board: $MACHINE ($ARCH)"
 
 # A firmware built by tools/build_firmware.sh has the logger frozen in (and
 # a gps_frozen marker with the SHA-256 of the gps_logger.py it was built
-# from): a gps_logger.mpy on flash would shadow it and bring its ~100 KB back
-# into the Python heap, so only main.py and the page go up. Only an
-# explicit answer counts: anything else (a garbled or missing reply) stops.
+# from, TFT for the display's modules and BOOT for gps_boot.py, main.py's
+# OTA/boot-retry helpers): a gps_logger.mpy on flash would shadow it and
+# bring its ~100 KB back into the Python heap, so only main.py and the page
+# go up. Only an explicit answer counts: anything else (a garbled or missing
+# reply) stops. An older marker has no TFT or BOOT ('-'): those are not
+# compared then.
 FROZEN=$($MPREMOTE connect "$PORT" exec "
 try:
     import gps_frozen
-    print('frozen', gps_frozen.COMMIT, getattr(gps_frozen, 'SHA', '-'), getattr(gps_frozen, 'TFT', '-'))
+    print('frozen', gps_frozen.COMMIT, getattr(gps_frozen, 'SHA', '-'), getattr(gps_frozen, 'TFT', '-'),
+          getattr(gps_frozen, 'BOOT', '-'))
 except ImportError:
-    print('plain')" | tr -d '\r' | grep -E '^(frozen [^ ]+ [^ ]+( [^ ]+)?|plain)$' | tail -n 1 || true)
+    print('plain')" | tr -d '\r' | grep -E '^(frozen [^ ]+ [^ ]+( [^ ]+){0,2}|plain)$' | tail -n 1 || true)
 KEEP_MPY=0
 case "$FROZEN" in
     frozen*)
-        read -r _ FCOMMIT FSHA FTFT <<< "$FROZEN"
+        read -r _ FCOMMIT FSHA FTFT FBOOT <<< "$FROZEN"
         if [ "${FORCE_MPY:-0}" = 1 ]; then
             KEEP_MPY=1
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
@@ -107,12 +113,21 @@ case "$FROZEN" in
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
             $PY -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
         else
-            # (the display's code on the board that has it: an older firmware
-            # has no TFT, the logger's SHA alone then)
-            if [ "$FSHA" != "$(sha256sum gps_logger.py | cut -d' ' -f1)" ] \
-               || { [ -n "${FTFT:-}" ] && [ "$FTFT" != "-" ] && \
-                    [ "$FTFT" != "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d' ' -f1)" ]; }; then
-                echo "The frozen logger ($FCOMMIT) is not this gps_logger.py: run" >&2
+            # (the display's code and gps_boot.py on the board that has them
+            # in the marker: an older firmware has no TFT or BOOT, the
+            # logger's SHA alone then)
+            STALE=""
+            if [ "$FSHA" != "$(sha256sum gps_logger.py | cut -d' ' -f1)" ]; then
+                STALE="gps_logger.py"
+            elif [ -n "${FTFT:-}" ] && [ "$FTFT" != "-" ] && \
+                 [ "$FTFT" != "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d' ' -f1)" ]; then
+                STALE="gps_tft.py / gps_tft_font.py"
+            elif [ -n "${FBOOT:-}" ] && [ "$FBOOT" != "-" ] && \
+                 [ "$FBOOT" != "$(sha256sum gps_boot.py | cut -d' ' -f1)" ]; then
+                STALE="gps_boot.py"
+            fi
+            if [ -n "$STALE" ]; then
+                echo "The frozen logger ($FCOMMIT) is not this $STALE: run" >&2
                 echo "tools/build_firmware.sh --flash first (FORCE=1 deploys main.py and the page anyway)" >&2
                 [ "${FORCE:-0}" = 1 ] || exit 1
                 echo "FORCE=1: deploying main.py and the page next to a stale frozen logger" >&2
@@ -129,7 +144,7 @@ esac
 # (Accept-Encoding: gzip), inflated on the board for other clients (curl).
 # tools/web_min.py strips it and makes the gzip, with the firmware's
 # WEB_GZ_WBITS window (see there); web.html itself keeps its comments.
-python3 tools/web_min.py web.html web.html.gz
+$PY tools/web_min.py web.html web.html.gz
 
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block

@@ -443,8 +443,11 @@ def _second(s):
         return
     c = _sec
     if c[0] is None or not s.startswith(c[0]):
-        c[0] = s[0:6]
-        c[1] = "%s:%s:%s" % (s[0:2], s[2:4], s[4:6])
+        h = s[0:6]
+        if not h.isdigit():              # a corrupt digit (see _num): the
+            raise ValueError(s)          # sentence is bad; one such time in
+        c[0] = h                         # a line stopped the track for good
+        c[1] = "%s:%s:%s" % (h[0:2], h[2:4], h[4:6])
     t = c[1]
     if t != ep["t"]:
         if ep["t"] is not None:
@@ -535,20 +538,28 @@ def _load(snap):
 # GGA quality 6 / RMC mode E: an estimate (dead reckoning, the last fix
 # carried on), no fix. GGA 1-5 are (GPS, DGPS, PPS, RTK fixed / float)
 GGA_FIX_MAX = 5
+GSA_EVERY = 5                            # s between GSA (fix type) rounds
+GSA_MAX = 8                              # GSA in a second beyond this: the
+                                         # receiver did not take its rate
 
 def rmc(talker, f):
     kn, pos = _num(f[7]), _position(f, 3)     # (all read first: _num)
-    _second(f[1])
-    st["speed"] = None if kn is None else kn * 1.852
-    if kn is not None and (ep["spd"] is None or st["speed"] > ep["spd"]):
-        ep["spd"] = st["speed"]          # the second's top speed
     d = f[9]
+    date = None
     # (a UC6580 without a fix sends a made-up date: 170126, measured)
     if len(d) == 6 and f[2] == "A":
         c = _day                         # (made once a day, as _second)
         if d != c[0]:
+            if not d.isdigit():          # (a corrupt digit: bad sentence)
+                raise ValueError(d)
             c[0], c[1] = d, "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
-        ep["date"] = c[1]
+        date = c[1]
+    _second(f[1])
+    st["speed"] = None if kn is None else kn * 1.852
+    if kn is not None and (ep["spd"] is None or st["speed"] > ep["spd"]):
+        ep["spd"] = st["speed"]          # the second's top speed
+    if date is not None:
+        ep["date"] = date
     if f[2] == "A" and pos and (len(f) < 13 or f[12] != "E"):
         _acc("r", pos)
 
@@ -669,10 +680,6 @@ def sv_seen():
     for c in st["view"].values():
         n += c
     return n
-
-GSA_EVERY = 5                            # s between GSA (fix type) rounds
-GSA_MAX = 8                              # GSA in a second beyond this: the
-                                         # receiver did not take its rate
 
 # --- UC6580 ----------------------------------------------------------------
 # The Heltec Wireless Tracker's Unicore UC6580 speaks no UBX: text commands
@@ -802,6 +809,8 @@ def _uc_gsa(f):
     """One GSA: the satellites of its system in the fix. A pause before it
     starts a new list: the sentences of a round come in one burst, and a
     round every second by the clock cut one in two (11 seen, 6 in use)."""
+    if len(f) < 19:
+        return                           # (no system id: NMEA before 4.10)
     u = _uc_sv
     now = time.ticks_ms()
     if not _recent(now, u["gsa"], UC_GSA_GAP):
@@ -1098,13 +1107,22 @@ def _mhz_env(env, key, default):
           "board, using", default)
     return default
 
+def _words():
+    """What the console status line and the diag line both end with: HDOP,
+    points logged/sent, WiFi state, keep-alive pulses, free Python heap,
+    IDF heap free/largest block (KB), Python heap size (KB: it doubles
+    into the IDF heap when an allocation does not fit)."""
+    fr, big = idf_heap()
+    pf, pk = py_heap()
+    return "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s heap %d" % (
+        st["hdop"], log["points"], up["sent"], wifi["state"].replace(" ", "_"),
+        wifi["pb_scans"], pf, fr, big, pk)
+
 def _status():
     """One console line: chip temperature (the die, not the GPS module),
-    fixes in the last second, satellites, HDOP, points and uploads."""
+    fixes in the last second, satellites, reset loops, then _words."""
     print("status temp", _temp(), "hz", st["epochs"], "used", st["used"],
-          "hdop", st["hdop"], "points", log["points"], "sent", up["sent"],
-          "wifi", wifi["state"], "pulses", wifi["pb_scans"],
-          "mem", py_heap()[0], "gpsloops", st["loops"])
+          "gpsloops", st["loops"], _words())
 
 def _diag_env(env):
     """DIAG=<seconds> in .env: 0 turns the diagnostic log off, otherwise
@@ -1322,21 +1340,12 @@ def _heap_note(phase):
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
-    HDOP, points logged/sent, WiFi state, keep-alive pulses, free Python
-    heap, IDF heap free/largest block (KB), Python heap size (KB: it
-    doubles into the IDF heap when an allocation does not fit)."""
-    view = sv_seen()
-    fr, big = idf_heap()
-    pf, pk = py_heap()
+    then _words."""
     _diag_write(
-        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s "
-        "hdop %s points %d sent %d wifi %s pulses %d mem %d idf %s/%s "
-        "heap %d" % (
+        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
-            st["loops"], view, sv_used(), status().replace(" ", "_"),
-            st["hdop"], log["points"], up["sent"],
-            wifi["state"].replace(" ", "_"), wifi["pb_scans"],
-            pf, fr, big, pk))
+            st["loops"], sv_seen(), sv_used(), status().replace(" ", "_"),
+            _words()))
 
 def _diag_final():
     """A status line right before a deliberate reset: the next boot reads
@@ -1646,7 +1655,7 @@ def _plain(v):
     return v
 
 def _truthy(v):
-    if v is None:
+    if v is None or isinstance(v, bytes):   # (bytes: not UTF-8, no flag)
         return None
     s = _plain(str(v)).lower()
     if s in ("1", "true", "yes", "on"):
@@ -1790,23 +1799,18 @@ def wifi_reset():
                 blank_ours=False, home_aps=[], home_miss={}, learn=False,
                 hid_wait=ROAM_CHECK, hid_at=None, blank_any=False,
                 rounds=0, hh=None,
-                seen_at=None, seen_wait=SEEN_WAIT)
-    # the link is down since boot (a board booting faster than the
-    # router): _web_search counts from here, as after a drop (lost)
-    wifi["down_at"] = time.ticks_ms()
-    wifi["down_home"] = True
-    wifi["down_rssi"] = None
-    wifi["down_ssid"] = None             # (any home network may come up)
+                seen_at=None, seen_wait=SEEN_WAIT,
+                # the link is down since boot (a board booting faster than
+                # the router): _web_search counts from here, as after a
+                # drop (lost); down_ssid None: any home network may come up
+                down_at=time.ticks_ms(), down_home=True, down_rssi=None,
+                down_ssid=None)
 
 def _rssi(w):
     try:
         return w.status("rssi")
     except (OSError, ValueError, RuntimeError):
         return None
-
-def _recently_failed(ssid, now):
-    t = wifi["failed"].get(ssid)
-    return _recent(now, t, FAIL_HOLD)
 
 def _wifi_diag(kind, line):
     """A WiFi event in the diag log (a drop and why the reconnects failed
@@ -2169,7 +2173,7 @@ def _hidden_home_target(now, arrival=False):
     for n in wifi["nets"]:
         if (n.get("home") and n.get("hidden")
                 and n["ssid"] != wifi["ssid"]
-                and not _recently_failed(n["ssid"], now)):
+                and not _recent(now, wifi["failed"].get(n["ssid"]), FAIL_HOLD)):
             target = dict(n)
             target["bssid"] = None
             return target
@@ -2204,8 +2208,10 @@ def _candidate_order(w):
             if n.get("home") and n.get("hidden") and n.get("rssi") is None:
                 n["rssi"] = wifi["blank_rssi"]
     good, bad = [], []
+    failed = wifi["failed"]
     for n in cands:
-        (bad if _recently_failed(n["ssid"], now) else good).append(n)
+        (bad if _recent(now, failed.get(n["ssid"]), FAIL_HOLD)
+         else good).append(n)
 
     def _home_first(rows):
         homes, rest = [], []
@@ -2384,7 +2390,7 @@ def _wifi_round_failed(w):
     wifi["state"] = "not found"
     wifi["home"] = False
     wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
-    wifi["last_check"] = time.ticks_ms()
+    wifi["last_check"] = now
 
 def _web_search(now):
     """The status page is on (at home, or WEB_AWAY) and no keep-alive scan
@@ -2438,18 +2444,19 @@ def _radio_off(w):
     except WLAN_ERR:
         pass
 
-def _wifi_off(w, state):
+def _wifi_off(w, state, wake_at=None):
     """Radio off: everything is uploaded. It searches again once WIFI_SLEEP
     has passed and there is something to upload, or when a new stay wakes
-    it. A home stay stays a home stay while the radio sleeps (sleep_home),
-    so it still writes no anchor points; leaving clears it (_still_leave)."""
+    it, or at wake_at (ticks: a backed-off upload due again). A home stay
+    stays a home stay while the radio sleeps (sleep_home), so it still
+    writes no anchor points; leaving clears it (_still_leave)."""
     if state == "sleep":
         wifi["sleep_home"] = bool(at_home() and log["still"]["active"])
     _radio_off(w)
     wifi["lost_at"] = None               # ("back after" measures a reconnect,
                                          # not a sleep)
     wifi.update(state=state, home=False, ip=None, rssi=None, wake=False,
-                wake_at=None, backoff=WIFI_RETRY, last_check=time.ticks_ms())
+                wake_at=wake_at, backoff=WIFI_RETRY, last_check=time.ticks_ms())
     print("wifi", state, "home" if wifi["sleep_home"] else "")
 
 def _upload_wait(now):
@@ -2489,8 +2496,7 @@ def _wifi_off_backoff(w, now):
     wait = _upload_wait(now)
     if wait < WIFI_OFF_WAIT:
         return False
-    _wifi_off(w, "sleep")
-    wifi["wake_at"] = time.ticks_add(now, wait)
+    _wifi_off(w, "sleep", time.ticks_add(now, wait))
     print("wifi off until upload retry", wait // 1000, "s")
     return True
 
@@ -2590,7 +2596,7 @@ def _try_roam_home(w, arrival=False):
     for n in found or ():
         if (n.get("home") and n.get("rssi", -100) >= ROAM_MIN_RSSI
                 and n["ssid"] != wifi["ssid"]
-                and not _recently_failed(n["ssid"], now)):
+                and not _recent(now, wifi["failed"].get(n["ssid"]), FAIL_HOLD)):
             target = n
             break
     if target is None:
@@ -2751,9 +2757,12 @@ def _home_seen(aps):
         wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
     print("wifi home in range")
 
-def wifi_start():
+def wifi_start(env=None):
+    """WiFi, upload, page, OTA and NTP settings from .env (env: the dict
+    run() read already), the first connect round."""
     global DEVICE_ID, HOSTNAME, CPU_MHZ, CPU_MHZ_UPLOAD
-    env = load_env(ENV_FILE)
+    if env is None:
+        env = load_env(ENV_FILE)
     CPU_MHZ = _mhz_env(env, "CPU_MHZ", CPU_MHZ)
     CPU_MHZ_UPLOAD = _mhz_env(env, "CPU_MHZ_UP", CPU_MHZ_UPLOAD)
     _set_freq(CPU_MHZ)
@@ -2992,6 +3001,8 @@ _P10 = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000,
 _ke = [None] * 12                        # the encoder's (flush)
 _kt = [None] * 12                        # the line being encoded
 _ks = [None] * 12                        # the reader's
+_TDIG = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)   # the digits of
+                                         # YYYYMMDDTHHMMSSZ
 
 def _kb_num(buf, a, b, s, i):
     """buf[a:b] into s[i] (value) and s[i + 5] (decimals): empty, or a
@@ -3036,7 +3047,7 @@ def _kb_num(buf, a, b, s, i):
 def _kb_time(buf, t):
     """The compact time YYYYMMDDTHHMMSSZ at buf[t:t + 16] -> seconds since
     2020, or None (not a valid UTC time from 2020 up to FIX_S_END: the line
-    is then a keyframe)."""
+    is then a keyframe). The one check of a real date: _ymd_ok."""
     if buf[t + 8] != 84 or buf[t + 15] != 90:
         return None
     for k in _TDIG:
@@ -3049,13 +3060,9 @@ def _kb_time(buf, t):
     hh = (buf[t + 9] - 48) * 10 + buf[t + 10] - 48
     mi = (buf[t + 11] - 48) * 10 + buf[t + 12] - 48
     ss = (buf[t + 13] - 48) * 10 + buf[t + 14] - 48
-    if not (2020 <= y <= 2099 and 1 <= m <= 12 and d >= 1
-            and hh < 24 and mi < 60 and ss < 60):
+    if not _ymd_ok(y, m, d, hh, mi, ss):
         return None
-    z = _days(y, m, 1)
-    if d > _days(y, m + 1, 1) - z:       # (past the month's last day)
-        return None
-    t = (z + d - 1 - EPOCH_DAYS) * 86400 + hh * 3600 + mi * 60 + ss
+    t = (_days(y, m, d) - EPOCH_DAYS) * 86400 + hh * 3600 + mi * 60 + ss
     return t if t < FIX_S_END else None  # (_kb_dec reads no delta past it)
 
 def _kb_parse(buf, a, e, s):
@@ -3192,7 +3199,7 @@ def log_reset():
                still=_still_state(), clock=None, seq=0,
                last_sample=None, last_flush=time.ticks_ms(), last_t=None,
                prev=None, full_check=None, file_at=None, good_size=None,
-               fmt=None, drop=0, full_tc=None, err_at=None, back=0)
+               fmt=None, drop=0, full_tc=None, err_at=None, back=0, hb=[])
 
 def _still_state():
     return {"active": False, "home": False, "win_at": None, "win_tc": None,
@@ -3610,9 +3617,14 @@ def _hist_close(st, ok=True):
         except OSError:
             pass
     if new:
-        try:                             # the day files beyond the newest
-            for n in _hist_names()[:-HIST_DAYS]:  # HIST_DAYS go
-                _rm(HIST_DIR + "/" + n)
+        try:                             # the days beyond the newest
+            ns = _hist_names()           # HIST_DAYS go (a day written as
+            ds = sorted(set(n[:8] for n in ns))  # .trk and .trb is one)
+            if len(ds) > HIST_DAYS:
+                cut = ds[-HIST_DAYS]
+                for n in ns:
+                    if n[:8] < cut:
+                        _rm(HIST_DIR + "/" + n)
         except OSError:
             pass
 
@@ -3991,7 +4003,9 @@ def _still_heartbeat(now):
     """Write the anchor as a point. It is stamped with the last fix's GPS
     time plus the ticks since, so no fix is needed: the anchor is known, and
     indoors there is rarely a usable fix. Skipped when that time would not
-    come after the last line written (retried on the next tick)."""
+    come after the last line written (tried again a second later, not
+    every pass). Its time goes into log["hb"], what tells the route an
+    anchor from a fix without height and HDOP (_rt_line)."""
     sl = log["still"]
     c = log["clock"]
     if c is None:
@@ -4001,12 +4015,17 @@ def _still_heartbeat(now):
         return
     t, tc = _stamp_s(c[0] + age // 1000)
     if log["last_t"] is not None and t <= log["last_t"]:
+        sl["hb_at"] = time.ticks_add(now, 1000 - STILL_HEARTBEAT)
         return
     a = sl["anchor"]
     sl["hb_at"] = now
     if log["file"] is None:
         start_file(_tcn(tc))
         sl["file_at"] = now
+    h = log["hb"]
+    h.append(tc)
+    if len(h) > 8:                       # (never fed to the route: no TFT)
+        h.pop(0)
     _record((t, _line("%.6f,%.6f" % (a[0], a[1]), ("", ""), tc)), a)
 
 def _still_beat(now):
@@ -4544,13 +4563,13 @@ def _sample(now):
     """One second of the current fix (st): the heartbeat clock, then the
     stay logic and the track when the fix is usable."""
     secs = _fix_s()
-    if secs is not None:
-        if not 0 <= secs < FIX_S_END:
-            return                       # (see FIX_S_END)
-        log["clock"] = (secs, now)       # GPS time for the heartbeat (2020)
-    if not st["date"] or not _usable(now):
-        return                           # (a second with GGA only, e.g. the
-                                         # first one after a warm boot)
+    if secs is None or not 0 <= secs < FIX_S_END:
+        return                           # (no date: a second with GGA only,
+                                         # e.g. the first after a warm boot;
+                                         # or see FIX_S_END)
+    log["clock"] = (secs, now)           # GPS time for the heartbeat (2020)
+    if not _usable(now):
+        return
     lt = log["last_t"]
     if lt is not None:                   # (in a stay too: see _time_back)
         t = st["date"] + "T" + st["time"] + "Z"
@@ -5173,7 +5192,6 @@ _J_SPD = b'"speed":'
 _J_FIX = len(_J_PT) + 1 + len(_J_TS) + 20 + 2   # "," time '",'
 _ISO = (0, 1, 2, 3, -45, 4, 5, -45, 6, 7, 8, 9, 10, -58, 11, 12, -58, 13,
         14, 15)                          # YYYYMMDDTHHMMSSZ -> ISO (-c: chr c)
-_TDIG = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)
 _pt = [0] * 16                           # the parsed .trk point (_trk_point)
 _dev = [None, b""]                       # DEVICE_ID, its JSON tail
 
@@ -5735,13 +5753,21 @@ def _rtc_sync(now):
     """mbedTLS checks the server certificate's dates against the board
     clock, which starts at 2000-01-01 each boot: with CA_FILE every
     verified POST failed. Set it from the GPS fix (valid, a date in
-    2020-2087) before a POST: once a boot, again only when it drifted more
-    than RTC_DRIFT s. Seconds since 2020 (small ints)."""
-    if not has_fix(now):
+    2020-2087) before a POST, or from NTP's answer while no fix came since
+    the boot: once a boot, again only when it drifted more than RTC_DRIFT
+    s. Seconds since 2020 (small ints)."""
+    src = ""
+    if has_fix(now):
+        at = st["pos_at"]
+        s = _fix_s()
+    elif not _rtc_set[0] and _ntp[0] is not None:
+        # no fix since boot (indoors, at home): NTP's answer, until a fix
+        # sets it (every verified POST failed the dates until the first fix)
+        s, at = _ntp[0]
+        src = " ntp"
+    else:
         return
-    at = st["pos_at"]
-    s = _fix_s()
-    if s is None:
+    if s is None or _age(now, at) >= TICKS_OLD:
         return
     s += _age(now, at) // 1000
     d = s // 86400
@@ -5764,7 +5790,7 @@ def _rtc_sync(now):
         print("rtc", repr(e))
         return
     if not _rtc_set[0]:
-        _diag_write("clock set %s" % _stamp_s(s)[0])
+        _diag_write("clock set %s%s" % (_stamp_s(s)[0], src))
     _rtc_set[0] = True
 
 def _tls_wrap(s, host):
@@ -5794,6 +5820,9 @@ def _guard_cb(timer):
             pass
 
 def _guard_start(sock, ms):
+    """Arm the guard for sock. Its timer is made once and kept running
+    (an idle callback a second): deinit / init around each POST would
+    alloc and free an interrupt handle in the IDF heap TLS needs whole."""
     _guard["sock"] = sock
     _guard["until"] = time.ticks_add(time.ticks_ms(), ms)
     if _guard["t"] is None:
@@ -5830,18 +5859,22 @@ def _http_open(method, url):
 def _http_head(s, want, got):
     """Read an answer's headers, in bounded pieces (a long header comes in
     several, only a piece at a line start is a header or the end). The value
-    of a header named in want (lowercase) goes to got at the same index."""
+    of a header named in want (lowercase) goes to got at the same index.
+    More than HTTP_LINES pieces before the blank line raise: silently
+    stopped, the rest of the head read as the body (a GET's sha256 failed
+    every check with no clue; a POST keeps its 2xx, the caller catches)."""
     bol = True
     for _ in range(HTTP_LINES):
         h = s.readline(HTTP_LINE)
         if not h or (bol and h in (b"\r\n", b"\n")):
-            break
+            return
         if bol:
             k, _, v = h.partition(b":")
             k = k.strip().lower()
             if k in want:
                 got[want.index(k)] = v.strip()
         bol = h[-1:] == b"\n"
+    raise OSError("head over %d lines" % HTTP_LINES)
 
 def _http_close(s):
     _guard_stop()
@@ -5860,6 +5893,7 @@ def _raw_post(url, data, headers, timeout):
     sent."""
     _post_phase[0] = "connect"
     s, addr, https, host, hdr = _http_open("POST", url)
+    raw = s                              # (the TLS socket has no settimeout)
     _guard_start(s, HTTP_MAX)            # the raw socket: closing it fails
     try:                                 # a TLS call stuck on it
         s.settimeout(timeout)
@@ -5887,6 +5921,11 @@ def _raw_post(url, data, headers, timeout):
             feed()
             if _age(time.ticks_ms(), t0) >= HTTP_WAIT:
                 raise OSError(110)       # ETIMEDOUT
+        # what is left of HTTP_WAIT for the status line: a TLS 1.3 server's
+        # session tickets right after the handshake are the first POLLIN,
+        # and the answer then had only the connect timeout (15 s) to come
+        raw.settimeout(max(HTTP_WAIT - _age(time.ticks_ms(), t0), 1000)
+                       / 1000)
         line = s.readline(HTTP_LINE)
         code = int(line.split(None, 2)[1])
         got = [None, None]
@@ -6159,7 +6198,6 @@ def upload_tick():
             off, key = _rk[1], None      # (read from 0: a bad .pos)
         _heap_note("read_batch")
         feed()
-        fsize = _file_size(path) or 0
     except OSError as e:
         # unreadable (corrupt LittleFS block, EIO): hold it back so the
         # newer tracks still go, and after READ_ERR_MAX tries park it as
@@ -6192,13 +6230,13 @@ def upload_tick():
         try:
             if n:
                 commit_offset(path, n, new_off, eof, key1)
-            elif eof or fsize == 0:
+            else:
+                # n == 0 only at EOF: read_batch leaves its loop early only
+                # with a point counted (the batch full, one that does not
+                # fit), so a file with no line to count is read to its end
                 _rm_done(path)           # empty / EOF track and .bad
                 _rm(path + ".pos")
                 _clear_bad_full(path)
-            else:
-                print("pos skip", path, off, new_off, fsize)
-                write_offset(path, 0)
         except OSError as e:
             print("upload pos", path, repr(e))
             _fs_err(now)
@@ -6818,7 +6856,13 @@ def _ota_check():
         return
     ota["state"] = "downloading"
     w = _SlotWriter(part)
-    code = HTTP_GET(_ota_url(m["url"]), w, m["size"])
+    try:
+        code = HTTP_GET(_ota_url(m["url"]), w, m["size"])
+    except (OSError, ValueError):
+        # a download cut short waits OTA_RETRY like a bad one: it came
+        # again (2 MB, the loop blocked) every OTA_CHECK
+        ota["failed"] = (build, time.ticks_ms(), "download err")
+        raise
     got = w.close()
     if (code != 200 or got != m["sha256"]
             or _slot_sha(part, m["size"]) != m["sha256"]):
@@ -6870,14 +6914,21 @@ def _ota_valid():
         pass
 
 def _ota_pending():
-    """(build, commit, staged paths) of OTA_PENDING, or None."""
+    """(build, commit, staged paths) of OTA_PENDING, None without one. A
+    note that is there but cannot be read or parsed is (None, "?", []):
+    an image is pending, its build unknown (ota_boot then runs the health
+    check as the running build's; before, it was confirmed unchecked)."""
     try:
         with open(OTA_PENDING) as f:
             lines = f.read().split("\n")
         b, _, c = lines[0].strip().partition(" ")
         return int(b), c, [x for x in lines[1:] if x]
-    except (OSError, ValueError, IndexError):
-        return None
+    except OSError as e:
+        if _enoent(e):
+            return None
+    except (ValueError, IndexError):
+        pass
+    return None, "?", []
 
 def ota_boot():
     """At boot: a firmware just installed (OTA_PENDING) runs pending until
@@ -6895,9 +6946,9 @@ def ota_boot():
         return
     build, c, paths = p
     mark = _ota_mark_get()
-    if build == FW_BUILD:
+    if build is None or build == FW_BUILD:
         _rm(OTA_MARK)                    # (a run before this one stopped)
-        ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
+        ota.update(pend=FW_BUILD, pend_at=time.ticks_ms(), wifi_seen=False,
                    probed=False, probe_at=None, probe_err=None,
                    state="pending", paths=paths)
         _diag_write("ota %s booted, checking" % c)
@@ -7027,8 +7078,10 @@ def ota_tick(now):
     # bug held back the update that fixes it
     if not at_home():
         return
-    if (up["left"] or up["files"]
-            or str(up["state"]).startswith("err")):
+    # (not with no GEO_URL / API_KEY: "left" never falls there, and a
+    # logging-only board got its update after OTA_STUCK, as "stuck")
+    if up["state"] != "no .env" and (up["left"] or up["files"]
+                                     or str(up["state"]).startswith("err")):
         ok = up["ok_at"]
         if ota.get("held_at") is None or ok != ota.get("held_ok"):
             ota["held_at"] = now
@@ -7154,12 +7207,9 @@ def _prev_text():
         return t + ", ended by a crash"
     return t + (" (last line %s)" % prev_run["end"] if prev_run["end"] else "")
 
-def _ago(t):
-    """Whole seconds since ticks t, None for never."""
-    return None if t is None else _age(time.ticks_ms(), t) // 1000
-
 def _web_rows():
     """(key, value) pairs of the JSON (web.html labels them)."""
+    now = time.ticks_ms()
     view = sv_seen()
     t = _fix_s()
     pos = pos6 = None
@@ -7167,7 +7217,7 @@ def _web_rows():
     # once that second is older than NO_DATA (the page would show it live)
     pa = st.get("pos_at")
     if (st["valid"] and st["lat"] is not None and st["lon"] is not None
-            and pa is not None and _age(time.ticks_ms(), pa) <= NO_DATA):
+            and pa is not None and _age(now, pa) <= NO_DATA):
         pos = "%.5f, %.5f" % (st["lat"], st["lon"])
         # the track line's precision for the page's static measurement
         pos6 = "%.6f, %.6f" % (st["lat"], st["lon"])
@@ -7189,8 +7239,9 @@ def _web_rows():
         ("pos6", pos6),
         ("nmea", "%d / %d" % (st["ok"], st["err"])),
         ("rx_bytes", st["rx_b"]),
-        ("rx_age_s", _ago(st["rx"])),
-        ("good_age_s", _ago(st["good"])),
+        ("rx_age_s", None if st["rx"] is None else _age(now, st["rx"]) // 1000),
+        ("good_age_s", None if st["good"] is None
+         else _age(now, st["good"]) // 1000),
         ("gps_boots", st["gps_boots"]),
         ("gps_loops", st["loops"]),
         ("receiver", st["gps_ver"]),
@@ -7202,7 +7253,8 @@ def _web_rows():
         ("sent", up["sent"]),
         ("upload", up["state"]),
         ("upload_err", up["err"]),
-        ("upload_age_s", _ago(up["ok_at"])),
+        ("upload_age_s", None if up["ok_at"] is None
+         else _age(now, up["ok_at"]) // 1000),
         ("days", _hist_days()),
         ("stay", "yes" if still.get("active") else "no"),
         ("uptime", uptime_s()),
@@ -7455,13 +7507,19 @@ def _web_send(c, code, ctype, parts):
 
 def _web_gzip(req):
     """True if the request's Accept-Encoding names gzip (every browser;
-    curl only with --compressed)."""
+    curl only with --compressed), in a bare-LF head too (as _web_host_ok
+    reads it); a gzip token with q=0 refuses it."""
     r = req.lower()
-    i = r.find(b"\r\naccept-encoding:")
+    i = r.find(b"\naccept-encoding:")
     if i < 0:
         return False
-    j = r.find(b"\r\n", i + 2)
-    return b"gzip" in r[i:j if j >= 0 else len(r)]
+    j = r.find(b"\n", i + 17)
+    for tok in r[i + 17:j if j >= 0 else len(r)].split(b","):
+        tok = tok.strip()
+        if tok[:4] == b"gzip":
+            q = tok.replace(b" ", b"").partition(b";q=")[2]
+            return not q or q.strip(b"0.") != b""
+    return False
 
 def _web_page(c, gz=False):
     """The status page from flash in WEB_CHUNK reads into one buffer. The
@@ -7882,7 +7940,11 @@ def _ntp_env(env):
 
 def _ntp_ask():
     """Seconds since 2020 from NTP_SERVER, None: no answer, or none to believe (not
-    synchronised, no server, or a time before this build was made)."""
+    synchronised, no server, not an answer to this request, or a time before this
+    build was made). The request's ticks go out as its transmit time and must come
+    back as the answer's originate time (a late or stray datagram is no answer).
+    Past the NTP era (2036-02-07) the seconds count from there: the small value
+    is read as the next era."""
     s = None
     try:
         ai = socket.getaddrinfo(NTP_SERVER, 123, 0, socket.SOCK_DGRAM)[0]
@@ -7890,6 +7952,7 @@ def _ntp_ask():
         s.settimeout(NTP_WAIT / 1000)
         q = bytearray(48)
         q[0] = 0x23                      # version 4, a client
+        struct.pack_into(">I", q, 40, time.ticks_ms())
         s.sendto(q, ai[-1])
         b = s.recv(48)
     except (OSError, IndexError, ValueError):
@@ -7897,9 +7960,15 @@ def _ntp_ask():
     finally:
         if s is not None:
             s.close()
-    if len(b) < 48 or b[0] >> 6 == 3 or b[0] & 7 != 4 or not 0 < b[1] < 16:
+    if (len(b) < 48 or b[0] >> 6 == 3 or b[0] & 7 != 4 or not 0 < b[1] < 16
+            or b[24:32] != q[40:48]):
         return None
-    t = struct.unpack_from(">I", b, 40)[0] - _NTP_2020
+    v = struct.unpack_from(">I", b, 40)[0]
+    if not v:
+        return None
+    t = v - _NTP_2020
+    if t < 0:
+        t += 1 << 32
     return t if max(0, FW_BUILD - EPOCH_DAYS * 86400) <= t < FIX_S_END else None
 
 def ntp_tick(now):
@@ -7921,13 +7990,14 @@ def ntp_tick(now):
     _diag_write("clock ntp %s" % _stamp_s(t)[0])
 
 def _local_hm():
-    """"HH:MM" in Hungary from the fix's UTC, else from NTP's, "--:--" without either
-    or with the receiver silent: its time stands still then."""
+    """"HH:MM" in Hungary from the fix's UTC; with the receiver silent (its time
+    stands still then) or no fix yet, from the last fix's clock run on by the
+    ticks, else NTP's (as _rt_tick); "--:--" without any."""
     d, t = st["date"], st["time"]
     rx = st["rx"]
     now = time.ticks_ms()
     if not d or not t or not _recent(now, rx, NO_DATA):
-        c = _ntp[0]
+        c = log["clock"] or _ntp[0]
         if c is None or _age(now, c[1]) >= TICKS_OLD:
             return "--:--"
         d = _stamp_s(c[0] + _age(now, c[1]) // 1000)[0]
@@ -7997,8 +8067,10 @@ def _store_state(now):
     if total <= 0:
         return None
     try:
-        for n in _hist_names()[:-1]:
-            room += _file_size(HIST_DIR + "/" + n) or 0
+        ns = _hist_names()
+        for n in ns:
+            if n[:8] != ns[-1][:8]:      # (not the newest day's, .trk or .trb)
+                room += _file_size(HIST_DIR + "/" + n) or 0
     except OSError:
         pass
     left = room - MIN_FREE
@@ -8124,13 +8196,19 @@ def _rt_add(lat, lon, new):
 def _rt_line(line):
     """One line written to the track. The last point is always the last position:
     it moves along until about ROUTE_STEP from the one before (9 millionths of a
-    degree a metre, near enough for spacing: no float), then stays."""
+    degree a metre, near enough for spacing: no float), then stays. An anchor
+    point (its time in log["hb"], _still_heartbeat) is no way travelled: skipped.
+    (Told by its empty height and HDOP before, which a fix of a second without
+    GGA has too: those were skipped with it.)"""
     R = _Rt
+    tc = line[-17:-1]
+    h = log["hb"]
+    if tc in h:
+        h.remove(tc)
+        return
     a = line.find(",")
     b = line.find(",", a + 1)
     z = line.encode()
-    if z[b + 1] == 44 and z[b + 2] == 44:    # no height, no HDOP: an anchor point
-        return
     s = _kb_time(z, len(z) - 17)
     if s is None:
         return
@@ -8143,7 +8221,7 @@ def _rt_line(line):
         return                           # (held over midnight: yesterday's)
     lat, lon = _e6(line, 0, a), _e6(line, a + 1, b)
     new = R.n == 0 or (R.last_s is not None and s - R.last_s > NEW_FILE_GAP)
-    if R.trip is not None and line[-17:-1] >= R.trip:
+    if R.trip is not None and tc >= R.trip:
         R.trip = None
         new = True
     R.last_s = s
@@ -8412,23 +8490,18 @@ def run():
         _gps_sys_env(env)
         _min_move_env(env)
         _diag_env(env)
-        env = None
         _diag_boot()
         ota_boot()
         gps_setup()
-        wifi_start()
+        wifi_start(env)                  # (the one read of .env)
+        env = None
         _running = True
         _loop()
     except KeyboardInterrupt:
         _running = False
         _ota_mark("stop")                # (its WDT reset: not the build's)
         print("WDT armed - fed by timer; hold the boot-bypass pin and reset for mpremote")
-        try:
-            flush(_still_hold())  # held drift is dropped
-        except Exception:
-            pass
-        wifi_stop()
-        _wdt_keepalive()
+        _wdt_keepalive()                 # (finally flushes and stops the WiFi)
         raise
     except Exception as e:
         _running = False
@@ -8456,8 +8529,11 @@ def run():
 TICK_PAUSE = 5000                        # ms a side tick that raised sits out
 _tick_bug = {}                           # its name -> ticks of the bug
 
-GUARD_MEM_MAX = 10                       # guarded MemoryErrors in a row:
-_guard_mem = [0]                         # a memory reboot (_mem_reboot)
+GUARD_MEM_MAX = 10                       # a tick's guarded MemoryErrors in
+_guard_mem = {"wifi": 0, "upload": 0,    # a row: a memory reboot (_mem_reboot);
+              "ota": 0, "web": 0,        # counted per tick (one tick's lasting
+              "ntp": 0, "status": 0,     # one never summed up while the others
+              "diag": 0}                 # ran through: the reboot never came)
 
 def _guarded(name, fn, arg=None, side=False):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
@@ -8466,15 +8542,17 @@ def _guarded(name, fn, arg=None, side=False):
     It escaped into run()'s crash branch: a reset and a boot-fail count
     each time, and a persistent one left the board in the REPL after
     BOOT_FAIL_MAX boots, logging nothing. Not guarded: log_tick and the
-    GPS reads (the logging itself: a reset is their recovery), and nothing
+    GPS reads (the logging itself: a reset is their recovery), and no bug
     while an OTA image is pending (its crash rolls it back). Nothing is
     fed here: a tick that hangs still fires the WDT.
+    A MemoryError is no crash of a pending image in any tick (the page's
+    wrote /ota.mark and blamed a good build; an upload's or a scan's would
+    the same, in the first minutes when the heap is at its worst): gc, the
+    pause, and the memory reboot waits (it would abort the image).
     side: the page and the status lines, which only need a little RAM at a
-    bad moment. Their MemoryError is no crash of a pending image either (it
-    wrote /ota.mark and blamed a good build; a real bug in them still rolls
-    it back, and a memory reboot waits, as it would abort the image), and
-    their running through says nothing about a lasting one (one idle page
-    tick allocates nothing, and no reboot would ever have come)."""
+    bad moment: their running through says nothing about a lasting one
+    (one idle page tick allocates nothing, and no reboot would ever have
+    come), so only a non-side tick's success clears its count."""
     at = _tick_bug.get(name)
     if at is not None:
         if _age(time.ticks_ms(), at) < TICK_PAUSE:
@@ -8486,21 +8564,21 @@ def _guarded(name, fn, arg=None, side=False):
             fn()
         else:
             fn(arg)
-        if not side:
-            _guard_mem[0] = 0
+        if not side and _guard_mem.get(name):
+            _guard_mem[name] = 0
     except Exception as e:
         pending_ota = pend is not None or ota["pend"] is not None
-        if pending_ota and not (side and isinstance(e, MemoryError)):
+        if pending_ota and not isinstance(e, MemoryError):
             raise
         now = time.ticks_ms()
         if isinstance(e, MemoryError):
             gc.collect()
             # the crash reset was a lasting MemoryError's recovery (the
             # heap fragmented for good): GUARD_MEM_MAX in a row reboot
-            _guard_mem[0] += 1
-            if (_guard_mem[0] >= GUARD_MEM_MAX and not pending_ota
+            n = _guard_mem[name] = _guard_mem.get(name, 0) + 1
+            if (n >= GUARD_MEM_MAX and not pending_ota
                     and not _mem_reboot_soon()):
-                _guard_mem[0] = 0
+                _guard_mem[name] = 0
                 _mem_reboot("guarded memory " + name)
         if name == "upload":
             # (after the POST, before the commit: the same batch went up
