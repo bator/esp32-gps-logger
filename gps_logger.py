@@ -1805,7 +1805,7 @@ def wifi_reset():
                 # the link is down since boot (a board booting faster than
                 # the router): _web_search counts from here, as after a
                 # drop (lost); down_ssid None: any home network may come up
-                down_at=time.ticks_ms(), down_home=True, down_rssi=None,
+                down_at=_stamp(), down_home=True, down_rssi=None,
                 down_ssid=None)
 
 def _rssi(w):
@@ -2312,8 +2312,7 @@ def _wifi_got_ip(w):
     lost = wifi["lost_at"]
     if lost is not None:
         _wifi_diag("back", "wifi back %s after %s, %d failed tries, rssi %s"
-                   % (wifi["ssid"] or "", _hms(_age(time.ticks_ms(), lost)
-                                                   // 1000),
+                   % (wifi["ssid"] or "", _hms(_age_s(lost)),
                       wifi["fails"], wifi["rssi"]))
         wifi["lost_at"] = None
     wifi["learn"] = False
@@ -2414,8 +2413,7 @@ def _web_search(now):
         r = wifi["down_rssi"]
         if r is None or r >= SEEN_MIN_RSSI:
             return False                 # _home_seen wakes it
-    at = wifi["down_at"]
-    return _recent(now, at, WEB_SEARCH)
+    return _recent_s(wifi["down_at"], WEB_SEARCH // 1000)
 
 def _home_seeable(ssid=None):
     """A keep-alive scan can see home come back (_home_seen): for the home
@@ -2612,7 +2610,7 @@ def _try_roam_home(w, arrival=False):
     wifi["cand_i"] = 0
     wifi["retried"] = False
     wifi["roaming"] = True
-    wifi["down_at"] = now                # the link is left: if neither
+    wifi["down_at"] = _stamp()           # the link is left: if neither
     wifi["down_home"] = False            # connects, a drop off home
     wifi["down_rssi"] = None
     wifi["down_ssid"] = None
@@ -2876,10 +2874,9 @@ def wifi_tick():
         # auto-reconnects. Do not map that to "connecting" with a stale
         # try_at (that would immediately fail the current SSID).
         wifi["state"] = "lost"
-        wifi["lost_at"] = now
+        wifi["lost_at"] = wifi["down_at"] = _stamp()
         wifi["fails"] = 0
         # a drop: what dropped decides whether _web_search searches
-        wifi["down_at"] = now
         wifi["down_home"] = bool(wifi["home"])
         wifi["down_rssi"] = wifi["rssi"]
         wifi["down_ssid"] = wifi["ssid"]   # whose return a scan must see
@@ -3197,7 +3194,7 @@ def log_reset():
                fix=False, lost_at=None, new_seg=False, seg_tc=[],
                full=False, wfail=False, wfails=0,
                still=_still_state(), clock=None, seq=0,
-               last_sample=None, last_flush=time.ticks_ms(), last_t=None,
+               last_sample=None, last_flush=_stamp(), last_t=None,
                prev=None, full_check=None, file_at=None, good_size=None,
                fmt=None, drop=0, full_tc=None, err_at=None, back=0, hb=[])
 
@@ -3283,7 +3280,7 @@ def start_file(stamp=None):
     # next one from closing: log_tick)
     log.update(file=LOG_DIR + "/" + name + TRB,
                created=False, points=0,
-               new_seg=False, seg_tc=[], file_at=time.ticks_ms(),
+               new_seg=False, seg_tc=[], file_at=_stamp(),
                good_size=None, wfail=False, wfails=0)
     # First write happens when there are points (parking must not create
     # an empty / one-point file just because a fix came back).
@@ -3294,7 +3291,7 @@ def flush(hold=None):
     close, or if the file size shows the new bytes actually landed. With
     hold (a compact track time), only the lines before it are written: the
     rest is the drift of a stay still being proven (see _still_hold)."""
-    log["last_flush"] = time.ticks_ms()
+    log["last_flush"] = _stamp()
     path, batch = log["file"], log["batch"]
     k = len(batch)
     if hold is not None:
@@ -3327,7 +3324,7 @@ def flush(hold=None):
         _seg_break()
         log["prev"] = None
         if log["fix"]:
-            log["fix"], log["lost_at"] = False, time.ticks_ms()
+            log["fix"], log["lost_at"] = False, _stamp()
         return
     creating = not log["created"]
     old = log["good_size"]
@@ -4040,7 +4037,7 @@ def _still_close(now=None):
     if log["file"] is None:
         return
     if (log["batch"] and now is not None
-            and _age(now, log["last_flush"]) < FLUSH):
+            and _age_s(log["last_flush"]) < FLUSH // 1000):
         return
     _close_file()                        # nothing is held during a stay
 
@@ -4435,14 +4432,14 @@ def log_tick():
     if (log["file"] is not None and log["file_at"] is not None
             and wifi["state"] == "connected" and not log["still"]["active"]
             and log["points"] + len(log["batch"]) > 0
-            and _age(now, log["file_at"]) >= NEW_FILE_GAP * 1000
-            and _age(now, log["last_flush"]) >= FLUSH):
+            and _age_s(log["file_at"]) >= NEW_FILE_GAP
+            and _age_s(log["last_flush"]) >= FLUSH // 1000):
         _close_file()
     if log["full"]:
         if log["fix"] and not has_fix(now):
             # nothing is recorded, but NEW_FILE_GAP counts from the loss,
             # not from when space returns
-            log["fix"], log["lost_at"] = False, now
+            log["fix"], log["lost_at"] = False, _stamp()
         if _recent_s(log["full_check"], FULL_CHECK // 1000):
             return
         log["full_check"] = _stamp()
@@ -4463,9 +4460,9 @@ def log_tick():
         # first, and nothing is stamped before lines already written
         _still_beat(now)
         if log["fix"]:
-            log["fix"], log["lost_at"] = False, now
+            log["fix"], log["lost_at"] = False, _stamp()
             flush(_still_hold())
-        elif log["batch"] and _age(now, log["last_flush"]) >= FLUSH:
+        elif log["batch"] and _age_s(log["last_flush"]) >= FLUSH // 1000:
             # anchor points written without a fix; and HOLD_RELEASE after
             # the last usable fix the drift hold is let go (_still_hold):
             # without a new fix the end of a trip would stay in RAM only
@@ -4477,7 +4474,7 @@ def log_tick():
         if log["still"]["active"]:
             pass                         # same place: the stay keeps its file
         elif (log["file"] is not None and log["lost_at"] is not None
-                and _age(now, log["lost_at"]) > NEW_FILE_GAP * 1000):
+                and _age_s(log["lost_at"]) > NEW_FILE_GAP):
             _rt_trip()
             # A new file: the old track closes so it uploads, unless a write
             # failed within FLUSH (a rate limit). Before, a non-empty batch
@@ -4488,7 +4485,7 @@ def log_tick():
             if _usable(now):
                 _still_gap(now, (st["lat"], st["lon"]))
             closed = (not (log["wfail"]
-                           and _age(now, log["last_flush"]) < FLUSH)
+                           and _age_s(log["last_flush"]) < FLUSH // 1000)
                       and _close_file())
             log["prev"] = None           # first point of the new trip is kept
             if not closed or log["batch"]:
@@ -4505,7 +4502,7 @@ def log_tick():
         log["last_sample"] = now
         _sample(now)
     _still_beat(now)                     # after the seconds (see above)
-    if _age(now, log["last_flush"]) >= FLUSH:
+    if _age_s(log["last_flush"]) >= FLUSH // 1000:
         flush(_still_hold())
 
 def _drain_q():
