@@ -124,22 +124,9 @@ case "$FROZEN" in
             # (the display's code, gps_boot.py, gps_clock.py and
             # gps_receiver.py on the board that has them in the marker: an older
             # firmware has no TFT, BOOT, CLOCK or RX, the logger's SHA alone then)
-            STALE=""
-            if [ "$FSHA" != "$(sha256sum gps_logger.py | cut -d' ' -f1)" ]; then
-                STALE="gps_logger.py"
-            elif [ -n "${FTFT:-}" ] && [ "$FTFT" != "-" ] && \
-                 [ "$FTFT" != "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d' ' -f1)" ]; then
-                STALE="gps_tft.py / gps_tft_font.py"
-            elif [ -n "${FBOOT:-}" ] && [ "$FBOOT" != "-" ] && \
-                 [ "$FBOOT" != "$(sha256sum gps_boot.py | cut -d' ' -f1)" ]; then
-                STALE="gps_boot.py"
-            elif [ -n "${FCLOCK:-}" ] && [ "$FCLOCK" != "-" ] && \
-                 [ "$FCLOCK" != "$(sha256sum gps_clock.py | cut -d' ' -f1)" ]; then
-                STALE="gps_clock.py"
-            elif [ -n "${FRX:-}" ] && [ "$FRX" != "-" ] && \
-                 [ "$FRX" != "$(sha256sum gps_receiver.py | cut -d' ' -f1)" ]; then
-                STALE="gps_receiver.py"
-            fi
+            # (tools/firmware.py: what each field hashes, the first that differs)
+            STALE=$("$PY" tools/firmware.py stale "$FSHA" "${FTFT:--}" "${FBOOT:--}" \
+                    "${FCLOCK:--}" "${FRX:--}")
             if [ -n "$STALE" ]; then
                 echo "The frozen logger ($FCOMMIT) is not this $STALE: run" >&2
                 echo "tools/build_firmware.sh --flash first (FORCE=1 deploys main.py and the page anyway)" >&2

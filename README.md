@@ -307,7 +307,8 @@ when `SHA` differs (or a firmware built before it was recorded) it stops and
 asks for `tools/build_firmware.sh --flash`, naming the file that differs
 (`gps_logger.py`, `gps_tft.py / gps_tft_font.py`, `gps_boot.py`,
 `gps_clock.py` or `gps_receiver.py`, the first in that order). A marker without
-`TFT`, `BOOT`, `CLOCK` or `RX` (an older build, read as
+`TFT`, `BOOT`, `CLOCK` or `RX` (`tools/firmware.py` holds what each field hashes,
+for both scripts; an older build, read as
 `-`) skips that comparison. A marker whose words are not plain
 (`A-Za-z0-9._-`) is no answer: it stops like a missing one. `FORCE=1
 ./deploy.sh` deploys main.py and the page anyway. A logger change means building and flashing the
