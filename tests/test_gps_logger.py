@@ -13841,7 +13841,7 @@ else:
                                           ft.get("today")])
           and "20261030" in pd and len(pd) in (1, 2)
           and ft.get("pastEnd") == 86400000
-          and (ft.get("nav0") or [""])[0].startswith('<button class="on" onclick="pick(\'\')">Today</button>')
+          and (ft.get("nav0") or [""])[0].endswith('<button class="on" onclick="pick(\'\')">Today</button>')
           and '<button onclick="pick(\'20261030\')">Fri 30</button>' in (ft.get("nav0") or [""])[0]
           and (ft.get("nav0") or [0])[1:] == [False, True]
           and ft.get("pickUrls") == ["/hist?d=%s&o=0" % pd[0]]
@@ -13853,6 +13853,28 @@ else:
               [3600000, 120.5], [3601000, 121], [3602000, None]],
           repr({k: ft.get(k) for k in ("days", "pastDays", "pickUrls",
                                        "pickPts", "nav0", "nav1")}))
+    _dd = ft.get("dayDir") or {}
+    with open(os.path.join(here, "..", "web.html")) as f:
+        _wp = f.read()
+    _days_css = re.search(r"\.days\{([^}]*)\}", _wp)
+    check("DAY-BUTTONS: the chips oldest first, today last, so < moves the "
+          "picked chip one left and > one right; wrapped, none cut off at the "
+          "edge; a day being read says so, a read or a failed one says no trip; "
+          "the buttons answer hover, press and the keyboard",
+          # (east of UTC the file 20261104 also offers the 5th)
+          (_dd.get("labels") or [""])[:2] == ["Tue 3", "Wed 4"] and _dd["labels"][-1] == "Today"
+          and _dd.get("on0") == len(_dd["labels"]) - 1 and _dd.get("on1") == _dd["on0"] - 1
+          and _dd.get("on2") == _dd["on0"]
+          and _dd.get("first") == '<p class="hint">Reading the day&hellip;</p>'
+          and _dd.get("today") == '<p class="hint">No trip yet today.</p>'
+          and _dd.get("busy") == '<p class="hint">Reading the day&hellip;</p>'
+          and _dd.get("failed") == '<p class="hint">No trip this day.</p>'
+          and ft.get("pickBusy") == '<p class="hint">Reading the day&hellip;</p>'
+          and _days_css is not None and "flex-wrap:wrap" in _days_css.group(1)
+          and "overflow" not in _days_css.group(1)
+          and all(w_ in _wp for w_ in (
+              ".btn:not(:disabled):hover", ".btn:not(:disabled):active", ".btn:focus-visible")),
+          repr((_dd, ft.get("pickBusy"), _days_css and _days_css.group(1))))
     check("PAGE-HIST: a track uploaded after a newer one is drawn in time "
           "order; no km from the jump back",
           ft.get("late") == [[3600000, 3601000, 7200000, 7201000], 221],
@@ -13870,8 +13892,8 @@ else:
               'km</b> &middot; 10 min &middot; 3 km/h</span></div><div '
               'class="tr end"><time>11:10</time><i></i><span></span></div>')
           and ft.get("timelineNone") == [
-              '<p class="hint">No trip this day. The other days are above.</p>',
-              '<p class="hint">No trip yet today. The other days are above.</p>'],
+              '<p class="hint">No trip this day.</p>',
+              '<p class="hint">No trip yet today.</p>'],
           repr((ft.get("trips"), ft.get("timeline"))))
     check("PAGE-PLACE-NAME: a station by its name, else city and street (no number, no shop's "
           "name), a road's own name, the district; a name once; nothing named: empty",
