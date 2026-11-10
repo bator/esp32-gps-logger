@@ -686,6 +686,13 @@ def _reload_logger():
 
 _install_mocks()
 import gps_clock as _gck               # (its Stamp state: _gck._up)
+
+
+def _ota_at(t):
+    """ota_tick at ticks t with the clock moved there: the OTA's moments are
+    Stamps, read from the clock, not from the now it is given."""
+    _clock[0] = t
+    gl.ota_tick(t)
 sys.modules["machine"].WDT_RESET = 3
 sys.modules["machine"].PWRON_RESET = 1
 sys.modules["machine"].SOFT_RESET = 4
@@ -15705,23 +15712,24 @@ try:
         gl.log_reset()
         gl.up_reset()
         gl.wifi.update(state="connected", home=True)
-        gl.ota["boot_at"] = _clock[0]
-        gl.ota_tick(_clock[0] + gl.OTA_FIRST - 1000)
+        _ot0 = _clock[0]
+        gl.ota["boot_at"] = gl._stamp()
+        _ota_at(_ot0 + gl.OTA_FIRST - 1000)
         n_early = len(calls)
-        gl.ota_tick(_clock[0] + gl.OTA_FIRST)
-        gl.ota_tick(_clock[0] + gl.OTA_FIRST + 60000)
+        _ota_at(_ot0 + gl.OTA_FIRST)
+        _ota_at(_ot0 + gl.OTA_FIRST + 60000)
         n_first = len(calls)
         gl.wifi["home"] = False
-        gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
+        _ota_at(_ot0 + gl.OTA_FIRST + gl.OTA_CHECK)
         n_away = len(calls)
         gl.wifi["home"] = True
         gl.up_reset()
         gl.up["left"] = 30               # points waiting in a file
-        gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
+        _ota_at(_ot0 + gl.OTA_FIRST + gl.OTA_CHECK)
         n_busy = len(calls)
         gl.up["left"] = 0
         gl.log["batch"].append("x")      # RAM only: flushed before a reset
-        gl.ota_tick(_clock[0] + gl.OTA_FIRST + gl.OTA_CHECK)
+        _ota_at(_ot0 + gl.OTA_FIRST + gl.OTA_CHECK)
         n_day = len(calls)
         gl.log["batch"][:] = []
     finally:
@@ -16149,18 +16157,18 @@ try:
             gl.up["state"] = "err payload"
             gl.up["left"] = 5
             t0 = _clock[0]
-            gl.ota["boot_at"] = t0
+            gl.ota["boot_at"] = gl._stamp()
             n = []
             for t in (gl.OTA_FIRST, 23 * h):
-                gl.ota_tick(t0 + t)
+                _ota_at(t0 + t)
                 n.append(len(calls))
-            gl.up["ok_at"] = t0 + 23 * h     # a 2xx: it is moving
-            gl.ota_tick(t0 + 25 * h)
+            gl.up["ok_at"] = gl._stamp()     # a 2xx (at 23 h): it is moving
+            _ota_at(t0 + 25 * h)
             n.append(len(calls))
-            gl.ota_tick(t0 + 50 * h)
+            _ota_at(t0 + 50 * h)
             n.append(len(calls))
             gl.wifi["home"] = False          # away: never
-            gl.ota_tick(t0 + 51 * h)
+            _ota_at(t0 + 51 * h)
             n.append(len(calls))
         finally:
             gl._ota_check = saved_check
@@ -16922,6 +16930,46 @@ check("CLOCK-STAMP-WIFI: a minute after a failed try the blank AP is skipped and
       _cb_fresh == (True, True) and _cb_stale == (False, False),
       repr((_cb_fresh, _cb_stale)))
 
+# CLOCK-STAMP-OTA: the update check's last time is a Stamp: a check a minute
+# ago holds the next one back for OTA_CHECK, one 12.4 days and a minute ago does
+# not (a tick Mark read that as a minute)
+_co_save = (time.ticks_diff, time.ticks_add, time.ticks_ms, list(_gck._up), _clock[0],
+            gl.OTA_URL, gl.esp32, gl._ota_check)
+time.ticks_diff = lambda a, b: (a - b + (_cs_w >> 1)) % _cs_w - (_cs_w >> 1)
+time.ticks_add = lambda a, b: (a + b) % _cs_w
+time.ticks_ms = lambda: _clock[0]
+_co_calls = []
+try:
+    _gck._up[:] = [0, None, 0]
+    _clock[0] = 5000
+    gl.wifi_reset()
+    gl.log_reset()
+    gl.up_reset()
+    gl.wifi.update(state="connected", home=True)
+    gl.OTA_URL, gl.esp32 = "https://ota.example.com/s3", object()
+    gl._ota_check = lambda: _co_calls.append(_clock[0])
+    gl.ota.update(at=_gck.stamp(), pend=None, held_at=None)
+    _clock[0] = 65000                     # a minute on
+    gl.ota_tick(_clock[0])
+    _co_fresh = len(_co_calls)
+    _t, _co_end = 65000, 65000 + _cs_w
+    while _t < _co_end:
+        _t = min(_t + 30000, _co_end)
+        _clock[0] = _t % _cs_w
+        _gck.stamp()
+    gl.ota_tick(_clock[0])
+    _co_stale = len(_co_calls)
+finally:
+    (time.ticks_diff, time.ticks_add, time.ticks_ms, _co_up, _clock[0],
+     gl.OTA_URL, gl.esp32, gl._ota_check) = _co_save
+    _gck._up[:] = _co_up
+    gl.ota.update(at=None, held_at=None)
+    gl.wifi_reset()
+    gl.up_reset()
+check("CLOCK-STAMP-OTA: a minute after an update check none is due; 12.4 days and a "
+      "minute after, one is",
+      _co_fresh == 0 and _co_stale == 1, repr((_co_fresh, _co_stale)))
+
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
 gl.uptime_s()                            # (the first call: the ticks count from boot)
@@ -16975,7 +17023,7 @@ try:
     gl._ota_check = _boom
     try:
         for k in range(3):
-            gl.ota["at"] = _clock[0] - gl.OTA_CHECK
+            gl.ota["at"] = gl._stamp() - gl.OTA_CHECK // 1000
             gl.ota_tick(_clock[0])
     finally:
         gl._ota_check = _sc
@@ -21087,7 +21135,7 @@ try:
     gl.HTTP_GET = _rn_get
     gl.wifi.update(state="connected", home=True)
     gl.up.update(state="idle", left=0, files=0)
-    gl.ota["boot_at"] = _clock[0] - gl.OTA_FIRST
+    gl.ota["boot_at"] = gl._stamp() - gl.OTA_FIRST // 1000
     gl.ota_tick(_clock[0])
     rn2 = [gl.ota["state"], gl.ota["failed"], _rn_n[0]]
     _clock[0] += gl.OTA_CHECK + 1
@@ -21112,11 +21160,11 @@ try:
     gl._ota_check = lambda: _rn_calls.append(1)
     try:
         gl.up.update(state="no .env", left=5, files=0)
-        gl.ota["boot_at"] = _clock[0] - gl.OTA_FIRST
+        gl.ota["boot_at"] = gl._stamp() - gl.OTA_FIRST // 1000
         gl.ota_tick(_clock[0])
         rn4 = [len(_rn_calls), gl.ota.get("stuck")]
         gl.up.update(state="idle")       # with a GEO_URL the points hold it
-        gl.ota["at"] = _clock[0] - gl.OTA_CHECK
+        gl.ota["at"] = gl._stamp() - gl.OTA_CHECK // 1000
         gl.ota_tick(_clock[0])
         rn4.append(len(_rn_calls))
     finally:

@@ -1075,7 +1075,7 @@ def _temp():
         return None
 
 _freq_bad = []                           # clocks this board refused
-_freq_bad_at = [None]                    # ticks of the last refusal
+_freq_bad_at = [None]                    # Stamp of the last refusal
 
 def _set_freq(mhz):
     """CPU clock: 80 MHz saves current against 240 (the UART
@@ -1088,8 +1088,7 @@ def _set_freq(mhz):
     if not mhz:
         return
     if mhz in _freq_bad:
-        at = _freq_bad_at[0]
-        if _recent(time.ticks_ms(), at, FREQ_RETRY):
+        if _recent_s(_freq_bad_at[0], FREQ_RETRY // 1000):
             return
         del _freq_bad[:]                 # all of them get a new chance
     for _ in range(FREQ_TRIES):
@@ -1101,7 +1100,7 @@ def _set_freq(mhz):
             err = e
         time.sleep_ms(10)
     _freq_bad.append(mhz)
-    _freq_bad_at[0] = time.ticks_ms()
+    _freq_bad_at[0] = _stamp()
     print("cpu freq", mhz, repr(err))
 
 def _mhz_env(env, key, default):
@@ -6394,7 +6393,7 @@ try:
 except ImportError:                      # (not frozen, or a firmware older
     FW_BUILD, FW_COMMIT = 0, "dev"       # than BUILD in gps_frozen)
 
-ota = {"at": None, "state": "off", "boot_at": time.ticks_ms(), "pend": None,
+ota = {"at": None, "state": "off", "boot_at": _stamp(), "pend": None,
        "pend_at": None, "wifi_seen": False}
 
 def _ota_env(env):
@@ -6649,7 +6648,7 @@ def _ota_wait_tried():
     boot, not OTA_FIRST (ota["failed"] is RAM: gone with the reset)."""
     b = _ota_tries()[0]
     if b is not None:
-        ota["failed"] = (b, time.ticks_ms(), "rolled back")
+        ota["failed"] = (b, _stamp(), "rolled back")
 
 def _ota_file(f):
     """One manifest file (the page) staged on flash as <path>.new: it
@@ -6793,7 +6792,7 @@ def _ota_check():
         return
     f = ota.get("failed")
     if (f is not None and f[0] == build
-            and _age(time.ticks_ms(), f[1]) < OTA_RETRY):
+            and _age_s(f[1]) < OTA_RETRY // 1000):
         ota["state"] = f[2]              # (2 MB every OTA_CHECK: no)
         return
     if not _ota_eq(_hmac_hex(OTA_KEY, _ota_signed(m)), m.get("hmac")):
@@ -6818,12 +6817,12 @@ def _ota_check():
         # a download cut short waits OTA_RETRY like a bad one: it came
         # again (2 MB, the loop blocked) every OTA_CHECK (whatever it
         # raised: an empty status line, a MemoryError)
-        ota["failed"] = (build, time.ticks_ms(), "download err")
+        ota["failed"] = (build, _stamp(), "download err")
         raise
     got = w.close()
     if (code != 200 or got != m["sha256"]
             or _slot_sha(part, m["size"]) != m["sha256"]):
-        ota["failed"] = (build, time.ticks_ms(), "bad image")
+        ota["failed"] = (build, _stamp(), "bad image")
         ota["state"] = "bad image"
         _diag_write("ota %s: download %s, sha256 mismatch" % (m["commit"],
                                                              code))
@@ -6848,7 +6847,7 @@ def _ota_check():
             _rm(OTA_PENDING)
             _ota_drop(paths)
             _ota_shadow(False)
-            ota["failed"] = (build, time.ticks_ms(), "bad page")
+            ota["failed"] = (build, _stamp(), "bad page")
             raise
     try:
         _diag_final()
@@ -7060,13 +7059,13 @@ def ota_tick(now):
                                      or str(up["state"]).startswith("err")):
         ok = up["ok_at"]
         if ota.get("held_at") is None or ok != ota.get("held_ok"):
-            ota["held_at"] = now
+            ota["held_at"] = _stamp()
             ota["held_ok"] = ok
             ota["stuck"] = False
             return
-        if _age(now, ota["held_at"]) < OTA_STUCK:
+        if _age_s(ota["held_at"]) < OTA_STUCK // 1000:
             return
-        ota["held_at"] = time.ticks_add(now, -OTA_STUCK)  # (past a wrap)
+        ota["held_at"] = _stamp() - OTA_STUCK // 1000  # (once a day)
         if not ota.get("stuck"):
             ota["stuck"] = True
             _diag_write("ota: uploads stuck %d h (%s), checking anyway" % (
@@ -7075,10 +7074,10 @@ def ota_tick(now):
         ota["held_at"] = None
         ota["stuck"] = False
     at = ota["at"]
-    if _age(now, ota["boot_at"] if at is None else at) < (
-            OTA_FIRST if at is None else OTA_CHECK):
+    if _age_s(ota["boot_at"] if at is None else at) < (
+            OTA_FIRST if at is None else OTA_CHECK) // 1000:
         return
-    ota["at"] = now
+    ota["at"] = _stamp()
     try:
         _ota_check()
     except Exception as e:               # a network or flash error: the next
@@ -7257,46 +7256,43 @@ def _web_rows():
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
     ]                                    # while the loop was blocked
 
-_fl = [None, None]                       # (KB, ticks) of the last statvfs
+_fl = [None, None]                       # (KB, Stamp) of the last statvfs
 
 def _flash_kb():
     """Free flash in KB, at most every 30 s: statvfs walks the whole
     LittleFS (slow, and the page asks every WEB_REFRESH)."""
-    now = time.ticks_ms()
-    if _recent(now, _fl[1], 30000):
+    if _recent_s(_fl[1], 30):
         return _fl[0]
     try:
         v = os.statvfs("/")
         _fl[0] = v[0] * v[3] // 1024
     except OSError:
         _fl[0] = None
-    _fl[1] = now
+    _fl[1] = _stamp()
     return _fl[0]
 
-_hd = [[], None]                         # (day history days, ticks)
+_hd = [[], None]                         # (day history days, Stamp)
 
 def _hist_days():
     """The UTC days (YYYYMMDD) of the day history, oldest first, a day
     once (.trb, or an older firmware's .trk), listed at most every 30 s
     (the page picks a day from them)."""
-    now = time.ticks_ms()
-    if _recent(now, _hd[1], 30000):
+    if _recent_s(_hd[1], 30):
         return _hd[0]
     try:
         _hd[0] = sorted(set(n[:8] for n in _hist_names()))
     except OSError:
         _hd[0] = []
-    _hd[1] = now
+    _hd[1] = _stamp()
     return _hd[0]
 
-_fc = [0, 0, None]                       # (files, bad files, ticks)
+_fc = [0, 0, None]                       # (files, bad files, Stamp)
 
 def _file_counts():
     """(track files waiting, .bad files) for the page, counted at most every
     10 s: pending() and pending_bad() list, sort and build the paths of the
     whole log directory, twice per poll. ilistdir counts without a list."""
-    now = time.ticks_ms()
-    if _recent(now, _fc[2], 10000):
+    if _recent_s(_fc[2], 10):
         return _fc[0], _fc[1]
     n = bad = 0
     cur = log["file"]
@@ -7313,7 +7309,7 @@ def _file_counts():
                 bad += 1
     except OSError:
         pass
-    _fc[0], _fc[1], _fc[2] = n, bad, now
+    _fc[0], _fc[1], _fc[2] = n, bad, _stamp()
     return n, bad
 
 def _sv_list():
@@ -8193,7 +8189,8 @@ class _Rt:
     last_s = trip = tail = None          # last line's time; first time of a new trip
     hour = None                          # (the hour hday was worked out for)
     hday = 0
-    drawn = saved = None                 # ticks of the last look and save
+    drawn = None                         # ticks of the last look
+    saved = None                         # Stamp of the last save
     moved = unsaved = False
     save_ok = True
 
@@ -8422,7 +8419,7 @@ def _rt_load():
 def _rt_save(now):
     """Atomically, as the upload's .pos: a power cut leaves the old file or the new."""
     R = _Rt
-    R.saved = now
+    R.saved = _stamp()
     R.save_ok = False                    # (a stay retries as seldom as a drive)
     room = free()
     if room is None or room < MIN_FREE:  # (the flash's last room is for the tracks)
@@ -8476,7 +8473,7 @@ def _rt_tick(now):
     if R.moved:
         R.moved = False
         _rt_project()
-    if R.unsaved and (not _recent(now, R.saved, ROUTE_SAVE)
+    if R.unsaved and (not _recent_s(R.saved, ROUTE_SAVE // 1000)
                       or (log["still"]["active"] and R.save_ok)):
         _rt_save(now)
     _tft_t[4] = 0
@@ -8630,7 +8627,7 @@ GUARD_PEND_MAX = 5                       # with an OTA image pending: this many
                                          # for good; a transient one in the
                                          # first minutes (the heap at its
                                          # worst) stays under it
-_guard_mem = {"wifi": [0, None], "upload": [0, None],   # name -> [count, ticks
+_guard_mem = {"wifi": [0, None], "upload": [0, None],   # name -> [count, Stamp
               "ota": [0, None], "web": [0, None],       # of the last one]:
               "ntp": [0, None], "status": [0, None],    # made here, not under
               "diag": [0, None]}                        # a MemoryError
@@ -8678,10 +8675,10 @@ def _guarded(name, fn, arg=None):
             c = _guard_mem.get(name)
             if c is None:
                 c = _guard_mem[name] = [0, None]
-            if not _recent(now, c[1], GUARD_MEM_QUIET):
+            if not _recent_s(c[1], GUARD_MEM_QUIET // 1000):
                 c[0] = 0
             c[0] += 1
-            c[1] = now
+            c[1] = _stamp()
             if pending_ota:
                 if c[0] >= GUARD_PEND_MAX:
                     raise
