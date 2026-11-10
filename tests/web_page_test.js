@@ -904,6 +904,8 @@ try {
   EV.error = String(e && e.stack || e);
 }
 v.ev = EV;
+// the shared time vectors (tests/time_vectors.json): what the page's evUtc makes of each
+if (process.env.TIME_VECTORS) v.utc = JSON.parse(fs.readFileSync(process.env.TIME_VECTORS, "utf8")).vectors.map((x) => c0.evUtc(x.tc));
 // the kinds of diag lines (tests/test_gps_logger.py passes one of each
 // format gps_logger.py writes)
 if (process.env.EV_LINES) v.kinds = JSON.parse(fs.readFileSync(process.env.EV_LINES, "utf8")).map((l) => c0.evKind(l));

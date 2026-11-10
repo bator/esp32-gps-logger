@@ -2591,7 +2591,7 @@ HIST_SEP = b"\xc0" * 32 + b"\n"
 _kh = [None] * 12                        # the day history encoder's state
 _khn = [0]                               # its deltas since the keyframe
 
-def _hist_begin(st, day):
+def _hist_begin(hf, day):
     """Open the day's file for an append into st ([file, made now, text,
     the .trb records not yet written]): its .trb, a new one with the
     header, an old one at its footer (HIST_SEP first without one); a .trk
@@ -2606,7 +2606,7 @@ def _hist_begin(st, day):
             path, size, text = path + ".trk", n, True
     if not text:
         path += TRB
-    st[1], st[2] = size is None, text
+    hf[1], hf[2] = size is None, text
     if size is None:
         try:
             os.mkdir(HIST_DIR)
@@ -2614,18 +2614,18 @@ def _hist_begin(st, day):
             pass                         # (there already)
     if text:
         cut = not _tail_nl(path, size)
-        st[0] = open(path, "ab")
+        hf[0] = open(path, "ab")
         if cut:
-            st[0].write(b"\n")
+            hf[0].write(b"\n")
         return
     _kh[0] = None                        # (a keyframe first)
     _khn[0] = 0
-    st[3] = bytearray()
+    hf[3] = bytearray()
     if not size:
-        st[0] = open(path, "wb")
-        st[0].write(HEADERB.encode())
+        hf[0] = open(path, "wb")
+        hf[0].write(HEADERB.encode())
         return
-    f = st[0] = open(path, "r+b")
+    f = hf[0] = open(path, "r+b")
     n = len(FOOTER)
     if size >= n:
         f.seek(size - n)
@@ -2635,15 +2635,15 @@ def _hist_begin(st, day):
     f.seek(size)
     f.write(HIST_SEP)
 
-def _hist_line(st, buf, a, b):
+def _hist_line(hf, buf, a, b):
     """The text line buf[a:b] (its newline last) into the open day file:
     a .trk's as it is; a .trb's as the next record (as _kb_part: a delta,
     or a keyframe first and after KEY_EVERY deltas), written a KB_CHUNK at
     a time."""
-    if st[2]:
-        st[0].write(memoryview(buf)[a:b])
+    if hf[2]:
+        hf[0].write(memoryview(buf)[a:b])
         return
-    out = st[3]
+    out = hf[3]
     if _khn[0] < KEY_EVERY and _kb_delta(buf, _kh, out, a, b):
         _khn[0] += 1
     else:
@@ -2652,16 +2652,16 @@ def _hist_line(st, buf, a, b):
         _kb_parse(buf, a, b - 1, _kh)
         _khn[0] = 0
     if len(out) >= KB_CHUNK:
-        st[0].write(out)
-        st[3] = bytearray()
+        hf[0].write(out)
+        hf[3] = bytearray()
 
-def _hist_close(st, ok=True):
+def _hist_close(hf, ok=True):
     """End the append in st: a .trb's last records and its footer, only if
     every write before landed (after a failed one the next append's
     HIST_SEP ends what it cut), then close. A new day's file drops the
     days beyond HIST_DAYS."""
-    f, new, text, out = st
-    st[0], st[1], st[3] = None, False, None
+    f, new, text, out = hf
+    hf[0], hf[1], hf[3] = None, False, None
     if f is not None:
         if ok and not text:
             try:
@@ -2764,15 +2764,8 @@ def _usable(now, fx=None):
     estimate does not catch it (0.3 m while 4 m off, measured), so its first
     UC_SETTLE after a start count only moving: 15 m off at first, 5 m after
     a minute (measured), which standing still draws as a walk."""
-    if not st["settled"]:
-        a = st["fix_first"]
-        if a is not None:
-            # not _age: a second queued before a restart (_drain_q) is
-            # older than this fix_first, and TICKS_OLD would settle it
-            if time.ticks_diff(now, a) >= _rcv.UC_SETTLE:
-                st["settled"] = True
-            elif (st.get("speed") or 0) < _rcv.UC_SETTLE_KMH:
-                return False
+    if _rcv.unsettled(now):
+        return False
     hdop = _fresh_hdop(now, fx)
     if hdop is not None and hdop > MAX_HDOP:
         return False
@@ -3503,9 +3496,8 @@ def log_tick():
     if not has_fix(now):
         if log["fix"]:
             _drain_q()                   # valid seconds just before the loss
-        elif st.get("q"):
-            st["q"] = []                 # stale (a new list only if any: this
-                                         # runs every pass without a fix)
+        else:
+            _rcv.drop_queue()            # stale
         # the heartbeat after the queued seconds: a departure in them comes
         # first, and nothing is stamped before lines already written
         _still_beat(now)
@@ -4488,38 +4480,38 @@ def _hist_batch(path, off, end, key):
         room = _hist_trim(HIST_RESERVE)
     if room is not None and room < 2 * MIN_FREE:
         return
-    st = [None, False, False, None]      # the open day file (_hist_begin)
+    hf = [None, False, False, None]      # the open day file (_hist_begin)
     ok = False
     try:
         with open(path, "rb") as src:
             _track_lines(src, path, off, end, key,
-                         lambda a, b: _hist_put(st, a, b))
+                         lambda a, b: _hist_put(hf, a, b))
         ok = True
     except Exception as e:               # (best effort: the commit after
         print("hist", repr(e))           # it is what matters)
         log["herr"] += 1
     finally:
-        _hist_close(st, ok)
+        _hist_close(hf, ok)
 
-def _hist_put(st, a, b):
+def _hist_put(hf, a, b):
     """The line _rbuf[a:b] into the day file of its time (opened when the
     day changes)."""
     d = b - 17                           # YYYYMMDD of its time
-    if st[0] is not None:
+    if hf[0] is not None:
         k = 0
         while k < 8 and _rbuf[d + k] == _hd8[k]:
             k += 1
         if k == 8:
-            _hist_line(st, _rbuf, a, b)
+            _hist_line(hf, _rbuf, a, b)
             return
-        _hist_close(st)
+        _hist_close(hf)
     for k in range(8):
         c = _rbuf[d + k]
         if not 48 <= c <= 57:
             return                       # (no date: not in a day's file)
         _hd8[k] = c
-    _hist_begin(st, bytes(_hd8).decode())
-    _hist_line(st, _rbuf, a, b)
+    _hist_begin(hf, bytes(_hd8).decode())
+    _hist_line(hf, _rbuf, a, b)
 
 def _append_bad(path, off, new_off, key=None):
     """Copy consumed point lines to <path>.bad. None once durable, else

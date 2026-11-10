@@ -8892,6 +8892,28 @@ check("CLOCK-MOD: ymd_ok / tc_ok / dt_s refuse what is no UTC time (month 13, ho
       and _gc.tc_ok(b"x20261110T123456Z", 1) and not _gc.tc_ok(b"20261310T123456Z", 0)
       and _gc.dt_s("2026-13-10", "12:34:56") is None and _gc.dt_s("abc", "12:34:56") is None,
       "")
+# TIME-VECTORS: one file of real and not real UTC times (tests/time_vectors.json)
+# that every check of one agrees on: gps_clock's ymd_ok, tc_ok and dt_s, the
+# logger's _kb_time, trk2gpx's _iso (and web.html's evUtc, PAGE-TIME-VECTORS)
+with open(os.path.join(ROOT, "tests", "time_vectors.json")) as f:
+    _tv = json.load(f)["vectors"]
+_tv_bad = []
+for _v in _tv:
+    _c, _ok = _v["tc"], _v["ok"]
+    _got = {"_iso": trk2gpx._iso(_c) is not None,
+            "_kb_time": gl._kb_time((_c + "\n").encode(), 0) is not None}
+    if _v.get("shape", True):
+        _y = tuple(int(x) for x in (_c[0:4], _c[4:6], _c[6:8], _c[9:11], _c[11:13], _c[13:15]))
+        _got["ymd_ok"] = _gc.ymd_ok(*_y)
+        _got["tc_ok"] = bool(_gc.tc_ok(_c.encode(), 0))
+        _got["dt_s"] = _gc.dt_s("%s-%s-%s" % (_c[0:4], _c[4:6], _c[6:8]),
+                                "%s:%s:%s" % (_c[9:11], _c[11:13], _c[13:15])) is not None
+    for _k, _g in _got.items():
+        if _g != (_v.get("kb", _ok) if _k == "_kb_time" else _ok):
+            _tv_bad.append((_c, _k, _g))
+check("TIME-VECTORS: ymd_ok, tc_ok, dt_s, _kb_time and trk2gpx's _iso agree on %d times "
+      "(leap days, month 13, hour 24, second 60, 2019 / 2100, a letter for a digit)" % len(_tv),
+      len(_tv) >= 20 and not _tv_bad, repr(_tv_bad))
 
 # GPS-22: the satellite-list skip window is GSV_EVERY long; one left over
 # from 7 days ago (past 2**29 ms on the wrapping clock) skips nothing
@@ -13605,11 +13627,23 @@ else:
     r_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
                          os.path.join(here, "..", "web.html")],
                         input=page_json, capture_output=True, text=True,
-                        env=dict(os.environ, EV_LINES=ev_lf))
+                        env=dict(os.environ, EV_LINES=ev_lf,
+                                 TIME_VECTORS=os.path.join(here, "time_vectors.json")))
     try:
         ev_kinds = json.loads(r_.stdout).get("kinds")
+        ev_utc = json.loads(r_.stdout).get("utc")
     except ValueError:
-        ev_kinds = r_.stdout[-300:] + r_.stderr[-300:]
+        ev_kinds = ev_utc = r_.stdout[-300:] + r_.stderr[-300:]
+    with open(os.path.join(here, "time_vectors.json")) as f:
+        tv_page = json.load(f)["vectors"]
+    tv_want = [calendar.timegm(time.strptime(v_["tc"], "%Y%m%dT%H%M%SZ")) * 1000
+               if v_["ok"] else None for v_ in tv_page]
+    check("PAGE-TIME-VECTORS: the page's evUtc takes the real UTC times of "
+          "tests/time_vectors.json (to the ms) and none of the others (Date.UTC rolled "
+          "a month 13 or an hour 25 over)",
+          ev_utc == tv_want, repr([(v_["tc"], g_) for v_, g_, w_ in
+                                    zip(tv_page, ev_utc or [], tv_want) if g_ != w_]
+                                   if isinstance(ev_utc, list) else ev_utc))
     ev_bad = [(l_, k_, g_) for (l_, k_), g_ in zip(ev_samples, ev_kinds or [])
               if k_ != g_]
     check("PAGE-EV-KINDS: every diag format gps_logger.py writes has a "
@@ -17068,6 +17102,25 @@ check("RX-DRAIN: a sample that raises leaves st on the latest second, not a queu
       and gl.st["lat"] == _rd_q[3][_rd.F_LAT], repr((gl.st["seq"], gl.st["time"])))
 _rd.reset()
 gl.log_reset()
+
+# RX-STATUS: st is the Receiver's: the logger reads it and never writes into it
+# (it set settled and dropped the queue itself)
+import ast as _ast
+_rw = []
+for _n in _ast.walk(_ast.parse(_slurp(os.path.join(ROOT, "gps_logger.py")))):
+    _tg = _n.targets if isinstance(_n, _ast.Assign) else (
+        [_n.target] if isinstance(_n, (_ast.AugAssign, _ast.AnnAssign)) else [])
+    for _t in _tg:
+        for _x in _ast.walk(_t):
+            if (isinstance(_x, _ast.Subscript) and isinstance(_x.value, _ast.Name)
+                    and _x.value.id == "st") or (isinstance(_x, _ast.Name) and _x.id == "st"):
+                _rw.append(_n.lineno)
+    if (isinstance(_n, _ast.Call) and isinstance(_n.func, _ast.Attribute)
+            and isinstance(_n.func.value, _ast.Name) and _n.func.value.id == "st"
+            and _n.func.attr in ("update", "pop", "clear", "setdefault", "popitem")):
+        _rw.append(_n.lineno)
+check("RX-STATUS: gps_logger.py writes nothing into st (only the Receiver does)",
+      _rw == [], repr(_rw))
 
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
