@@ -512,6 +512,7 @@ p.c.step(-1);
 for (let k = 0; k < 3 && p.c.sel !== "20261030"; k++) { answer(p, null, ""); p.c.step(-1); }
 const ph = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done);
 ft.pickUrls = ph.map((x) => x.url);
+ft.pickBusy = p.doc.getElementById("tline").innerHTML;   // (the day not in yet)
 const pd = new Date(2026, 9, 30, 12, 0, 0).getTime();
 let pb = "#TRK2\n";
 for (let k = 0; k < 5; k++) pb += "47.1" + k + ",18.4,100,2,3," + iso(pd + k * 1000) + "\n";
@@ -531,6 +532,32 @@ p.c.hlTrip(0);
 ft.hlOff = (p.doc.getElementById("trk").innerHTML.match(/<path (class="hl" )?d=/g) || []).length;
 for (let k = 0; k < 3 && p.c.hist.past; k++) p.c.step(1);   // (via 20261031 east of UTC)
 ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
+// DAY-BUTTONS (Bator: "the buttons work badly"): the chips run oldest
+// first, today last, so < (older) moves the picked chip one to the left and
+// > one to the right; a day being read says so, not "no trip"; a failed read
+// says "no trip" at once
+ft.dayDir = (() => {
+  const q = page(1600), out = {};
+  q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null, days: ["20261103", "20261104"]});
+  q.xhrs[0].onload();
+  const chips = () => q.doc.getElementById("days").innerHTML.split("</button>").filter(Boolean);
+  const on = () => chips().findIndex((b) => b.indexOf('class="on"') >= 0);
+  out.labels = chips().map((b) => b.replace(/.*>/, ""));
+  out.on0 = on();
+  out.first = q.doc.getElementById("tline").innerHTML;     // today, not read yet
+  answer(q, null, "");
+  out.today = q.doc.getElementById("tline").innerHTML;     // read: nothing
+  q.c.step(-1);
+  out.on1 = on();
+  out.busy = q.doc.getElementById("tline").innerHTML;
+  q.c.step(1);
+  out.on2 = on();
+  q.c.step(-1);
+  const open = q.xhrs.filter((r) => r.url.indexOf("/hist?") === 0 && !r.done), x = open[open.length - 1];
+  if (x) { x.done = true; x.onerror(); }   // (the shown day's own request)
+  out.failed = q.doc.getElementById("tline").innerHTML;
+  return out;
+})();
 // REV-4: at 00:30 local on Nov 2 in Budapest (23:30 UTC on Nov 1) today
 // is Nov 2 and Nov 1 a past day (the UTC date made Nov 1 "today")
 ft.tz = (() => {

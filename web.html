@@ -51,11 +51,17 @@ h3 b{letter-spacing:.04em;color:var(--t)}h3 b.ok{color:var(--ok)}h3 b.warn{color
 .k b{display:block;font-size:19px;color:var(--t);white-space:nowrap}
 .nc{margin:10px 0 0;font-size:11.5px;color:var(--m)}
 .dh{display:flex;gap:6px;align-items:center;margin:20px 0 12px;padding-top:20px;border-top:1px solid var(--l)}.dh h3{margin:0 auto 0 0}
-.btn{font-size:11px;font-weight:600;color:var(--t);background:var(--s);border:0;border-radius:6px;height:32px;min-width:32px;padding:0 9px;cursor:pointer}
+/* the day's buttons: they answer the pointer (hover lighter, a press sinks,
+   a keyboard ring); the chips oldest first, today last, as the arrows step
+   (< older, > newer), and they wrap: none cut off at the edge */
+.btn{font-size:11px;font-weight:600;color:var(--t);background:var(--s);border:0;border-radius:6px;height:36px;min-width:36px;padding:0 10px;cursor:pointer}
 .btn:disabled{opacity:.4;cursor:default}
-.days{display:flex;gap:6px;margin:0 0 16px;overflow-x:auto}
-.days button{flex:none;font:600 11.5px "JetBrains Mono",monospace;padding:7px 9px;border:0;border-radius:6px;background:var(--s);color:var(--m);cursor:pointer}
-.days .on{background:var(--t);color:var(--b)}
+.days{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}
+.days button{font:600 11.5px "JetBrains Mono",monospace;height:36px;padding:0 10px;border:0;border-radius:6px;background:var(--s);color:var(--m);cursor:pointer}
+.btn:not(:disabled):hover,.days button:hover{filter:brightness(1.25)}.days button:hover{color:var(--t)}
+.btn:not(:disabled):active,.days button:active{transform:translateY(1px)}
+.btn:focus-visible,.days button:focus-visible{outline:2px solid var(--rt);outline-offset:2px}
+.days .on,.days .on:hover{background:var(--t);color:var(--b);filter:none}
 .kp{display:flex;gap:22px;margin-bottom:16px}.kp b{font-size:24px}.kp em{font-style:normal;font-size:12px;color:var(--m);margin-left:4px}
 /* the day as a line: a solid stretch a trip, dashed a stop */
 .tr{display:grid;grid-template-columns:48px 18px 1fr;min-height:30px;line-height:16px}
@@ -819,7 +825,7 @@ function histNext(i) {
     if (t) h.off[day] = o + t.length;
     histNext(t.length >= HIST_REPLY ? i : i + 1);
   };
-  x.onerror = x.ontimeout = function () { if (h === hist) { h.busy = false; h.at = Date.now(); } };
+  x.onerror = x.ontimeout = function () { if (h === hist) { h.busy = false; h.at = Date.now(); trackPaint(); } };
   x.send();
 }
 function histDue() { return !hist.busy && !hist.done && Date.now() - hist.at >= 60000; }
@@ -860,7 +866,7 @@ var WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function dayLabel(s) { var d = new Date(localDay(s)); return WD[d.getDay()] + " " + d.getDate(); }
 function navPaint() {
   var ds = dayList(boardDays), i = dayIdx(ds), cur = sel || ds[ds.length - 1], h = "";
-  for (var k = ds.length - 1; k >= 0; k--) {
+  for (var k = 0; k < ds.length; k++) {   // (oldest first: < steps left, > right)
     var today = k === ds.length - 1;
     h += "<button" + (ds[k] === cur ? ' class="on"' : "") + " onclick=\"pick('" + (today ? "" : ds[k]) + "')\">" +
       (today ? "Today" : dayLabel(ds[k])) + "</button>";
@@ -908,9 +914,9 @@ var OTA = {current: "up to date", ok: "updated", idle: "not checked yet", checki
 function dur(ms) { var m = Math.round(ms / 60000); return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + two(m % 60) + " min"; }
 // the timeline: a dot and a solid line per trip (distance, time, mean
 // speed), a hollow dot and a dashed line per stop; on: the trip shown on
-// the map (pure, for tests)
-function timeline(trips, on, past, names) {
-  if (!trips.length) return '<p class="hint">' + (past ? "No trip this day." : "No trip yet today.") + " The other days are above.</p>";
+// the map; busy: the day is still being read (pure, for tests)
+function timeline(trips, on, past, names, busy) {
+  if (!trips.length) return '<p class="hint">' + (busy ? "Reading the day&hellip;" : past ? "No trip this day." : "No trip yet today.") + "</p>";
   var h = "";
   // a place over its line, where one is known (names: tripPlaces); else as before
   var pl = function (n, rest) { return n ? "<strong>" + esc(n) + "</strong>" + (rest ? "<br>" + rest : "") : rest; };
@@ -1147,13 +1153,14 @@ function histPath(t, z, i0, i1) {       // SVG path in the tile layer's pixels
 // the Day panel, when the shown track changed
 var tpKey = "";
 function trackPaint() {
-  var k = hist.start + "/" + hist.pts.length + "/" + hist.hl;
+  // (read once at least, or not: no "no trip" before the day is in)
+  var busy = hist.busy || !hist.at, k = hist.start + "/" + hist.pts.length + "/" + hist.hl + "/" + busy;
   if (k === tpKey) return;
   tpKey = k;
   if (hist.trips === undefined || hist.tn !== hist.pts.length) { hist.trips = tripsOf(hist.pts); hist.tn = hist.pts.length; }
   var tn = hist.trips.length, tl = tn && hist.trips[tn - 1];
   paint({tkpi: kpis(hist.trips), tline: timeline(hist.trips, hist.hl, hist.past,
-    tripPlaces(hist.trips, hist.pts, tl && !hist.past && Date.now() - tl.t1 <= GAP_MS))});
+    tripPlaces(hist.trips, hist.pts, tl && !hist.past && Date.now() - tl.t1 <= GAP_MS), busy)});
   placeNext();
   navPaint();
   document.getElementById("gpx").disabled = !hist.pts.length;
