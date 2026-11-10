@@ -1626,7 +1626,7 @@ try:
         for _ in range(n):
             WLAN.connects = []
             gl.wifi["state"] = "not found"
-            gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"]
+            gl.wifi["last_check"] = gl._stamp() - gl.wifi["backoff"] // 1000
             gl.wifi_tick()
             drain_wifi()
             tries.append([c[0] for c in WLAN.connects])
@@ -2566,7 +2566,7 @@ try:
     WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
     WLAN.ok = set(["home", "PhoneHotspot"])
     WLAN.connects = []
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     drain_wifi()
     check("roam: switches to visible home >= -75 dBm",
@@ -2578,7 +2578,7 @@ try:
     WLAN.scan_aps = [("home", -40), ("PhoneHotspot", -50)]
     WLAN.ok = set(["PhoneHotspot"])  # home connect fails
     WLAN.connects = []
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     drain_wifi()
     check("roam: failed home switch returns to the hotspot",
@@ -2590,7 +2590,7 @@ try:
     WLAN.scan_aps = [("home", -80), ("PhoneHotspot", -40)]
     WLAN.ok = set(["home", "PhoneHotspot"])
     WLAN.connects = []
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("roam: weak home (< -75 dBm) is ignored",
           gl.wifi["ssid"] == "PhoneHotspot" and WLAN.connects == [],
@@ -2604,7 +2604,7 @@ try:
     WLAN.connects = []
     gl.st["speed"] = None
     gl.wifi["failed"].pop("home", None)
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("HID: roam tries hidden home when empty-SSID AP is strong",
           WLAN.connects and WLAN.connects[0][0] == "home",
@@ -2618,7 +2618,7 @@ try:
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "phone"
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("HID: no empty-SSID AP does not roam to hidden home",
           WLAN.connects == [],
@@ -2635,7 +2635,7 @@ try:
     WLAN.connects = []
     gl.st["speed"] = None
     gl.wifi["failed"].pop("home", None)
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("HID: roam does not pin to a stronger neighbour hidden AP",
           WLAN.connects and WLAN.connects[0][0] == "home"
@@ -2649,8 +2649,8 @@ try:
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "phone"
     gl.wifi["roam_backoff"] = gl.ROAM_BACKOFF_MAX
-    gl.wifi["moved_at"] = _clock[0] - 60000
-    gl.wifi["roam_at"] = _clock[0]
+    gl.wifi["moved_at"] = gl._stamp() - 60
+    gl.wifi["roam_at"] = gl._stamp()
     gl.wifi["failed"].pop("home", None)
     gl.st.update(valid=True, date="2026-10-05", time="18:00:00",
                  lat=52.5, lon=13.4, pos_at=_clock[0], speed=0,
@@ -2679,7 +2679,7 @@ try:
     gl.st["speed"] = None
     gl.wifi["failed"].pop("home", None)
     gl.wifi["roam_backoff"] = gl.ROAM_CHECK
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     drain_wifi()
     check("HID: failed hidden-home roam keeps the 5 min interval",
@@ -2693,7 +2693,7 @@ try:
     for _ in range(5):
         _clock[0] += gl.FAIL_HOLD
         gl.wifi["failed"].pop("home", None)
-        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
         if WLAN.instances:
             WLAN.instances[-1]._status = 3
         gl.wifi["state"] = "connected"
@@ -2717,7 +2717,7 @@ try:
         _clock[0] += gl.ROAM_CHECK
         WLAN.scan_aps = [("", -50, bytes([0x20 + i % 5]) * 6),
                          ("phone", -40)]
-        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
         if WLAN.instances:
             WLAN.instances[-1]._status = 3
         gl.wifi["state"] = "connected"
@@ -2737,7 +2737,7 @@ try:
     WLAN.ok = set(["PhoneHotspot"])
     WLAN.connects = []
     gl.st["speed"] = None
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     drain_wifi()
     check("roam backoff: failed home switch doubles the interval",
@@ -2749,7 +2749,7 @@ try:
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "PhoneHotspot"
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("roam backoff: 5 min later does not retry a failed roam",
           WLAN.connects == [],
@@ -2757,7 +2757,7 @@ try:
     WLAN.connects = []
     _clock[0] += gl.FAIL_HOLD
     gl.wifi["failed"].pop("home", None)
-    gl.wifi["roam_at"] = _clock[0] - gl.wifi["roam_backoff"]
+    gl.wifi["roam_at"] = gl._stamp() - gl.wifi["roam_backoff"] // 1000
     gl.wifi_tick()
     check("roam backoff: retries after the doubled interval",
           WLAN.connects and WLAN.connects[0][0] == "home",
@@ -2776,7 +2776,7 @@ try:
                  lat=52.5, lon=13.4, pos_at=_clock[0], speed=0,
                  status="A", quality=1, fixtype=3)
     for _ in range(6):
-        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
         gl.wifi_tick()
         drain_wifi()
         if WLAN.instances:
@@ -2800,7 +2800,7 @@ try:
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "PhoneHotspot"
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("roam: after a long hotspot trip, visible home is tried at 5 min",
           WLAN.connects and WLAN.connects[0][0] == "home",
@@ -2819,7 +2819,7 @@ try:
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "PhoneHotspot"
     gl.wifi["roam_backoff"] = gl.ROAM_CHECK
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("roam: skip scan while moving >= 5 km/h",
           WLAN.connects == [],
@@ -2834,7 +2834,7 @@ try:
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "PhoneHotspot"
-    gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+    gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
     gl.wifi_tick()
     check("roam: stale speed does not skip the home scan",
           WLAN.connects and WLAN.connects[0][0] == "home",
@@ -2850,7 +2850,7 @@ try:
     gl.wifi["ssid"] = "PhoneHotspot"
     gl.wifi["failed"].pop("home", None)
     gl.wifi["roam_backoff"] = gl.ROAM_BACKOFF_MAX
-    gl.wifi["moved_at"] = _clock[0] - 60000
+    gl.wifi["moved_at"] = gl._stamp() - 60
     gl.st["speed"] = 0
     gl.st["pos_at"] = _clock[0]
     WLAN.connects = []
@@ -2859,7 +2859,7 @@ try:
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = False
     gl.wifi["ssid"] = "PhoneHotspot"
-    gl.wifi["roam_at"] = _clock[0]
+    gl.wifi["roam_at"] = gl._stamp()
     gl.wifi_tick()
     check("roam: stop after driving resets backoff and scans",
           (gl.wifi.get("roam_backoff") or 0) == gl.ROAM_CHECK
@@ -3553,8 +3553,8 @@ try:
     check("K2-6: _loop measures BOOT_OK from loop_start",
           "loop_start = time.ticks_ms()" in src
           and "ticks_diff(now, loop_start)" in src)
-    check("ticks: wifi lost last_check uses ticks_add",
-          'ticks_add(now, -wifi["backoff"])' in src)
+    check("ticks: wifi lost makes the next round due at once (last_check a Stamp, no wrap)",
+          'wifi["last_check"] = _stamp() - wifi["backoff"] // 1000' in src)
     gl.reset()
     gl.log_reset()
     gl.wifi_reset()
@@ -3690,7 +3690,7 @@ try:
         gl.reset()
         gl.log_reset()
         gl.wifi_reset()
-        gl.wifi["failed"]["home"] = 0
+        gl.wifi["failed"]["home"] = gl._stamp() - 6 * 86400  # (a Stamp)
         check("REVIEW-3: a failure 6 days ago is not 'recently failed'",
               gl._recent(now, gl.wifi["failed"].get("home"), gl.FAIL_HOLD)
               is False)
@@ -6550,7 +6550,7 @@ try:
           not sv_active() and not gl.at_home())
     # somewhere else, no network there: the first anchor waits for the round
     WLAN.scan_aps, WLAN.ok = [], set()
-    gl.wifi["last_check"] = _clock[0]           # (the hour is not over yet)
+    gl.wifi["last_check"] = gl._stamp()           # (the hour is not over yet)
     n_conn = len(WLAN.connects)
     entered = None
     for k in range(400):
@@ -10208,7 +10208,7 @@ try:
     # drop and searched for WEB_SEARCH (~7 extra rounds in ~35 min)
     gl.WEB, gl.WEB_AWAY, gl.PB_KEEPALIVE = True, False, 0
     w = rv_connect(["hot"], [("hot", -50)])
-    gl.wifi["idle_at"] = _clock[0] - gl.WIFI_IDLE
+    gl.wifi["idle_at"] = gl._stamp() - gl.WIFI_IDLE // 1000
     gl.wifi_tick()
     slept = gl.wifi["state"]
     WLAN.ok, WLAN.scan_aps = set(), []
@@ -10244,7 +10244,7 @@ try:
     wb_err = []
     try:
         gl.wifi["state"] = "not found"
-        gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"] - 1
+        gl.wifi["last_check"] = gl._stamp() - gl.wifi["backoff"] // 1000 - 1
         try:
             gl.wifi_tick()
         except MemoryError as e:
@@ -10357,7 +10357,7 @@ try:
         _clock[0] += gl.PB_KEEPALIVE
         rt_try("keepalive asleep", lambda: gl.keepalive_tick(_clock[0]))
         gl.wifi["state"] = "not found"
-        gl.wifi["last_check"] = _clock[0] - gl.wifi["backoff"]
+        gl.wifi["last_check"] = gl._stamp() - gl.wifi["backoff"] // 1000
         rt_try("wifi_tick round", gl.wifi_tick)
         gl.wifi["state"] = "connecting"
         rt_try("wifi_tick connecting", gl.wifi_tick)
@@ -10474,7 +10474,7 @@ try:
         WLAN.ok = {"home", "hot"}
         WLAN.connects = []
         gl.st["speed"] = None
-        gl.wifi["roam_at"] = _clock[0] - gl.ROAM_CHECK
+        gl.wifi["roam_at"] = gl._stamp() - gl.ROAM_CHECK // 1000
         gl.wifi_tick()
         roamed = [c[0] for c in WLAN.connects][:1] == ["home"]
         r2_until(lambda: gl.wifi["state"] == "connected", 30, step=500)
@@ -10509,7 +10509,7 @@ try:
         # the strongest one (it hid a weaker AP that may be ours)
         gl.wifi_reset()
         gl.wifi["nets"] = [dict(n) for n in hid]
-        gl.wifi["blank_bad"] = [(R2_NEIGH, _clock[0])]
+        gl.wifi["blank_bad"] = [(R2_NEIGH, gl._stamp())]
         WLAN.scan_aps = [("", -40, R2_NEIGH), ("", -60, R2_MESH)]
         gl._scan_known(WLAN(0))
         skip = (gl.wifi["blank_bssid"], gl._blank_home_ok())
@@ -14422,7 +14422,7 @@ for active in (True, False):
     gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
                         "hidden": False, "bssid": None, "ip": None}]
     gl.wifi.update(wlan=_LostW(), state="connected", ssid="home", home=True,
-                   last_check=_clock[0])
+                   last_check=gl._stamp())
     gl.log["still"]["active"] = active
     gl.wifi_tick()
     r2.append((gl.wifi["state"], bool(gl.at_home())))
@@ -14873,7 +14873,7 @@ check("REV-13: a restart during the setup keeps the storm wait",
 gl.wifi_reset()
 gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
                     "hidden": False, "bssid": None, "ip": None}]
-gl.wifi.update(state="error", wlan=None, last_check=_clock[0])
+gl.wifi.update(state="error", wlan=None, last_check=gl._stamp())
 gl.wifi_tick()
 early14 = gl.wifi["wlan"]
 _clock[0] += gl.wifi["backoff"] + 1000
@@ -14929,7 +14929,7 @@ gl.log_reset()
 gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
                     "hidden": False, "bssid": None, "ip": None}]
 gl.wifi.update(wlan=_GoneW(), state="connected", ssid="home", home=True,
-               rssi=-61, last_check=_clock[0])
+               rssi=-61, last_check=gl._stamp())
 gl.wifi_tick()
 gl._mark_failed("home", "status 202 after 7000 ms")
 _clock[0] += 1000
@@ -16889,6 +16889,38 @@ finally:
 check("CLOCK-STAMP-STAY: a minute after the last usable fix the stay window still "
       "holds its lines; 12.4 days and a minute after, they are let go",
       _ch_fresh == "20261110T120000Z" and _ch_stale is None, repr((_ch_fresh, _ch_stale)))
+
+# CLOCK-STAMP-WIFI: a blank AP blamed for a failed hidden-home try is skipped
+# for BLANK_BAD_HOLD, and 12.4 days and a minute later it is not (a tick Mark
+# read that as a minute: our own router shut out for another hour)
+_cb_save = (time.ticks_diff, time.ticks_add, time.ticks_ms, list(_gck._up), _clock[0])
+time.ticks_diff = lambda a, b: (a - b + (_cs_w >> 1)) % _cs_w - (_cs_w >> 1)
+time.ticks_add = lambda a, b: (a + b) % _cs_w
+time.ticks_ms = lambda: _clock[0]
+try:
+    _gck._up[:] = [0, None, 0]
+    _clock[0] = 5000
+    gl.wifi_reset()
+    gl.wifi["blank_bad"] = [(b"\x02" * 6, _gck.stamp())]
+    gl.wifi["failed"]["home"] = _gck.stamp()
+    _clock[0] = 65000                     # a minute on
+    _cb_fresh = (gl._blank_bad(b"\x02" * 6),
+                 gl._recent_s(gl.wifi["failed"]["home"], gl.FAIL_HOLD // 1000))
+    _t, _cb_end = 65000, 65000 + _cs_w
+    while _t < _cb_end:
+        _t = min(_t + 30000, _cb_end)
+        _clock[0] = _t % _cs_w
+        _gck.stamp()
+    _cb_stale = (gl._blank_bad(b"\x02" * 6),
+                 gl._recent_s(gl.wifi["failed"]["home"], gl.FAIL_HOLD // 1000))
+finally:
+    time.ticks_diff, time.ticks_add, time.ticks_ms, _cb_up, _clock[0] = _cb_save
+    _gck._up[:] = _cb_up
+    gl.wifi_reset()
+check("CLOCK-STAMP-WIFI: a minute after a failed try the blank AP is skipped and the "
+      "network demoted; 12.4 days and a minute later neither",
+      _cb_fresh == (True, True) and _cb_stale == (False, False),
+      repr((_cb_fresh, _cb_stale)))
 
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
@@ -20855,7 +20887,7 @@ for _p in (200, None):
     WLAN.ok = {"phone"}
     _w.connect("phone", "x")
     gl.wifi.update(wlan=_w, state="connected", home=False, ssid="phone", ip="1.2.3.4")
-    gl.wifi["idle_at"] = _clock[0]
+    gl.wifi["idle_at"] = gl._stamp()
     gl.ota["pend"] = _p
     gl._radio_idle_ok = lambda: True
     _clock[0] += gl.WIFI_IDLE
@@ -21668,7 +21700,7 @@ try:
     gl.wifi.update(wlan=_N2W(), state="connected", home=False, roam_at=0,
                    nets=[{"ssid": "h", "pw": "", "home": True,
                           "hidden": False, "bssid": None, "ip": None}],
-                   idle_at=_clock[0], last_check=_clock[0])
+                   idle_at=gl._stamp(), last_check=gl._stamp())
     _N2W.status = lambda self, *a: gl.network.STAT_GOT_IP
     gl.wifi_tick()
     n2_0.append(len(called))

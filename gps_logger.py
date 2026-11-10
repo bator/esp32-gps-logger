@@ -1789,11 +1789,11 @@ def wifi_reset():
     wifi.clear()
     wifi.update(wlan=None, ssid=None, nets=[], failed={},
                 state="off", ip=None, rssi=None, home=False,
-                backoff=WIFI_RETRY, last_check=time.ticks_ms(),
+                backoff=WIFI_RETRY, last_check=_stamp(),
                 cand=[], cand_i=0, try_at=None,
-                roam_at=time.ticks_ms(), prev_status=None,
+                roam_at=_stamp(), prev_status=None,
                 roam_backoff=ROAM_CHECK, moved_at=None, roaming=False,
-                retried=False, idle_at=time.ticks_ms(), sleep_home=False,
+                retried=False, idle_at=_stamp(), sleep_home=False,
                 lost_at=None, fails=0, diag_at={}, diag_more={}, empty=0,
                 pb_at=time.ticks_ms(), pb_scans=0, pb_empty=0,
                 wake=False, wake_at=None,
@@ -1827,7 +1827,7 @@ def _wifi_diag(kind, line):
     _diag_write(line + (" (+%d more)" % n if n else ""))
 
 def _mark_failed(ssid, why=""):
-    wifi["failed"][ssid] = time.ticks_ms()
+    wifi["failed"][ssid] = _stamp()
     wifi["fails"] = wifi["fails"] + 1
     print("wifi fail", ssid, why)
     _wifi_diag("fail", "wifi fail %s %s" % (ssid, why))
@@ -1843,23 +1843,22 @@ def _mark_failed(ssid, why=""):
             # ours, briefly unreachable: not until reboot). A learned BSSID
             # of ours never is: one failed try shut our own router out for
             # an hour (hid_wait throttles the tries already).
-            now = wifi["failed"][ssid]
             b = wifi["hid_wait"]
             wifi["hid_wait"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
             wifi["hid_at"] = _stamp()
             b = wifi["blank_bssid"]
             if (b is not None and b not in wifi["home_aps"]
-                    and not _blank_bad(b, now)):
+                    and not _blank_bad(b)):
                 bad = [x for x in wifi["blank_bad"]
-                       if _age(now, x[1]) < BLANK_BAD_HOLD]
-                bad.append((b, now))
+                       if _age_s(x[1]) < BLANK_BAD_HOLD // 1000]
+                bad.append((b, _stamp()))
                 wifi["blank_bad"] = bad[-4:]
         wifi["roaming"] = False
 
-def _blank_bad(bssid, now):
+def _blank_bad(bssid):
     """A hidden-home try on this empty-SSID AP failed within BLANK_BAD_HOLD."""
     for b, t in wifi["blank_bad"]:
-        if b == bssid and _age(now, t) < BLANK_BAD_HOLD:
+        if b == bssid and _age_s(t) < BLANK_BAD_HOLD // 1000:
             return True
     return False
 
@@ -1912,7 +1911,6 @@ def _scan_found(aps):
     mine = wifi["home_aps"]
     _stay_scan(aps)
     _home_seen(aps)
-    now = time.ticks_ms()
     best = {}
     blank_rssi, blank_bssid = None, None
     own_rssi, own_bssid = None, None
@@ -1925,7 +1923,7 @@ def _scan_found(aps):
         bssid = rec[1]
         if not ssid:
             wifi["blank_any"] = True     # some hidden AP is around
-            if _blank_bad(bssid, now):
+            if _blank_bad(bssid):
                 continue                 # its hidden-home try failed
             if bssid in mine:
                 if own_rssi is None or rssi > own_rssi:
@@ -2023,7 +2021,7 @@ def _blank_home_ok(strict=False):
     r = wifi["blank_rssi"]
     if r is None or r < ROAM_MIN_RSSI:
         return False
-    if _blank_bad(wifi["blank_bssid"], time.ticks_ms()):
+    if _blank_bad(wifi["blank_bssid"]):
         return False                     # a hidden-home try there failed
     if strict and wifi["home_aps"] and not wifi["blank_ours"]:
         return False                     # a stranger's (or unlearned) AP
@@ -2171,7 +2169,7 @@ def _hidden_home_target(now, arrival=False):
     for n in wifi["nets"]:
         if (n.get("home") and n.get("hidden")
                 and n["ssid"] != wifi["ssid"]
-                and not _recent(now, wifi["failed"].get(n["ssid"]), FAIL_HOLD)):
+                and not _recent_s(wifi["failed"].get(n["ssid"]), FAIL_HOLD // 1000)):
             target = dict(n)
             target["bssid"] = None
             return target
@@ -2185,7 +2183,6 @@ def _candidate_order(w):
     beacons with an empty SSID: a good scan without any blank AP leaves
     it for that Nth round too. Each try of a network that is not there
     costs CONNECT_TIMEOUT with the radio on."""
-    now = time.ticks_ms()
     scanned = _scan_known(w)
     rounds = wifi["rounds"]
     wifi["rounds"] = rounds + 1
@@ -2208,7 +2205,7 @@ def _candidate_order(w):
     good, bad = [], []
     failed = wifi["failed"]
     for n in cands:
-        (bad if _recent(now, failed.get(n["ssid"]), FAIL_HOLD)
+        (bad if _recent_s(failed.get(n["ssid"]), FAIL_HOLD // 1000)
          else good).append(n)
 
     def _home_first(rows):
@@ -2324,10 +2321,10 @@ def _wifi_got_ip(w):
         wifi["hid_at"] = None
         wifi["learn"] = True
     wifi["sleep_home"] = False
-    wifi["idle_at"] = time.ticks_ms()
+    wifi["idle_at"] = _stamp()
     wifi["failed"].pop(wifi["ssid"], None)
     wifi["backoff"] = WIFI_RETRY
-    wifi["roam_at"] = time.ticks_ms()
+    wifi["roam_at"] = _stamp()
     wifi["roaming"] = False
     wifi["seen_wait"] = SEEN_WAIT
     if wifi["home"]:
@@ -2387,7 +2384,7 @@ def _wifi_round_failed(w):
     wifi["state"] = "not found"
     wifi["home"] = False
     wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY), WIFI_BACKOFF_MAX)
-    wifi["last_check"] = now
+    wifi["last_check"] = _stamp()
 
 def _web_search(now):
     """The status page is on (at home, or WEB_AWAY) and no keep-alive scan
@@ -2452,7 +2449,7 @@ def _wifi_off(w, state, wake_at=None):
     wifi["lost_at"] = None               # ("back after" measures a reconnect,
                                          # not a sleep)
     wifi.update(state=state, home=False, ip=None, rssi=None, wake=False,
-                wake_at=wake_at, backoff=WIFI_RETRY, last_check=time.ticks_ms())
+                wake_at=wake_at, backoff=WIFI_RETRY, last_check=_stamp())
     print("wifi", state, "home" if wifi["sleep_home"] else "")
 
 def _upload_wait(now):
@@ -2547,7 +2544,7 @@ def wifi_wake():
         return True
     if wifi["state"] == "not found":
         wifi["rounds"] = 0               # an arrival: try every network
-        wifi["last_check"] = time.ticks_add(time.ticks_ms(), -wifi["backoff"])
+        wifi["last_check"] = _stamp() - wifi["backoff"] // 1000
         return True
     return False
 
@@ -2592,7 +2589,7 @@ def _try_roam_home(w, arrival=False):
     for n in found or ():
         if (n.get("home") and n.get("rssi", -100) >= ROAM_MIN_RSSI
                 and n["ssid"] != wifi["ssid"]
-                and not _recent(now, wifi["failed"].get(n["ssid"]), FAIL_HOLD)):
+                and not _recent_s(wifi["failed"].get(n["ssid"]), FAIL_HOLD // 1000)):
             target = n
             break
     if target is None:
@@ -2603,7 +2600,7 @@ def _try_roam_home(w, arrival=False):
         return
     if arrival:
         wifi["roam_backoff"] = ROAM_CHECK
-        wifi["roam_at"] = now
+        wifi["roam_at"] = _stamp()
     cur = _net(wifi["ssid"])
     wifi["cand"] = [target] + ([dict(cur)] if cur else [])
     wifi["cand_i"] = 0
@@ -2741,7 +2738,6 @@ def _home_seen(aps):
             break
     else:
         return
-    now = time.ticks_ms()
     if _recent_s(wifi["seen_at"], wifi["seen_wait"] // 1000):
         return
     wifi["seen_at"] = _stamp()
@@ -2749,7 +2745,7 @@ def _home_seen(aps):
     if state == "sleep":
         wifi["wake"] = True
     else:
-        wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
+        wifi["last_check"] = _stamp() - wifi["backoff"] // 1000
     print("wifi home in range")
 
 def wifi_start(env=None):
@@ -2792,7 +2788,7 @@ def wifi_start(env=None):
     _wifi_begin_round(w)
     if wifi["state"] == "connecting":
         _wifi_poll(w)
-    wifi["last_check"] = time.ticks_ms()
+    wifi["last_check"] = _stamp()
 
 def _wifi_make():
     """Create the STA interface; on failure state "error", wlan None
@@ -2805,7 +2801,7 @@ def _wifi_make():
     except WLAN_ERR:
         wifi["wlan"] = None
         wifi["state"] = "error"
-        wifi["last_check"] = time.ticks_ms()
+        wifi["last_check"] = _stamp()
         return None
 
 def wifi_tick():
@@ -2813,8 +2809,8 @@ def wifi_tick():
     if w is None:
         # the interface failed to come up at boot: it used to stay down
         # for good (the keep-alive's own WLAN showed the chip recovered)
-        if wifi["state"] == "error" and wifi["nets"] and _age(
-                time.ticks_ms(), wifi["last_check"]) >= wifi["backoff"]:
+        if (wifi["state"] == "error" and wifi["nets"]
+                and _age_s(wifi["last_check"]) >= wifi["backoff"] // 1000):
             wifi["backoff"] = min(max(wifi["backoff"] * 2, WIFI_RETRY),
                                   WIFI_BACKOFF_MAX)
             w = _wifi_make()
@@ -2833,32 +2829,32 @@ def wifi_tick():
         else:
             if wifi["learn"]:
                 _learn_home(w)
-            if _age(now, wifi["last_check"]) >= WIFI_CHECK:
+            if _age_s(wifi["last_check"]) >= WIFI_CHECK // 1000:
                 wifi["rssi"] = _rssi(w)
-                wifi["last_check"] = now
+                wifi["last_check"] = _stamp()
             interval = wifi["roam_backoff"]
             if not wifi["home"] and _has_home():
                 spd = st.get("speed")
                 moving = (has_fix(now) and spd is not None and spd >= 5
                           and not log["still"]["active"])
                 if moving:
-                    wifi["moved_at"] = now
+                    wifi["moved_at"] = _stamp()
                     arrival = False
                 elif (wifi["moved_at"] is not None
-                      and _age(now, wifi["moved_at"]) >= 60000):
+                      and _age_s(wifi["moved_at"]) >= 60):
                     wifi["moved_at"] = None
                     arrival = True
                 else:
                     arrival = False
-                ra = wifi["roam_at"]     # (is None: tick 0 is a time)
+                ra = wifi["roam_at"]     # (is None: Stamp 0 is a time)
                 due = (not moving and ra is not None
-                       and _age(now, ra) >= interval)
+                       and _age_s(ra) >= interval // 1000)
                 if due or arrival:
-                    wifi["roam_at"] = now
+                    wifi["roam_at"] = _stamp()
                     _try_roam_home(w, arrival=arrival and not due)
             if (wifi["state"] == "connected"
-                    and _age(now, wifi["idle_at"]) >= WIFI_IDLE):
-                wifi["idle_at"] = now
+                    and _age_s(wifi["idle_at"]) >= WIFI_IDLE // 1000):
+                wifi["idle_at"] = _stamp()
                 if WEB and (wifi["home"] or WEB_AWAY):
                     pass                 # the status page keeps it on
                 elif _ota_wants_radio():
@@ -2900,7 +2896,7 @@ def wifi_tick():
             if ta is not None and _age(now, ta) < LOST_GRACE:
                 return
         wifi["state"] = "offline"
-        wifi["last_check"] = time.ticks_add(now, -wifi["backoff"])
+        wifi["last_check"] = _stamp() - wifi["backoff"] // 1000
         _radio_off(w)                    # the IDF still reconnects: a scan
                                          # then fails (wifi still connecting)
         # fall through to a fresh round
@@ -2913,24 +2909,24 @@ def wifi_tick():
         if not wifi["wake"]:
             at = wifi["wake_at"]
             due = at is not None and not _waiting(now, at, UP_WAIT_MAX)
-            if not due and _age(now, wifi["last_check"]) < WIFI_SLEEP:
+            if not due and _age_s(wifi["last_check"]) < WIFI_SLEEP // 1000:
                 return
-            if _age(now, wifi["idle_at"]) < WIFI_IDLE:
+            if _age_s(wifi["idle_at"]) < WIFI_IDLE // 1000:
                 return
-            wifi["idle_at"] = now
+            wifi["idle_at"] = _stamp()
             if (_nothing_to_send() and not _ota_wants_radio()
                     and not (WEB and (WEB_AWAY or _has_home()))):
                 wifi["wake_at"] = None
                 return
         wifi["wake"] = False
         wifi["backoff"] = WIFI_RETRY
-        wifi["last_check"] = now
+        wifi["last_check"] = _stamp()
         wifi["rounds"] = 0               # a wake: the first round tries all
         _wifi_begin_round(w)
         return
-    if _age(now, wifi["last_check"]) < wifi["backoff"]:
+    if _age_s(wifi["last_check"]) < wifi["backoff"] // 1000:
         return
-    wifi["last_check"] = now
+    wifi["last_check"] = _stamp()
     _wifi_begin_round(w)
 
 def wifi_stop():
