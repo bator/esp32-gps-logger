@@ -8156,8 +8156,9 @@ try:
     import inspect
     resets = {f: inspect.getsource(getattr(gl, f)) for f in (
         "_mem_reboot", "_ota_check", "_ota_health")}
-    mem_via = all("_mem_reboot(" in inspect.getsource(getattr(gl, f))
-                  for f in ("_tls_reboot", "_low_reboot"))
+    mem_via = (all("_reboot_for_memory(" in inspect.getsource(getattr(gl, f))
+                   for f in ("_tls_reboot", "_low_reboot", "_guarded"))
+               and "_mem_reboot(" in inspect.getsource(gl._reboot_for_memory))
     gl._uptime_saved = gl.uptime_s
     diag_clear()
     gl.uptime_s = lambda now=None: 151
@@ -17121,6 +17122,47 @@ for _n in _ast.walk(_ast.parse(_slurp(os.path.join(ROOT, "gps_logger.py")))):
         _rw.append(_n.lineno)
 check("RX-STATUS: gps_logger.py writes nothing into st (only the Receiver does)",
       _rw == [], repr(_rw))
+
+# MEM-RULE: every memory reboot goes through one rule (_reboot_for_memory): not
+# with an OTA image pending, not again within LOWIDF_REBOOT_GAP, the upload's
+# reasons at home only; TLS and low-heap reboot only past their own counts
+_mr_save = (gl._mem_reboot, gl._mem_reboot_soon, gl.at_home, gl.ota["pend"], gl.up.get("enomem"))
+_mr_reb, _mr_soon, _mr_home = [], [False], [True]
+gl._mem_reboot = _mr_reb.append
+gl._mem_reboot_soon = lambda: _mr_soon[0]
+gl.at_home = lambda: _mr_home[0]
+_mr = []
+try:
+    def _mr_case(home, pend, soon, home_rule=True):
+        _mr_home[0], _mr_soon[0] = home, soon
+        gl.ota["pend"] = 123 if pend else None
+        del _mr_reb[:]
+        r = gl._reboot_for_memory("x", home=home_rule)
+        return r, list(_mr_reb)
+    _mr.append(_mr_case(True, False, False))          # at home: reboots
+    _mr.append(_mr_case(False, False, False))         # away, an upload reason: no
+    _mr.append(_mr_case(False, False, False, False))  # away, a tick's: yes
+    _mr.append(_mr_case(True, True, False))           # an OTA image pending: no
+    _mr.append(_mr_case(True, True, False, False))
+    _mr.append(_mr_case(True, False, True))           # one a short while ago: no
+    _mr_home[0], _mr_soon[0], gl.ota["pend"] = True, False, None
+    gl.up["enomem"] = gl.TLS_REBOOT_N - 1
+    del _mr_reb[:]
+    _mr.append((gl._tls_reboot(), list(_mr_reb)))     # under TLS_REBOOT_N: no
+    gl.up["enomem"] = gl.TLS_REBOOT_N
+    _mr.append((gl._tls_reboot(), list(_mr_reb)))
+    del _mr_reb[:]
+    _mr.append((gl._low_reboot("idf %d KB", 20, gl.LOWIDF_WAIT - 1), list(_mr_reb)))
+    _mr.append((gl._low_reboot("idf %d KB", 20, gl.LOWIDF_WAIT), list(_mr_reb)))
+finally:
+    (gl._mem_reboot, gl._mem_reboot_soon, gl.at_home, gl.ota["pend"], _mr_e) = _mr_save
+    gl.up["enomem"] = _mr_e or 0
+_mr_want = [(True, ["x"]), (False, []), (True, ["x"]), (False, []), (False, []), (False, []),
+            (False, []), (True, ["tls memory %d" % gl.TLS_REBOOT_N]),
+            (False, []), (True, ["low idf 20 KB %d s" % (gl.LOWIDF_WAIT // 1000)])]
+check("MEM-RULE: a memory reboot at home, or away for a tick's MemoryError; never with an "
+      "OTA image pending or within the gap; TLS from TLS_REBOOT_N, low heap from LOWIDF_WAIT",
+      _mr == _mr_want, repr(_mr))
 
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
