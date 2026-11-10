@@ -664,6 +664,8 @@ diag_dir = tempfile.mkdtemp(prefix="diaglog-")
 
 
 def _reload_logger():
+    if "gps_clock" in sys.modules:       # (its uptime counts from this reload)
+        importlib.reload(sys.modules["gps_clock"])
     if "gps_logger" in sys.modules:
         m = importlib.reload(sys.modules["gps_logger"])
     else:
@@ -683,6 +685,7 @@ def _reload_logger():
 
 
 _install_mocks()
+import gps_clock as _gck               # (its Stamp state: _gck._up)
 sys.modules["machine"].WDT_RESET = 3
 sys.modules["machine"].PWRON_RESET = 1
 sys.modules["machine"].SOFT_RESET = 4
@@ -3695,12 +3698,12 @@ try:
                      lat=47.5, lon=19.0, pos_at=0)
         check("REVIEW-3: a 6-day-old position is not a fix",
               not gl.has_fix(now))
-        for start in (None, 0):
+        for start in (None, gl._stamp() - 3600):    # (a Stamp: seconds of uptime)
             gl.log_reset()
             gl.log.update(full=True, full_check=start)
             gl.log_tick()
-            check("REVIEW-3: full flash is re-polled (full_check=%r)" % start,
-                  gl.log["full"] is False and gl.log["full_check"] == now)
+            check("REVIEW-3: full flash is re-polled (full_check=%r)" % (start is None),
+                  gl.log["full"] is False and gl.log["full_check"] == gl._stamp())
         gl.log_reset()
         gl.log.update(last_sample=0, last_flush=0)
         rv_fix(47.5, 30.0)
@@ -7983,7 +7986,7 @@ try:
     gl.log_reset()
     gl.up_reset()
     _reset_cause[0] = 6
-    gl._up[:] = [0, 0, 0]                # uptime from tick 0
+    _gck._up[:] = [0, 0, 0]                # uptime from tick 0
     gl._diag_boot()
     _reset_cause[0] = 1
     gl.st.update(ok=120, err=3, gps_boots=2, loops=1, used=7,
@@ -8803,7 +8806,7 @@ TPW = 1 << 30
 saved_t = (time.ticks_ms, time.ticks_diff)
 time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
 try:
-    gl._up[:] = [0, TPW - 1000, 0]
+    _gck._up[:] = [0, TPW - 1000, 0]
     ups = []
     for k in range(1, 15):
         ups.append(gl.uptime_s((TPW - 1000 + k * 86400000) & (TPW - 1)))
@@ -12116,8 +12119,8 @@ online(up_td)                            # the next boot takes the mark
 gl.up["url"], gl.up["key"] = "https://d.example", "k"
 gl.wifi["home"] = True
 make_trk(os.path.join(up_td, "20261006_100000.trk"), 3)
-u3_saved = list(gl._up)
-gl._up[:] = [0, _clock[0], 0]           # just booted
+u3_saved = list(_gck._up)
+_gck._up[:] = [0, _clock[0], 0]           # just booted
 u3_boot = gl.up.get("lowidf_boot")
 _resets[:] = []
 u3_t = None
@@ -12134,7 +12137,7 @@ try:
 finally:
     _post_raise[0] = None
     gl.wifi["home"] = False
-    gl._up[:] = u3_saved
+    _gck._up[:] = u3_saved
 check("UPL-3: a TLS reboot writes LOWIDF_MARK, the next waits "
       "LOWIDF_REBOOT_GAP of uptime",
       u3_mark and u3_boot is True and u3_t is not None
@@ -12663,8 +12666,8 @@ gl.up["url"], gl.up["key"] = "https://d.example", "k"
 make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
 gap_ms = getattr(gl, "LOWIDF_REBOOT_GAP", 1800000)
 took = (gl.up.get("lowidf_boot"), os.path.exists(mark))
-saved_up = list(gl._up)
-gl._up[:] = [0, _clock[0], 0]           # just booted
+saved_up = list(_gck._up)
+_gck._up[:] = [0, _clock[0], 0]           # just booted
 gl.idf_heap = lambda: (30, 20)
 gl.wifi["home"] = True
 _resets[:] = []
@@ -12682,7 +12685,7 @@ try:
 finally:
     gl.idf_heap = real_idf
     gl.wifi["home"] = False
-    gl._up[:] = saved_up
+    _gck._up[:] = saved_up
 check("LOWIDF-RATE: at most one low-idf reboot per LOWIDF_REBOOT_GAP",
       took == (True, False) and t_reboot is not None
       and gap_ms <= t_reboot <= gap_ms + retry_ms,
@@ -12812,7 +12815,7 @@ if os.path.exists(mark):
 gl._idf_info = lambda: (157 * 1024, 126 * 1024)
 gl.idf_heap = lambda: (157, 126)
 gl.gc.mem_free = lambda: 126 * 1024 + 4000
-saved_up = list(gl._up)
+saved_up = list(_gck._up)
 diag_clear()
 gl.DIAG = 60000
 _resets[:] = []
@@ -12830,7 +12833,7 @@ try:
     online(up_td)                        # the next boot takes the mark
     gl.up["url"], gl.up["key"] = "https://d.example", "k"
     make_trk(lp_p, 3)
-    gl._up[:] = [0, _clock[0], 0]       # just booted
+    _gck._up[:] = [0, _clock[0], 0]       # just booted
     lpr_gap = _lp_run(True, gap_ms + 4 * retry_ms)
 finally:
     gl.gc.mem_free = real_mem_free
@@ -12841,7 +12844,7 @@ finally:
         gl._idf_info = real_idf_info
     gl.DIAG = 0
     gl.wifi["home"] = False
-    gl._up[:] = saved_up
+    _gck._up[:] = saved_up
 diag_clear()
 if os.path.exists(mark):
     os.remove(mark)
@@ -14803,12 +14806,12 @@ del _uart_rx[:]
 
 # REV-11: counters stay small ints (heap longs every loop after 12 days);
 # "good" ages out with the other receiver stamps
-gl._up[:] = [0, _clock[0], 0]
+_gck._up[:] = [0, _clock[0], 0]
 c11 = _clock[0]
 for d in range(20):
     c11 += 86400000
     up11 = gl.uptime_s(c11)
-small11 = gl._up[0] < (1 << 30) and len(gl._up) == 3 and 0 <= gl._up[2] < 1000
+small11 = _gck._up[0] < (1 << 30) and len(_gck._up) == 3 and 0 <= _gck._up[2] < 1000
 gl.reset()
 gl.st["rx_b"] = 0x3FFFFFF0
 _uart_rx.extend(b"$" * 32)
@@ -14821,11 +14824,11 @@ _clock[0] += gl.TICKS_CAP + 1000
 gl._stamps_old(_clock[0])
 good11 = gl.st["good"]
 gl.reset()
-gl._up[:] = [0, _clock[0], 0]
+_gck._up[:] = [0, _clock[0], 0]
 check("REV-11: uptime in seconds + ms (20 days), the byte count wraps at "
       "2^30, good cleared after TICKS_CAP",
       up11 == 20 * 86400 and small11 and rx11 == 16 and good11 is None,
-      repr((up11, list(gl._up), rx11, good11)))
+      repr((up11, list(_gck._up), rx11, good11)))
 
 # REV-12: trk2gpx stops at the footer (bytes after it are left over from a
 # longer older write)
@@ -16778,11 +16781,60 @@ check("WEB-JSON-TAIL: an error while streaming the diag lines still ends "
 (gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl._web_rows, gl.WEB_PAGE) = _wr_saved
 shutil.rmtree(_wr_dir, ignore_errors=True)
 
+# CLOCK-STAMP: a Stamp is whole seconds of uptime that do not wrap: 13 days of
+# 30 s steps on a 2**30 ms clock (12.4 days), a Stamp of day 0 is 13 days old
+_cs_w = 1 << 30
+_cs_save = (time.ticks_diff, time.ticks_add, time.ticks_ms, list(_gck._up), _clock[0])
+time.ticks_diff = lambda a, b: (a - b + (_cs_w >> 1)) % _cs_w - (_cs_w >> 1)
+time.ticks_add = lambda a, b: (a + b) % _cs_w
+time.ticks_ms = lambda: _clock[0]
+try:
+    _gck._up[:] = [0, None, 0]
+    _clock[0] = 5000
+    _cs0 = _gck.stamp()
+    _cs_ages, _cs_rec = [], []
+    for _n in range(1, 13 * 86400 // 30 + 1):
+        _clock[0] = (5000 + _n * 30000) % _cs_w
+        if _n % 2880 == 0:               # once a day
+            _cs_ages.append(_gck.age_s(_cs0) // 86400)
+    _cs_rec = (_gck.recent_s(_cs0, 12 * 86400), _gck.recent_s(_cs0, 14 * 86400))
+    _cs_e = [gl._diag_write]
+    _cs_said = []
+    gl._diag_write = _cs_said.append
+    gl.log["err_at"] = None
+    gl._werr("t")                        # the first error goes to the diag
+    _clock[0] += 1000
+    gl._werr("t")                        # one second later: not again
+    _clock[0] += gl.WERR_EVERY + 1000
+    gl._werr("t")                        # WERR_EVERY later: again
+    _cs_werr = len(_cs_said)
+    # a Stamp of a first error, then 13 days of running: the next goes out
+    _cs_said[:] = []
+    gl.log["err_at"] = _gck.stamp()
+    for _n in range(1, 13 * 86400 // 30 + 1):
+        _clock[0] = (_clock[0] + 30000) % _cs_w
+        _gck.stamp()
+    gl._werr("t")
+    _cs_after = len(_cs_said)
+finally:
+    gl._diag_write = _cs_e[0]
+    time.ticks_diff, time.ticks_add, time.ticks_ms, _cs_up, _clock[0] = _cs_save
+    _gck._up[:] = _cs_up
+check("CLOCK-STAMP: a Stamp is 1..13 days old, day by day, across the 12.4-day ticks "
+      "wrap; recent_s says 12 d no, 14 d yes; None is NEVER and never recent",
+      _cs_ages == list(range(1, 14)) and _cs_rec == (False, True)
+      and _gck.age_s(None) == _gck.NEVER and not _gck.recent_s(None, 1 << 28),
+      repr((_cs_ages, _cs_rec)))
+check("CLOCK-STAMP: _werr (log['err_at'] a Stamp) logs the first error, holds the next "
+      "for WERR_EVERY, and after 13 days on the wrapping clock logs again",
+      _cs_werr == 2 and _cs_after == 1, repr((_cs_werr, _cs_after)))
+
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
-check("R2-UPTIME: _up starts at the ticks of the import (boot), not at 0",
-      gl._up[0] * 1000 + gl._up[2] == gl._up[1] and 0 <= gl._up[2] < 1000,
-      repr(list(gl._up)))
+gl.uptime_s()                            # (the first call: the ticks count from boot)
+check("R2-UPTIME: _up starts at the ticks of the first call (boot), not at 0",
+      _gck._up[0] * 1000 + _gck._up[2] == _gck._up[1] and 0 <= _gck._up[2] < 1000,
+      repr(list(_gck._up)))
 
 # OTA-RETRY: checks every OTA_CHECK (10 min); a download that failed its
 # sha256 is not downloaded again before OTA_RETRY; one diag line per kind
