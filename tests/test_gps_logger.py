@@ -1188,7 +1188,7 @@ try:
     gl.reset()                               # (no fix)
     gl.log.update(full=True, full_check=None, fix=True, lost_at=None)
     _clock[0] += 1000
-    lost_t = _clock[0]
+    lost_t = gl._stamp()                     # (lost_at is a Stamp)
     gl.log_tick()
     _clock[0] += gl.NEW_FILE_GAP * 1000
     gl.free = lambda: gl.MIN_FREE + 10
@@ -2978,8 +2978,8 @@ try:
     gl.log["file"] = open_path
     gl.log["created"] = True
     gl.log["points"] = 3
-    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
-    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
+    gl.log["file_at"] = gl._stamp() - gl.NEW_FILE_GAP - 1
+    gl.log["last_flush"] = gl._stamp() - gl.FLUSH // 1000 - 1
     gl.log["batch"] = []
     gl.log["prev"] = (52.5, 13.4)
     gl.log["last_t"] = "2026-10-05T18:00:00Z"
@@ -2998,8 +2998,8 @@ try:
 
     gl.log["file"] = open_path
     gl.log["created"] = True
-    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
-    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
+    gl.log["file_at"] = gl._stamp() - gl.NEW_FILE_GAP - 1
+    gl.log["last_flush"] = gl._stamp() - gl.FLUSH // 1000 - 1
     gl.log["points"] = 3
     gl.wifi["state"] = "offline"
     gl.wifi["home"] = False
@@ -3009,8 +3009,8 @@ try:
 
     gl.wifi["state"] = "connected"
     gl.wifi["home"] = True
-    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
-    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
+    gl.log["file_at"] = gl._stamp() - gl.NEW_FILE_GAP - 1
+    gl.log["last_flush"] = gl._stamp() - gl.FLUSH // 1000 - 1
     gl.log_tick()
     check("rotate: home net closes an old file so it can upload",
           gl.log["file"] is None)
@@ -3020,8 +3020,8 @@ try:
     gl.wifi["home"] = False
     gl.log["file"] = open_path
     gl.log["created"] = True
-    gl.log["file_at"] = _clock[0] - gl.NEW_FILE_GAP * 1000 - 1
-    gl.log["last_flush"] = _clock[0] - gl.FLUSH - 1
+    gl.log["file_at"] = gl._stamp() - gl.NEW_FILE_GAP - 1
+    gl.log["last_flush"] = gl._stamp() - gl.FLUSH // 1000 - 1
     keep_pt = trk_line(52.5, 13.4, "2026-10-05T00:00:00Z")
     gl.log["batch"] = [keep_pt]
     gl.log["err"] = 0
@@ -3407,8 +3407,8 @@ try:
 
     # new trip during a write error starts a new track segment
     gl.log.update(file=close_path, created=True, points=2, batch=[extra_pt],
-                  fix=False, lost_at=_clock[0] - gl.NEW_FILE_GAP * 1000 - 1,
-                  last_flush=_clock[0], prev=(52.5, 13.4), new_seg=False,
+                  fix=False, lost_at=gl._stamp() - gl.NEW_FILE_GAP - 1,
+                  last_flush=gl._stamp(), prev=(52.5, 13.4), new_seg=False,
                   wfail=True, online=False)
     gl.st.update(valid=True, date="2026-10-05", time="19:00:00",
                  lat=52.6, lon=13.5, alt=10.0, pos_at=_clock[0],
@@ -3705,13 +3705,13 @@ try:
             check("REVIEW-3: full flash is re-polled (full_check=%r)" % (start is None),
                   gl.log["full"] is False and gl.log["full_check"] == gl._stamp())
         gl.log_reset()
-        gl.log.update(last_sample=0, last_flush=0)
+        gl.log.update(last_sample=0, last_flush=gl._stamp() - 3600)  # (a Stamp)
         rv_fix(47.5, 30.0)
         gl.log_tick()
         # the sample opens a stay window, so the flush holds it in RAM
         check("REVIEW-3: wrapped last_sample/last_flush still sample + flush",
               gl.log["points"] + len(gl.log["batch"]) == 1
-              and gl.log["last_flush"] == now,
+              and gl.log["last_flush"] == gl._stamp(),
               "points=%s batch=%s flush=%s" % (
                   gl.log["points"], len(gl.log["batch"]), gl.log["last_flush"]))
         gl.flush()
@@ -5405,7 +5405,7 @@ try:
 
     def failing_flush(*a):
         calls[0] += 1
-        gl.log["last_flush"] = _clock[0]
+        gl.log["last_flush"] = gl._stamp()
     gl.flush = failing_flush
     try:
         for i in range(-180, 1):
@@ -5727,7 +5727,7 @@ try:
     trip = gl.log["file"]
     for _ in range(gl.NEW_FILE_GAP + 10):
         hb_fix(0, 0, nofix=True)
-    gl.log["last_flush"] = _clock[0]                # a flush just happened
+    gl.log["last_flush"] = gl._stamp()              # a flush just happened
     sv_fix(500, 0, 22.0)
     trip_pts = []
     if os.path.exists(trip):
@@ -16418,7 +16418,7 @@ class _OffW(object):
         return False
 gl.wifi_reset()
 gl.log_reset()
-gl.wifi["lost_at"] = _clock[0]
+gl.wifi["lost_at"] = gl._stamp()
 gl._wifi_off(_OffW(), "sleep")
 check("R2-LOST: _wifi_off clears lost_at", gl.wifi["lost_at"] is None)
 
@@ -16828,6 +16828,37 @@ check("CLOCK-STAMP: a Stamp is 1..13 days old, day by day, across the 12.4-day t
 check("CLOCK-STAMP: _werr (log['err_at'] a Stamp) logs the first error, holds the next "
       "for WERR_EVERY, and after 13 days on the wrapping clock logs again",
       _cs_werr == 2 and _cs_after == 1, repr((_cs_werr, _cs_after)))
+
+# CLOCK-STAMP-WEB: wifi down_at is a Stamp: 12.4 days and 10 min after a drop
+# (a tick Mark read that as 10 min: the page searched again for WEB_SEARCH)
+# the drop is long over
+_cw_save = (time.ticks_diff, time.ticks_add, time.ticks_ms, list(_gck._up), _clock[0],
+            gl.WEB, gl.WEB_AWAY)
+time.ticks_diff = lambda a, b: (a - b + (_cs_w >> 1)) % _cs_w - (_cs_w >> 1)
+time.ticks_add = lambda a, b: (a + b) % _cs_w
+time.ticks_ms = lambda: _clock[0]
+try:
+    _gck._up[:] = [0, None, 0]
+    _clock[0] = 5000
+    gl.wifi_reset()
+    gl.WEB, gl.WEB_AWAY = True, True
+    gl.wifi.update(down_home=False, down_at=_gck.stamp())
+    _cw_fresh = gl._web_search(_clock[0])
+    _cw_end = 5000 + _cs_w + 600000      # 12.4 days and 10 min later
+    _t = 5000
+    while _t < _cw_end:
+        _t = min(_t + 30000, _cw_end)
+        _clock[0] = _t % _cs_w
+        _gck.stamp()
+    _cw_stale = gl._web_search(_clock[0])
+finally:
+    (time.ticks_diff, time.ticks_add, time.ticks_ms, _cw_up, _clock[0],
+     gl.WEB, gl.WEB_AWAY) = _cw_save
+    _gck._up[:] = _cw_up
+    gl.wifi_reset()
+check("CLOCK-STAMP-WEB: a fresh drop searches for the page; 12.4 days and 10 min later "
+      "it does not (a tick mark read that as 10 min)",
+      _cw_fresh is True and _cw_stale is False, repr((_cw_fresh, _cw_stale)))
 
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
@@ -18962,7 +18993,7 @@ hl._still_leave()
 _leave = _Rt.trip
 _Rt.trip = None
 hl.log["file"] = "x"
-hl.log.update(fix=False, lost_at=_clock[0] - hl.NEW_FILE_GAP * 1000 - 1, created=True)
+hl.log.update(fix=False, lost_at=hl._stamp() - hl.NEW_FILE_GAP - 1, created=True)
 hl.st.update(valid=True, lat=10.0, lon=20.0, pos_at=_clock[0], rx=_clock[0])
 _cf0 = hl._close_file
 hl._close_file = lambda: True
