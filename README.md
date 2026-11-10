@@ -211,7 +211,7 @@ The script asks the board what it is (anything but the Heltec is refused:
 `Unsupported board`), compiles `gps_logger.py`, `gps_clock.py` and `gps_receiver.py` to `.mpy` when the
 firmware has no frozen logger and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
-It makes `web.html.gz` with `tools/web_min.py` (~27 KB instead of the ~94 KB
+It makes `web.html.gz` with `tools/web_min.py` (~24 KB instead of the ~80 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
 window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
 `gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy`, `main.py` and the status page, only as `web.html.gz`, as
@@ -459,10 +459,10 @@ payload` is cleared by a 2xx only, so an upload bug held back the update
 that fixes it) it checks anyway, one diag line `ota: uploads stuck`.
 Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
-The status page shows the running build under *Systems*: the `FIRMWARE` row
+The status page shows the running build under *Logger*: the `Firmware` row
 gives the build's date (the commit time, `fw_build` in the JSON, local
 time) and the OTA state (`up to date`, `updated`, `checking`, `rolled back`,
-…); the commit is in the panel's subtitle.
+…); the commit is in the top bar (`FW 02e4317`).
 
 After the migration, `--flash` over USB still works. It backs up both slots
 (after an OTA the second one runs), writes the first slot and erases
@@ -652,104 +652,112 @@ cause, the build (`fw`, `fw_build`), chip temperature, free Python heap
 and flash,
 WiFi, keep-alive pulses; and the last lines of the diagnostic log (the page
 itself no longer uses them: it reads the whole log, below). The
-page is a dark telemetry view in one colour world (near-black, white as
-the accent; green, amber and red only for meaning). On top, a darkened
-grey OSM-carto map (through the homelab Atlas tile proxy,
-`atlas.crusand.org/tiles/geoapify/`, which answers pages on a
-private-network address such as the board's) is
-centred on the position, with a glowing dot, an accuracy ring (HDOP x 2.5 m)
-and the coordinates (N/S, E/W) with
-± that accuracy; without a fix it says `NO FIX`. Over its lower edge a strip
-shows fix, satellites used/seen, HDOP, points waiting
-for upload, WiFi signal and the share of bad NMEA sentences. The WiFi cell
-is an arc icon (0–3 arcs lit) and the link quality in per cent, 2 x (RSSI +
-100) capped at 0–100 (-63 dBm = 74 %), with the dBm beside it on a wide
-screen; amber below -67 dBm, red below -80 dBm. Below (on a wide screen in two
-columns: the sky plot and *Track* on the left, the plot growing
-to fill the column next to *Systems*; signal bars and *Systems* on the right):
-- a radar-style sky plot (centre = overhead, edge = horizon, north up;
-  colour = system: GPS blue, Galileo green, BeiDou amber, GLONASS pink;
-  filled = in the fix, hollow = not used);
-- one signal bar per satellite (lines at 15/30/45 dBHz);
-- *Systems* (`LOGGER SYSTEM STATUS`, laid out after a drone diagnostics
-  design: uppercase labels, a segmented bar, status words):
-  - *System readiness*: the share of subsystems nominal as a 10-segment bar
-    (green, amber with a warning, red with an error), then a row each with
-    its detail and `NOMINAL` / `WARN` / `ERROR`: `GPS RECEIVER` (model, fix,
-    satellites used/seen; amber without a 3D fix, a failed setup or reset
-    loops), `GPS LINK` (B/s, the last whole frame, restarts, bytes read), `UPLOAD` (state, sent, errors, `.bad`
-    files), `MEMORY` (the largest IDF block, red under the 48 KB TLS needs,
-    and the Python heap), `FIRMWARE` (the build date, the OTA state);
-  - *Storage module*: how long the free flash holds a 1 Hz drive (`≈18
-    days`, at 7 bytes a `.trb` point), free MB, points waiting (amber over
-    30 min), points logged, track files waiting and `.bad` files;
-  - *Uplink*: the network (and keep-alive pulses), the signal (`86%
-    strong`, the dBm in its label: strong / good / weak / poor by the same
-    tones as the strip) and the last accepted upload;
-  - *Device*: how long it has run and since when (local time), the boot
-    cause, the run before it and until when, chip temperature and clock,
-    GPS time.
-  Counters that are 0 are left out of the rows;
-- the *Event log*: the whole diagnostic log on the board (`/diag.1`, then
-  `/diag.log`: up to ~26 h), aggregated by kind rather than listed line by
-  line (laid out after Sentry / Loki "patterns"). The window on top (`10:16–
-  16:20 · 6 h 04 min of the diag log`), then:
-  - four tiles: the share of status lines (minutes) with a 3D fix, the time
-    without a fix or without data, the boots (how many were power-on) and
-    the firmware updates (each counted once, `all ok` or how many failed);
-  - *Satellites*: seen (green) and used (cyan) as 5-minute means over the
-    whole window, a smooth line broken where the log has a gap over 10 min,
-    local hours below;
-  - *Events, grouped*: a row a kind, the most severe first, then by count:
-    an icon by meaning (red: crash, caught bug, GPS reset loop, GPS silent,
-    track write error, flash full, upload error, a rolled back update;
-    amber: update check, memory reboot, clock back, WiFi failed / lost,
-    upload waiting for memory, GPS setup refused, `.env`;
-    cyan / green: boots, updates, WiFi back; grey: receiver start, stay
-    ended, other), the count (`(+N more)` and `N more windows` included),
-    a detail (e.g. `5 restarts in 3–24 s`, `krumpli · status 201 · 12 s
-    each`, the silent time summed from `gps back after N s`, the updates
-    `2e8bc6e → a3f2271 → 69f8c15`), a per-hour sparkline over the window and
-    when it was last seen. On a phone the detail and the sparkline are left
-    out. An event line has no time of its own: it takes the time of the next
-    status line with GPS time (lines after the last one: the last time).
-  The page reads `/diag?f=1&o=0`, then on from each reply's end, then
-  `f=0` the same way (`X-Diag-Size` is the file's size; ~16 KB a reply,
-  `HIST_REPLY`), parsing as it goes (only the totals are kept, not the
-  lines); after that once a minute `f=0` from where it got to. When
-  `/diag.log` is smaller than that, it became `/diag.1`: the page reads both
-  again;
-- *Track*: the day as a timeline (as in Maps Timeline), `‹ day ›` arrows
-  step through today and the days the board keeps. On top the km, the
-  moving time and the trips; below, a dot and a solid line per trip (start
-  time, km, duration, mean km/h) and a hollow dot and a dashed line per stop
-  (its length). Over each line the place where it starts or ends, from Atlas'
-  Photon, as for the position (a railway station within 150 m, else city and
-  street, once a place, kept while the page is open, the 400 newest);
-  no answer, as offline: the line alone, tried again once a minute (one
-  request at a time); a place the geocoder keeps failing on goes to the back
-  of the queue after 3 tries, so the others still get their names. A trip still going has no end place yet. A trip is a run of
-  points without a gap over 5 min that
-  covers 100 m at least; a few fixes while standing belong to the stop. A
-  trip clicked is drawn white on the map, which zooms to it (clicked again:
-  the whole day). `GPX` saves the shown day as GPX 1.1 (built in the
-  browser, a segment per gap);
-- a folded satellite table (signal, elevation, azimuth, used).
+page follows the phone's light or dark setting in one colour world (green,
+amber and red only for meaning). A thin top bar names the board (`device`),
+says `LIVE` (or `OFFLINE · 12 MIN AGO`, `NO ANSWER`, `BOARD ERROR`) and
+gives the uptime and the firmware's commit. Under it, the position and the
+day sit beside the map (on a phone the map comes first):
+- the *now* block: moving or standing still (the track's last minute, or
+  the board's own `stay`), the fix and the satellites used of those in
+  view; the address of the position from Atlas' Photon
+  (`atlas.crusand.org/api/v1/photon/reverse`, asked again only after 25 m
+  and 20 s) with district and city; how long it has been here, the speed,
+  the accuracy (HDOP x 2.5 m) and the age of the last fix; the coordinates
+  (N/S, E/W) under them;
+- *Day*: a chip a day (today first, then the days the board keeps) and
+  `‹ ›` arrows; on top the km, the moving time and the trips; below, the
+  day as a line (as in Maps Timeline): a dot and a solid stretch per trip
+  (start time, km, duration, mean km/h) and a dashed stretch per stop (its
+  length). Over each line the place where it starts or ends, from Photon,
+  as for the position (a railway station within 150 m, else city and
+  street, once a place, kept while the page is open, the 400 newest); no
+  answer, as offline: the line alone, tried again once a minute (one request
+  at a time); a place the geocoder keeps failing on goes to the back of the
+  queue after 3 tries, so the others still get their names. A trip still
+  going has no end place yet. A trip is a run of points without a gap over
+  5 min that covers 100 m at least; a few fixes while standing belong to
+  the stop. A trip clicked is drawn darker on the map, which zooms to it
+  (clicked again: the whole day). `GPX` saves the shown day as GPX 1.1
+  (built in the browser, a segment per gap). A day without a trip says so
+  in a line, no row of zeros;
+- the map: OSM-carto in its own colours (through the homelab Atlas tile
+  proxy, `atlas.crusand.org/tiles/geoapify/`, which answers pages on a
+  private-network address such as the board's), the shown day's track
+  fitted into it, a blue dot with an accuracy ring and, while moving, a cone
+  the way it goes; without a fix it says `NO FIX` in the middle.
 
-The `GPS LINK` row (bytes a second between two polls, the age of the last
-whole frame) turns amber after 3 s, red after 10 s; the waiting points and
-the last upload turn amber (also the strip's `UPLINK`) when points have
-waited over 30 min without an accepted batch. While the receiver sends nothing whole for over
-10 s, a red banner above the strip says `GPS SILENT · 42 S` and whether
-bytes still arrive (wiring or baud rate) or nothing does (power or the TX
-wire): useful while moving the wires with the page open.
+Below, three columns split by hairlines (one under the other on a phone):
+- *Logger*: how long the free flash holds a 1 Hz drive as the number (`≈6
+  days`, at 7 bytes a `.trb` point), then a row a subsystem with its detail,
+  a green, amber or red dot and the word (`Warn`, `Error`) only when it is
+  not nominal; the heading counts them (`7/7 OK`). `GPS receiver` (model,
+  fix, satellites used/seen, HDOP; amber without a 3D fix, a failed setup or
+  reset loops), `GPS link` (B/s, the last whole frame, restarts, bytes read,
+  the share of broken NMEA sentences), `Upload` (state, points waiting,
+  sent, errors, `.bad` files, the last accepted upload), `Storage` (free MB,
+  points logged, track files), `Memory` (the largest IDF block, red under
+  the 48 KB TLS needs, and the Python heap), `Wi-Fi` (an arc icon with 0–3
+  arcs lit, the network, the link quality in per cent, 2 x (RSSI + 100)
+  capped at 0–100, -63 dBm = 74 %, and the dBm; amber below -67 dBm, red
+  below -80 dBm; keep-alive pulses), `Firmware` (the build date, the OTA
+  state). Counters that are 0 are left out of the rows;
+- *Sky*: a plot (centre = overhead, edge = horizon, north up; colour =
+  system: GPS, Galileo green, BeiDou amber, GLONASS pink; bigger = clearer;
+  filled = in the fix, hollow = not used), a bar each satellite in use
+  (strongest first), and the signal in words: the overall grade and how
+  many are strong (35 dB-Hz up), fair (25 up) or weak, how many more are in
+  view;
+- *Diag log*: the whole diagnostic log on the board (`/diag.1`, then
+  `/diag.log`: up to ~26 h), aggregated rather than listed line by line
+  (laid out after Sentry / Loki "patterns"). The window in the heading
+  (`10:16–16:20 · 6 h 04 min`), then the typical accuracy (`±5 m`, and the
+  share within ±5 m), a summary (the share of minutes with a 3D fix, the
+  time without a fix or data, the minutes the receiver sent nothing in how
+  many drop-outs, the boots and how many were power-on, the firmware
+  updates each counted once with the failed ones, the broken NMEA sentences
+  as `1 in N`), the accuracy as a dot matrix (a column a time slice, taller
+  = more precise: 12 dots ±2 m, one ±15 m and worse; green ±5 m, lime
+  ±12 m, amber worse, a red dot where there was no fix) with the receiver
+  link as a strip under it (data every minute, gaps, none) and a red mark
+  with its start time under each drop-out; then a row each drop-out (start,
+  end, length) and a row a kind of event (the latest first, then the most
+  severe and the count): its last time, its name coloured by meaning (red:
+  crash, caught bug, GPS reset loop, GPS silent, track write error, flash
+  full, upload error, a rolled back update; amber: update check, memory
+  reboot, clock back, WiFi failed / lost, upload waiting for memory, GPS
+  setup refused, `.env`; green / white: boots, updates, WiFi back; grey:
+  receiver start, stay ended, display backlight, other), a detail (e.g. `5
+  restarts in 3–24 s`, `krumpli · status 201 · 12 s each`, the silent time
+  summed from `gps back after N s`, the updates `2e8bc6e → a3f2271 →
+  69f8c15`), a per-hour sparkline (not on a phone) and the count (`(+N
+  more)` and `N more windows` included). An event line has no time of its
+  own: it takes the time of the next status line with GPS time (lines after
+  the last one: the last time). The page reads `/diag?f=1&o=0`, then on
+  from each reply's end, then `f=0` the same way (`X-Diag-Size` is the
+  file's size; ~16 KB a reply, `HIST_REPLY`), parsing as it goes (only the
+  totals are kept, not the lines); after that once a minute `f=0` from
+  where it got to. When `/diag.log` is smaller than that, it became
+  `/diag.1`: the page reads both again.
+
+Under the columns the device in one strip: how long it has run and since
+when (local time), the boot cause, the run before it and until when, chip
+temperature and clock, GPS time, the position; and a folded table of every
+satellite (signal, elevation, azimuth, used).
+
+The `GPS link` row (bytes a second between two polls, the age of the last
+whole frame) turns amber after 3 s, red after 10 s; the `Upload` row turns
+amber when points have waited over 30 min without an accepted batch. While
+the receiver sends nothing whole for over 10 s, a red banner over the page
+says `GPS SILENT · 42 S` and whether bytes still arrive (wiring or baud
+rate) or nothing does (power or the TX wire): useful while moving the wires
+with the page open.
 
 Amber or red marks what needs a look. The map tiles and the fonts (Inter,
 JetBrains Mono) load from the internet when the phone is online; without
-it the page shows a dark map and the system font (the font sheet loads
+it the page shows an empty map and the system font (the font sheet loads
 without blocking the first paint, so an offline phone does not wait for it).
 The page is a file on the
-board, kept only gzipped (`/web.html.gz`, ~27 KB instead of the ~94 KB
+board, kept only gzipped (`/web.html.gz`, ~24 KB instead of the ~80 KB
 `web.html`, whose comments and indentation `tools/web_min.py` takes out at build
 time; copied by `deploy.sh` or an OTA) and loads once: a browser
 (`Accept-Encoding: gzip`, in a bare-LF request too; a `gzip;q=0` token
