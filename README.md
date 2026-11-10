@@ -208,13 +208,13 @@ VENV=../venv ./deploy.sh         # python, pip and mpremote from another venv
 ```
 
 The script asks the board what it is (anything but the Heltec is refused:
-`Unsupported board`), compiles `gps_logger.py` to `gps_logger.mpy` when the
+`Unsupported board`), compiles `gps_logger.py` and `gps_clock.py` to `.mpy` when the
 firmware has no frozen logger and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
 It makes `web.html.gz` with `tools/web_min.py` (~27 KB instead of the ~94 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
 window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
-`gps_logger.mpy`, `main.py` and the status page, only as `web.html.gz`, as
+`gps_logger.mpy`, `gps_clock.mpy`, `main.py` and the status page, only as `web.html.gz`, as
 `<name>.dpl`, checks their size and SHA-256 on the board, and only then
 renames them over the old files, removing an old plain `/web.html` in the
 same step (~90 KB of flash back); a failed check (`Copy check FAILED`)
@@ -264,7 +264,7 @@ Freezing does not stop the Python heap from growing into the IDF heap
 (MicroPython's split heap stays on); it leaves so much of the 96 KB heap
 free that an allocation rarely has to.
 
-The logger, `gps_boot.py` and the display's modules are compiled with
+The logger, `gps_clock.py`, `gps_boot.py` and the display's modules are compiled with
 `-O3` (`opt=3` in the build's manifest, `-O3` in `deploy.sh`): their line
 numbers stay out of the bytecode, ~10 KB of the logger's ~98 KB. The cost: a
 traceback on the USB console no longer says where (each frame reads `line 1`,
@@ -282,25 +282,29 @@ second, so the board may not boot an app afterwards. The ROM download mode
 over USB is never touched: run `--flash` again, or write the backup back
 with the `esptool.py` command it prints (with the second slot running, the
 board still boots that one). Run `./deploy.sh` right after: it
-removes the old `gps_logger.mpy` (until then it shadows the frozen module
-and runs as before) and any stray `gps_logger.py` (`''` comes first in
+removes the old `gps_logger.mpy` and `gps_clock.mpy` (until then they shadow the
+frozen modules and run as before) and any stray `gps_logger.py` or `gps_clock.py` (`''` comes first in
 `sys.path`), and clears the boot-fail counter. Right after esptool's reset
 the raw REPL may not answer for a while; if `deploy.sh` cannot reach the
 board, run it again.
 
-The firmware also freezes `gps_boot.py`: what `main.py` does around the
-logger's start for OTA and the boot-fail retry. Frozen, its code is not
-compiled into the heap at every boot; `main.py` runs without it on a
-plain firmware. And it carries a small `gps_frozen` module with the commit
-(`-dirty` when the tree had uncommitted changes), the BUILD time and three
-SHA-256s: `SHA` of the frozen `gps_logger.py`, `TFT` of `gps_tft.py` +
-`gps_tft_font.py` (cat'ed in that order) and `BOOT` of `gps_boot.py`. When
-`deploy.sh` finds it, it copies only `main.py` and the page and removes a
-stray `gps_logger.mpy`, but first compares the three with the repo's files:
+The firmware also freezes `gps_clock.py`, the Clock's date maths and the
+one test of a real UTC time (the logger imports it, so a plain board gets a
+`gps_clock.mpy` beside `gps_logger.mpy`), and `gps_boot.py`: what `main.py`
+does around the logger's start for OTA and the boot-fail retry. Frozen, its
+code is not compiled into the heap at every boot; `main.py` runs without it
+on a plain firmware. And it carries a small `gps_frozen` module with the
+commit (`-dirty` when the tree had uncommitted changes), the BUILD time and
+four SHA-256s: `SHA` of the frozen `gps_logger.py`, `TFT` of `gps_tft.py` +
+`gps_tft_font.py` (cat'ed in that order), `BOOT` of `gps_boot.py` and `CLOCK`
+of `gps_clock.py`. When `deploy.sh` finds it, it copies only `main.py` and
+the page and removes a stray `gps_logger.mpy` and `gps_clock.mpy`, but first
+compares them with the repo's files:
 when `SHA` differs (or a firmware built before it was recorded) it stops and
 asks for `tools/build_firmware.sh --flash`, naming the file that differs
-(`gps_logger.py`, `gps_tft.py / gps_tft_font.py` or `gps_boot.py`, the first
-in that order). A marker without `TFT` or `BOOT` (an older build, read as
+(`gps_logger.py`, `gps_tft.py / gps_tft_font.py`, `gps_boot.py` or
+`gps_clock.py`, the first in that order). A marker without `TFT`, `BOOT` or
+`CLOCK` (an older build, read as
 `-`) skips that comparison. A marker whose words are not plain
 (`A-Za-z0-9._-`) is no answer: it stops like a missing one. `FORCE=1
 ./deploy.sh` deploys main.py and the page anyway. A logger change means building and flashing the
@@ -393,7 +397,7 @@ A refused manifest is one diagnostic line until a good one comes, and no
 unverified field goes into it (a commit with newlines wrote forged lines);
 any diag line is one line, cut at 320 bytes (`DIAG_CUT`; a status line
 runs to ~220). A `/gps_logger.mpy` or `.py`
-on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
+(or `/gps_clock.mpy`, `.py`) on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
 (`''` comes first in `sys.path`): on a frozen firmware the install moves
 it aside as `<name>.ota-old`, the valid new firmware deletes it, and
 after a rollback `main.py` puts it back before the import. A Ctrl-C
@@ -1499,20 +1503,20 @@ every pull request:
   neither. The suite removes every temporary directory it made when it ends
   (`KEEP_TMP=1` keeps them to look at after a failure).
 - `mpy-cross` 1.29 for `xtensawin` on every frozen module (`gps_logger.py`,
-  `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
+  `gps_clock.py`, `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
   itself (ESP-IDF, `boards/GPS_LOGGER_S3`) is not built in CI: a board or
   freeze-manifest breakage shows at the next local `tools/build_firmware.sh`.
-- `pyflakes` on every Python file: `gps_logger.py`, `gps_boot.py`,
-  `gps_tft.py`, `gps_tft_font.py`, `main.py`, `tools/` and `tests/`.
+- `pyflakes` on every Python file: `gps_logger.py`, `gps_clock.py`,
+  `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`, `main.py`, `tools/` and `tests/`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
 
 The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
-.venv/bin/python -m pyflakes gps_logger.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
+.venv/bin/python -m pyflakes gps_logger.py gps_clock.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 shellcheck deploy.sh tools/build_firmware.sh
-for m in gps_logger gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done
+for m in gps_logger gps_clock gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done
 MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \
     python3 tests/test_gps_logger.py
 ```

@@ -9,7 +9,8 @@ import machine
 
 OTA_PENDING = "/ota.pending"             # (gps_logger's OTA_PENDING,
 OTA_MARK = "/ota.mark"                   # OTA_MARK and OTA_SHADOW)
-OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py")
+OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py",
+              "/gps_clock.mpy", "/gps_clock.py")
 
 _retry = None                            # the BOOT_RETRY_MS timer (REPL:
                                          # gps_boot._retry.deinit() stops it)
