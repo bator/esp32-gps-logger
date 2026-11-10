@@ -1,0 +1,25 @@
+{
+  "about": "Compact UTC times (YYYYMMDDTHHMMSSZ) and whether each is a real UTC time in 2020-2099. Every check of one uses these: gps_clock.ymd_ok, tc_ok and dt_s, the logger's _kb_time, tools/trk2gpx.py _iso and web.html evUtc. shape false: not even the form (only the checks that read the form take it). kb false: past the track's FIX_S_END (2088), which only _kb_time also refuses.",
+  "vectors": [
+    {"tc": "20200101T000000Z", "ok": true},
+    {"tc": "20240229T120000Z", "ok": true, "why": "a leap day"},
+    {"tc": "20261110T235959Z", "ok": true},
+    {"tc": "20871231T235959Z", "ok": true, "why": "the last second before FIX_S_END"},
+    {"tc": "20991231T235959Z", "ok": true, "kb": false, "why": "past FIX_S_END"},
+    {"tc": "20191231T235959Z", "ok": false, "why": "before 2020"},
+    {"tc": "21000101T000000Z", "ok": false, "why": "after 2099"},
+    {"tc": "20230229T000000Z", "ok": false, "why": "no leap day"},
+    {"tc": "20261310T000000Z", "ok": false, "why": "month 13"},
+    {"tc": "20260010T000000Z", "ok": false, "why": "month 0"},
+    {"tc": "20261100T000000Z", "ok": false, "why": "day 0"},
+    {"tc": "20260431T000000Z", "ok": false, "why": "April 31"},
+    {"tc": "20261110T240000Z", "ok": false, "why": "hour 24"},
+    {"tc": "20261110T256000Z", "ok": false, "why": "hour 25, minute 60"},
+    {"tc": "20261110T126000Z", "ok": false, "why": "minute 60"},
+    {"tc": "20261110T120060Z", "ok": false, "why": "second 60"},
+    {"tc": "2026111OT120000Z", "ok": false, "shape": false, "why": "a letter O for a 0"},
+    {"tc": "20261110 120000Z", "ok": false, "shape": false, "why": "no T"},
+    {"tc": "20261110T120000", "ok": false, "shape": false, "why": "no Z"},
+    {"tc": "20261110T12000Z", "ok": false, "shape": false, "why": "a digit short"}
+  ]
+}

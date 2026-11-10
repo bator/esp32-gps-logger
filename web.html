@@ -424,9 +424,14 @@ function evNew() {                      // the aggregate of a diag log read so f
     lk: null, lt: null, tu: null, drops: 0, run: 0, lng: 0, bad: 0, okn: 0, up: 0, dn: 0, eps: []};
 }
 // UTC "20261102T091639Z" -> ms, or null
+// a compact UTC time -> ms, or null: no real time in 2020-2099 either (as the
+// logger's gps_clock.ymd_ok; Date.UTC rolls a month 13 or an hour 25 over)
 function evUtc(u) {
   var m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/.exec(u);
-  return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+  if (!m || m[1] < 2020 || m[1] > 2099) return null;
+  var t = Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]), d = new Date(t);
+  return d.getUTCMonth() === m[2] - 1 && d.getUTCDate() === +m[3] && d.getUTCHours() === +m[4]
+    && d.getUTCMinutes() === +m[5] && d.getUTCSeconds() === +m[6] ? t : null;
 }
 // a reply's text (one char a byte: x-user-defined) -> whole lines, the cut
 // one kept for the next; a line with a non-ASCII byte (an SSID) as UTF-8

@@ -271,6 +271,29 @@ def _snap():
 F_SEQ, F_LAT, F_LON, F_ALT, F_HDOP, F_HDOP_AT, F_STD, F_STD_AT, F_POS_AT, \
     F_TIME, F_DATE, F_VALID, F_EPOCHS = range(13)
 
+def unsettled(now):
+    """True while the UC6580's first fix is under UC_SETTLE old and the board
+    is slower than UC_SETTLE_KMH: its first minute counts only moving (15 m
+    off at first, 5 m after a minute, measured; standing still that draws a
+    walk). Settled once that minute is over."""
+    if st["settled"]:
+        return False
+    a = st["fix_first"]
+    if a is None:
+        return False
+    # not _age: a second queued before a restart (drain) is older than this
+    # fix_first, and TICKS_OLD would settle it
+    if time.ticks_diff(now, a) >= UC_SETTLE:
+        st["settled"] = True
+        return False
+    return (st.get("speed") or 0) < UC_SETTLE_KMH
+
+def drop_queue():
+    """Forget the queued seconds (no fix: they are stale). A new list only
+    when there is one: this runs every pass without a fix."""
+    if st.get("q"):
+        st["q"] = []
+
 def drain(seen):
     """The published seconds after seq seen, oldest first, as Fixes (tuples in
     _SNAP's order), and the queue emptied. st stays the latest second."""
