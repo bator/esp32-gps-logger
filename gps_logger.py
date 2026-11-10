@@ -801,8 +801,8 @@ def _uc_gsv_skip():
     u = _uc_sv
     if u["until"] is None:
         return False
-    if time.ticks_diff(u["until"], time.ticks_ms()) > 0:
-        return True
+    if 0 < time.ticks_diff(u["until"], time.ticks_ms()) <= GSV_EVERY * 1000:
+        return True                      # (a window from before a wrap is over)
     u["until"] = None
     return False
 
@@ -2490,7 +2490,7 @@ def _upload_wait(now):
         if t is None:
             return 0                     # one is due
         h = time.ticks_diff(t, now)
-        if h <= 0:
+        if not 0 < h <= UP_WAIT_MAX:     # (as _due: a hold from before a wrap is over)
             return 0
         first = h if first is None or h < first else first
     if first is None:
