@@ -7958,9 +7958,9 @@ check("UPL-6: trk2gpx drops times out of range and a point with a field "
 with open(os.path.join(ROOT, "web.html")) as f:
     th_src = f.read()
 th_hex = sorted(set(c.lower() for c in re.findall(r"#[0-9a-fA-F]{6}\b", th_src)))
-check("PAGE-THEME: the carbon palette only (plus the map's navigation "
-      "blue), no navy / cyan / graphite left, the Atlas map unfiltered",
-      len(th_hex) <= 22
+check("PAGE-THEME: the carbon palette only, dark and light (plus the map's "
+      "navigation blue), no navy / cyan / graphite left, the Atlas map unfiltered",
+      len(th_hex) <= 24 and "prefers-color-scheme:light" in th_src
       and not [c for c in th_hex if c in ("#3b82f6",)]
       and not any(c in th_src for c in ("#22d3ee", "#060b16", "#16233d",
                                         "rgba(34,211,238", "#1d2622",
@@ -13285,12 +13285,11 @@ else:
         except ValueError:
             out.append({"error": r.stdout + r.stderr})
     v, v2, v3 = out
-    tm, tm2 = v.get("tm", ""), v2.get("tm", "")
-    tm3, sy3 = v3.get("tm", ""), v3.get("sys", "")
-    check("PAGE: telemetry shows HDOP, a dash without one, and NMEA BAD",
-          "<small>HDOP</small><b>-</b>" in tm3 and "<small>ACC</small>" not in tm3
-          and "<small>HDOP</small>" in tm and "<small>NMEA BAD</small>" in tm3,
-          tm3[:400])
+    sy, sy2, sy3 = v.get("sys", ""), v2.get("sys", ""), v3.get("sys", "")
+    check("PAGE: the GPS receiver row shows HDOP, a dash without one; no "
+          "accuracy tile",
+          "&middot; HDOP -" in sy3 and "&middot; HDOP 0.88" in sy
+          and "ACC" not in sy3, sy3[:400])
     check("PAGE: map ring from HDOP * UERE, coordinates +-that in m",
           v3.get("dom", {}).get("acc") == "36px"
           and v.get("coord", "").endswith("&plusmn;2.2 m"),
@@ -13315,7 +13314,8 @@ else:
                              text=True)
         if time.localtime()[:3] == time.localtime(now_)[:3]:
             break
-    syb = json.loads(rb_.stdout).get("sys", "")
+    rbj = json.loads(rb_.stdout)
+    syb, dlb, upb = rbj.get("sys", ""), rbj.get("dl", ""), rbj.get("up", "")
 
     def _hm(t):
         # (the page puts the month and day before a time from another day)
@@ -13323,75 +13323,71 @@ else:
         same = lt[:3] == time.localtime(now_)[:3]
         return time.strftime("%H:%M" if same else "%m-%d %H:%M", lt)
 
-    boots = ['<tr><td>Running</td><td>2 h 54 min<span class="sx-chip">since '
-             '%s</span></td></tr><tr><td>Last boot</td><td>hard reset</td>'
-             '</tr><tr><td>Previous run</td><td>2 min 30 s, until %s</td>'
-             '</tr>' % (_hm(x), _hm(x - 30))
+    boots = ['<div class=""><small>Running</small><b>2 h 54 min &middot; since '
+             '%s</b></div><div class=""><small>Last boot</small><b>hard reset</b>'
+             '</div><div class=""><small>Previous run</small><b>2 min 30 s, until %s</b>'
+             '</div>' % (_hm(x), _hm(x - 30))
              for x in (now_ - 10492, now_ - 10492 - 60)]
-    fwl = ('<i></i>Firmware <em>%s</em></span><b>up to date</b>'
+    fwl = ('<div class=""><i></i><b>Firmware</b><span>%s &middot; up to date</span></div>'
            % time.strftime("%Y-%m-%d %H:%M", time.localtime(1793548800)))
-    check("PAGE-BOOT: Device shows the uptime with the boot's local time, "
-          "the cause and the previous run up to when; Firmware the build "
-          "date and 'up to date', the commit in the subtitle",
-          any(b_ in syb for b_ in boots) and fwl in syb
-          and "health &middot; 86fb9c8</p>" in syb
-          and json.loads(rb_.stdout).get("unlabeled") == [],
-          syb[syb.find("Firmware"):syb.find("Chip")])
-    check("PAGE: Systems labels every row, no UBX or fix source",
+    check("PAGE-BOOT: the device strip shows the uptime with the boot's local "
+          "time, the cause and the previous run up to when; Firmware the build "
+          "date and 'up to date', the commit in the top bar",
+          any(b_ in dlb for b_ in boots) and fwl in syb
+          and upb.endswith("&middot; FW 86fb9c8")
+          and rbj.get("unlabeled") == [],
+          (dlb[:400], syb[syb.find("Firmware") - 40:]))
+    check("PAGE: the Logger labels every row, no UBX or fix source",
           v3.get("unlabeled") == [] and " ubx" not in sy3
           and "NAV-PVT" not in sy3, sy3[:1500])
-    check("PAGE: telemetry strip - fix, sats, HDOP, uplink, WiFi, NMEA bad",
-          '<div class="ok"><small>FIX</small><b>3D</b></div>' in tm
-          and "<small>SATS</small><b>1<em>/2</em>" in tm
-          and "<small>HDOP</small><b>0.88</b>" in tm
-          and "<small>UPLINK</small><b>120<em>pts</em>" in tm
-          and '<div class="warn"><small>WIFI</small><b><svg class="wi" viewBox="0 0 24 18">'
+    check("PAGE: the Logger rows - fix, sats used/seen, HDOP, waiting points, "
+          "Wi-Fi with its arcs, % and dBm (amber when weak)",
+          '<div class=""><i></i><b>GPS receiver</b><span>' in sy
+          and "&middot; 3D fix &middot; 1/2 sats &middot; HDOP 0.88" in sy
+          and "&middot; 120 waiting" in sy
+          and '<div class="warn"><i></i><b>Wi-Fi</b><span><svg class="wi" viewBox="0 0 24 18">'
               '<circle cx="12" cy="15.5" r="2"/><path class="on" d="M8.5 12.5A5 5 0 0 1 15.5 12.5"/>'
               '<path d="M5.6 9.6A9 9 0 0 1 18.4 9.6"/><path d="M2.8 6.8A13 13 0 0 1 21.2 6.8"/>'
-              '</svg>50<em>%</em><em class="db">-75 dBm</em></b></div>' in tm
-          and "<small>NMEA BAD</small>" in tm, tm[:400])
+              '</svg>&lt;x&gt; &middot; 50 % weak &middot; -75 dBm</span><em>Warn</em></div>' in sy,
+          sy[:1200])
     check("PAGE: no fix amber, WiFi off shows the state, map says NO FIX",
-          '<div class="warn"><small>FIX</small><b>WAITING</b>' in tm2
-          and "<small>WIFI</small><b>OFF</b>" in tm2
+          '<div class="warn"><i></i><b>GPS receiver</b>' in sy2
+          and "<b>Wi-Fi</b><span>off</span>" in sy2
           and v2.get("coord", "").startswith("NO FIX")
           and v.get("coord", "").startswith("47.10000&deg; N  18.40000&deg; E")
-          and "NO SATELLITE LIST" in v2.get("sig", ""), tm2[:400])
+          and "NO SATELLITE LIST" in v2.get("sig", ""), sy2[:600])
     check("PAGE: sky radar - horizon east at x 90, zenith centre, hollow unused",
           '<circle class="g0" cx="90" cy="0" r="3.4"><title>GPS 16 26 dBHz'
           in v.get("dots", "")
           and '<circle class="g3 u" cx="0" cy="0" r="2.4">' in v.get("dots", "")
           and "SBAS 5" not in v.get("dots", "-")
-          and v.get("skyh") == "Sky &middot; 1 locked / 3 tracked",
+          and v.get("skyh") == "Sky <b>1 used / 3</b>",
           v.get("dots", "")[:300])
     # PAGE-SIGNAL: in words, not dB-Hz (Bator: "what is a dB-Hz? in human
-    # language"): an overall grade, satellites in use of those in view,
-    # how many are strong / fair / weak; a bar a satellite, strongest
-    # first, its number under it, a hollow one not in use; zones named
-    # strong (35+), fair (25-34), weak; it replaced the Static test
-    sg = v.get("sig", "")
+    # language"): an overall grade, how many in use are strong / fair /
+    # weak, how many more are in view; a bar each satellite in use,
+    # strongest first (the sky plot shows the rest: A+C, 2026-11-10)
+    sg, sgn = v.get("sig", ""), v.get("sgn", "")
     check("PAGE-SIGNAL: overall grade and counts in words, a bar a "
-          "satellite (strongest first, hollow when not in use), zones named",
-          '<b class="q-fair">Fair<em>overall</em></b>' in sg
-          and "1<em>satellite in use, of 3 in view</em>" in sg
-          and "0 strong &middot; 1 fair &middot; 0 weak" in sg
-          and sg.index('class="sg-b q-fair"') < sg.index('class="sg-b sg-u')
-          and "<span>16</span>" in sg and "dB" not in sg
-          and all("<em>%s</em>" % z in sg for z in ("strong", "fair", "weak")),
-          sg[:400])
-    sy = v.get("sys", "")
-    check("PAGE: Systems - every JSON key shown, escaped; readiness, "
-          "storage, uplink and device sections; a silent GPS link an error",
-          v.get("unlabeled") == [] and "System readiness</span><b>60%</b>" in sy
-          and '<div class="sx-seg bad">' + "<i></i>" * 6 in sy
-          and "Storage module" in sy and "Uplink" in sy and "Device" in sy
+          "satellite in use (the others only counted), no dB-Hz",
+          '<b class="q-fair">Fair overall</b>' in sgn
+          and "0 strong, 1 fair, 0 weak" in sgn
+          and "2 more in view, not in use" in sgn
+          and sg == '<p><span>GPS 16</span><s class="q-fair" style="width:52%"></s></p>'
+          and "dB" not in sg + sgn, (sg[:400], sgn))
+    check("PAGE: Logger - every JSON key labelled, escaped; a row a "
+          "subsystem in its tone, the word only when not nominal, the count "
+          "OK in the heading; the drive the free flash holds as the number; "
+          "a silent GPS link an error",
+          v.get("unlabeled") == [] and re.match(r'<span class="bad">\d/\d OK</span>$', v.get("hok", ""))
+          and "of driving fits in the free flash</em></p>" in sy
           and "&lt;x&gt;" in sy and "<x>" not in sy
-          and "Upload <em>idle" in sy and "GPS receiver <em>" in sy
-          and '<div class="sx-r bad"><span><i></i>GPS link <em>no frame yet'
-              in sy and "<b>Error</b>" in sy
-          and '<div class="sx-r "><span><i></i>Memory <em>IDF 144 KB of 157'
-              in sy,
-          repr(v.get("unlabeled")) + sy[sy.find("Upload <em>") - 300:
-                                         sy.find("Storage module")])
+          and "<b>Upload</b><span>idle" in sy
+          and '<div class="bad"><i></i><b>GPS link</b><span>no frame yet' in sy
+          and "<em>Error</em>" in sy
+          and '<div class=""><i></i><b>Memory</b><span>IDF 144 KB of 157' in sy
+          and "Nominal" not in sy,
+          repr((v.get("unlabeled"), v.get("hok"))) + sy[:1500])
     # PAGE-EV: the Event log aggregates the whole diag log on the board
     # (tests/web_page_test.js feeds a canned 3 h log, Budapest time)
     ev = v.get("ev", {})
@@ -13399,20 +13395,20 @@ else:
     check("PAGE-EV: the harness ran the Event log (no error)",
           "error" not in ev and evw, repr(ev.get("error", ""))[:600])
     check("PAGE-EV: header - the window in local time and its length",
-          evw.get("evs") == "10:00&ndash;12:59 &middot; 2 h 59 min of the "
-                            "diag log", repr(evw.get("evs")))
+          evw.get("evs") == "10:00&ndash;12:59 &middot; 2 h 59 min",
+          repr(evw.get("evs")))
     evk = evw.get("evk", "")
-    check("PAGE-EV: KPI tiles - 3D fix % of the status lines (2 after a "
+    check("PAGE-EV: the summary - 3D fix % of the status lines (2 after a "
           "boot without utc counted), no fix as a duration, boots with "
           "power-on, updates once each with the failures",
           ev.get("lines") == 166
-          and '<div class="t-ok"><small>3D fix</small><b>81<em>% of minutes'
-              '</em></b></div>' in evk
+          and '<div class="t-ok"><small>3D fix</small><b>81 %</b><em>of minutes'
+              '</em></div>' in evk
           and '<div class="t-warn"><small>No fix / no data</small><b>32<em>'
               'min</em></b></div>' in evk
-          and "<small>Boots</small><b>3<em>1 power-on</em></b>" in evk
-          and '<div class="t-warn"><small>Updates</small><b>2<em>1 failed'
-              '</em></b>' in evk, evk)
+          and "<small>Boots</small><b>3</b><em>1 power-on</em>" in evk
+          and '<div class="t-warn"><small>Updates</small><b>2</b><em>1 failed'
+              '</em></div>' in evk, evk)
     ev_n = {"crash": 1, "bug": 2, "gloop": 4, "gsil": 2, "track": 1,
             "full": 1, "upl": 3, "ota": 2, "otax": 1, "reboot": 1,
             "tback": 1, "wfail": 4, "wlost": 1, "low": 1, "setup": 5,
@@ -13461,48 +13457,43 @@ else:
           and ev.get("last", {}).get("boot") == "12:59"
           and ev.get("last", {}).get("ota") == "12:11",
           repr((sp, ev.get("last"))))
-    # PAGE-TELE: the satellites curve was there twice (the Signal panel);
-    # in its place GPS telemetry, after the "Orbital Systems" shot Bator
-    # picked: position accuracy as a dot matrix (a column a time slice,
-    # taller = smaller HDOP, red = no fix), the receiver link (sentences a
-    # second from each status line's NMEA count: a minute where it stood
-    # still is a drop-out) and an anomaly card while there was one
+    # PAGE-TELE: position accuracy as a dot matrix (the "Orbital Systems"
+    # matrix Bator picked, kept in A+C): a column a time slice, taller =
+    # smaller HDOP, red = no fix; the typical accuracy in metres over it;
+    # the receiver's silent minutes and broken sentences in the summary
     evt = evw.get("evt", "")
-    check("PAGE-TELE: accuracy share and matrix, link up time, broken "
-          "sentences, one 9 min drop-out in an anomaly card",
-          "GPS telemetry" in evt and evt.count('<i class="gt-c') == 36
-          and "<b>56%</b>" in evt and "typical 1.2" in evt
-          and '<b class="gt-n">2<em>h</em> 33<em>min</em></b><small>the receiver sent data</small>' in evt
-          and '<b class="gt-n a">9<em>min</em></b><small>it sent nothing (1 drop-out)</small>' in evt
-          and "<b>5</b> broken messages &middot; 1 in 18\u202f361" in evt
-          and "of minutes" not in evt
-          and 'class="gt-chip a">Anomaly' in evt and "evc" not in evw,
-          evt[:900])
+    _dm = evt[evt.find('<div class="dm">'):evt.find('<div class="lk">')]
+    _lk = evt[evt.find('<div class="lk">'):evt.find('<div class="mk">')]
+    check("PAGE-TELE: accuracy matrix and its typical value, the silent "
+          "minutes in 1 drop-out, broken sentences",
+          _dm.count("<i") == 36 and _dm.count('<i class="x">') >= 1
+          and '<p class="big">&plusmn;3 m<em>typical &middot; 56 % within &plusmn;5 m</em></p>' in evk
+          and "<small>Receiver silent</small><b>9<em>min</em></b><em>1 drop-out</em>" in evk
+          and "<small>Broken NMEA</small><b>5</b><em>1 in 18\u202f361</em>" in evk
+          and "<svg" not in evt,
+          (evk[:600], evt[:600]))
     # (Bator: "with no scale, how do I know when it happened?") the link
     # is a strip under the accuracy matrix on its time axis, a cell a
-    # column (red where no data came), and the anomaly card lists each
-    # drop-out with its local time and length, newest first
-    check("PAGE-TELE: the link strip shares the matrix's columns and time "
-          "axis, a marker with the start time under each drop-out; the card "
-          "heads its list with their total",
-          evt.count('<i class="gt-k') == 36
-          and evt.count('<i class="gt-k rd"') >= 1
-          and "<span>11:00&ndash;11:09</span><b>9 min</b>" in evt
-          and "<h4><i>!</i>9 min without data, in 1 drop-out:</h4>" in evt
-          and '<span class="gt-mk" style="left:' in evt
-          and '"><i></i>11:00</span>' in evt
-          and "<svg" not in evt, evt[-1500:])
+    # column (red where no data came), a mark with its start time under each
+    # drop-out, and the drop-outs head the list with their times and length
     evg = evw.get("evg", "")
-    check("PAGE-EV: the grouped table - a header row, a row a kind with its "
-          "icon chip, name, count, detail, sparkline and last seen",
-          evg.startswith('<div class="ev-grp ev-hd">')
-          and evg.count('<div class="ev-grp">') == 21
-          and '<div class="ev-grp"><span class="ev-ic t-bad"><svg' in evg
-          and '<span class="ev-nm t-bad">GPS reset loop</span><span '
-              'class="ev-n">4</span>' in evg
-          and '<span class="ev-lt">10:46</span>' in evg, evg[:900])
+    check("PAGE-TELE: the link strip shares the matrix's columns and time "
+          "axis, a mark with the start time under each drop-out; the "
+          "drop-out heads the list with its start, end and length",
+          _lk.count("<i") == 36 and _lk.count('class="rd"') >= 1
+          and '<div class="mk"><span style="left:' in evt
+          and '"><i></i>11:00</span>' in evt
+          and evg.startswith('<div class="er t-warn"><time>11:00</time><span>Receiver silent '
+                             '<em>until 11:09</em></span><i class="sk"></i><b>9 min</b></div>'),
+          (evt[-900:], evg[:300]))
+    check("PAGE-EV: the list - a row a kind with its name, detail, "
+          "per-hour sparkline, count and last seen",
+          evg.count('<div class="er') == 22
+          and re.search(r'<div class="er t-bad"><time>10:46</time><span>GPS reset loop <em>'
+                        r'[^<]*(<em>[^<]*</em>)?</em></span><i class="sk">.*?</i><b>4</b></div>', evg)
+          is not None, evg[:900])
     check("PAGE-EV: empty states - reading, and an empty log",
-          "reading the diag log" in ev.get("empty", {}).get("evs", "")
+          "reading" in ev.get("empty", {}).get("evs", "")
           and "THE DIAGNOSTIC LOG IS EMPTY" in ev.get("none", {}).get(
               "evg", ""), repr((ev.get("empty"), ev.get("none")))[:400])
     ln = ev.get("lens") or [0, 0, 0]
@@ -13518,7 +13509,7 @@ else:
           and ev.get("load1") == [False, True, 166, 0]
           and ev.get("load2") == [2, [ln[1] + ln[2], ln[0]]]
           and ev.get("rot") == [168, 2, True, False]
-          and "81<em>% of minutes" in ev.get("kpi1", "")
+          and "81 %</b><em>of minutes" in ev.get("kpi1", "")
           and "GPS reset loop" in ev.get("grp1", ""),
           repr({k: ev.get(k) for k in ("urls", "load1", "load2", "rot",
                                        "lens", "mime")}))
@@ -13665,11 +13656,10 @@ else:
                           [1, 64, "warn"], [1, 40, "warn"], [0, 38, "bad"],
                           [0, 0, "bad"], [0, 0, "bad"], None],
           repr(v.get("wq")))
-    check("PAGE-WIFI: Uplink cells - the network, the signal in % with a "
+    check("PAGE-WIFI: the Wi-Fi row - the network, the signal in % with a "
           "word by its tone and the dBm",
-          "<small>Network</small><b class=\"\">&lt;x&gt;" in sy
-          and '<small>Signal &middot; -75 dBm</small><b class="warn">50% weak'
-              in sy, sy[sy.find("Network"):sy.find("Last upload")])
+          "</svg>&lt;x&gt; &middot; 50 % weak &middot; -75 dBm</span>" in sy,
+          sy[sy.find("Wi-Fi"):sy.find("Wi-Fi") + 600])
     # PAGE-NULL: south/west coordinates, Python None in diag lines, quotes
     check("PAGE-NULL: S/W coordinates as absolute values",
           v.get("coordSW", "").startswith("33.85678&deg; S  151.21530&deg; W")
@@ -13677,7 +13667,7 @@ else:
           repr((v.get("coordSW"), v.get("coordNE"))))
     check("PAGE-NULL: an empty status.json shows - (no None/null/NaN)",
           "heap -/- KB" in v.get("nullSys", "")
-          and '<small>Network</small><b class="">-</b>' in v.get("nullSys", "")
+          and "<b>Wi-Fi</b><span>-</span>" in v.get("nullSys", "")
           and "GPS link" not in v.get("nullSys", "")
           and not any(w in v.get("nullSys", "") for w in (
               "None", "null", "NaN", "undefined")),
@@ -13740,22 +13730,17 @@ else:
           p2.count('<circle class="s"') == 1 and p2.count('<circle class="e"') == 1,
           repr(p2[-160:]))
     check("PAGE-HIST: zoom fitted to the track (15-17), layer moves with the "
-          "tiles, TODAY km in the HUD",
-          15 <= (hd.get("zoom") or 0) <= 16 and hd.get("trkT")
-          and hd.get("day") == "<em>TODAY </em>%.2f KM" % hd.get("km", -1)
+          "tiles, the day's km",
+          15 <= (hd.get("zoom") or 0) <= 17 and hd.get("trkT")
           and 0.28 < hd.get("km", 0) < 0.32, repr((hd.get("zoom"),
-                                                    hd.get("day"))))
-    check("PAGE-HIST: no running hist.km (nothing reads it: the HUD and "
-          "the timeline sum the trips)", hd.get("kmField") is False,
+                                                    hd.get("km"))))
+    check("PAGE-HIST: no running hist.km (nothing reads it: the Day's "
+          "figures and the timeline sum the trips)", hd.get("kmField") is False,
           repr(hd.get("kmField")))
-    check("PAGE-HIST: a 20 km drive fits whole between the header and the "
-          "telemetry strip (below zoom 13); without a fix the track's centre",
+    check("PAGE-HIST: a 20 km drive fits whole in the map's band (below "
+          "zoom 13); without a fix the track's centre",
           v.get("feat", {}).get("fitLive") == [[True, True, True]] * 2,
           repr(v.get("feat", {}).get("fitLive")))
-    check("PAGE-MAP: the now card on the band's half away from the dot; on "
-          "a phone always at the top, the track fitted under it",
-          v.get("feat", {}).get("cardSide") == ["now top", "now", "now top", "50px", 98],
-          repr(v.get("feat", {}).get("cardSide")))
     nw = v.get("feat", {}).get("now", {})
     check("PAGE-NOW: Photon's answer read as street and number (a place's "
           "name first), district and city under it; nothing named: none",
@@ -13777,21 +13762,23 @@ else:
           nw.get("headN") == 0 and nw.get("headE") == 90
           and nw.get("headNone") is None, repr(nw))
     cd = nw.get("card", {})
-    check("PAGE-NOW: the card: address, district and city, HERE FOR / SPEED "
-          "/ ACCURACY / LAST FIX, the coordinates under them (a phone: one "
-          "line); without an address the coordinates as its title",
-          cd.get("nst") == "Fűtőház utca 16" and cd.get("nsub") == "Víziváros, Székesfehérvár"
-          and "HERE FOR<b>2 h 00 min</b>" in cd.get("nr", "")
-          and "SPEED<b>0 km/h</b>" in cd.get("nr", "")
-          and "ACCURACY<b>&plusmn;4 m</b>" in cd.get("nr", "")
-          and 'class="fa">LAST FIX<b>2 s</b>' in cd.get("nr", "")
+    _bare = nw.get("bare", {})
+    check("PAGE-NOW: the now block: standing or moving with the fix, the "
+          "address, district and city, here for / speed / accuracy / last "
+          "fix, the coordinates under them; without an address the "
+          "coordinates as its title",
+          cd.get("st", "").startswith('<span class="bad"><i></i>Standing still</span>')
+          and _bare.get("st", "").startswith('<span class="bad"><i></i>Position</span>')
+          and cd.get("nst") == "Fűtőház utca 16" and cd.get("nsub") == "Víziváros, Székesfehérvár"
+          and "<div><b>2 h 00 min</b><span>here for</span></div>" in cd.get("nr", "")
+          and "<div><b>0 km/h</b><span>speed</span></div>" in cd.get("nr", "")
+          and "<div><b>&plusmn;4 m</b><span>accuracy</span></div>" in cd.get("nr", "")
+          and '<div class="fa"><b>2 s</b><span>last fix</span></div>' in cd.get("nr", "")
           and cd.get("ncoord") == "47.18000&deg; N"
-          and nw.get("bare", {}).get("nst") == "47.18000&deg; N"
-          and "HERE FOR" not in nw.get("bare", {}).get("nr", "")
-          and "SPEED<b>&ndash;</b>" in nw.get("bare", {}).get("nr", "")
-          and "&plusmn;5 m" in nw.get("bare", {}).get("nr", "")
-          and cd.get("nm") == "here 2 h 00 min &middot; 0 km/h &middot; &plusmn;4 m"
-          and nw.get("bare", {}).get("nm") == "&plusmn;5 m", repr(nw))
+          and _bare.get("nst") == "47.18000&deg; N" and _bare.get("ncoord") == ""
+          and "here for" not in _bare.get("nr", "")
+          and "<b>&ndash;</b><span>speed</span>" in _bare.get("nr", "")
+          and "&plusmn;5 m" in _bare.get("nr", ""), repr(nw))
     check("PAGE-NOW: the address from Atlas' Photon; asked again only after "
           "25 m and 20 s, one at a time",
           (nw.get("url") or "").startswith("https://atlas.crusand.org/api/v1/photon/reverse?lat=47.18000&lon=18.42000")
@@ -13799,9 +13786,9 @@ else:
           repr(nw))
     check("PAGE-NOW: moving, a cone the way the track goes",
           nw.get("cone") == ["cone on", "rotate(0deg)"], repr(nw.get("cone")))
-    check("PAGE-MAP: the free band is measured (header bottom, strip top), "
-          "defaults without a layout",
-          v.get("feat", {}).get("band") == [[44, 204], [70, 250]],
+    check("PAGE-MAP: the free band is the map 16 px in from its top and "
+          "bottom, whatever lies around it",
+          v.get("feat", {}).get("band") == [[16, 284], [16, 284]],
           repr(v.get("feat", {}).get("band")))
     ft = v.get("feat", {})
     check("PAGE-LINK: GPS link tone by seconds since the last frame, B/s "
@@ -13814,29 +13801,24 @@ else:
           and ft.get("linkDead") == {"tone": "bad", "rate": None,
                                      "silent": 95, "junk": False}
           and ft.get("linkOld") is None, repr(ft)[:600])
-    check("PAGE-LINK: red banner only while silent; Systems GPS LINK line",
+    check("PAGE-LINK: red banner only while silent; the Logger's GPS link row",
           ft.get("glOk") == "" and ft.get("glDead", "").startswith(
               "GPS SILENT &middot; 42 S<em>nothing from the receiver")
           and ft.get("alert", "").startswith("GPS SILENT &middot; 1 MIN 00 S")
-          and '<div class="sx-r "><span><i></i>GPS link <em>400 B/s &middot; '
+          and '<div class=""><i></i><b>GPS link</b><span>400 B/s &middot; '
               'frame 0 s ago' in ft.get("sysOk", "")
-          and "48.8 KB read</em>" in ft.get("sysOk", "")
-          and '<div class="sx-r bad"><span><i></i>GPS link <em>frame 42 s '
+          and "48.8 KB read &middot; 0.00 % broken</span>" in ft.get("sysOk", "")
+          and '<div class="bad"><i></i><b>GPS link</b><span>frame 42 s '
               'ago' in ft.get("sysDead", "")
           and "GPS link" not in ft.get("sysNone", "-"),
           repr((ft.get("glDead"), ft.get("sysOk", "")[-400:])))
-    check("PAGE-UPLOAD: LAST UPLOAD line; amber (and the strip) when points "
-          "wait over 30 min",
-          '<small>Last upload</small><b class="">30 s ago</b>'
-          in ft.get("sysOk", "") and "<small>Waiting</small><b>0<em>pts"
+    check("PAGE-UPLOAD: the Upload row with the last upload; amber when "
+          "points wait over 30 min",
+          '<div class=""><i></i><b>Upload</b><span>- &middot; last 30 s ago</span></div>'
           in ft.get("sysOk", "")
-          and '<small>Last upload</small><b class="warn">1 h 06 min ago</b>'
-              in ft.get("sysDead", "")
-          and '<small>Waiting</small><b class="warn">50<em>pts'
-              in ft.get("sysDead", "")
-          and '<div class="warn"><small>UPLINK</small><b>50<em>pts' in
-              ft.get("tmDead", "")
-          and "<small>Last upload</small><b class=\"\">-</b>" in ft.get("sysNone", "-"),
+          and '<div class="warn"><i></i><b>Upload</b><span>- &middot; 50 waiting &middot; '
+              'last 1 h 06 min ago</span><em>Warn</em></div>' in ft.get("sysDead", "")
+          and "<b>Upload</b><span>- &middot; last -</span>" in ft.get("sysNone", "-"),
           repr(ft.get("sysDead", "")[-500:]))
     pd = ft.get("pastDays") or ["?"]
 
@@ -13859,17 +13841,18 @@ else:
                                           ft.get("today")])
           and "20261030" in pd and len(pd) in (1, 2)
           and ft.get("pastEnd") == 86400000
-          and ft.get("nav0") == ["TODAY", False, True]
+          and (ft.get("nav0") or [""])[0].startswith('<button class="on" onclick="pick(\'\')">Today</button>')
+          and '<button onclick="pick(\'20261030\')">Fri 30</button>' in (ft.get("nav0") or [""])[0]
+          and (ft.get("nav0") or [0])[1:] == [False, True]
           and ft.get("pickUrls") == ["/hist?d=%s&o=0" % pd[0]]
           and ft.get("pickPts") == 5 and ft.get("pickDone") is True
           and ft.get("pickMap") == "map nofix" and ft.get("pickTrk") is True
-          and ft.get("pickDay") == "<em>2026-10-30 </em>4.42 KM"
-          and ft.get("nav1") == ["2026-10-30", False, False]
+          and '<button class="on" onclick="pick(\'20261030\')">Fri 30</button>' in (ft.get("nav1") or [""])[0]
+          and (ft.get("nav1") or [0])[1:] == [False, False]
           and ft.get("backToday") is True and ft.get("pts") == [
               [3600000, 120.5], [3601000, 121], [3602000, None]],
           repr({k: ft.get(k) for k in ("days", "pastDays", "pickUrls",
-                                       "pickPts", "pickDay", "nav0",
-                                       "nav1")}))
+                                       "pickPts", "nav0", "nav1")}))
     check("PAGE-HIST: a track uploaded after a newer one is drawn in time "
           "order; no km from the jump back",
           ft.get("late") == [[3600000, 3601000, 7200000, 7201000], 221],
@@ -13887,8 +13870,8 @@ else:
               'km</b> &middot; 10 min &middot; 3 km/h</span></div><div '
               'class="tr end"><time>11:10</time><i></i><span></span></div>')
           and ft.get("timelineNone") == [
-              '<span class="hint">NO TRIP THIS DAY</span>',
-              '<span class="hint">NO TRIP YET TODAY</span>'],
+              '<p class="hint">No trip this day. The other days are above.</p>',
+              '<p class="hint">No trip yet today. The other days are above.</p>'],
           repr((ft.get("trips"), ft.get("timeline"))))
     check("PAGE-PLACE-NAME: a station by its name, else city and street (no number, no shop's "
           "name), a road's own name, the district; a name once; nothing named: empty",
@@ -14024,7 +14007,7 @@ else:
           and gx.endswith("</trkseg>\n</trk>\n</gpx>\n"), gx[:400])
     check("PAGE: satellite table and map tile maths",
           "<td>SBAS 5</td><td>-</td><td>-</td><td>-</td>" in v.get("svt", "")
-          and v.get("svh") == "Satellite table &middot; 3"
+          and v.get("svh") == "All satellites &middot; 3"
           and v.get("tile", {}).get("x") == 72235
           and v.get("tile", {}).get("y") == 46048
           and abs(v.get("tile", {}).get("mpp", 0) - 0.8130) < 0.0001, repr(v.get("tile")))
@@ -14044,14 +14027,14 @@ _pd_gone = [w_ for w_ in (".grid", 'class="grid"', ".r .u", ".sx-big.bad", ".gt-
                           "var OTHER", "function tile(", "Math.cos(pts[i][1]")
             if w_ in page_src]
 _pd_one = {w_: page_src.count(w_) for w_ in (
-    ".gt-ax{", "Math.log(Math.tan(r)", "<path d=\"M12 7v5l3 2\"/>", "Math.sqrt(Math.pow(",
+    ".ax{", "Math.log(Math.tan(r)", "function lgRow(", "Math.sqrt(Math.pow(",
     "String(d.position || \"\").split", "d.hdop * UERE", "<em>min</em>\" : Math.floor(")}
 _pd_null = re.findall(r"(\w[\w.]*) [!=]== null (?:\|\||&&) \1 [!=]== undefined", page_src)
 check("PAGE-DEAD: every CSS class is in the markup or the script; the dead rules and the "
       "test-only lists gone; one copy each of the Mercator, metres, the position and the "
       "accuracy; == null, not both tests; the classes the tests read still drawn",
       not _pd_dead and not _pd_gone and set(_pd_one.values()) == {1} and not _pd_null
-      and all(w_ in page_src for w_ in ('"now top"', '"st" : "end"', '"fa"')),
+      and all(w_ in page_src for w_ in ('"st" : "end"', '"fa"')),
       repr((_pd_dead, _pd_gone, _pd_one, _pd_null)))
 # WEB-MIN: tools/web_min.py strips the page at build time (a // in a string or
 # a regex is no comment: the page has both); web.html keeps its comments
@@ -14122,11 +14105,11 @@ if os.path.exists(_wm_gz):
         _wm_data = f.read()
 _wm_w = getattr(gl, "WEB_GZ_WBITS", 12)
 check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
-      "mtime, not over 29 KB (35.7 before); the CSS and the markup only lose comments and "
+      "mtime, not over 25 KB (35.7, then 28.5 before A+C); the CSS and the markup only lose comments and "
       "white space; stripping again changes nothing; web.html itself keeps its comments",
       web_min and _wm_r.returncode == 0
       and _gunzip_w(_wm_data, _wm_w) == _wm_page.encode("utf-8") and _wm_data[4:8] == b"\0\0\0\0"
-      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 29000
+      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25000
       and web_min.minify(_wm_page) == _wm_page and "<!--" not in _wm_page
       and "/*" not in _wm_page[_wm_page.index("<style>"):_wm_page.index("</style>")]
       and _wm_css(_wm_page) == _wm_css(page_src) and _wm_html(_wm_page) == _wm_html(page_src)
@@ -14215,9 +14198,9 @@ check("PAGE: polls status.json at the board's refresh_s, no reload; Atlas "
       and 'name="viewport"' in page_src)
 
 # PAGE-LAYOUT: the page in headless Chrome at phone and tablet width, a
-# status.json with long values, offline with a day's km (the HUD's longest
-# state): no horizontal scrolling, the HUD items inside the screen and not
-# over each other. Runs wherever google-chrome or chromium is on the PATH, else
+# status.json with long values, offline (the top bar's longest state): no
+# horizontal scrolling, the top bar's items inside the screen and not over
+# each other. Runs wherever google-chrome or chromium is on the PATH, else
 # SKIP; the CI workflow installs neither, so there it runs only if the runner
 # image has one.
 chrome = shutil.which("google-chrome") or shutil.which("chromium")
@@ -14246,13 +14229,12 @@ else:
         "MyVeryLongHomeNetworkName_5G", rssi=-71, pulses=3, fw="d2c6db9",
         fw_build=1793520000, ota="current", ubx="900 / 0", flash_kb=2600,
         days=["20261030", "20261031"])
-    # the probe: offline 12 min with a day's km, as stale() and trackPaint()
-    # write them, then the page's and the HUD items' boxes
+    # the probe: offline 12 min, as stale() writes it, then the page's and
+    # the top bar items' boxes
     lay_probe = (
         '<script>setTimeout(function () {'
         'last = Date.now() - 725000; stale();'
-        'document.getElementById("day").innerHTML = "<em>TODAY </em>23.45 KM";'
-        'var r = [], hs = document.querySelector(".hud").children;'
+        'var r = [], hs = document.querySelector(".bar").children;'
         'for (var i = 0; i < hs.length; i++) { var b = hs[i].getBoundingClientRect();'
         '  if (b.width) r.push([b.left, b.right, b.top, b.bottom]); }'
         'var o = document.createElement("pre"); o.id = "probe";'
@@ -14319,7 +14301,8 @@ else:
     def _lay_ok(m):
         h = m.get("hud", [])
         # (one line each: a squeezed item breaks its words over lines)
-        return (m.get("iw") and m.get("sw", 1e9) <= m["iw"] and len(h) >= 3
+        # (the name and LIVE / OFFLINE at least; offline a phone drops "up")
+        return (m.get("iw") and m.get("sw", 1e9) <= m["iw"] and len(h) >= 2
                 and all(b[1] <= m["iw"] + 0.5 and b[3] - b[2] <= 24
                         for b in h)
                 and not any(a[0] < b[1] - 0.5 and b[0] < a[1] - 0.5
@@ -14330,7 +14313,7 @@ else:
           "(scrollWidth <= innerWidth), long Systems values included",
           all(lay.get(w, {}).get("iw") and lay[w].get("sw", 1e9)
               <= lay[w]["iw"] for w in (375, 800)), repr(lay)[:600])
-    check("PAGE-LAYOUT: offline with a day's km the HUD fits the screen, "
+    check("PAGE-LAYOUT: offline the top bar fits the screen, "
           "each item on one line, none over another (375 and 800 px)",
           all(_lay_ok(lay.get(w, {})) for w in (375, 800)), repr(lay)[:600])
 

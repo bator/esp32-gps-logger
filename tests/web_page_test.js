@@ -70,7 +70,7 @@ dom.transform = p.doc.getElementById("tiles").style.transform;
 dom.acc = p.doc.getElementById("acc").style.width;
 dom.live = p.doc.getElementById("live").innerHTML;
 dom.body = p.doc.body.className;
-dom.painted = p.doc.getElementById("tm").innerHTML === v.tm && p.doc.getElementById("sys").innerHTML === v.sys;
+dom.painted = p.doc.getElementById("dl").innerHTML === v.dl && p.doc.getElementById("sys").innerHTML === v.sys;
 dom.timer = p.timers[0];
 p.map.offsetWidth = 400;
 p.c.window.onresize();
@@ -164,7 +164,6 @@ hd.pts = p.c.hist.pts.length;
 hd.km = p.c.tripsOf(p.c.hist.pts).reduce((a, t) => a + t.km, 0);
 hd.kmField = "km" in p.c.hist;          // (the HUD sums the trips)
 hd.path = p.doc.getElementById("trk").innerHTML;
-hd.day = p.doc.getElementById("day").innerHTML;
 hd.zoom = +(p.doc.getElementById("tiles").innerHTML.match(/tiles\/geoapify\/(\d+)\//) || [])[1];
 hd.trkT = p.doc.getElementById("trk").style.transform === p.doc.getElementById("tiles").style.transform;
 // a full reply (HIST_REPLY bytes) is asked again from its end
@@ -194,7 +193,6 @@ ft.glOk = vOk.gl;
 ft.glDead = vDead.gl;
 ft.sysOk = vOk.sys;
 ft.sysDead = vDead.sys;
-ft.tmDead = vDead.tm;
 ft.sysNone = c0.view({uptime: 10}).sys;
 ft.days = c0.dayList(["20261030", "bad", "20261029", c0.utcDay(Date.now()), "20261030"]);
 ft.today = c0.utcDay(Date.now());
@@ -215,9 +213,9 @@ const dl = (ms, la) => la + ",18.0,100.0,2,1.0," + iso(d0 + ms) + "\n";
 c0.histParse(c0.hist.days[0], dl(7200000, "47.0") + dl(7201000, "47.001"));
 c0.histParse(c0.hist.days[0], dl(3600000, "47.01") + dl(3601000, "47.011"));
 ft.late = [c0.hist.pts.map((q) => q[0] - d0), Math.round(c0.tripsOf(c0.hist.pts).reduce((a, t) => a + t.km, 0) * 1000)];
-// a 20 km drive, the live position at its end: the whole track between
-// the header and the telemetry strip (zoom 13 at least cut both ends off
-// under them); without a fix, a past day or a picked trip the track decides
+// a 20 km drive, the live position at its end: the whole track inside the
+// map's band (zoom 13 at least cut both ends off); without a fix, a past
+// day or a picked trip the track decides
 ft.fitLive = (() => {
   c0.hist = c0.histNew(null);
   for (let k = 0; k < 1200; k++) c0.hist.pts.push([Date.now() - (1200 - k) * 1000, 47.18 + k * 0.00002, 18.30 + k * 0.00022, 120]);
@@ -227,35 +225,13 @@ ft.fitLive = (() => {
     const ends = [c0.hist.pts[0], c0.hist.pts[1199]], lat = ends[1][1], lon = ends[1][2];
     const fv = c0.fitView(lat, lon, el, true, b);
     const inBand = (q) => {
-      const m = c0.wpx(q[1], q[2], fv.z), x = w / 2 + (m[0] - fv.X) * fv.sc, y = h * .42 + (m[1] - fv.Y) * fv.sc;
+      const m = c0.wpx(q[1], q[2], fv.z), x = w / 2 + (m[0] - fv.X) * fv.sc, y = h * .5 + (m[1] - fv.Y) * fv.sc;
       return x >= 16 && x <= w - 16 && y >= b.top + 12 && y <= b.bot - 12;
     };
     const nf = c0.fitView(lat, lon, el, false, b);
     out.push([fv.z + Math.log2(fv.sc) < 13, inBand(ends[0]) && inBand(ends[1]),
       Math.abs(nf.X - c0.wpx(47.18, 18.30 + 1199 * 0.00022 / 2, nf.z)[0]) < 1]);
   }
-  return out;
-})();
-// the "now" card on the band's half away from the dot (the dot low:
-// the card at the top)
-ft.cardSide = (() => {
-  const q = page(1100), m = q.doc.getElementById("map");
-  m.offsetHeight = 300;
-  q.c.hist = q.c.histNew(null);
-  q.c.hist.pts.push([Date.now() - 60000, 47.20, 18.42, 100], [Date.now(), 47.18, 18.42, 100]);
-  q.c.placeMap({position: "47.18, 18.42"});
-  const low = q.doc.getElementById("now").className;
-  q.c.hist.pts.reverse();
-  q.c.placeMap({position: "47.20, 18.42"});
-  const out = [low, q.doc.getElementById("now").className];
-  // a phone: always at the top, the band starting under it
-  const r = page(375), rm = r.doc.getElementById("map"), card = r.doc.getElementById("now");
-  rm.offsetHeight = 340; card.offsetHeight = 46;
-  r.c.hist = r.c.histNew(null);
-  r.c.hist.pts.push([Date.now() - 60000, 47.20, 18.42, 100], [Date.now(), 47.18, 18.42, 100]);
-  r.c.placeMap({position: "47.20, 18.42"});
-  rm.className = "map";
-  out.push(card.className, card.style.top, r.c.mapBand(rm).top);
   return out;
 })();
 // the card: Photon's answer, how long here, speed, heading, the address
@@ -317,8 +293,8 @@ ft.now = (() => {
   out.cone = [q.doc.getElementById("cone").className, q.doc.getElementById("cone").style.transform];
   return out;
 })();
-// the bands measured on the page: a two-line header on a phone (70 px)
-// and an alert pushing the strip down; without a layout the defaults
+// the band: the map itself 16 px in from the top and the bottom, whatever
+// lies around it (nothing lies over it since A+C)
 ft.band = (() => {
   const c = page(375), rect = (t, b) => () => ({top: t, bottom: b});
   const m = c.doc.getElementById("map"), hud = c.doc.getElementById("hud"), wr = c.doc.getElementById("wrap");
@@ -507,7 +483,7 @@ ft.numEsc = (() => {
 // RT2-9: a firmware with an fw but no ota in the JSON shows a dash, not "ota undefined"
 ft.otaMissing = (() => {
   const w = c0.view({fw: "abc1234", uptime: 5});
-  return [w.sys.indexOf("undefined") < 0, w.sys.indexOf("Firmware <em>") >= 0];
+  return [w.sys.indexOf("undefined") < 0, w.sys.indexOf("<b>Firmware</b><span>") >= 0];
 })();
 // RT2-9: "tft light N" is a Display backlight group, not Other
 ft.dispKind = (() => {
@@ -527,7 +503,7 @@ p = page(1600);
 p.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null, days: ["20261029", "20261030"], uptime: 60,
   rx_bytes: 0, good_age_s: null, rx_age_s: null});
 p.xhrs[0].onload();
-ft.nav0 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev").disabled,
+ft.nav0 = [p.doc.getElementById("days").innerHTML, p.doc.getElementById("dprev").disabled,
   p.doc.getElementById("dnext").disabled];
 ft.alert = p.doc.getElementById("gl").innerHTML;
 answer(p, null, "");
@@ -544,10 +520,9 @@ ft.pickPts = p.c.hist.pts.length;
 ft.pickDone = p.c.hist.done && !p.c.histDue();
 ft.pickMap = p.map.className;
 ft.pickTrk = p.doc.getElementById("trk").innerHTML.indexOf("<path") >= 0;
-ft.pickDay = p.doc.getElementById("day").innerHTML;
 ft.pickKpi = p.doc.getElementById("tkpi").innerHTML;
 ft.pickLine = p.doc.getElementById("tline").innerHTML;
-ft.nav1 = [p.doc.getElementById("dname").innerHTML, p.doc.getElementById("dprev").disabled,
+ft.nav1 = [p.doc.getElementById("days").innerHTML, p.doc.getElementById("dprev").disabled,
   p.doc.getElementById("dnext").disabled];
 p.c.hlTrip(0);
 ft.hlMap = (p.doc.getElementById("trk").innerHTML.match(/<path (class="hl" )?d=/g) || []).length;
@@ -740,7 +715,7 @@ ft.wr7 = (() => {
   };
   q.xhrs[0].responseText = text;
   q.xhrs[0].onload();
-  const ids = ["tm", "sys", "skyh", "sig", "svt", "coord", "tkpi", "tline"];
+  const ids = ["dl", "sys", "skyh", "sig", "svt", "coord", "tkpi", "tline"];
   const w1 = ids.map((id) => els[id] ? els[id].writes : 0);
   q.c.tick();
   const x2 = st(q)[1];
