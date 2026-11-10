@@ -666,6 +666,8 @@ diag_dir = tempfile.mkdtemp(prefix="diaglog-")
 def _reload_logger():
     if "gps_clock" in sys.modules:       # (its uptime counts from this reload)
         importlib.reload(sys.modules["gps_clock"])
+    if "gps_receiver" in sys.modules:    # (a fresh st and UART, like the logger)
+        importlib.reload(sys.modules["gps_receiver"])
     if "gps_logger" in sys.modules:
         m = importlib.reload(sys.modules["gps_logger"])
     else:
@@ -686,6 +688,11 @@ def _reload_logger():
 
 _install_mocks()
 import gps_clock as _gck               # (its Stamp state: _gck._up)
+
+
+def _own(m, k):
+    """The module that holds name k for logger m: the logger or its receiver."""
+    return m if k in m.__dict__ else m._rcv
 
 
 def _ota_at(t):
@@ -1192,7 +1199,7 @@ try:
     # a fix lost while the flash is full is noted then, not when space
     # returns: NEW_FILE_GAP counts from the loss
     gl.free = lambda: 100
-    gl.reset()                               # (no fix)
+    gl._rcv.reset()                               # (no fix)
     gl.log.update(full=True, full_check=None, fix=True, lost_at=None)
     _clock[0] += 1000
     lost_t = gl._stamp()                     # (lost_at is a Stamp)
@@ -1228,7 +1235,7 @@ try:
                 os.remove(gl.DIAG_FILE)
             except OSError:
                 pass
-            gl.reset()
+            gl._rcv.reset()
             gl.log_reset()
             gl.wifi_reset()
             gl.wifi.update(state="offline", home=False)
@@ -1393,12 +1400,12 @@ try:
     # startup exception (before _loop) also resets
     _resets[:] = []
     gl._wdt = None
-    orig_reset = gl.reset
+    orig_reset = gl._rcv.reset
 
     def boom_init():
         raise OSError("at start-up")
 
-    gl.reset = boom_init
+    gl._rcv.reset = boom_init
     try:
         gl.run()
         check("startup OSError: machine.reset() (run() returned)", False, "returned")
@@ -1407,7 +1414,7 @@ try:
     except Exception as e:
         check("startup OSError: machine.reset() (other exception)", False, repr(e))
     finally:
-        gl.reset = orig_reset
+        gl._rcv.reset = orig_reset
 
     # Ctrl-C: no reset, Timer keepalive
     _resets[:] = []
@@ -2833,7 +2840,7 @@ try:
           "connects=%s" % (WLAN.connects,))
     # stale speed (no fresh fix) must not block
     gl.wifi["failed"].pop("home", None)
-    gl.st["pos_at"] = _clock[0] - gl.STALE - 1
+    gl.st["pos_at"] = _clock[0] - gl._rcv.STALE - 1
     gl.st["speed"] = 50
     WLAN.connects = []
     if WLAN.instances:
@@ -3562,7 +3569,7 @@ try:
           and "ticks_diff(now, loop_start)" in src)
     check("ticks: wifi lost makes the next round due at once (last_check a Stamp, no wrap)",
           'wifi["last_check"] = _stamp() - wifi["backoff"] // 1000' in src)
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     gl.wifi_reset()
     gl.up_reset()
@@ -3621,7 +3628,7 @@ gl = _reload_logger()
 rv_dir = tempfile.mkdtemp(prefix="gpxlog-rv-")
 try:
     gl.LOG_DIR = rv_dir
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     gl.wifi_reset()
     gl.up_reset()
@@ -3690,11 +3697,11 @@ try:
         _clock[0] = (1 << 29) + 1000        # ~6.2 days after ticks 0
         now = _clock[0]
         check("REVIEW-3: a wrapped age counts as very old",
-              gl._age(now, 0) == gl.TICKS_OLD and gl._age(now, now - 5) == 5)
+              gl._age(now, 0) == _gck.TICKS_OLD and gl._age(now, now - 5) == 5)
         check("REVIEW-3: a wrapped deadline is due, a near one is pending",
               not gl._waiting(now, 0, gl.UP_WAIT_MAX)
               and gl._waiting(now, now + 1000, gl.UP_WAIT_MAX))
-        gl.reset()
+        gl._rcv.reset()
         gl.log_reset()
         gl.wifi_reset()
         gl.wifi["failed"]["home"] = gl._stamp() - 6 * 86400  # (a Stamp)
@@ -3750,12 +3757,12 @@ try:
 
     def epoch(hhmmss, lat="4730.000", lon="01900.000", status="A", q=1,
               hdop="1.0", alt="100.0", date="171026", kn="2.0"):
-        gl.handle(nmea("GPRMC,%s,%s,%s,N,%s,E,%s,90.0,%s,,,A"
+        gl._rcv.handle(nmea("GPRMC,%s,%s,%s,N,%s,E,%s,90.0,%s,,,A"
                        % (hhmmss, status, lat, lon, kn, date)))
-        gl.handle(nmea("GPGGA,%s,%s,N,%s,E,%d,08,%s,%s,M,40.0,M,,"
+        gl._rcv.handle(nmea("GPGGA,%s,%s,N,%s,E,%d,08,%s,%s,M,40.0,M,,"
                        % (hhmmss, lat, lon, q, hdop, alt)))
 
-    gl.reset()
+    gl._rcv.reset()
     epoch("120000.00")
     check("AVG: a second is not a fix while it is still being collected",
           not gl.has_fix(_clock[0]) and gl.st["seq"] == 0)
@@ -3764,31 +3771,31 @@ try:
           bool(gl.has_fix(_clock[0])) and gl.st["time"] == "12:00:00"
           and gl.st["date"] == "2026-10-17" and gl.st["seq"] == 1)
     _clock[0] += 1000
-    gl.handle(nmea("GPRMC,120002.00,V,,,,,,,171026,,,N"))  # 12:00:01 done
+    gl._rcv.handle(nmea("GPRMC,120002.00,V,,,,,,,171026,,,N"))  # 12:00:01 done
     fix_at = gl.st["pos_at"]
-    gl.handle(nmea("GPGGA,120002.00,,,,,0,00,99.9,,M,,M,,"))
-    gl.handle(nmea("GPRMC,120003.00,V,,,,,,,171026,,,N"))
+    gl._rcv.handle(nmea("GPGGA,120002.00,,,,,0,00,99.9,,M,,M,,"))
+    gl._rcv.handle(nmea("GPRMC,120003.00,V,,,,,,,171026,,,N"))
     check("REVIEW-4: a void second is no fix and does not refresh pos_at",
           gl.st["valid"] is False and gl.st["pos_at"] == fix_at
           and gl.st["time"] == "12:00:02")
     _clock[0] += 1000
-    gl.handle(nmea("GPRMC,120004.00,A,,,,,,,171026,,,A"))
-    gl.handle(nmea("GPGGA,120004.00,,,,,1,08,1.0,,M,,M,,"))
-    gl.handle(nmea("GPRMC,120005.00,V,,,,,,,171026,,,N"))
+    gl._rcv.handle(nmea("GPRMC,120004.00,A,,,,,,,171026,,,A"))
+    gl._rcv.handle(nmea("GPGGA,120004.00,,,,,1,08,1.0,,M,,M,,"))
+    gl._rcv.handle(nmea("GPRMC,120005.00,V,,,,,,,171026,,,N"))
     check("REVIEW-4: a valid second without a position is no fix",
           gl.st["valid"] is False and gl.st["pos_at"] == fix_at)
 
     # NMEA-DR: GGA quality 6 and RMC mode E are an estimate (dead
     # reckoning, the last fix carried on) and were a fix. DGPS (2) still is
     def dr_case(q, mode, gga=True, rmc=True):
-        gl.reset()
+        gl._rcv.reset()
         for t in ("120040.00", "120041.00", "120042.00"):
             if rmc:
-                gl.handle(nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,0.0,"
+                gl._rcv.handle(nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,0.0,"
                                "171026,,%s" % (t, "" if mode is None
                                                 else "," + mode)))
             if gga:
-                gl.handle(nmea("GPGGA,%s,4730.000,N,01900.000,E,%d,04,2.0,"
+                gl._rcv.handle(nmea("GPGGA,%s,4730.000,N,01900.000,E,%d,04,2.0,"
                                "100.0,M,40.0,M,," % (t, q)))
         return gl.st["valid"], gl.st["seq"]
 
@@ -3800,7 +3807,7 @@ try:
                  (True, 2)), repr(dr))
 
     # AVG: five fixes of one second publish their mean, once
-    gl.reset()
+    gl._rcv.reset()
     lats = ("4730.0000", "4730.0010", "4730.0020", "4730.0030", "4730.0040")
     for k, la in enumerate(lats):
         epoch("120010.%02d" % (k * 20), lat=la, hdop="%.1f" % (1.0 + k * 0.1))
@@ -3813,7 +3820,7 @@ try:
                                         gl.st["hdop"]))
     # AVG: moving faster than AVG_MAX_SPEED the point is the second's first
     # fix (the mean would lie ~0.4 s along the track, stamped the second)
-    gl.reset()
+    gl._rcv.reset()
     for k, la in enumerate(lats):
         epoch("120010.%02d" % (k * 20), lat=la, kn="20.0" if k == 2 else "2.0",
               hdop="%.1f" % (1.0 + k * 0.1))
@@ -3822,7 +3829,7 @@ try:
           gl.st["epochs"] == 5 and abs(gl.st["lat"] - 47.5) < 1e-7
           and abs(gl.st["hdop"] - 1.2) < 1e-6,
           "lat=%r hdop=%s" % (gl.st["lat"], gl.st["hdop"]))
-    gl.reset()
+    gl._rcv.reset()
     for k in range(5):
         epoch("120020.%02d" % (k * 20), q=0 if k < 3 else 1,
               lat="4730.%04d" % (k * 10))
@@ -3838,11 +3845,11 @@ try:
                    ("17959.9994", "W"), ("17959.9988", "W")),
                   (("17959.9988", "W"), ("17959.9994", "W"),
                    ("17959.9994", "E"))):
-        gl.reset()
+        gl._rcv.reset()
         for k, (lo, ew) in enumerate(fixes):
-            gl.handle(nmea("GPGGA,120025.%02d,1700.000,S,%s,%s,1,08,1.0,"
+            gl._rcv.handle(nmea("GPGGA,120025.%02d,1700.000,S,%s,%s,1,08,1.0,"
                            "10.0,M,40.0,M,," % (k * 20, lo, ew)))
-        gl.handle(nmea("GPGGA,120026.00,1700.000,S,17959.9988,E,1,08,1.0,"
+        gl._rcv.handle(nmea("GPGGA,120026.00,1700.000,S,17959.9988,E,1,08,1.0,"
                        "10.0,M,40.0,M,,"))
         am_lon.append(gl.st["lon"])
     check("AVG: the mean of a second across 180° stays at 180° and in range",
@@ -3850,10 +3857,10 @@ try:
           and abs(abs(am_lon[0]) - 180) < 1e-6
           and abs(am_lon[1] - (-180 + 0.00002 / 3)) < 1e-6,
           repr(am_lon))
-    gl.reset()
-    gl.handle(nmea("GPRMC,120030.00,A,4730.000,N,01900.000,E,1.0,0.0,"
+    gl._rcv.reset()
+    gl._rcv.handle(nmea("GPRMC,120030.00,A,4730.000,N,01900.000,E,1.0,0.0,"
                    "171026,,,A"))
-    gl.handle(nmea("GPRMC,120031.00,A,4730.000,N,01900.000,E,1.0,0.0,"
+    gl._rcv.handle(nmea("GPRMC,120031.00,A,4730.000,N,01900.000,E,1.0,0.0,"
                    "171026,,,A"))
     check("AVG: RMC positions are used when a second has no GGA",
           bool(gl.has_fix(_clock[0])) and gl.st["epochs"] == 1)
@@ -3863,7 +3870,7 @@ try:
     saved_dir = gl.LOG_DIR
     try:
         gl.LOG_DIR = avg_dir
-        gl.reset()
+        gl._rcv.reset()
         gl.log_reset()
         gl.wifi_reset()
         settled()
@@ -3888,7 +3895,7 @@ try:
     saved_dir = gl.LOG_DIR
     try:
         gl.LOG_DIR = q_dir
-        gl.reset()
+        gl._rcv.reset()
         gl.log_reset()
         gl.wifi_reset()
         settled()
@@ -3915,7 +3922,7 @@ try:
     saved_dir = gl.LOG_DIR
     try:
         gl.LOG_DIR = q_dir
-        gl.reset()
+        gl._rcv.reset()
         gl.log_reset()
         gl.wifi_reset()
         settled()
@@ -3940,16 +3947,17 @@ try:
     out = []
     real_print = gl.print if hasattr(gl, "print") else None
     gl.print = lambda *a, **k: out.append(" ".join(str(x) for x in a))
+    gl._rcv.print = gl.print           # (the receiver's lines too)
     try:
         banner = b"FWVer R6.0.0.0Build3700\r\n"
-        gl.reset()
+        gl._rcv.reset()
         _uart_rx.extend(banner)
         for k in range(12):
             _uart_rx.extend(nmea("GPRMC,1205%02d.00,V,,,,,,,171026,,,N" % k)
                             + b"\r\n")
-            gl.read_uart()
+            gl._rcv.read_uart()
             _clock[0] += 1000
-            gl.gps_check(_clock[0])
+            gl._rcv.gps_check(_clock[0])
         normal = gl.st["loops"]
         # restarts with NMEA in between: GPS_FLAP_RESTARTS in the window
         def restarts(n, gap):
@@ -3959,29 +3967,30 @@ try:
                     _uart_rx.extend(
                         nmea("GPRMC,1206%02d.00,V,,,,,,,171026,,,N" % j)
                         + b"\r\n")
-                gl.read_uart()
+                gl._rcv.read_uart()
                 _clock[0] += gap
-                gl.gps_check(_clock[0])
-        gl.reset()
+                gl._rcv.gps_check(_clock[0])
+        gl._rcv.reset()
         out[:] = []
-        restarts(gl.GPS_FLAP_RESTARTS, 10000)
+        restarts(gl._rcv.GPS_FLAP_RESTARTS, 10000)
         flap = gl.st["loops"]
         flap_warned = any("gps reset loop" in o and "restarts" in o
                           for o in out)
         flap_ok = gl.st["ok"]
-        restarts(gl.GPS_FLAP_RESTARTS - 1, 10000)
+        restarts(gl._rcv.GPS_FLAP_RESTARTS - 1, 10000)
         flap_again = gl.st["loops"]
         restarts(1, 10000)
         flap_twice = gl.st["loops"]
-        gl.reset()
-        restarts(gl.GPS_FLAP_RESTARTS * 2,
-                 gl.GPS_FLAP_WINDOW // (gl.GPS_FLAP_RESTARTS - 1) + 1000)
+        gl._rcv.reset()
+        restarts(gl._rcv.GPS_FLAP_RESTARTS * 2,
+                 gl._rcv.GPS_FLAP_WINDOW // (gl._rcv.GPS_FLAP_RESTARTS - 1) + 1000)
         flap_slow = gl.st["loops"]
     finally:
         if real_print is None:
             del gl.print
         else:
             gl.print = real_print
+        gl._rcv.__dict__.pop("print", None)
     check("LOOP: one start-up banner followed by NMEA is not a loop",
           normal == 0, "loops=%d" % normal)
     check("LOOP: GPS_FLAP_RESTARTS restarts with NMEA in between -> warned",
@@ -4003,24 +4012,24 @@ try:
     # out (good HDOP, hundreds of metres off), a settled fix is used
     def gst_second(hhmmss, std):
         epoch(hhmmss)
-        gl.handle(nmea("GPGST,%s,20,,,,%.1f,%.1f,%.1f"
+        gl._rcv.handle(nmea("GPGST,%s,20,,,,%.1f,%.1f,%.1f"
                        % (hhmmss, std, std * 0.8, std * 2)))
 
-    gl.reset()
+    gl._rcv.reset()
     settled()
     gst_second("120100.00", 150.0)
     epoch("120101.00")
     check("GST: an estimate of 150 m makes the second unusable",
           gl.st["std"] == 150.0 and not gl._usable(_clock[0])
           and gl._sample_line(_clock[0], None, None) is None)
-    gl.reset()
+    gl._rcv.reset()
     settled()
     gst_second("120110.00", 4.0)
     epoch("120111.00")
     check("GST: an estimate of 4 m is usable",
           gl.st["std"] == 4.0 and gl._usable(_clock[0])
           and gl._sample_line(_clock[0], None, None) is not None)
-    gl.reset()
+    gl._rcv.reset()
     settled()
     epoch("120120.00")
     epoch("120121.00")
@@ -4029,7 +4038,7 @@ try:
     # REV-5: at 1 Hz GST comes once per 5 epochs (and one may be lost):
     # the seconds between keep its estimate for GST_HOLD, not None (that
     # let 4 of 5 seconds of a converging cold start through)
-    gl.reset()
+    gl._rcv.reset()
     settled()
     gst_second("120130.00", 150.0)
     _clock[0] += 1000
@@ -4053,74 +4062,74 @@ try:
     vtg_line = nmea("GNVTG,,T,,M,0.0,N,0.0,K,A")
     cfg_n = setup_cmds
 
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
     _uart_tx[:] = []
-    gl.gps_setup()
-    gl.read_uart()
+    gl._rcv.gps_setup()
+    gl._rcv.read_uart()
     n_frames = cfg_n()
-    gl.handle(vtg_line)                             # still in the UART buffer
-    gl.handle(gsv_line)                             # (GSV stays on: never extra)
-    _clock[0] += gl.GPS_RETRY
-    gl.gps_check(_clock[0])
+    gl._rcv.handle(vtg_line)                             # still in the UART buffer
+    gl._rcv.handle(gsv_line)                             # (GSV stays on: never extra)
+    _clock[0] += gl._rcv.GPS_RETRY
+    gl._rcv.gps_check(_clock[0])
     check("SETUP-AGAIN: sentences queued before the setup do not count",
           cfg_n() == n_frames and gl.st["extra"] == 0)
-    gl.handle(gsv_line)
-    gl.gps_check(_clock[0])
+    gl._rcv.handle(gsv_line)
+    gl._rcv.gps_check(_clock[0])
     no_again = cfg_n()
-    gl.handle(vtg_line)
-    gl.gps_check(_clock[0])
+    gl._rcv.handle(vtg_line)
+    gl._rcv.gps_check(_clock[0])
     check("SETUP-AGAIN: VTG after the setup -> it is sent again; GSV is not "
           "what it turned off",
           no_again == n_frames and cfg_n() == 2 * n_frames
-          and gl.st["extra"] == 0 and gl.st["setup_wait"] == gl.GPS_RETRY,
+          and gl.st["extra"] == 0 and gl.st["setup_wait"] == gl._rcv.GPS_RETRY,
           "%d %d %d" % (no_again, cfg_n(), n_frames))
     _clock[0] += 1500
-    gl.handle(nmea("GNGLL,,,,,120000.00,V,N"))
-    _clock[0] += gl.GPS_RETRY
-    gl.gps_check(_clock[0])
+    gl._rcv.handle(nmea("GNGLL,,,,,120000.00,V,N"))
+    _clock[0] += gl._rcv.GPS_RETRY
+    gl._rcv.gps_check(_clock[0])
     check("SETUP-AGAIN: one that acknowledges and ignores (GLL too): again after "
           "GPS_RETRY, then doubling",
           cfg_n() == 3 * n_frames and gl.st.get("ack_n") == 2
-          and gl.st["setup_wait"] == 2 * gl.GPS_RETRY,
+          and gl.st["setup_wait"] == 2 * gl._rcv.GPS_RETRY,
           "frames=%d wait=%d" % (cfg_n(), gl.st["setup_wait"]))
-    _clock[0] += 10 * gl.GPS_RETRY_MAX
-    gl.gps_check(_clock[0])
+    _clock[0] += 10 * gl._rcv.GPS_RETRY_MAX
+    gl._rcv.gps_check(_clock[0])
     check("SETUP-AGAIN: a receiver that took it is never sent it again",
           cfg_n() == 3 * n_frames)
     # a receiver that never answers: less and less often
-    gl.uart.silent = True
+    gl._rcv.uart.silent = True
     try:
-        gl.reset()
-        gl.gps_setup()
+        gl._rcv.reset()
+        gl._rcv.gps_setup()
         sends = []
         for _ in range(40):
             _clock[0] += 1500
-            gl.handle(gsv_line)
+            gl._rcv.handle(gsv_line)
             n0 = cfg_n()
-            gl.gps_check(_clock[0])
+            gl._rcv.gps_check(_clock[0])
             if cfg_n() > n0:
                 sends.append(_clock[0])
         gaps = [(b2 - a2) // 1000 for a2, b2 in zip(sends, sends[1:])]
     finally:
-        gl.uart.silent = False
+        gl._rcv.uart.silent = False
     check("SETUP-AGAIN: a silent receiver is retried with a doubling wait",
           len(gaps) >= 2 and gaps == sorted(gaps) and gaps[-1] > gaps[0],
           "gaps=%s" % gaps)
     # a restart banner sets it up again within GPS_RETRY
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
-    gl.gps_setup()
-    gl.read_uart()
-    gl.st["setup_wait"] = gl.GPS_RETRY_MAX
+    gl._rcv.gps_setup()
+    gl._rcv.read_uart()
+    gl.st["setup_wait"] = gl._rcv.GPS_RETRY_MAX
     n0 = cfg_n()
-    _clock[0] += gl.GPS_RETRY
-    gl.handle(b"FWVer R6.0.0.0Build3700")
-    gl.gps_check(_clock[0])
+    _clock[0] += gl._rcv.GPS_RETRY
+    gl._rcv.handle(b"FWVer R6.0.0.0Build3700")
+    gl._rcv.gps_check(_clock[0])
     check("SETUP-AGAIN: a restart banner sends the setup again at once",
           cfg_n() > n0 and gl.st["gps_boots"] == 1)
     # a receiver that stops answering mid-setup: the rest not sent, no long block
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
     _uart_tx[:] = []
     real_write = _UcUart.write
@@ -4136,18 +4145,19 @@ try:
     _UcUart.write = silent_after_two
     t0 = _clock[0]
     try:
-        gl.gps_setup()
+        gl._rcv.gps_setup()
     finally:
         _UcUart.write = real_write
     check("SETUP-AGAIN: a receiver silent after the first command: setup_ok "
           "False, the rest not sent, one UC_ACK_WAIT",
           gl.st["setup_ok"] is False and cfg_n() == 2
-          and _clock[0] - t0 <= gl.UC_ACK_WAIT + 100,
+          and _clock[0] - t0 <= gl._rcv.UC_ACK_WAIT + 100,
           "ms=%d frames=%d" % (_clock[0] - t0, cfg_n()))
     _uart_rx[:] = []
     out = []
     real_print = gl.print if hasattr(gl, "print") else None
     gl.print = lambda *a, **k: out.append(" ".join(str(x) for x in a))
+    gl._rcv.print = gl.print           # (the receiver's lines too)
     try:
         gl.log_reset()
         gl.up["sent"] = 0
@@ -4157,12 +4167,13 @@ try:
             del gl.print
         else:
             gl.print = real_print
+        gl._rcv.__dict__.pop("print", None)
     check("STATUS: the console line works without a temperature sensor",
           out and out[0].startswith("status temp None hz"), repr(out))
 
-    gl.reset()
+    gl._rcv.reset()
     st_ok = gl.st["ok"]
-    gl.handle(b"\xb5\x62\x05\x01\x02\x00\x06\x01\x0f\x38"
+    gl._rcv.handle(b"\xb5\x62\x05\x01\x02\x00\x06\x01\x0f\x38"
               + nmea("GNGSA,A,3,01,02,03,,,,,,,,,,2.0,1.0,1.7,1"))
     check("HANDLE: garbage (0xB5 0x62 too) that runs into a line does not lose it",
           gl.st["ok"] == st_ok + 1 and gl.st["fixtype"] == 3)
@@ -4285,7 +4296,7 @@ try:
     NOISE = "noise"
 
     def sv_reset(home=False):
-        gl.reset()
+        gl._rcv.reset()
         gl.log_reset()
         gl.wifi_reset()
         gl.up_reset()
@@ -5494,11 +5505,11 @@ try:
                                        len(sv_lines())))
 
     # MIDNIGHT: a GGA past midnight whose RMC was lost is not dated a day back
-    gl.reset()
+    gl._rcv.reset()
     settled()
     epoch("235959.00", date="181026")
     epoch("235959.20", date="181026")
-    gl.handle(nmea("GPGGA,000000.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
+    gl._rcv.handle(nmea("GPGGA,000000.00,4730.000,N,01900.000,E,1,08,1.0,100.0,"
                    "M,40.0,M,,"))                   # its RMC was lost
     check("MIDNIGHT: setup - fix at 23:59:59",
           bool(gl.has_fix(_clock[0])) and gl.st["date"] == "2026-10-18"
@@ -5514,7 +5525,7 @@ try:
     check("MIDNIGHT: the next second brings the new date back",
           bool(gl.has_fix(_clock[0])) and s is not None
           and s[0] == "2026-10-19T00:00:01Z", repr(s))
-    gl.reset()
+    gl._rcv.reset()
     epoch("235959.00", date="181026")
     epoch("000000.00", date="191026")               # RMC first: new date
     check("MIDNIGHT: the last second of a day keeps its own date",
@@ -6244,12 +6255,12 @@ try:
                    "GPGSV,1,1,00,1"):
             _uart_rx.extend(nmea(s_) + b"\r\n")
 
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
     gl.st["setup_ok"] = True
     sats_round()
     t0 = _clock[0]
-    gl.read_uart()
+    gl._rcv.read_uart()
     c = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
     gl._web_reply(c, c.req)
     waited = _clock[0] - t0
@@ -6269,21 +6280,21 @@ try:
                                   "unhealthy": False},
           repr(jd["satellites"][1]))
     check("SATS: seen counts the satellites with a signal, used those in the fix",
-          gl.sv_seen() == 4 and gl.sv_used() == 4,
-          repr((gl.sv_seen(), gl.sv_used())))
-    gl.handle(b"FWVer R6.0.0.0Build3700")
+          gl._rcv.sv_seen() == 4 and gl._rcv.sv_used() == 4,
+          repr((gl._rcv.sv_seen(), gl._rcv.sv_used())))
+    gl._rcv.handle(b"FWVer R6.0.0.0Build3700")
     check("SATS: a receiver restart forgets the list and the model",
           (gl.st["svs"], gl.st["gps_ver"]) == (None, None),
           repr((gl.st["svs"], gl.st["gps_ver"])))
-    gl.reset()
-    gl.handle(gsv_line)
-    seen_gsv = gl.sv_seen()
+    gl._rcv.reset()
+    gl._rcv.handle(gsv_line)
+    seen_gsv = gl._rcv.sv_seen()
     _uart_rx[:] = []
-    gl.gps_setup()
+    gl._rcv.gps_setup()
     check("SATS: GSV's count until a list is made; a setup leaves it (GSV stays on)",
-          seen_gsv == 12 and gl.st["view"] == {"GP": 12} and gl.sv_seen() == 12,
+          seen_gsv == 12 and gl.st["view"] == {"GP": 12} and gl._rcv.sv_seen() == 12,
           "%d %r" % (seen_gsv, gl.st["view"]))
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
     t0 = _clock[0]
     c3 = FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n")
@@ -6361,6 +6372,7 @@ try:
         out = []
         real_print = gl.print if hasattr(gl, "print") else None
         gl.print = lambda *x, **k: out.append(" ".join(str(y) for y in x))
+        gl._rcv.print = gl.print           # (the receiver's lines too)
         try:
             gl._freq_bad[:] = []
             gl._set_freq(100)
@@ -6373,6 +6385,7 @@ try:
                 del gl.print
             else:
                 gl.print = real_print
+            gl._rcv.__dict__.pop("print", None)
         check("CPU: an unsupported clock is reported once, not per POST",
               once, repr(out))
         check("CPU: 20/40/80/160/240 (or 0) are accepted from .env",
@@ -6446,7 +6459,7 @@ try:
     stubs = ("read_uart", "gps_check", "log_tick", "wifi_tick",
              "keepalive_tick", "upload_tick", "web_tick", "ota_tick",
              "ntp_tick", "tft_tick", "_status", "_diag", "_boot_ok")
-    saved = dict((k, getattr(gl, k)) for k in stubs)
+    saved = dict((k, getattr(_own(gl, k), k)) for k in stubs)
     orig_sleep = time.sleep_ms
     loops = [0]
 
@@ -6457,7 +6470,7 @@ try:
             raise KeyboardInterrupt()
     try:
         for k in stubs:
-            setattr(gl, k, lambda *a, **kw: None)
+            setattr(_own(gl, k), k, lambda *a, **kw: None)
         gl._freq_bad[:] = []
         real_freq(160000000)
         fails[0] = gl.FREQ_TRIES
@@ -6473,7 +6486,7 @@ try:
     finally:
         time.sleep_ms = orig_sleep
         for k in stubs:
-            setattr(gl, k, saved[k])
+            setattr(_own(gl, k), k, saved[k])
         mach.freq = real_freq
         gl._freq_bad[:] = []
     check("RV3: the loop retries a refused CPU_MHZ without a POST",
@@ -6766,7 +6779,7 @@ try:
     now = _clock[0]
     check("REVIEW2-2: small negative difference is age 0",
           gl._age(now, now + 500) == 0
-          and gl._age(now, now + gl.TICKS_SKEW + 1) == gl.TICKS_OLD)
+          and gl._age(now, now + _gck.TICKS_SKEW + 1) == _gck.TICKS_OLD)
     gl.st.update(valid=True, date="2026-10-17", time="12:00:00",
                  lat=47.5, lon=19.0, pos_at=now + 200)
     check("REVIEW2-2: a fix stamped just after now is still a fix",
@@ -6980,8 +6993,8 @@ def deploy_run(env_extra):
     """deploy.sh in a fresh copy of the repo files against a fake board
     that holds an older install: (rc, stdout, stderr, board dir, calls)."""
     work = tempfile.mkdtemp(dir=dp_td)
-    for n in ("deploy.sh", "gps_logger.py", "gps_clock.py", "main.py", "web.html",
-              "gps_boot.py", "gps_tft.py", "gps_tft_font.py"):
+    for n in ("deploy.sh", "gps_logger.py", "gps_clock.py", "gps_receiver.py", "main.py",
+              "web.html", "gps_boot.py", "gps_tft.py", "gps_tft_font.py"):
         shutil.copy(os.path.join(ROOT, n), work)
     os.makedirs(os.path.join(work, "tools"))
     if web_min:
@@ -7014,6 +7027,8 @@ def deploy_run(env_extra):
             boot_sha = hashlib.sha256(f.read()).hexdigest()
         with open(os.path.join(work, "gps_clock.py"), "rb") as f:
             clock_sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(work, "gps_receiver.py"), "rb") as f:
+            rx_sha = hashlib.sha256(f.read()).hexdigest()
         tft_sha = hashlib.sha256()
         for n in ("gps_tft.py", "gps_tft_font.py"):
             with open(os.path.join(work, n), "rb") as f:
@@ -7023,13 +7038,16 @@ def deploy_run(env_extra):
                 fz, "abc1234"))                 # "old": no SHA (first builds)
             if fz != "old":
                 f.write('SHA = "%s"\n' % (sha if fz != "stale" else "0" * 64))
-            if fz in ("full", "tft-stale", "boot-stale", "clock-stale", "quote", "dirty"):  # a marker with the
+            if fz in ("full", "tft-stale", "boot-stale", "clock-stale", "rx-stale", "quote",
+                      "dirty"):                 # a marker with the
                 f.write('TFT = "%s"\n' % (tft_sha.hexdigest()  # display's and
                                           if fz != "tft-stale" else "0" * 64))
                 f.write('BOOT = "%s"\n' % (boot_sha           # gps_boot.py's SHA
                                            if fz != "boot-stale" else "0" * 64))
-                f.write('CLOCK = "%s"\n' % (clock_sha         # and gps_clock.py's
+                f.write('CLOCK = "%s"\n' % (clock_sha         # gps_clock.py's
                                             if fz != "clock-stale" else "0" * 64))
+                f.write('RX = "%s"\n' % (rx_sha               # and gps_receiver.py's
+                                         if fz != "rx-stale" else "0" * 64))
     env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_LOGGER=os.path.join(work, "logger"),
@@ -7091,7 +7109,8 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [n for n in os.listdir(dev) if n.endswith(".dpl")]
           and dev_file(dev, ".rtc") == b"0"
           and dev_file(dev, "gps_clock.py") is None
-          and len(cps) == 4 and all(c[2].endswith(".dpl") for c in cps)
+          and dev_file(dev, "gps_receiver.py") is None
+          and len(cps) == 5 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Heltec Wireless Tracker" in out and "(xtensawin)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
@@ -7114,13 +7133,13 @@ if shutil.which("bash") and shutil.which("sha256sum"):
         with open(pl) as f:
             dp_opt.append(f.read().split("\n")[:-1])
     opt_src = {}
-    for n in ("gps_logger.py", "gps_clock.py", "gps_boot.py", "gps_tft.py"):
+    for n in ("gps_logger.py", "gps_clock.py", "gps_receiver.py", "gps_boot.py", "gps_tft.py"):
         with open(os.path.join(ROOT, n)) as f:
             opt_src[n] = [ln for ln in f.read().splitlines()
                           if re.match(r"\s*assert\b", ln) or "__debug__" in ln]
     check("DEPLOY-OPT3: deploy.sh compiles with -O3, plain and FORCE_MPY; no "
           "assert or __debug__ in what is compiled that way",
-          len(dp_opt) == 2 and all(len(c) == 2 and all("-O3" in x.split() for x in c)
+          len(dp_opt) == 2 and all(len(c) == 3 and all("-O3" in x.split() for x in c)
                                    for c in dp_opt)
           and not any(opt_src.values()), repr((dp_opt, opt_src)))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
@@ -7216,8 +7235,17 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [c for call in calls_c for c in call if c[0] == "cp"]
           and rc_p == 0 and dev_file(dev_p, "gps_clock.mpy") is not None
           and sorted(c[1] for call in calls_p for c in call if c[0] == "cp")
-          == ["gps_clock.mpy", "gps_logger.mpy", "main.py", "web.html.gz"],
+          == ["gps_clock.mpy", "gps_logger.mpy", "gps_receiver.mpy", "main.py", "web.html.gz"],
           "%r %r" % ((rc_c, err_c[-200:]), (rc_p, err_p[-200:])))
+    # DEPLOY-RX: gps_receiver.py the same way: compared (RX), installed on a
+    # plain board, a stale frozen one stops naming it
+    rc_r, out_r, err_r, dev_r, calls_r = deploy_run({"FAKE_FROZEN": "rx-stale"})
+    check("DEPLOY-RX: a frozen gps_receiver.py not this one stops, naming it; a plain board "
+          "gets gps_receiver.mpy",
+          rc_r != 0 and "gps_receiver.py" in err_r
+          and not [c for call in calls_r for c in call if c[0] == "cp"]
+          and dev_file(dev_p, "gps_receiver.mpy") is not None,
+          "%r" % ((rc_r, err_r[-200:]),))
     # DEPLOY-RT2 (RT2-5): the marker's words go to the shell only as words: a
     # quote in the commit is no answer (it used to be spliced into the Python
     # run on the board, a SyntaxError after the copy); a "-dirty" commit is one;
@@ -7391,6 +7419,7 @@ def build_run(args, env_extra, dirty=False):
                     os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_clock.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_receiver.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft_font.py"), work)
@@ -7507,8 +7536,8 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
         [], {"BOARD_DIR": os.path.join(ROOT, "boards", "GPS_LOGGER_S3")})
     with open(os.path.join(work_s3, "firmware", "manifest.py")) as f:
         man_s3 = re.findall(man_re, f.read())
-    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_clock", "gps_boot",
-                                     "gps_tft", "gps_tft_font")]
+    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_clock", "gps_receiver",
+                                     "gps_boot", "gps_tft", "gps_tft_font")]
     check("BUILD-OPT3: the frozen modules with code leave the line numbers out "
           "(opt=3: ~10 KB of the logger), the display's too",
           rc == 0 and rc_s3 == 0 and all(x in man_s3 for x in opt3)
@@ -7734,6 +7763,13 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           rc6 == 0 and 'module("gps_clock.py", base_path' in m6
           and fr6.get("CLOCK") == hashlib.sha256(clock6).hexdigest(),
           repr({k: fr6.get(k) for k in ("COMMIT", "SHA", "CLOCK")}))
+    with open(os.path.join(work6, "gps_receiver.py"), "rb") as f:
+        rx6 = f.read()
+    check("BUILD-RX: gps_receiver.py is frozen (opt=3) and the marker carries its SHA-256 "
+          "as RX (deploy.sh compares it)",
+          rc6 == 0 and 'module("gps_receiver.py", base_path' in m6
+          and fr6.get("RX") == hashlib.sha256(rx6).hexdigest(),
+          repr({k: fr6.get(k) for k in ("COMMIT", "SHA", "RX")}))
     # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
     # names /web.html.gz alone, made with the board's small window (it
     # inflates it for a client without gzip); an older firmware (after a
@@ -7952,26 +7988,26 @@ def diag_clear():
 # banner on the page: the diag log, read after a walk, said nothing. Its
 # start and its end are diag lines now, once each
 diag_clear()
-gl.reset()
+gl._rcv.reset()
 _gs_t0 = _clock[0]
 gl.st["start"] = _gs_t0
-gl.gps_check(_clock[0] + gl.GPS_SILENT - 1000)
+gl._rcv.gps_check(_clock[0] + gl._rcv.GPS_SILENT - 1000)
 _gs_early = [l for l in diag_lines() if "gps silent" in l]
-_clock[0] = _gs_t0 + gl.GPS_SILENT
-gl.gps_check(_clock[0])
+_clock[0] = _gs_t0 + gl._rcv.GPS_SILENT
+gl._rcv.gps_check(_clock[0])
 _clock[0] += 30000
-gl.gps_check(_clock[0])
+gl._rcv.gps_check(_clock[0])
 _gs_mute = [l for l in diag_lines() if "gps silent" in l]
 gl.st["rx"] = _clock[0]                  # bytes again
-gl.gps_check(_clock[0])
-gl.gps_check(_clock[0] + 1000)
+gl._rcv.gps_check(_clock[0])
+gl._rcv.gps_check(_clock[0] + 1000)
 _gs_back = [l for l in diag_lines() if "gps back" in l]
 check("GPS-SILENT: no bytes for GPS_SILENT is one diag line, their return "
       "one more", _gs_early == [] and len(_gs_mute) == 1
       and len(_gs_back) == 1 and "90 s" in _gs_back[0]
       and gl.st["mute_at"] is None, repr((_gs_early, _gs_mute, _gs_back)))
 diag_clear()
-gl.reset()
+gl._rcv.reset()
 
 
 saved_diag = (gl.DIAG, gl.DIAG_MAX)
@@ -7989,7 +8025,7 @@ try:
 
     diag_clear()
     gl.DIAG = 60000
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     gl.up_reset()
     _reset_cause[0] = 6
@@ -8154,35 +8190,35 @@ def rv_nmea(body):
 
 # GPS-2: GSA every GSA_EVERY s
 check("GPS-2: GSA rate is one round per GSA_EVERY s at GPS_HZ",
-      "CFGMSG,0,2,%d" % (gl.GPS_HZ * gl.GSA_EVERY) in gl._uc_msgs())
+      "CFGMSG,0,2,%d" % (gl._rcv.GPS_HZ * gl._rcv.GSA_EVERY) in gl._rcv._uc_msgs())
 
 # GPS-7: a setup unanswered leaves setup_ok False with nothing extra: set up again
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
-gl.uart.silent = True
+gl._rcv.uart.silent = True
 try:
-    gl.gps_setup()
+    gl._rcv.gps_setup()
 finally:
-    gl.uart.silent = False
+    gl._rcv.uart.silent = False
 lost = gl.st["setup_ok"]
 _uart_tx[:] = []
-_clock[0] += gl.GPS_RETRY + 1000
-gl.gps_check(_clock[0])
+_clock[0] += gl._rcv.GPS_RETRY + 1000
+gl._rcv.gps_check(_clock[0])
 again = setup_cmds() > 0
 check("GPS-7: setup not answered and no extra sentence -> sent again",
       lost is False and gl.st["extra"] == 0 and again
       and gl.st["setup_ok"] is True, "%r %r" % (lost, gl.st["setup_ok"]))
 
 # GPS-18: a GSA flood (rate not taken) counts as a setup not taken
-gl.reset()
+gl._rcv.reset()
 gl.st["setup_at"] = _clock[0] - 5000
 for _ in range(20):
-    gl.handle(rv_nmea("GNGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2,1"))
+    gl._rcv.handle(rv_nmea("GNGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2,1"))
 flood = gl.st["extra"]
-gl.reset()
+gl._rcv.reset()
 gl.st["setup_at"] = _clock[0] - 5000
 for _ in range(4):
-    gl.handle(rv_nmea("GNGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2,1"))
+    gl._rcv.handle(rv_nmea("GNGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2,1"))
 check("GPS-18: >GSA_MAX GSA a second -> extra; one round of 4 does not",
       flood >= 1 and gl.st["extra"] == 0, "%d %d" % (flood, gl.st["extra"]))
 
@@ -8190,7 +8226,7 @@ check("GPS-18: >GSA_MAX GSA a second -> extra; one round of 4 does not",
 # bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
 # line "20A6-10-29T12:00:01Z" went into the track and became last_t, which no
 # real time ever sorted above: no line and no anchor point until a reboot.
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 _nd_ld, gl.LOG_DIR = gl.LOG_DIR, os.path.join(diag_dir, "nd")
 settled()
@@ -8202,8 +8238,8 @@ def _nd_sec(t, date):
     _nd_k[0] += 1
     lat = "4728.%04d" % (_nd_k[0] * 20)
     _clock[0] += 1000
-    gl.handle(rv_nmea("GNRMC,%s,A,%s,N,01900.0000,E,0.1,,%s,,,A,V" % (t, lat, date)))
-    gl.handle(rv_nmea("GNGGA,%s,%s,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,," % (t, lat)))
+    gl._rcv.handle(rv_nmea("GNRMC,%s,A,%s,N,01900.0000,E,0.1,,%s,,,A,V" % (t, lat, date)))
+    gl._rcv.handle(rv_nmea("GNGGA,%s,%s,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,," % (t, lat)))
     gl.log_tick()
 
 
@@ -8229,7 +8265,7 @@ check("NMEA-DIGITS: a non-digit in the time or the date makes the sentence bad, 
       and len(gl.log["batch"]) == 10 and gl.log["clock"] == _nd_c,
       repr((_nd_e0, _nd_e1, _nd_e2, _nd_d, _nd_lt, _nd_n, len(gl.log["batch"]))))
 gl.LOG_DIR = _nd_ld
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 
 # SETUP-LATE: a receiver that answers late (overrun, still booting): the setup
@@ -8254,7 +8290,7 @@ def late_any(self):
     return len(_uart_rx)
 
 
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
 _uart_tx[:] = []
 late.append((_clock[0] + 100, b"FWVer R6.0.0.0Build3700\r\n"))
@@ -8263,19 +8299,19 @@ late.append((_clock[0] + 150, rv_nmea(
 _UcUart.write, UART.any = late_write, late_any
 t0 = _clock[0]
 try:
-    gl.gps_setup()
+    gl._rcv.gps_setup()
     took = _clock[0] - t0
     sl_ok = gl.st["setup_ok"]
     sl_n = setup_cmds()
     _clock[0] += 2000
-    gl.read_uart()
+    gl._rcv.read_uart()
     sl_oks = gl.st["uc_ok"]
 finally:
     _UcUart.write, UART.any = real_write, real_any
     late[:] = []
 check("SETUP-LATE: late answers block one UC_ACK_WAIT per command sent, the rest "
       "not sent; they are counted, no answer to anything after",
-      took <= 2 * gl.UC_ACK_WAIT + 100 and sl_ok is False and sl_n == 1
+      took <= 2 * gl._rcv.UC_ACK_WAIT + 100 and sl_ok is False and sl_n == 1
       and sl_oks == 2, "ms=%d ok=%r cmds=%d oks=%d" % (took, sl_ok, sl_n, sl_oks))
 check("SETUP-LATE: NMEA read during the setup is parsed (banner = restart)",
       gl.st["gps_boots"] == 1 and gl.st["ok"] >= 1 and gl.st["extra"] == 1,
@@ -8289,9 +8325,9 @@ _uart_rx[:] = []
 
 
 def verify_run(fixes, gst):
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
-    gl.gps_setup()
+    gl._rcv.gps_setup()
     _uart_tx[:] = []
     for k in range(12):
         for f in range(fixes):
@@ -8303,15 +8339,15 @@ def verify_run(fixes, gst):
         if gst:
             _uart_rx.extend(rv_nmea("GNGST,1206%02d.00,20,,,,3.0,2.5,6.0" % k)
                             + b"\r\n")
-        gl.read_uart()
+        gl._rcv.read_uart()
         _clock[0] += 1000
-        gl.gps_check(_clock[0])
+        gl._rcv.gps_check(_clock[0])
     return setup_cmds()
 
 
 v_slow = verify_run(1, True)
-v_good = verify_run(gl.GPS_HZ, True)
-v_nogst = verify_run(gl.GPS_HZ, False)
+v_good = verify_run(gl._rcv.GPS_HZ, True)
+v_nogst = verify_run(gl._rcv.GPS_HZ, False)
 check("SETUP-CHECK: answered but still 1 fix/s, or no GST -> set up again",
       v_slow > 0 and v_nogst > 0 and v_good == 0,
       "slow=%d nogst=%d good=%d" % (v_slow, v_nogst, v_good))
@@ -8320,26 +8356,26 @@ check("SETUP-CHECK: answered but still 1 fix/s, or no GST -> set up again",
 # its own setup comes) is no verdict on the setup before it in the NMEA
 # mode either: it was "not taken: 1 fix/s", a diag line and the
 # GPS_NOT_TAKEN_SAY throttle started
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
-gl.gps_setup()
+gl._rcv.gps_setup()
 sr_pre = (gl.st["setup_ok"], gl.st["checked"])
 _clock[0] += 2000
-gl.handle(b"FWVer R6.0.0.0Build3700")
+gl._rcv.handle(b"FWVer R6.0.0.0Build3700")
 sr_extra = gl.st["extra"]
 for k in range(12):
     _clock[0] += 1000
     t = "1200%02d.00" % k
-    gl.handle(rv_nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,,021126,,,A" % t))
-    gl.handle(rv_nmea("GPGGA,%s,4730.000,N,01900.000,E,1,08,1.0,100.0,M,"
+    gl._rcv.handle(rv_nmea("GPRMC,%s,A,4730.000,N,01900.000,E,0.1,,021126,,,A" % t))
+    gl._rcv.handle(rv_nmea("GPGGA,%s,4730.000,N,01900.000,E,1,08,1.0,100.0,M,"
                       "40.0,M,," % t))
-    gl.handle(rv_nmea("GPGST,%s,1.0,2.0,1.0,0.0,1.5,1.2,2.0" % t))
-gl._setup_check(_clock[0])
+    gl._rcv.handle(rv_nmea("GPGST,%s,1.0,2.0,1.0,0.0,1.5,1.2,2.0" % t))
+gl._rcv._setup_check(_clock[0])
 check("SETUP-CHECK-RESTART: a restart within GPS_VERIFY is no 'not taken'",
       sr_pre == (True, False) and gl.st["checked"] is False
       and gl.st["nt_said"] is None and gl.st["extra"] == sr_extra == 1,
       repr((sr_pre, gl.st["checked"], gl.st["nt_said"], gl.st["extra"])))
-gl.reset()
+gl._rcv.reset()
 
 # RATE-NAK: a rate refused ($FAIL) is an answer: it must not read as silence
 # (setup_ok False, set up again and again). The rest of the setup goes on, the
@@ -8351,13 +8387,13 @@ def rate_nak_run():
     said = []
     saved_dw = gl._diag_write
     gl._diag_write = said.append
-    gl.uart.bad = ("CFGNAV",)
+    gl._rcv.uart.bad = ("CFGNAV",)
     try:
         n = verify_run(1, True)
         state = (gl.st["setup_ok"], gl.st["rate_nak"], gl.st["checked"],
                  gl.st["extra"])
     finally:
-        gl.uart.bad = ()
+        gl._rcv.uart.bad = ()
         gl._diag_write = saved_dw
     return n, state, [ln for ln in said if "refused" in ln]
 
@@ -8365,8 +8401,8 @@ def rate_nak_run():
 rn1 = rate_nak_run()
 check("RATE-NAK: the rate refused -> setup ok at 1 Hz, not set up again",
       rn1 == (0, (True, True, True, 0),
-              ["gps refused CFGNAV,%d,%d,1000" % (1000 // gl.GPS_HZ,
-                                                  1000 // gl.GPS_HZ)]),
+              ["gps refused CFGNAV,%d,%d,1000" % (1000 // gl._rcv.GPS_HZ,
+                                                  1000 // gl._rcv.GPS_HZ)]),
       repr(rn1))
 
 # SETUP-NOFIX: a setup before the first fix (at boot, indoors) got its one
@@ -8377,9 +8413,9 @@ check("RATE-NAK: the rate refused -> setup ok at 1 Hz, not set up again",
 
 
 def nofix_setup():
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
-    gl.gps_setup()
+    gl._rcv.gps_setup()
     gl.st["ack_n"] = 2                   # a backoff that is running
     _uart_tx[:] = []
 
@@ -8400,10 +8436,10 @@ def nofix_secs(k0, n, fix=False, gst_every=0, step=1):
             ls.append("GNGST,%s,,,,,,," % t)
         for s_ in ls:
             _uart_rx.extend(rv_nmea(s_) + b"\r\n")
-        gl.read_uart()
+        gl._rcv.read_uart()
         _clock[0] += 1000 * step
-        gl.gps_check(_clock[0])
-        gl.read_uart()                   # (the answers of a setup it sent)
+        gl._rcv.gps_check(_clock[0])
+        gl._rcv.read_uart()                   # (the answers of a setup it sent)
 
 
 cfgs = setup_cmds
@@ -8418,7 +8454,7 @@ check("SETUP-NOFIX: no verdict before a fix, then 1 fix/s -> set up again",
       nf_wait == (False, 2, 0) and nf_again[0] > 0 and nf_again[1] >= 2,
       "wait=%r again=%r" % (nf_wait, nf_again))
 nofix_setup()
-nofix_secs(0, getattr(gl, "GPS_VERIFY_MAX", 1800000) // 1000 + 20,
+nofix_secs(0, getattr(gl._rcv, "GPS_VERIFY_MAX", 1800000) // 1000 + 20,
            gst_every=5, step=10)
 check("SETUP-NOFIX: no fix for GPS_VERIFY_MAX -> the wait ends, no verdict",
       gl.st["checked"] is True and gl.st["ack_n"] == 2 and cfgs() == 0
@@ -8437,7 +8473,7 @@ check("NO-GST-NOFIX: no fix with GST coming -> no verdict, not set up again",
       "cfg=%d checked=%r extra=%r" % (cfgs(), gl.st["checked"],
                                       gl.st["extra"]))
 nofix_setup()
-nofix_secs(0, gl.UC_GST_LOST // 1000 - 2)
+nofix_secs(0, gl._rcv.UC_GST_LOST // 1000 - 2)
 ng_before = (cfgs(), gl.st["checked"], gl.st["extra"])
 nofix_secs(40, 10)
 check("NO-GST-NOFIX: no fix, no GST: no verdict; only UC_GST_LOST sets it up again",
@@ -8452,11 +8488,11 @@ try:
     os.remove(gl.DIAG_FILE)
 except OSError:
     pass
-gl.reset()
+gl._rcv.reset()
 for k in range(12):                      # a verdict every 70 s
-    gl.st.update(checked=False, setup_at=_clock[0] - gl.GPS_VERIFY, hz1=3,
+    gl.st.update(checked=False, setup_at=_clock[0] - gl._rcv.GPS_VERIFY, hz1=3,
                  hz5=0)
-    gl._setup_check(_clock[0])
+    gl._rcv._setup_check(_clock[0])
     _clock[0] += 70000
 try:
     with open(gl.DIAG_FILE) as f:
@@ -8471,27 +8507,27 @@ check("SETUP-NOT-TAKEN: a diag line per GPS_NOT_TAKEN_SAY, the rest counted",
 
 # SETUP-BACKOFF: a receiver that answers every setup but keeps sending
 # the sentences it turns off: GPS_RETRY, then doubling up to a cap
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
 _uart_tx[:] = []
-gl.gps_setup()
+gl._rcv.gps_setup()
 times = []
 for _ in range(200):
     _clock[0] += 1500
-    gl.handle(rv_nmea("GPVTG,,T,,M,0.0,N,0.0,K,A"))
+    gl._rcv.handle(rv_nmea("GPVTG,,T,,M,0.0,N,0.0,K,A"))
     n0 = setup_cmds()
-    gl.gps_check(_clock[0])
+    gl._rcv.gps_check(_clock[0])
     if setup_cmds() > n0:
         times.append(_clock[0])
 gaps = [(b2 - a2) // 1000 for a2, b2 in zip(times, times[1:])]
-cap = getattr(gl, "GPS_IGNORED_MAX", 60000) // 1000
+cap = getattr(gl._rcv, "GPS_IGNORED_MAX", 60000) // 1000
 check("SETUP-BACKOFF: acknowledged but ignored -> retries double to a cap",
-      len(gaps) >= 4 and gaps[0] <= gl.GPS_RETRY // 1000 + 2
+      len(gaps) >= 4 and gaps[0] <= gl._rcv.GPS_RETRY // 1000 + 2
       and gaps == sorted(gaps) and cap <= gaps[-1] <= cap + 2,
       "gaps=%s" % gaps)
-gl.handle(b"FWVer R6.0.0.0Build3700")
+gl._rcv.handle(b"FWVer R6.0.0.0Build3700")
 check("SETUP-BACKOFF: a receiver restart starts the backoff afresh",
-      gl.st.get("ack_n") == 0 and gl.st["setup_wait"] == gl.GPS_RETRY,
+      gl.st.get("ack_n") == 0 and gl.st["setup_wait"] == gl._rcv.GPS_RETRY,
       "%r %r" % (gl.st.get("ack_n"), gl.st["setup_wait"]))
 # SETUP-BACKOFF-CAP: ack_n grows for as long as the receiver keeps ignoring
 # (a retry a minute: 43200 after a month), and GPS_RETRY << (n - 1) grew
@@ -8499,18 +8535,18 @@ check("SETUP-BACKOFF: a receiver restart starts the backoff afresh",
 # count no receiver reaches shows it here (CPython: too many digits)
 cap_waits = []
 for n_ in (2, 4, 5, 43200, 1 << 70):
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
     gl.st["ack_n"] = n_
     try:
-        gl.gps_setup()
+        gl._rcv.gps_setup()
         _uart_rx[:] = []
         cap_waits.append(gl.st["setup_wait"])
     except (OverflowError, MemoryError) as e_:
         cap_waits.append(repr(e_))
 check("SETUP-BACKOFF-CAP: the shift is capped, the wait GPS_IGNORED_MAX",
-      cap_waits == [2 * gl.GPS_RETRY, 8 * gl.GPS_RETRY]
-      + [gl.GPS_IGNORED_MAX] * 3, repr(cap_waits))
+      cap_waits == [2 * gl._rcv.GPS_RETRY, 8 * gl._rcv.GPS_RETRY]
+      + [gl._rcv.GPS_IGNORED_MAX] * 3, repr(cap_waits))
 
 
 # GPS-19: the rotation's first line is no status line: look in diag.1
@@ -8670,14 +8706,14 @@ with open(gl.DIAG_OLD, "wb") as f:
 with open(gl.DIAG_FILE, "wb") as f:
     f.write(dw_cur)
 dw_uart = [0]
-dw_real_uart = gl.read_uart
+dw_real_uart = gl._rcv.read_uart
 
 
 def _dw_uart():
     dw_uart[0] += 1
 
 
-gl.read_uart = _dw_uart
+gl._rcv.read_uart = _dw_uart
 try:
     dw_pages, dw_ok = {}, True
     for fn, want in ((1, dw_old), (0, dw_cur)):
@@ -8703,7 +8739,7 @@ try:
     os.remove(gl.DIAG_OLD)
     dw_missing = _dget(b"f=1&o=0")[0]
 finally:
-    gl.read_uart = dw_real_uart
+    gl._rcv.read_uart = dw_real_uart
 check("DIAG-WEB: /diag?f=1 and f=0 paged from o are the files byte for "
       "byte (a UTF-8 SSID too), HIST_REPLY a reply at most, exact "
       "Content-Length, X-Diag-Size the file's size, WEB_CHUNK sends, the "
@@ -8727,33 +8763,33 @@ check("DIAG-WEB: a bad f or o, or a missing file, is a 404; a foreign Host "
 diag_clear()
 
 # GPS-20: a cut-off sentence glued to a whole one keeps the whole one
-gl.reset()
-gl.handle(b"$GNGGA,120000.80,4728.0" + rv_nmea(
+gl._rcv.reset()
+gl._rcv.handle(b"$GNGGA,120000.80,4728.0" + rv_nmea(
     "GNRMC,120001.00,A,4728.0000,N,01900.0000,E,0.1,,291026,,,A,V"))
 check("GPS-20: the whole sentence after a cut-off one is parsed",
-      gl.st["ok"] == 1 and gl.st["err"] == 0 and gl.ep["r"] is not None
-      and gl.ep["date"] == "2026-10-29",
+      gl.st["ok"] == 1 and gl.st["err"] == 0 and gl._rcv.ep["r"] is not None
+      and gl._rcv.ep["date"] == "2026-10-29",
       "%d %d" % (gl.st["ok"], gl.st["err"]))
 
 # HDOP-HOLD: a second with RMC only (its GGA lost) set hdop None, and an
 # unknown HDOP passes _usable: the MAX_HDOP gate was off for that second.
 # Now it keeps the last GGA HDOP and its stamp, for STALE ms (_fresh_hdop)
-gl.reset()
+gl._rcv.reset()
 settled()
 hh_t0 = _clock[0]
-gl.handle(rv_nmea("GPGGA,120000.00,4730.000,N,01900.000,E,1,08,9.0,100.0,M,"
+gl._rcv.handle(rv_nmea("GPGGA,120000.00,4730.000,N,01900.000,E,1,08,9.0,100.0,M,"
                   "40.0,M,,"))
 hh = []
 for k in range(1, 4):
     _clock[0] = hh_t0 + 1000 * k
-    gl.handle(rv_nmea("GPRMC,1200%02d.00,A,4730.000,N,01900.000,E,0.1,,"
+    gl._rcv.handle(rv_nmea("GPRMC,1200%02d.00,A,4730.000,N,01900.000,E,0.1,,"
                       "021126,,,A" % k))
     hh.append((gl.st["time"], gl.st["hdop"], gl._usable(gl.st["pos_at"])))
 check("HDOP-HOLD: an RMC-only second keeps the last GGA HDOP for STALE ms",
       hh == [("12:00:00", 9.0, False), ("12:00:01", 9.0, False),
              ("12:00:02", None, True)]
-      and gl.STALE == 2000, repr(hh))
-gl.reset()
+      and gl._rcv.STALE == 2000, repr(hh))
+gl._rcv.reset()
 
 # NMEA-RANGE: a checksum-valid corrupt sentence (the XOR misses two flipped
 # bits) put what float() takes in st: minutes 60+, lat 91, lon 181, "e"
@@ -8784,24 +8820,24 @@ nr_ok = (("GPGGA,120001.00,8959.9999,S,17959.9999,W,1,08,1.0,-12.5,M,,M,,",
           (47.5, 19.00833333)))
 nr_got = []
 for body in nr_bad:
-    gl.reset()
-    gl.handle(rv_nmea(body))
-    gl.handle(rv_nmea("GPRMC,120002.00,V,,,,,,,021126,,,N"))
+    gl._rcv.reset()
+    gl._rcv.handle(rv_nmea(body))
+    gl._rcv.handle(rv_nmea("GPRMC,120002.00,V,,,,,,,021126,,,N"))
     nr_got.append((body, gl.st["err"], gl.st["valid"], gl.st["lat"],
                    gl.st["alt"], gl.st["hdop"], gl.st["speed"],
-                   gl.st["std"], gl.ep["spd"]))
+                   gl.st["std"], gl._rcv.ep["spd"]))
 nr_fail = [g for g in nr_got
            if g[1:] != (1, False, None, None, None, None, None, None)]
 nr_okgot = []
 for body, want in nr_ok:
-    gl.reset()
-    gl.handle(rv_nmea(body))
-    gl.handle(rv_nmea("GPRMC,120002.00,V,,,,,,,021126,,,N"))
+    gl._rcv.reset()
+    gl._rcv.handle(rv_nmea(body))
+    gl._rcv.handle(rv_nmea("GPRMC,120002.00,V,,,,,,,021126,,,N"))
     nr_okgot.append((gl.st["err"], gl.st["valid"],
                      gl.st["lat"] is not None
                      and round(gl.st["lat"], 6) == round(want[0], 6)
                      and round(gl.st["lon"], 6) == round(want[1], 6)))
-gl.reset()
+gl._rcv.reset()
 check("NMEA-RANGE: minutes 60+, |lat| > 90, |lon| > 180, exponents, signs, "
       "bad hemispheres, nan / inf -> the sentence is bad, nothing kept",
       not nr_fail, repr(nr_fail[:3]))
@@ -8832,6 +8868,7 @@ check("CLOCK-MOD: the logger uses gps_clock's functions, not copies; the OTA sha
       == (_gc.days, _gc.civil, _gc.ymd_ok, _gc.tc_ok, _gc.dt_s, _gc.stamp_s)
       and (gl.EPOCH_DAYS, gl.FIX_S_END) == (_gc.EPOCH_DAYS, _gc.FIX_S_END)
       and "/gps_clock.mpy" in gl.OTA_SHADOW and "/gps_clock.py" in gl.OTA_SHADOW
+      and "/gps_receiver.mpy" in gl.OTA_SHADOW and "/gps_receiver.py" in gl.OTA_SHADOW
       and tuple(_gb.OTA_SHADOW) == tuple(gl.OTA_SHADOW), repr(gl.OTA_SHADOW))
 _cm_rt = all(_gc.civil(_gc.days(y, m, d)) == (y, m, d)
              for y in (2020, 2024, 2026, 2099, 2100) for m in range(1, 13)
@@ -8858,41 +8895,41 @@ check("CLOCK-MOD: ymd_ok / tc_ok / dt_s refuse what is no UTC time (month 13, ho
 
 # GPS-22: the satellite-list skip window is GSV_EVERY long; one left over
 # from 7 days ago (past 2**29 ms on the wrapping clock) skips nothing
-saved_t = (time.ticks_diff, time.ticks_add, _clock[0], dict(gl._uc_sv))
+saved_t = (time.ticks_diff, time.ticks_add, _clock[0], dict(gl._rcv._uc_sv))
 time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
 time.ticks_add = lambda a, b: (a + b) & (TPW - 1)
 try:
     _clock[0] = 5000
-    gl._uc_sv["until"] = time.ticks_add(5000, 2000)
-    skip_fresh = gl._uc_gsv_skip()
+    gl._rcv._uc_sv["until"] = time.ticks_add(5000, 2000)
+    skip_fresh = gl._rcv._uc_gsv_skip()
     _clock[0] = (5000 + 7 * 86400000) & (TPW - 1)
-    skip_stale = gl._uc_gsv_skip()
-    cleared = gl._uc_sv["until"] is None
+    skip_stale = gl._rcv._uc_gsv_skip()
+    cleared = gl._rcv._uc_sv["until"] is None
 finally:
     time.ticks_diff, time.ticks_add, _clock[0] = saved_t[:3]
-    gl._uc_sv.update(saved_t[3])
+    gl._rcv._uc_sv.update(saved_t[3])
 check("GPS-22: a GSV skip window 7 days old is over and cleared, a fresh one skips",
       skip_fresh and not skip_stale and cleared, "%r %r %r" % (skip_fresh, skip_stale, cleared))
 
 # GPS: used from the satellite list (GGA stops at 12), a banner across reads
-gl.reset()
+gl._rcv.reset()
 gl.st["used"] = 12
 gl.st["svs"] = [(k, 30, 40, 100, True, False, 0) for k in range(1, 17)]
 gl.st["svs_at"] = _clock[0]
-used_list = gl.sv_used()
-gl.st["svs_at"] = _clock[0] - 3 * gl.SV_POLL
-used_old = gl.sv_used()
+used_list = gl._rcv.sv_used()
+gl.st["svs_at"] = _clock[0] - 3 * gl._rcv.SV_POLL
+used_old = gl._rcv.sv_used()
 check("GPS: used from a fresh satellite list, else GGA",
       used_list == 16 and used_old == 12, "%r %r" % (used_list, used_old))
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
 ban = b"FWVer R6.0.0.0Build3700\r\n"
 _uart_rx.extend(b"x" * 10 + b"\r\n")     # a cut-off line before it
-gl.read_uart()
+gl._rcv.read_uart()
 _uart_rx.extend(ban[:12])
-gl.read_uart()
+gl._rcv.read_uart()
 _uart_rx.extend(ban[12:])
-gl.read_uart()
+gl._rcv.read_uart()
 check("GPS: a start-up banner split across two reads is one restart",
       gl.st["gps_boots"] == 1, gl.st["gps_boots"])
 
@@ -8900,21 +8937,21 @@ check("GPS: a start-up banner split across two reads is one restart",
 # RXBUF: lines are read in place from one preallocated buffer (a bytes buffer
 # grown per read and sliced per line copied ~1 KB at a time); a line split over
 # reads, a line after it and junk still work
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
 rmcs = b"".join(rv_nmea("GNRMC,1207%02d.00,V,,,,,,,171026,,,N" % k) + b"\r\n"
                 for k in range(3))
 data = rmcs + rmcs
 for k in range(0, len(data), 7):
     _uart_rx.extend(data[k:k + 7])
-    gl.read_uart()
+    gl._rcv.read_uart()
 rx_ok = (gl.st["ok"], gl.st["err"])
 _uart_rx.extend(b"\x00" * 300)               # junk: no newline in sight
-gl.read_uart()
+gl._rcv.read_uart()
 _uart_rx.extend(rmcs)
-gl.read_uart()
+gl._rcv.read_uart()
 check("RXBUF: a preallocated buffer, lines across 7-byte reads, junk dropped",
-      isinstance(getattr(gl, "_rx", None), bytearray)
+      isinstance(getattr(gl._rcv, "_rx", None), bytearray)
       and rx_ok == (6, 0) and gl.st["ok"] == 9,
       "%r ok=%d" % (rx_ok, gl.st["ok"]))
 
@@ -8924,20 +8961,20 @@ check("RXBUF: a preallocated buffer, lines across 7-byte reads, junk dropped",
 # has no meaning to a UC6580): before a sentence it is what ran into it, with a
 # plausible "length" behind it it holds nothing back, in a sentence that one
 # sentence is bad and no other
-gl.reset()
-gl._rx_n = gl._rx_s = 0
+gl._rcv.reset()
+gl._rcv._rx_n = gl._rcv._rx_s = 0
 _uart_rx[:] = []
 _uart_rx.extend(b"\xff\xb5\x62\x01\x02\x40\x00" + rmcs)
-gl.read_uart()
-b62_a = (gl.st["ok"], gl.st["err"], gl._rx_n)
-gl.reset()
+gl._rcv.read_uart()
+b62_a = (gl.st["ok"], gl.st["err"], gl._rcv._rx_n)
+gl._rcv.reset()
 _uart_rx.extend(b"\xb5\x62\x01\x07\xff\x03" + rmcs)
-gl.read_uart()
-b62_b = (gl.st["ok"], gl.st["err"], gl._rx_n)
-gl.reset()
+gl._rcv.read_uart()
+b62_b = (gl.st["ok"], gl.st["err"], gl._rcv._rx_n)
+gl._rcv.reset()
 _uart_rx.extend(b"$GNRMC,120700.00,V,\xb5\x62\x01\x07\xff\x03,,,,171026,,,N*00\r\n" + rmcs)
-gl.read_uart()
-b62_c = (gl.st["ok"], gl.st["err"], gl._rx_n)
+gl._rcv.read_uart()
+b62_c = (gl.st["ok"], gl.st["err"], gl._rcv._rx_n)
 check("RX-B562: 0xB5 0x62 in junk is not a frame: no sentence lost or held back",
       b62_a == (3, 0, 0) and b62_b == (3, 0, 0) and b62_c == (3, 1, 0),
       repr((b62_a, b62_b, b62_c)))
@@ -8946,7 +8983,7 @@ check("RX-B562: 0xB5 0x62 in junk is not a frame: no sentence lost or held back"
 # in order, also across a junk drop; the buffer's bounds hold
 import random as _rnd2
 _tr = _rnd2.Random(7)
-_tr_real = gl.handle
+_tr_real = gl._rcv.handle
 _tr_bad = []
 _tr_max = [0]
 for _ in range(120):
@@ -8954,24 +8991,24 @@ for _ in range(120):
            for _k in range(_tr.randrange(1, 40))]
     _d = b"\r\n".join(_ls) + b"\r\n"
     _seen = []
-    gl.handle = lambda b, a, e: _seen.append(bytes(b[a:e]))
-    gl._rx_n = gl._rx_s = 0
+    gl._rcv.handle = lambda b, a, e: _seen.append(bytes(b[a:e]))
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
     _uart_rx[:] = []
     _o = 0
     while _o < len(_d):
         _s = _tr.choice((1, 2, 3, 13, 63, 64, 255, 256, 257, 700))
         _uart_rx.extend(_d[_o:_o + _s])
         _o += _s
-        gl.read_uart()
-        _tr_max[0] = max(_tr_max[0], gl._rx_n)
-    if _seen != _ls or gl._rx_n or gl._rx_s:
+        gl._rcv.read_uart()
+        _tr_max[0] = max(_tr_max[0], gl._rcv._rx_n)
+    if _seen != _ls or gl._rcv._rx_n or gl._rcv._rx_s:
         _tr_bad.append((_seen[:2], _ls[:2]))
-gl.handle = _tr_real
-gl._rx_n = gl._rx_s = 0
-gl.reset()
+gl._rcv.handle = _tr_real
+gl._rcv._rx_n = gl._rcv._rx_s = 0
+gl._rcv.reset()
 check("RX-TORN: lines whole and in order across any reads, the buffer within its "
-      "RX_LINE + RX_READ", not _tr_bad and _tr_max[0] <= gl.RX_LINE
-      and len(gl._rx) == gl.RX_LINE + gl.RX_READ, repr((_tr_bad[:1], _tr_max)))
+      "RX_LINE + RX_READ", not _tr_bad and _tr_max[0] <= gl._rcv.RX_LINE
+      and len(gl._rcv._rx) == gl._rcv.RX_LINE + gl._rcv.RX_READ, repr((_tr_bad[:1], _tr_max)))
 
 # RXBUF-FIND: line ends are found with bytearray.find
 # (C), not a Python loop over every byte (~0.17 us/B on the unix port)
@@ -8983,21 +9020,21 @@ class IdxCount(bytearray):
         return bytearray.__getitem__(self, k)
 
 
-saved_rx = (gl._rx, gl._rxv)
-ic = IdxCount(len(gl._rx))
-gl._rx, gl._rxv = ic, memoryview(ic)
-gl._rx_n = gl._rx_s = 0
+saved_rx = (gl._rcv._rx, gl._rcv._rxv)
+ic = IdxCount(len(gl._rcv._rx))
+gl._rcv._rx, gl._rcv._rxv = ic, memoryview(ic)
+gl._rcv._rx_n = gl._rcv._rx_s = 0
 try:
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
     f_data = (b"".join(rv_nmea("GPRMC,1210%02d.00,V,,,,,,,171026,,,N" % k)
                        + b"\r\n" for k in range(40))
               + (b"FWVer R6.0.0.0Build3700\r\n") * 2)
     _uart_rx.extend(f_data)
-    gl.read_uart()
+    gl._rcv.read_uart()
 finally:
-    gl._rx, gl._rxv = saved_rx
-    gl._rx_n = gl._rx_s = 0
+    gl._rcv._rx, gl._rcv._rxv = saved_rx
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
 check("RXBUF-FIND: no per-byte Python loop over what the UART delivers",
       IdxCount.n < len(f_data) // 20 and gl.st["ok"] == 40
       and gl.st["gps_boots"] == 2,
@@ -9033,7 +9070,7 @@ def old_handle(line):
     gl.st["good"] = time.ticks_ms()
     try:
         f = line[1:line.rfind(b"*")].decode().split(",")
-        fn = gl.HANDLERS.get(f[0][2:])
+        fn = gl._rcv.HANDLERS.get(f[0][2:])
         if fn:
             fn(f[0][:2], f)
         gl.st["ok"] += 1
@@ -9072,13 +9109,13 @@ for n_ in range(1500):
     pad = bytearray(b"xx\n" + line + b"\r\n12")
     got = []
     for run in range(2):
-        gl.reset()
+        gl._rcv.reset()
         gl.st["setup_at"] = _clock[0] - 5000
         if run:
-            gl.handle(pad, 3, 3 + len(line))
+            gl._rcv.handle(pad, 3, 3 + len(line))
         else:
             old_handle(line)
-        gl.handle(rv_nmea("GPRMC,120001.00,V,,,,,,,171026,,,N"))
+        gl._rcv.handle(rv_nmea("GPRMC,120001.00,V,,,,,,,171026,,,N"))
         got.append([gl.st[k_] for k_ in ip_keys])
     if got[0] != got[1]:
         ip_bad.append((line, got))
@@ -9097,10 +9134,10 @@ cs_body = "GPRMC,120000.00,A,4730.000,N,01900.000,E,0.1,,021126,%s,,A" % (
 cs_c ^= cs_x[0]
 cs_got = []
 for ck_ in ("+%X", " %X", "%X", "%02Xzz", "%02X*", "-%X", "%02X", "%02x"):
-    gl.reset()
-    gl.handle(("$%s*%s\r\n" % (cs_body, ck_ % cs_c)).encode())
+    gl._rcv.reset()
+    gl._rcv.handle(("$%s*%s\r\n" % (cs_body, ck_ % cs_c)).encode())
     cs_got.append((gl.st["ok"], gl.st["err"]))
-gl.reset()
+gl._rcv.reset()
 check("NMEA-CK-STRICT: only two hex digits after '*' (not '+F', ' 5', '5')",
       cs_c < 16 and cs_got == [(0, 1)] * 6 + [(1, 0)] * 2,
       repr((cs_c, cs_got)))
@@ -9120,17 +9157,17 @@ class SetCount(object):
         self.mv[k] = v
 
 
-saved_rxv = gl._rxv
-gl._rx[:500] = bytes(range(256)) + bytes(range(244))
-d_want = bytes(gl._rx[100:500])
-sc = SetCount(memoryview(gl._rx))
-gl._rxv, gl._rx_n = sc, 500
+saved_rxv = gl._rcv._rxv
+gl._rcv._rx[:500] = bytes(range(256)) + bytes(range(244))
+d_want = bytes(gl._rcv._rx[100:500])
+sc = SetCount(memoryview(gl._rcv._rx))
+gl._rcv._rxv, gl._rcv._rx_n = sc, 500
 try:
-    gl._rx_drop(100)
-    dropped = (bytes(gl._rx[:400]) == d_want, gl._rx_n, sc.sets)
+    gl._rcv._rx_drop(100)
+    dropped = (bytes(gl._rcv._rx[:400]) == d_want, gl._rcv._rx_n, sc.sets)
 finally:
-    gl._rxv = saved_rxv
-    gl._rx_n = gl._rx_s = 0
+    gl._rcv._rxv = saved_rxv
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
 check("RXBUF-DROP: the rest moves to the front in one slice store",
       dropped == (True, 400, 1), repr(dropped))
 
@@ -9144,32 +9181,32 @@ rc_list = [rv_nmea("GPGGA,%02d0000.00,4730.0000,N,01900.0000,E,1,08,1.0,"
 rc_lines = b"".join(rc_list)
 rc_got = []
 for rc_err in (MemoryError, RuntimeError):
-    gl.reset()
+    gl._rcv.reset()
     _uart_rx[:] = []
-    gl._rx_n = gl._rx_s = 0
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
     rc_calls = [0]
-    rc_gga = gl.HANDLERS["GGA"]
+    rc_gga = gl._rcv.HANDLERS["GGA"]
 
     def rc_boom(t, f, err=rc_err):
         rc_calls[0] += 1
         if rc_calls[0] == 3:
             raise err("in a handler")
         rc_gga(t, f)
-    gl.HANDLERS["GGA"] = rc_boom
+    gl._rcv.HANDLERS["GGA"] = rc_boom
     _uart_rx.extend(rc_lines)
     try:
         try:
-            gl.read_uart()
+            gl._rcv.read_uart()
             rc_raised = None
         except Exception as e:
             rc_raised = type(e).__name__
-        gl.read_uart()
+        gl._rcv.read_uart()
     finally:
-        gl.HANDLERS["GGA"] = rc_gga
+        gl._rcv.HANDLERS["GGA"] = rc_gga
     rc_got.append((rc_raised, rc_calls[0], [s[9] for s in gl.st["q"]],
-                   gl.st["err"], gl._rx_n))
-gl.reset()
-gl._rx_n = gl._rx_s = 0
+                   gl.st["err"], gl._rcv._rx_n))
+gl._rcv.reset()
+gl._rcv._rx_n = gl._rcv._rx_s = 0
 _uart_rx[:] = []
 check("RXBUF-COMMIT: a handler's error counts the line, nothing handled twice",
       rc_got == [(None, 4, ["10:00:00", "11:00:00"], 1, 0)] * 2, repr(rc_got))
@@ -9189,16 +9226,16 @@ def sec_epochs(hhmmss, date="311026", n=5, lat="4730.0000"):
     return out
 
 
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
 _uart_rx.extend(sec_epochs("235959", date="181026", lat="4730.0002"))
-gl.read_uart()
+gl._rcv.read_uart()
 mid0 = gl.st["seq"]
 _uart_rx.extend(sec_epochs("000000", date="191026", lat="4736.0000"))
-gl.read_uart()
+gl._rcv.read_uart()
 mid1 = (gl.st["time"], gl.st["date"], gl.st["seq"], gl.st["epochs"])
 _uart_rx.extend(sec_epochs("000001", date="191026", n=1))
-gl.read_uart()
+gl._rcv.read_uart()
 mid2 = (gl.st["time"], gl.st["date"], gl.st["seq"], gl.st["epochs"],
         round(gl.st["lat"], 6))
 check("SECONDS: 5 epochs a second publish once; across midnight dated",
@@ -9209,13 +9246,13 @@ q_td = tempfile.mkdtemp(prefix="secq-")
 saved_dir = gl.LOG_DIR
 try:
     gl.LOG_DIR = q_td
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     settled()
     _uart_rx[:] = []
     for s_ in range(4):                   # read after a blocking POST
         _uart_rx.extend(sec_epochs("12000%d" % s_, lat="4730.%04d" % (s_ * 6)))
-    gl.read_uart()
+    gl._rcv.read_uart()
     queued = len(gl.st["q"])
     gl.log_tick()
     q_lines = list(gl.log["batch"])
@@ -9236,14 +9273,14 @@ th_td = tempfile.mkdtemp(prefix="secthin-")
 saved_dir = gl.LOG_DIR
 try:
     gl.LOG_DIR = th_td
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     settled()
     _uart_rx[:] = []
     for s_ in range(41):
         _uart_rx.extend(sec_epochs("1200%02d" % s_, lat="4730.%04d" % (s_ * 12)))
-    while gl.uart.any():                 # (RX_READS a call, no log_tick between)
-        gl.read_uart()
+    while gl._rcv.uart.any():                 # (RX_READS a call, no log_tick between)
+        gl._rcv.read_uart()
     th_n = gl.st.get("q_thin")
     gl.log_tick()
     th_lines = list(gl.log["batch"])
@@ -9253,12 +9290,12 @@ finally:
 th_t = [l.rstrip().rsplit(",", 1)[1] for l in th_lines]
 check("SECONDS-THIN: 40 s published without log_tick keep SECONDS_Q seconds "
       "spread over all of them, not the newest only",
-      len(th_lines) == gl.SECONDS_Q and th_t[0] == "20261031T120000Z"
+      len(th_lines) == gl._rcv.SECONDS_Q and th_t[0] == "20261031T120000Z"
       and th_t[-1] == "20261031T120039Z" and th_t == sorted(th_t)
-      and th_n == 40 - gl.SECONDS_Q, repr((th_n, th_t)))
+      and th_n == 40 - gl._rcv.SECONDS_Q, repr((th_n, th_t)))
 th_rows = dict(gl._web_rows())
 check("SECONDS-THIN: status.json counts thinned seconds, lost points and track "
-      "write errors", th_rows.get("q_thin") == 40 - gl.SECONDS_Q
+      "write errors", th_rows.get("q_thin") == 40 - gl._rcv.SECONDS_Q
       and "track_drop" in th_rows and "write_errs" in th_rows,
       repr({k: th_rows.get(k) for k in ("q_thin", "track_drop",
                                         "write_errs")}))
@@ -9269,7 +9306,7 @@ t2_td = tempfile.mkdtemp(prefix="trk2-")
 saved_dir = gl.LOG_DIR
 try:
     gl.LOG_DIR = t2_td
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     path2 = os.path.join(t2_td, "20261031_120000.trk")
     with open(path2, "w") as f:
@@ -9361,7 +9398,7 @@ check("TRK2: trk2gpx output of TRK1 lines unchanged (no extension namespace)",
 # RING-LINE: the way out rebuilt from the departure ring is the line
 # _sample_line writes (single precision: mpy_unix_logger)
 def ring_nmea():
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     gl.log["still"] = sl = gl._still_state()
     sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
@@ -9389,7 +9426,7 @@ check("RING-LINE: the way out is the line _sample_line writes",
       w1 == g1 and len(g1) == gl.STILL_DEP_MAX and g1[1].count(",") == 4
       and g1[1].startswith("47.498130,-0.314401,"),
       repr([(a, b) for a, b in zip(w1, g1) if a != b][:2]))
-gl.reset()
+gl._rcv.reset()
 
 # HIST: the day history the status page draws - each point once it is
 # uploaded, appended to HIST_DIR/<UTC day>.trb (the track file is deleted
@@ -9813,7 +9850,7 @@ try:
 finally:
     gl.HIST_DIR, gl.LOG_DIR, gl.HIST_REPLY = _hist_saved
     shutil.rmtree(_hd, ignore_errors=True)
-    gl.reset()
+    gl._rcv.reset()
 
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
 rv_td = tempfile.mkdtemp(prefix="rev29-")
@@ -10911,7 +10948,7 @@ for t in ("080001", "080002"):
         data += rv_rmc(t) + rv_gga(t)
 data += rv_rmc("080003")
 _uart_rx.extend(data)
-gl.read_uart()
+gl._rcv.read_uart()
 crash = None
 try:
     gl.log_tick()
@@ -10999,7 +11036,7 @@ for k in range(10):                      # meanwhile: driving off, queued
                  lat=47.5, lon=19.0 + (160 + 20 * k) * M_LON, alt=100.0,
                  hdop=1.0, std=None, std_at=None, epochs=5, status="A",
                  fixtype=3, pos_at=_clock[0], hdop_at=_clock[0])
-    gl.st["q"].append(gl._snap())
+    gl.st["q"].append(gl._rcv._snap())
 gl.log_tick()
 times = [l.split(",")[4].strip() for l in sv_lines()]
 check("L-12: no heartbeat before queued seconds (lines in time order)",
@@ -11644,8 +11681,8 @@ gl.socket, gl.select = fake_sockmod, fake_sel
 sys.modules["tls"] = RvTls
 tls_ctx_reset()                          # up_reset() made one with the mock
 uart_reads = [0]
-real_ru = gl.read_uart
-gl.read_uart = lambda: uart_reads.__setitem__(0, uart_reads[0] + 1)
+real_ru = gl._rcv.read_uart
+gl._rcv.read_uart = lambda: uart_reads.__setitem__(0, uart_reads[0] + 1)
 try:
     rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\nRetry-After: 7\r\n\r\n",
                         polls=3)
@@ -11725,7 +11762,7 @@ finally:
         sys.modules.pop("tls", None)
     else:
         sys.modules["tls"] = real_mods[2]
-    gl.read_uart = real_ru
+    gl._rcv.read_uart = real_ru
     gl.CA_FILE = "/ca.der"
     tls_ctx_reset()
 check("U-11: POST body in chunks, UART read while writing and waiting",
@@ -12281,7 +12318,7 @@ c = RvConn(long_req)
 got = gl._web_read(c)
 check("U-13: the whole request head is read (900 B cookie)",
       got == long_req and c.req == b"", "%d" % len(got))
-gl.reset()
+gl._rcv.reset()
 c = RvConn(b"")
 gl._web_reply(c, b"GET /status.json HTTP/1.1")
 head, _, jb = c.sent.partition(b"\r\n\r\n")
@@ -12593,18 +12630,18 @@ check("POST-5: a guard hit on a 2xx is no 'aborted' line for the next error",
 
 # GPS-STORM: while it loops, setups are GPS_STORM_WAIT apart; diag lines
 diag_clear()
-gl.reset()
+gl._rcv.reset()
 banner = b"FWVer R6.0.0.0Build3700"
-gl.handle(banner)
+gl._rcv.handle(banner)
 calm = gl.st["setup_wait"]
-for _ in range(gl.GPS_FLAP_RESTARTS):
+for _ in range(gl._rcv.GPS_FLAP_RESTARTS):
     _clock[0] += 5000
-    gl.handle(banner)
-gl.handle(banner)
+    gl._rcv.handle(banner)
+gl._rcv.handle(banner)
 storm = gl.st["setup_wait"]
 lines = diag_lines()
 check("GPS-STORM: setups GPS_STORM_WAIT apart while the receiver loops",
-      calm == gl.GPS_RETRY and storm == gl.GPS_STORM_WAIT
+      calm == gl._rcv.GPS_RETRY and storm == gl._rcv.GPS_STORM_WAIT
       and any(l.startswith("gps reset loop ") for l in lines),
       "%r %r %r" % (calm, storm, lines[-2:]))
 gl.DIAG = 0
@@ -13045,48 +13082,48 @@ check("HEAP-LABELS: diag says 'connect' and 'post', not 'http_post' twice",
 
 
 # GPS-STORM-END: quiet for GPS_STORM_QUIET after a storm -> set up soon
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
 banner = b"FWVer R6.0.0.0Build3700"
-for _ in range(gl.GPS_FLAP_RESTARTS + 1):
+for _ in range(gl._rcv.GPS_FLAP_RESTARTS + 1):
     _clock[0] += 3000
-    gl.handle(banner)
+    gl._rcv.handle(banner)
 gl.st["setup_at"] = _clock[0]
 storm_wait = gl.st["setup_wait"]
 _uart_tx[:] = []
-_clock[0] += gl.GPS_STORM_QUIET + gl.GPS_RETRY + 500
-gl.gps_check(_clock[0])
+_clock[0] += gl._rcv.GPS_STORM_QUIET + gl._rcv.GPS_RETRY + 500
+gl._rcv.gps_check(_clock[0])
 sent = setup_cmds() > 0
 check("GPS-STORM-END: after the storm the setup comes within ~15 s, not 30-60",
-      storm_wait == gl.GPS_STORM_WAIT and sent, "%r %r" % (storm_wait, sent))
+      storm_wait == gl._rcv.GPS_STORM_WAIT and sent, "%r %r" % (storm_wait, sent))
 
 # STORM-END-NOACK: the last storm setup got no ACK, but the receiver took
 # the blind burst (no extra sentence): quiet after the storm, it is still
 # set up within GPS_RETRY, not after the doubled GPS_STORM_WAIT
-gl.reset()
-for _ in range(gl.GPS_FLAP_RESTARTS + 1):
+gl._rcv.reset()
+for _ in range(gl._rcv.GPS_FLAP_RESTARTS + 1):
     _clock[0] += 3000
-    gl.handle(banner)
-gl.uart.silent = True
+    gl._rcv.handle(banner)
+gl._rcv.uart.silent = True
 try:
-    gl.gps_setup()
+    gl._rcv.gps_setup()
 finally:
-    gl.uart.silent = False
+    gl._rcv.uart.silent = False
 noack = (gl.st["setup_ok"], gl.st["extra"], gl.st["setup_wait"])
 _uart_tx[:] = []
-_clock[0] += gl.GPS_STORM_QUIET + gl.GPS_RETRY + 500
-gl.gps_check(_clock[0])
+_clock[0] += gl._rcv.GPS_STORM_QUIET + gl._rcv.GPS_RETRY + 500
+gl._rcv.gps_check(_clock[0])
 sent = setup_cmds() > 0
 check("STORM-END-NOACK: unacknowledged last storm setup, quiet -> set up soon",
-      noack == (False, 0, gl.GPS_STORM_WAIT) and sent, "%r %r" % (noack, sent))
+      noack == (False, 0, gl._rcv.GPS_STORM_WAIT) and sent, "%r %r" % (noack, sent))
 
 # STORM-FIRST: the restart that makes it a storm already gets the storm wait
-gl.reset()
-for _ in range(gl.GPS_FLAP_RESTARTS):
+gl._rcv.reset()
+for _ in range(gl._rcv.GPS_FLAP_RESTARTS):
     _clock[0] += 5000
-    gl.handle(banner)
+    gl._rcv.handle(banner)
 check("STORM-FIRST: the restart that declares the storm waits GPS_STORM_WAIT",
-      gl.st["loops"] == 1 and gl.st["setup_wait"] == gl.GPS_STORM_WAIT,
+      gl.st["loops"] == 1 and gl.st["setup_wait"] == gl._rcv.GPS_STORM_WAIT,
       "loops=%d wait=%d" % (gl.st["loops"], gl.st["setup_wait"]))
 
 # STORM-SPACED: restarts further apart than GPS_STORM_QUIET (12 s) each got
@@ -13097,15 +13134,15 @@ check("STORM-FIRST: the restart that declares the storm waits GPS_STORM_WAIT",
 
 
 def storm_run(gap):
-    gl.reset()
+    gl._rcv.reset()
     calls = []
-    real = gl.gps_setup
+    real = gl._rcv.gps_setup
 
     def fake():
         calls.append(_clock[0])
         gl.st.update(setup_at=_clock[0], extra=0, setup_ok=True, checked=True)
 
-    gl.gps_setup = fake
+    gl._rcv.gps_setup = fake
     try:
         gl.st.update(setup_at=_clock[0], setup_ok=True, extra=0, checked=True)
         end = _clock[0] + 600000
@@ -13113,21 +13150,21 @@ def storm_run(gap):
         k = 0
         while _clock[0] < end:
             if _clock[0] >= nxt:
-                gl.handle(banner)
+                gl._rcv.handle(banner)
                 nxt += gap
             k += 1
             if k % 5 == 0:
-                gl.handle(rv_nmea("GNRMC,120000.00,V,,,,,,,311026,,,N"))
-            gl.gps_check(_clock[0])
+                gl._rcv.handle(rv_nmea("GNRMC,120000.00,V,,,,,,,311026,,,N"))
+            gl._rcv.gps_check(_clock[0])
             _clock[0] += 200
     finally:
-        gl.gps_setup = real
+        gl._rcv.gps_setup = real
     return len(calls)
 
 
 s12, s40 = storm_run(12000), storm_run(40000)
 check("STORM-SPACED: restarts 12 s apart: setups GPS_STORM_WAIT apart",
-      s12 <= 600000 // gl.GPS_STORM_WAIT + 3 and s40 == 15,
+      s12 <= 600000 // gl._rcv.GPS_STORM_WAIT + 3 and s40 == 15,
       "12 s: %d setups for 50 restarts, 40 s: %d for 15" % (s12, s40))
 
 # WRAP-GPS: ticks_ms wraps every 2**30 ms; the storm mark, old restart
@@ -13136,31 +13173,31 @@ TPW = 1 << 30
 saved_td = time.ticks_diff
 time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
 try:
-    gl.reset()
-    for _ in range(2 * gl.GPS_FLAP_RESTARTS - 1):   # a storm + 4 restarts
+    gl._rcv.reset()
+    for _ in range(2 * gl._rcv.GPS_FLAP_RESTARTS - 1):   # a storm + 4 restarts
         _clock[0] += 3000
-        gl.handle(banner)
+        gl._rcv.handle(banner)
     gl.st.update(svs=[(k, 30, 40, 100, True, False, 0) for k in range(9)],
                  svs_at=_clock[0], used=7)
     base = _clock[0]
     loops0 = gl.st["loops"]
-    for dt in (gl.GPS_FLAP_WINDOW + 10000,
+    for dt in (gl._rcv.GPS_FLAP_WINDOW + 10000,
                getattr(gl, "TICKS_CAP", 86400000) + 10000):
         _clock[0] = base + dt
-        gl.gps_check(_clock[0])
+        gl._rcv.gps_check(_clock[0])
     _clock[0] = base + TPW + 5000            # all would read 5-30 s old
-    used = gl.sv_used()
-    gl.handle(banner)
+    used = gl._rcv.sv_used()
+    gl._rcv.handle(banner)
     wrapped = (gl.st["setup_wait"], gl.st["loops"] - loops0, used)
 finally:
     time.ticks_diff = saved_td
 check("WRAP-GPS: storm mark, restart times, satellite list end, not wrap",
-      wrapped == (gl.GPS_RETRY, 0, 7), repr(wrapped))
+      wrapped == (gl._rcv.GPS_RETRY, 0, 7), repr(wrapped))
 
 
 
 # PAGE: web.html draws the boxes from /status.json (node runs its view())
-gl.reset()
+gl._rcv.reset()
 gl.up_reset()
 gl.wifi_reset()
 gl.st.update(rx=_clock[0], pos_at=_clock[0], valid=True, fixtype=3, quality=1,
@@ -13201,7 +13238,7 @@ check("PAGE: JSON is generated piece by piece (no list in RAM)",
 check("PAGE: status JSON has no field of the receiver this board does not have",
       not any(k in jd1 for k in ("hacc", "fix_src", "ubx")) and "nmea" in jd1
       and jd3["hdop"] is None, repr(sorted(jd1)))
-gl.reset()
+gl._rcv.reset()
 import re
 import shutil
 import subprocess
@@ -13540,8 +13577,10 @@ else:
         ("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
          "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
          "idf None/None heap 124", "status")]
-    with open(os.path.join(ROOT, "gps_logger.py")) as f:
-        ev_src = f.read()
+    ev_src = ""
+    for n_ in ("gps_logger.py", "gps_receiver.py"):   # (the receiver's lines too)
+        with open(os.path.join(ROOT, n_)) as f:
+            ev_src += f.read()
     ev_fmts = re.findall(r'_wifi_diag\(\s*"\w+",\s*"([^"]*)"', ev_src)
     for m_ in re.finditer(r'(_diag_write|_ota_say|_say|_loop_diag|'
                           r'_bug_once)\((\s*now,)?\s*"([^"]*)"', ev_src):
@@ -14279,27 +14318,27 @@ def _nm(body):
     for ch in body.encode():
         c ^= ch
     return ("$%s*%02X\r\n" % (body, c)).encode()
-gl.reset()
+gl._rcv.reset()
 j0 = json.loads(_web_json())
 _junk = b"\x00\xff garbage\r\n$GPRMC,1,2*00\r\n"
 _uart_rx.extend(_junk)
-gl.read_uart()
+gl._rcv.read_uart()
 j1 = json.loads(_web_json())
 junk_b, junk_good = gl.st["rx_b"], gl.st["good"]
 _clock[0] += 4000
 s1 = _nm("GPRMC,120500.00,V,,,,,,,171026,,,N")
 _uart_rx.extend(s1)
-gl.read_uart()
+gl._rcv.read_uart()
 good_at = gl.st["good"]
 _clock[0] += 7000
 s2 = _nm("GNRMC,120501.00,V,,,,,,,171026,,,N")
 _uart_rx.extend(s2)
-gl.read_uart()
+gl._rcv.read_uart()
 ubx_at = gl.st["good"]
 _clock[0] += 12000
 _bad_ck = b"$GNRMC,120502.00,V,,,,,,,171026,,,N*00\r\n"
 _uart_rx.extend(_bad_ck)                  # bytes came, no whole sentence
-gl.read_uart()
+gl._rcv.read_uart()
 j2 = json.loads(_web_json())
 check("WEB-LINK: rx_bytes counts every byte, good_age_s only whole frames",
       j0["rx_bytes"] == 0 and j0["rx_age_s"] is None
@@ -14322,7 +14361,7 @@ check("WEB-POS6: pos6 %.6f, None w/o fix",
       and p_nm["position"] == "47.18536, 18.42730"
       and p_none["pos6"] is None,
       repr((p_nm.get("pos6"), p_none.get("pos6"))))
-gl.reset()
+gl._rcv.reset()
 
 # WEB-DAYS: the day history's days for the page's picker, oldest first,
 # only YYYYMMDD.trb and (older firmware's) YYYYMMDD.trk, a day once,
@@ -14400,13 +14439,13 @@ gl.up_reset()
 
 # REV-1: a silent receiver keeps its last second's valid flag; the page
 # got that position as live (and the static test recorded it)
-gl.reset()
+gl._rcv.reset()
 gl.st.update(rx=_clock[0], pos_at=_clock[0], valid=True, fixtype=3,
              lat=47.1, lon=18.4)
 r1a = json.loads(_web_json())
-_clock[0] += gl.NO_DATA + 1000
+_clock[0] += gl._rcv.NO_DATA + 1000
 r1b = json.loads(_web_json())
-gl.reset()
+gl._rcv.reset()
 check("REV-1: no position once the last second is older than NO_DATA",
       r1a["position"] == "47.10000, 18.40000" and r1a["pos6"] is not None
       and r1b["fix"] == "No data!" and r1b["position"] is None
@@ -14819,18 +14858,18 @@ for d in range(20):
     c11 += 86400000
     up11 = gl.uptime_s(c11)
 small11 = _gck._up[0] < (1 << 30) and len(_gck._up) == 3 and 0 <= _gck._up[2] < 1000
-gl.reset()
+gl._rcv.reset()
 gl.st["rx_b"] = 0x3FFFFFF0
 _uart_rx.extend(b"$" * 32)
-gl.read_uart()
+gl._rcv.read_uart()
 rx11 = gl.st["rx_b"]
 del _uart_rx[:]
-gl.reset()
+gl._rcv.reset()
 gl.st["good"] = _clock[0]
-_clock[0] += gl.TICKS_CAP + 1000
-gl._stamps_old(_clock[0])
+_clock[0] += _gck.TICKS_CAP + 1000
+gl._rcv._stamps_old(_clock[0])
 good11 = gl.st["good"]
-gl.reset()
+gl._rcv.reset()
 _gck._up[:] = [0, _clock[0], 0]
 check("REV-11: uptime in seconds + ms (20 days), the byte count wraps at "
       "2^30, good cleared after TICKS_CAP",
@@ -14846,10 +14885,10 @@ check("REV-12: trk2gpx ignores what follows #END",
 
 # REV-13: a receiver restart read during an answered setup keeps the wait
 # _gps_restarted set (a storm's GPS_STORM_WAIT), not GPS_RETRY again
-gl.reset()
+gl._rcv.reset()
 _uart_rx[:] = []
 gl.st["storm_at"] = _clock[0]
-_real_uart = gl.uart
+_real_uart = gl._rcv.uart
 
 
 class _UcRestart(_UcUart):
@@ -14863,17 +14902,17 @@ class _UcRestart(_UcUart):
         return n
 
 
-gl.uart = _UcRestart()
+gl._rcv.uart = _UcRestart()
 try:
-    gl.gps_setup()
+    gl._rcv.gps_setup()
     b13 = gl.st["gps_boots"]
 finally:
-    gl.uart = _real_uart
+    gl._rcv.uart = _real_uart
     _uart_rx[:] = []
 w13 = gl.st["setup_wait"]
-gl.reset()
+gl._rcv.reset()
 check("REV-13: a restart during the setup keeps the storm wait",
-      b13 == 1 and w13 == gl.GPS_STORM_WAIT, repr((b13, w13)))
+      b13 == 1 and w13 == gl._rcv.GPS_STORM_WAIT, repr((b13, w13)))
 
 # REV-14: an interface that failed to come up at boot is made again after
 # the backoff (it stayed down for good)
@@ -15652,8 +15691,8 @@ try:
     _gsock.SOCK_STREAM = 1
     _gsock.getaddrinfo = lambda h, p, a=0, b=0: [(2, 1, 6, "", (h, p))]
     _gsock.socket = lambda *a: _gs[0]
-    _gsaved = (gl.socket, gl.read_uart)
-    gl.socket, gl.read_uart = _gsock, lambda: None
+    _gsaved = (gl.socket, gl._rcv.read_uart)
+    gl.socket, gl._rcv.read_uart = _gsock, lambda: None
     got = []
     try:
         body = b"y" * 3000
@@ -15692,7 +15731,7 @@ try:
             gl._raw_get(u_, bytearray().extend, 5000)
             get_hosts.append(b"".join(sent_).split(b"\r\n")[1])
     finally:
-        gl.socket, gl.read_uart = _gsaved
+        gl.socket, gl._rcv.read_uart = _gsaved
     check("OTA-CLEN: reads exactly Content-Length (no EOF error), short or "
           "too long raises, no length reads to EOF",
           got == [(200, True), "ota body 10 ", "ota body 900", (200, b"abc")],
@@ -17054,7 +17093,7 @@ check("OTA-RETRY: OTA_CHECK is 10 min; a bad download waits OTA_RETRY "
 # the upload JSON, the .bad copy and the day history are the text lines
 # byte for byte; a point takes ~2-8 bytes instead of ~46-51.
 import random as _rnd
-gl.reset()
+gl._rcv.reset()
 _tb_saved = (gl.LOG_DIR, gl.HIST_DIR, gl.UPLOAD_BATCH)
 _tb = tempfile.mkdtemp(prefix="trb-")
 gl.HIST_DIR = os.path.join(_tb, "hist")
@@ -17831,10 +17870,21 @@ finally:
 # The sentences here are the board's, measured 2026-11-04 (receiver UC6580I
 # R6.0.0.0Build3700, indoors: no signal, so the fix sentences are made up).
 def _heltec_logger():
+    # its own receiver (st, UART, buffers): a second copy of gps_receiver.py
+    # that only this logger imports, as it has its own copy of the logger
+    rspec = importlib.util.spec_from_file_location(
+        "gps_receiver", os.path.join(ROOT, "gps_receiver.py"))
+    r = importlib.util.module_from_spec(rspec)
     spec = importlib.util.spec_from_file_location(
         "gps_logger_heltec", os.path.join(ROOT, "gps_logger.py"))
     m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
+    saved_r = sys.modules.get("gps_receiver")
+    sys.modules["gps_receiver"] = r
+    try:
+        rspec.loader.exec_module(r)
+        spec.loader.exec_module(m)
+    finally:
+        sys.modules["gps_receiver"] = saved_r
     m.DIAG_FILE = os.path.join(diag_dir, "diag-h.log")
     m.DIAG_OLD = os.path.join(diag_dir, "diag-h.1")
     m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf-h")
@@ -17848,7 +17898,7 @@ def _uc_feed(m, *lines):
     for ln in lines:
         _uart_rx.extend(ln if isinstance(ln, bytes) else ln.encode())
         _uart_rx.extend(b"\r\n")
-    m.read_uart()
+    m._rcv.read_uart()
 
 
 def _nmea(body):
@@ -17863,20 +17913,20 @@ _uart_rx[:] = b""
 hl = _heltec_logger()
 check("HELTEC-BOARD: UART1 on 34/33 at 115200, Vext (GPIO3) high and the TFT "
       "backlight (GPIO21) off, before any UART use",
-      (hl.GPS_UART, hl.GPS_TX, hl.GPS_RX, hl.BAUD) == (1, 34, 33, 115200)
+      (hl._rcv.GPS_UART, hl._rcv.GPS_TX, hl._rcv.GPS_RX, hl._rcv.BAUD) == (1, 34, 33, 115200)
       and [p[:2] for p in _pin_levels if p[0] in (3, 21)] == [(3, 1), (21, 0)],
-      repr((hl.GPS_TX, hl.GPS_RX, hl.BAUD, _pin_levels[:4])))
+      repr((hl._rcv.GPS_TX, hl._rcv.GPS_RX, hl._rcv.BAUD, _pin_levels[:4])))
 with open(os.path.join(ROOT, "main.py")) as f:
     _msrc = f.read()
 check("HELTEC-SKIP: main.py's boot-bypass pin is GPIO7, not the download-mode "
       "button", "SKIP_PIN = 7" in _msrc)
 
 # the setup
-hl.reset()
-hl.uart = _UcUart()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
 _uart_rx[:] = b""
-_ha_setup = hl.uart
-hl.gps_setup()
+_ha_setup = hl._rcv.uart
+hl._rcv.gps_setup()
 _cmds = list(_ha_setup.cmds)
 check("UC-SETUP: PDTINFO (no checksum: with one it gets no answer), then CFGNAV "
       "first (it resets the GSV rate), each with its checksum; "
@@ -17897,37 +17947,37 @@ check("UC-SETUP: all answered: taken for now, the receiver's model from PDTINFO"
       and hl.st["gps_ver"] == "UC6580I G1B1L1E1, R6.0.0.0Build3700",
       repr((hl.st["setup_ok"], hl.st["gps_ver"])))
 _ha_setup.cmds[:] = []
-hl.gps_setup()
+hl._rcv.gps_setup()
 check("UC-SETUP: the model is asked once", not any(
     c.startswith(b"$PDTINFO") for c in _ha_setup.cmds))
 
-hl.reset()
-hl.uart = _UcUart(silent=True)
+hl._rcv.reset()
+hl._rcv.uart = _UcUart(silent=True)
 _t0 = _clock[0]
-hl.gps_setup()
+hl._rcv.gps_setup()
 check("UC-SILENT: no answer ends the setup at the first silent command after "
       "PDTINFO (the loop is not held up), and gps_check retries",
       hl.st["setup_ok"] is False and hl.st["checked"] is True
-      and len(hl.uart.cmds) == 2 and _clock[0] - _t0 <= 3 * hl.UC_ACK_WAIT,
-      repr((hl.st["setup_ok"], hl.uart.cmds, _clock[0] - _t0)))
+      and len(hl._rcv.uart.cmds) == 2 and _clock[0] - _t0 <= 3 * hl._rcv.UC_ACK_WAIT,
+      repr((hl.st["setup_ok"], hl._rcv.uart.cmds, _clock[0] - _t0)))
 
-hl.reset()
+hl._rcv.reset()
 _hdl, _hdw = [], hl._diag_write
 hl._diag_write = _hdl.append
-hl.uart = _UcUart(bad=("CFGNAV",))
-hl.gps_setup()
+hl._rcv.uart = _UcUart(bad=("CFGNAV",))
+hl._rcv.gps_setup()
 hl._diag_write = _hdw
 _hd = "\n".join(_hdl)
 check("UC-FAIL: a refused rate is said and is no \"not taken\" verdict; the "
       "rest of the setup goes on",
       hl.st["setup_ok"] is True and hl.st["rate_nak"] is True
       and "gps refused CFGNAV,200,200,1000" in _hd
-      and any(c.startswith(b"$CFGMSG,0,7,5") for c in hl.uart.cmds), _hd[-200:])
+      and any(c.startswith(b"$CFGMSG,0,7,5") for c in hl._rcv.uart.cmds), _hd[-200:])
 
 # a restart: the banner the board prints after a power cycle
-hl.reset()
-hl.uart = _UcUart()
-hl.gps_setup()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
+hl._rcv.gps_setup()
 _b0, _e0 = hl.st["gps_boots"], hl.st["err"]
 _uc_feed(hl, "", "UC6580I G1B1L1E1 COM1", "PN 2400615000268",
          "SN 20230729000954003", "HWVer 00", "FWVer R6.0.0.0Build3700",
@@ -17939,9 +17989,9 @@ check("UC-RESTART: the plain text banner is one restart, not 7 bad lines; the "
       repr((hl.st["gps_boots"], hl.st["err"], hl.st["extra"])))
 
 # 5 Hz with a fix: the setup's verdict
-hl.reset()
-hl.uart = _UcUart()
-hl.gps_setup()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
+hl._rcv.gps_setup()
 _ok0 = hl.st["ok"]
 for _s in range(5):
     for _f in range(5):
@@ -17952,8 +18002,8 @@ for _s in range(5):
         if _f == 0:
             _uc_feed(hl, _nmea("GNGST,%s,0.8,,,,1.4,1.6,2.5" % _t))
         _clock[0] += 200
-_clock[0] += hl.GPS_VERIFY
-hl._setup_check(_clock[0])
+_clock[0] += hl._rcv.GPS_VERIFY
+hl._rcv._setup_check(_clock[0])
 check("UC-5HZ: GGA, RMC and GST at 5 Hz pass the setup's check (5 fixes a "
       "second, GST seen), nothing counted as not taken",
       hl.st["checked"] is True and hl.st["extra"] == 0 and hl.st["hz5"] > 0
@@ -17961,8 +18011,8 @@ check("UC-5HZ: GGA, RMC and GST at 5 Hz pass the setup's check (5 fixes a "
       repr((hl.st["checked"], hl.st["extra"], hl.st["hz1"], hl.st["hz5"], hl.st["err"])))
 
 # no fix yet: its RMC carries a date that is not today
-hl.reset()
-hl.uart = _UcUart()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
 _uc_feed(hl, _nmea("GNRMC,090328.00,V,,,,,,,170126,,,N,V"),
          _nmea("GNGGA,090328.00,,,,,0,00,99.99,,,,,,"),
          _nmea("GNGST,090328.00,0.0,,,,3750000,3750000,3750000"))
@@ -17977,9 +18027,9 @@ check("UC-NOFIX: the receiver's made-up date before a fix (17 Jan 2026, no "
       repr((hl.st["pos_at"], hl.st["date"], hl.st["err"])))
 
 # the satellite list from GSV: two bands of one satellite, then GSA's used ones
-hl.reset()
-hl.uart = _UcUart()
-hl.gps_setup()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
+hl._rcv.gps_setup()
 _uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"),
          _nmea("GNGSA,A,3,25,,,,,,,,,,,,1.2,0.8,0.9,4"),
          _nmea("GPGSV,1,1,03,14,77,011,40,17,56,319,35,30,36,201,,1"),
@@ -17992,10 +18042,10 @@ _uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # the next round closes this one
 _svs = {(v[6], v[0]): v for v in (hl.st["svs"] or [])}
 _uok = hl.st["ok"]
 _uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,99,1"))
-_clock[0] += hl.GSV_EVERY * 1000 + 1
-_skip = hl.st["ok"] == _uok + 1 and not hl._uc_sv["new"]
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_skip = hl.st["ok"] == _uok + 1 and not hl._rcv._uc_sv["new"]
 _uc_feed(hl, _nmea("GAGSV,1,1,01,13,42,203,31,7"))      # the end of a round
-_mid = not hl._uc_sv["new"]
+_mid = not hl._rcv._uc_sv["new"]
 _uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
 _uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,50,1"))
 _again = [v[1] for v in hl.st["svs"]] == [50]
@@ -18011,14 +18061,14 @@ check("UC-GSV: one list from a round: a satellite once with its strongest band, 
 check("UC-GSV-SKIP: GSV_EVERY s of GSV not decoded after a list (1 Hz with a "
       "fix); then not from a round's middle, a whole round again",
       _skip and _mid and _again, repr((_skip, _mid, _again, hl.st["svs"])))
-_clock[0] += hl.GSV_EVERY * 1000 + 1
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
 _uc_feed(hl, _nmea("GPGSV,1,1,00,1"), _nmea("GAGSV,1,1,00,7"))
-_clock[0] += hl.GSV_EVERY * 1000 + 1
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
 _uc_feed(hl, _nmea("GPGSV,1,1,00,1"))    # closes the empty round
 check("UC-GSV-EMPTY: a round with no satellites (no signal) is the list: "
       "none seen, not the last round's",
-      hl.st["svs"] == [] and hl.sv_seen() == 0 and hl._sv_list() == [],
-      repr((hl.st["svs"], hl.sv_seen())))
+      hl.st["svs"] == [] and hl._rcv.sv_seen() == 0 and hl._sv_list() == [],
+      repr((hl.st["svs"], hl._rcv.sv_seen())))
 
 # GPS_SYS: a mask set once, only when the receiver has another
 class _UcSys(_UcUart):
@@ -18032,37 +18082,37 @@ class _UcSys(_UcUart):
         return n
 
 
-hl.reset()
-hl.UC_SYS = None
+hl._rcv.reset()
+hl._rcv.UC_SYS = None
 hl._gps_sys_env({"GPS_SYS": "h135155"})
-_w = hl.UC_SYS
+_w = hl._rcv.UC_SYS
 hl._gps_sys_env({"GPS_SYS": "xyz"})
-_bad = hl.UC_SYS
-hl.uart = _UcSys()
-hl.gps_setup()
-_c1 = list(hl.uart.cmds)
-hl.gps_setup()
-_c2 = hl.uart.cmds[len(_c1):]
-hl.reset()
-hl.uart = _UcSys()
-hl.uart.has = "H135155"
-hl.gps_setup()
-_c3 = list(hl.uart.cmds)
-hl.UC_SYS = None
-hl.reset()
-hl.uart = _UcUart()
-hl.gps_setup()
-_c4 = list(hl.uart.cmds)
-hl.UC_SYS = 0x135155
-hl.reset()
-hl.uart = _UcSys(bad=("CFGSYS,",))       # the board's: $FAIL for the SBAS bit
+_bad = hl._rcv.UC_SYS
+hl._rcv.uart = _UcSys()
+hl._rcv.gps_setup()
+_c1 = list(hl._rcv.uart.cmds)
+hl._rcv.gps_setup()
+_c2 = hl._rcv.uart.cmds[len(_c1):]
+hl._rcv.reset()
+hl._rcv.uart = _UcSys()
+hl._rcv.uart.has = "H135155"
+hl._rcv.gps_setup()
+_c3 = list(hl._rcv.uart.cmds)
+hl._rcv.UC_SYS = None
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
+hl._rcv.gps_setup()
+_c4 = list(hl._rcv.uart.cmds)
+hl._rcv.UC_SYS = 0x135155
+hl._rcv.reset()
+hl._rcv.uart = _UcSys(bad=("CFGSYS,",))       # the board's: $FAIL for the SBAS bit
 _rl, _rw = [], hl._diag_write
 hl._diag_write = _rl.append
-hl.gps_setup()
+hl._rcv.gps_setup()
 hl._diag_write = _rw
-_c5 = list(hl.uart.cmds)
+_c5 = list(hl._rcv.uart.cmds)
 _r5 = hl.st["setup_ok"]
-hl.UC_SYS = None
+hl._rcv.UC_SYS = None
 check("UC-SYS-REFUSED: a refused mask is said as refused and the setup goes on: "
       "the receiver is not left at its defaults (1 Hz, no GST)",
       any(l.startswith("gps refused CFGSYS,") for l in _rl)
@@ -18088,8 +18138,8 @@ def _uc_fixes(m, n, kn="0.05", q=1):
         _clock[0] += 1000
 
 
-hl.reset()
-hl.uart = _UcUart()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
 _clock[0] += 1000
 _uc_feed(hl, _nmea("GNRMC,090328.00,V,,,,,,,170126,,,N,V"))
 _clock[0] += 1000
@@ -18104,7 +18154,7 @@ _u1 = hl._usable(_clock[0])
 _uc_fixes(hl, 2)
 _f1 = hl.st["fix_first"]
 _u2 = hl._usable(_clock[0])
-_clock[0] += hl.UC_SETTLE
+_clock[0] += hl._rcv.UC_SETTLE
 _uc_fixes(hl, 2)
 _u3 = hl._usable(_clock[0])
 _s3 = hl.st["settled"]
@@ -18115,12 +18165,12 @@ check("UC-SETTLE: no fix does not start it; the first fix does, later ones do no
       and _u1 is True and _u2 is False and _u3 is True and _s3 is True,
       repr((_v0, _f0, _f1, _u0, _u1, _u2, _u3, _s3)))
 # a day later: no second window (it was in the 24 h stamp clean-up)
-_clock[0] += hl.TICKS_CAP + 1000
-hl._stamps_old(_clock[0])
+_clock[0] += _gck.TICKS_CAP + 1000
+hl._rcv._stamps_old(_clock[0])
 _uc_fixes(hl, 2)
 _u4 = hl._usable(_clock[0])
 _nofirst = hl.st["fix_first"] == _f0
-gl.reset()
+gl._rcv.reset()
 gl.st.update(speed=2.0)
 _u5 = gl._usable(_clock[0])
 check("UC-SETTLE-DAY: the rule does not come back after TICKS_CAP of uptime; no fix "
@@ -18135,15 +18185,15 @@ _se_td = tempfile.mkdtemp(prefix="settle-")
 _se_saved = hl.LOG_DIR
 try:
     hl.LOG_DIR = _se_td
-    hl.reset()
+    hl._rcv.reset()
     hl.log_reset()
     hl.wifi_reset()
     hl.up_reset()
     hl.wifi.update(state="offline", home=False)
-    hl.uart = _UcUart()
+    hl._rcv.uart = _UcUart()
     _clock[0] = (_clock[0] // 1000 + 1) * 1000
     _se_early = []
-    for _i in range(hl.UC_SETTLE // 1000 - 2):
+    for _i in range(hl._rcv.UC_SETTLE // 1000 - 2):
         _uc_fixes(hl, 1)
         hl.log_tick()
         _se_early.append(len(hl.log["batch"]) + bool(hl.log["still"]["win_at"]))
@@ -18151,7 +18201,7 @@ try:
         _uc_fixes(hl, 1)
         hl.log_tick()
     _se_stay = hl.log["still"]["active"]
-    hl.reset()
+    hl._rcv.reset()
     hl.log_reset()
     _clock[0] = (_clock[0] // 1000 + 1) * 1000
     for _i in range(5):
@@ -18161,7 +18211,7 @@ try:
 finally:
     hl.LOG_DIR = _se_saved
     hl.log_reset()
-    hl.reset()
+    hl._rcv.reset()
     shutil.rmtree(_se_td, ignore_errors=True)
 check("UC-SETTLE-STAY: standing still from the first fix: nothing recorded for "
       "UC_SETTLE, then a stay as ever; at 50 km/h points from the start",
@@ -18196,48 +18246,48 @@ check("UC-SETTLE-QUEUED: a second from before fix_first does not settle the "
 # a first fix that never settled (a short fix, then days without one): the
 # stamps tick settles it at TICKS_CAP, long before _usable's ticks_diff would
 # wrap negative on the board (6.2 days) and drop every slow fix
-hl.st.update(settled=False, fix_first=time.ticks_add(_clock[0], 1 - hl.TICKS_CAP))
-hl._stamps_old(_clock[0])
+hl.st.update(settled=False, fix_first=time.ticks_add(_clock[0], 1 - _gck.TICKS_CAP))
+hl._rcv._stamps_old(_clock[0])
 _w0 = hl.st["settled"]
-hl.st["fix_first"] = time.ticks_add(_clock[0], -hl.TICKS_CAP)
-hl._stamps_old(_clock[0])
+hl.st["fix_first"] = time.ticks_add(_clock[0], -_gck.TICKS_CAP)
+hl._rcv._stamps_old(_clock[0])
 _w1 = (hl.st["settled"], hl.st["fix_first"] is not None)
 check("UC-SETTLE-WRAP: an unsettled first fix TICKS_CAP old is settled by the "
       "stamps tick; younger it still waits",
       _w0 is False and _w1 == (True, True), repr((_w0, _w1)))
 
 # a restart whose banner was lost: no GST with sentences coming
-hl.reset()
-hl.uart = _UcUart()
-hl.gps_setup()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
+hl._rcv.gps_setup()
 _dl2, _dw2 = [], hl._diag_write
 hl._diag_write = _dl2.append
-_clock[0] += hl.UC_GST_LOST - 1000
+_clock[0] += hl._rcv.UC_GST_LOST - 1000
 hl.st["rx"] = _clock[0]
-hl._uc_watch(_clock[0])
+hl._rcv._uc_watch(_clock[0])
 _w0 = hl.st["extra"]
 _clock[0] += 2000
 hl.st["rx"] = None                       # silent: another case
-hl._uc_watch(_clock[0])
+hl._rcv._uc_watch(_clock[0])
 _w1 = hl.st["extra"]
 hl.st["rx"] = _clock[0]
 hl.st["gst_at"] = _clock[0] - 1000       # GST comes: all is well
-hl._uc_watch(_clock[0])
+hl._rcv._uc_watch(_clock[0])
 _w2 = hl.st["extra"]
-hl.st["gst_at"] = _clock[0] - hl.UC_GST_LOST
-hl._uc_watch(_clock[0])
+hl.st["gst_at"] = _clock[0] - hl._rcv.UC_GST_LOST
+hl._rcv._uc_watch(_clock[0])
 _w3 = hl.st["extra"]
-hl._uc_watch(_clock[0])
-_cn = len(hl.uart.cmds)
+hl._rcv._uc_watch(_clock[0])
+_cn = len(hl._rcv.uart.cmds)
 hl.st["setup_at"] = _clock[0] - hl.st["setup_wait"]
-hl.gps_check(_clock[0])
-_w4 = len(hl.uart.cmds) > _cn and hl.st["extra"] == 0
+hl._rcv.gps_check(_clock[0])
+_w4 = len(hl._rcv.uart.cmds) > _cn and hl.st["extra"] == 0
 hl._diag_write = _dw2
 check("UC-WATCH: no GST for UC_GST_LOST with sentences coming: gps_check sets it up "
       "again, said; not before, not when silent, not while GST comes",
       _w0 == 0 and _w1 == 0 and _w2 == 0 and _w3 == 1 and _w4
       and _dl2 == ["gps setup lost: no GST"], repr((_w0, _w1, _w2, _w3, _w4, _dl2)))
-hl.reset()
+hl._rcv.reset()
 _ipolls = []
 
 
@@ -18247,8 +18297,8 @@ class _Ipoll(object):
         return iter(())
 
 
-hl._usb_in = _Ipoll()
-hl.gps_check(_clock[0])
+hl._rcv._usb_in = _Ipoll()
+hl._rcv.gps_check(_clock[0])
 _ip_ok = _ipolls == [0]
 
 
@@ -18257,32 +18307,32 @@ class _IpollBad(object):
         raise MemoryError()
 
 
-hl._usb_in = _IpollBad()
-hl._usb_drain()
-hl._usb_in = None
+hl._rcv._usb_in = _IpollBad()
+hl._rcv._usb_drain()
+hl._rcv._usb_in = None
 check("USB-DRAIN: every gps_check reads stdin on the Heltec, without a list per pass "
       "(ipoll); no MemoryError leaves it", _ip_ok, repr(_ipolls))
 
 # GSA: a burst is one round, wherever the second's clock falls in it
-hl.reset()
-hl.uart = _UcUart()
+hl._rcv.reset()
+hl._rcv.uart = _UcUart()
 _clock[0] += 1000
 _uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"))
 hl.st["gsa_at"] = _clock[0] - 1000       # the next one a second after the first
 _uc_feed(hl, _nmea("GNGSA,A,3,25,,,,,,,,,,,,1.2,0.8,0.9,4"))
-_u1 = sorted(hl._uc_sv["used"])
+_u1 = sorted(hl._rcv._uc_sv["used"])
 _clock[0] += 200
 _uc_feed(hl, _nmea("GNGSA,A,3,30,,,,,,,,,,,,1.2,0.8,0.9,1"))
 check("UC-GSA: the satellites in use of one burst stay together past a second's "
       "boundary; a pause starts the next round's",
-      _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._uc_sv["used"] == [30],
-      repr((_u1, hl._uc_sv["used"])))
+      _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._rcv._uc_sv["used"] == [30],
+      repr((_u1, hl._rcv._uc_sv["used"])))
 _e0 = hl.st["err"]
 _uc_feed(hl, _nmea("GNGSA,A,2,30,,,,,,,,,,,,1.2,0.8,0.9"))
 check("UC-GSA-OLD: a GSA without a system id (NMEA before 4.10, VDOP last) is a "
       "good sentence: its fix type taken, the list of used satellites left alone",
-      hl.st["err"] == _e0 and hl.st["fixtype"] == 2 and hl._uc_sv["used"] == [30],
-      repr((hl.st["err"] - _e0, hl.st["fixtype"], hl._uc_sv["used"])))
+      hl.st["err"] == _e0 and hl.st["fixtype"] == 2 and hl._rcv._uc_sv["used"] == [30],
+      repr((hl.st["err"] - _e0, hl.st["fixtype"], hl._rcv._uc_sv["used"])))
 
 # the display: the fonts, the values, what goes to the panel
 import gps_tft as _ft
@@ -18300,7 +18350,7 @@ for _f in (_ff.CLOCK, _ff.SATS, _ff.UP, _ff.WORD, _ff.SMALL):
 check("TFT-FONT: every glyph's offset and size add up, 16 levels (the design's five sizes: "
       "TFT-FONT-BASE)", all(_fo), repr(_fo))
 
-hl.reset()
+hl._rcv.reset()
 hl.log_reset()
 hl.wifi_reset()
 hl.up_reset()
@@ -18313,10 +18363,10 @@ hl.st.update(date="2026-11-04", time="10:42:10", valid=True, lat=47.1, lon=18.4,
              pos_at=_clock[0], speed=46.6, hdop=0.968, used=22, view={"GP": 28},
              alt=182.4, rx=_clock[0], fixtype=3)
 _s1 = hl._tft_state(_clock[0])
-_s2 = hl._tft_state(_clock[0] + hl.STALE + 1)
+_s2 = hl._tft_state(_clock[0] + hl._rcv.STALE + 1)
 hl.wifi.update(state="connected", ssid="krumpli", rssi=-55, ip="192.168.1.60")
 hl.up["left"] = 0
-_s3 = hl._tft_state(_clock[0] + hl.STALE + 1)
+_s3 = hl._tft_state(_clock[0] + hl._rcv.STALE + 1)
 _lv = []
 for _r in (-55, -60, -61, -70, -71, -80, -81, None):
     _lv.append(hl._wifi_level(_r, None))
@@ -18351,7 +18401,7 @@ check("TFT-CLOCK: Hungarian time from the fix: CET in winter, CEST in summer, "
       and _ls("2026-03-29", "00:59:00") == "01:59" and _ls("2026-03-29", "01:00:00") == "03:00"
       and _ls("2026-10-25", "00:59:00") == "02:59" and _ls("2026-10-25", "01:00:00") == "02:00"
       and _ls(None, None) == "--:--")
-hl.st["rx"] = _clock[0] - hl.NO_DATA
+hl.st["rx"] = _clock[0] - hl._rcv.NO_DATA
 check("TFT-CLOCK-SILENT: a silent receiver's clock shows --:--, not a stopped time",
       _ls("2026-11-04", "10:42:10") == "--:--")
 hl.log["clock"] = ((hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 + 42 * 60 + 10,
@@ -19337,7 +19387,7 @@ _h_summer = _ls(None, None)
 hl._ntp[0] = (_DAY - 86400 * 150, hl._stamp())
 _h_winter = _ls(None, None)
 _h_gps = _ls("2026-11-04", "10:42:10")
-hl.st["rx"] = _clock[0] - hl.NO_DATA
+hl.st["rx"] = _clock[0] - hl._rcv.NO_DATA
 hl._ntp[0] = (_DAY, hl._stamp())
 _h_silent = _ls("2026-11-04", "10:42:10")
 hl.st["rx"] = _clock[0]
@@ -19982,12 +20032,12 @@ _rg_k = [0]
 
 
 def _rg_reset():
-    hl.reset()
+    hl._rcv.reset()
     hl.log_reset()
     hl.wifi_reset()
     hl.up_reset()
     hl.wifi.update(state="offline", home=False)
-    hl.uart = _UcUart()
+    hl._rcv.uart = _UcUart()
     _uart_rx[:] = b""
     hl.st["settled"] = True
     _clock[0] = (_clock[0] // 1000 + 1) * 1000
@@ -20287,9 +20337,9 @@ for _tk, _bd in (("GP", "GPGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2"),
                  ("GL", "GLGSA,A,3,65,66,,,,,,,,,,,1.5,0.9,1.2"),
                  ("GN", "GNGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2"),
                  ("GN", "GNGSA,A,3,07,08,,,,,,,,,,,1.5,0.9,1.2,3")):
-    hl._uc_sv["gsa"] = None
+    hl._rcv._uc_sv["gsa"] = None
     _uc_feed(hl, _nmea(_bd))
-    _rg_u2.append(list(hl._uc_sv["used"]))
+    _rg_u2.append(list(hl._rcv._uc_sv["used"]))
 check("RG-7: a GSA before NMEA 4.10 (no system id) counts for its talker's system, a GN one "
       "for none; with the id (4.10) as before",
       _rg_u2 == [[1, 2, 3], [6 << 8 | 65, 6 << 8 | 66], [], [2 << 8 | 7, 2 << 8 | 8]],
@@ -20315,7 +20365,7 @@ gl.LOG_DIR = os.path.join(_rb_dir, "gpx")
 gl.HIST_DIR = os.path.join(_rb_dir, "hist")
 os.makedirs(gl.LOG_DIR)
 os.makedirs(gl.HIST_DIR)
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 gl.wifi_reset()
 gl.up_reset()
@@ -20442,12 +20492,12 @@ def _rb_loop(n=5):
         if k[0] >= n:
             raise KeyboardInterrupt
     saved = (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
-             gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick,
-             gl._boot_ok, gl.read_uart)
+             gl.log_tick, gl._rcv.gps_check, gl.keepalive_tick, gl.tft_tick,
+             gl._boot_ok, gl._rcv.read_uart)
     gl.time.sleep_ms = _sl
     gl.wifi_tick = gl.upload_tick = gl.log_tick = lambda: None
-    gl._boot_ok = gl.read_uart = lambda: None
-    gl.ota_tick = gl.gps_check = gl.keepalive_tick = gl.tft_tick = lambda now: None
+    gl._boot_ok = gl._rcv.read_uart = lambda: None
+    gl.ota_tick = gl._rcv.gps_check = gl.keepalive_tick = gl.tft_tick = lambda now: None
     gl._wdt = None
     try:
         gl._loop()
@@ -20458,8 +20508,8 @@ def _rb_loop(n=5):
         return repr(e)
     finally:
         (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
-         gl.log_tick, gl.gps_check, gl.keepalive_tick, gl.tft_tick,
-         gl._boot_ok, gl.read_uart) = saved
+         gl.log_tick, gl._rcv.gps_check, gl.keepalive_tick, gl.tft_tick,
+         gl._boot_ok, gl._rcv.read_uart) = saved
 
 
 def _rb_oom(*a):
@@ -20467,7 +20517,7 @@ def _rb_oom(*a):
 
 
 _rb_marks = []
-_rb_saved = (gl._ota_mark, gl.sv_seen, gl._temp, gl.DIAG, gl.STATUS)
+_rb_saved = (gl._ota_mark, gl._rcv.sv_seen, gl._temp, gl.DIAG, gl.STATUS)
 gl._ota_mark = _rb_marks.append
 _rb_res = {}
 try:
@@ -20488,9 +20538,9 @@ try:
         gl.WEB = False
         gl.ota["pend"] = _p
         gl.DIAG = 1
-        gl.sv_seen = _rb_oom
+        gl._rcv.sv_seen = _rb_oom
         _rb_res["diag", _p] = _rb_loop()
-        gl.sv_seen = _rb_saved[1]
+        gl._rcv.sv_seen = _rb_saved[1]
         gl.DIAG = 0
         gl.STATUS = 1
         gl._tick_bug.clear()
@@ -20501,7 +20551,7 @@ try:
 finally:
     gl.ota["pend"] = None
     _RbListen.oom = None
-    gl._ota_mark, gl.sv_seen, gl._temp, gl.DIAG, gl.STATUS = _rb_saved
+    gl._ota_mark, gl._rcv.sv_seen, gl._temp, gl.DIAG, gl.STATUS = _rb_saved
 _rb_want = {}
 for _p in (None, 200):
     _rb_want["accept", _p] = _rb_want["diag", _p] = _rb_want["status", _p] = "ran"
@@ -20630,39 +20680,39 @@ class _RbUart(object):
         return k
 
 
-_rb_saved = (gl.uart, gl.handle)
+_rb_saved = (gl._rcv.uart, gl._rcv.handle)
 _rb_seen = []
-gl.handle = lambda b, a, e: _rb_seen.append(bytes(b[a:e]))
+gl._rcv.handle = lambda b, a, e: _rb_seen.append(bytes(b[a:e]))
 try:
-    gl.reset()
-    gl._rx_n = gl._rx_s = 0
-    gl.uart = _RbUart(flood=True)
-    gl.read_uart()
-    _rb_flood = gl.uart.reads
+    gl._rcv.reset()
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
+    gl._rcv.uart = _RbUart(flood=True)
+    gl._rcv.read_uart()
+    _rb_flood = gl._rcv.uart.reads
     # a full 8 KB buffer (the Heltec's): one pass takes all of it, in order
-    gl._rx_n = gl._rx_s = 0
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
     del _rb_seen[:]
     _rb_ln = [b"$GNGGA,%05d,47.1,N,18.4,E,1,12,0.9,100,M,40,M,,*00" % i for i in range(160)]
     _rb_8k = b"\n".join(_rb_ln) + b"\n"
-    gl.uart = _RbUart(_rb_8k)
-    gl.read_uart()
-    _rb_one = (len(_rb_8k) >= 8192, gl.uart.any(), _rb_seen == _rb_ln)
+    gl._rcv.uart = _RbUart(_rb_8k)
+    gl._rcv.read_uart()
+    _rb_one = (len(_rb_8k) >= 8192, gl._rcv.uart.any(), _rb_seen == _rb_ln)
     # more than a pass takes: the rest waits there, no byte lost or doubled
-    gl._rx_n = gl._rx_s = 0
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
     del _rb_seen[:]
     _rb_ln = [b"$GNGGA,%05d,47.1,N,18.4,E,1,12,0.9,100,M,40,M,,*00" % i for i in range(1500)]
-    gl.uart = _RbUart(b"\n".join(_rb_ln) + b"\n")
+    gl._rcv.uart = _RbUart(b"\n".join(_rb_ln) + b"\n")
     _rb_n = 0
-    while gl.uart.any() and _rb_n < 100:
-        gl.read_uart()
+    while gl._rcv.uart.any() and _rb_n < 100:
+        gl._rcv.read_uart()
         _rb_n += 1
     _rb_many = (_rb_n > 1, _rb_seen == _rb_ln)
 finally:
-    gl.uart, gl.handle = _rb_saved
-    gl._rx_n = gl._rx_s = 0
-    gl.reset()
+    gl._rcv.uart, gl._rcv.handle = _rb_saved
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
+    gl._rcv.reset()
 check("RB-UART: a UART never empty: read_uart returns after its budget",
-      _rb_flood <= getattr(gl, "RX_READS", 0) and _rb_flood > 0, repr(_rb_flood))
+      _rb_flood <= getattr(gl._rcv, "RX_READS", 0) and _rb_flood > 0, repr(_rb_flood))
 check("RB-UART-NOLOSS: a full 8 KB buffer goes in one pass (a pass is ~25 ms at "
       "2.3 KB/s); more waits in the UART for the next pass, nothing lost or doubled",
       _rb_one == (True, 0, True) and _rb_many == (True, True),
@@ -20728,7 +20778,7 @@ gl.socket, gl.WEB, gl.WEB_AWAY = _rb_socket, False, False
 gl.wifi_reset()
 
 # RB-Q: no new list on each pass without a fix when the queue is empty
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 _rb_q = gl.st["q"]
 gl.log_tick()
@@ -20985,7 +21035,7 @@ def _rb_batch(n):
             % (i // 3600, i // 60 % 60, i % 60) for i in range(n)]
 
 
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 gl.free = lambda: 10 ** 9
 gl.log["file"] = os.path.join(gl.LOG_DIR, "hold.trk")
@@ -21009,7 +21059,7 @@ for _f in _rb_days:
     with open(_f, "w") as f:
         f.write("x\n")
 gl.free = lambda: 10 ** 9 if not os.path.exists(os.path.join(gl.HIST_DIR, "20261001.trk")) else gl.MIN_FREE - 1
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 gl.log["file"] = os.path.join(gl.LOG_DIR, "trim.trk")
 gl.log["created"] = False
@@ -21198,9 +21248,9 @@ try:
     # JSON, the image's sha256 wrong at every check, no clue); a POST keeps
     # its status (the head is read for Retry-After and Content-Type only)
     _rn_hdrs = b"".join(b"X-Pad-%d: y\r\n" % i for i in range(gl.HTTP_LINES + 6))
-    _rn_saved2 = (gl.socket, gl.read_uart)
+    _rn_saved2 = (gl.socket, gl._rcv.read_uart)
     _rn_out = bytearray()
-    gl.socket, gl.read_uart = _gsock, lambda: None
+    gl.socket, gl._rcv.read_uart = _gsock, lambda: None
     try:
         _gs[0] = _GetSock(b"HTTP/1.0 200 OK\r\n" + _rn_hdrs
                           + b"Content-Length: 4\r\n\r\nBODY")
@@ -21209,7 +21259,7 @@ try:
         except OSError as e:
             rn5 = ("OSError", str(e))
     finally:
-        gl.socket, gl.read_uart = _rn_saved2
+        gl.socket, gl._rcv.read_uart = _rn_saved2
 
     class _RnSock(RvSock):
         def settimeout(self, t):
@@ -21340,7 +21390,7 @@ _n2_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
              gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES, gl.OTA_MARK, gl.OTA_SHADOW,
              gl._mem_reboot, gl._mem_reboot_soon, _ota_dir, gl._diag_write,
              gl.NTP_SERVER, gl._ntp_ask, gl.up["url"], gl._wifi_begin_round,
-             gl._try_roam_home, gl.socket, gl.read_uart, gl.feed,
+             gl._try_roam_home, gl.socket, gl._rcv.read_uart, gl.feed,
              gl._rtc_sync, gl._tls_wrap, gl._ota_promote, gl._rm,
              gl.wifi["wlan"])
 _n2_log = dict((k, gl.log.get(k)) for k in ("clock",))
@@ -21572,7 +21622,7 @@ try:
         ev = []
         def connect(self, a):
             _N2Sock.ev.append("connect")
-    gl.socket, gl.read_uart = _gsock, lambda: None
+    gl.socket, gl._rcv.read_uart = _gsock, lambda: None
     gl._rtc_sync = lambda now: _N2Sock.ev.append("rtc")
     gl._tls_wrap = lambda s, h: s
     n2_6 = []
@@ -21606,7 +21656,7 @@ try:
         gl.feed = _n2_saved[25]
         gl._rtc_sync = _n2_saved[26]
         gl._tls_wrap = _n2_saved[27]
-        gl.socket, gl.read_uart = _n2_saved[23], _n2_saved[24]
+        gl.socket, gl._rcv.read_uart = _n2_saved[23], _n2_saved[24]
     check("RN2-6: an https GET sets the board clock before it connects, an "
           "http one not; getaddrinfo is fed around",
           n2_6 == [["rtc", "connect"], ["connect"], ["feed", "dns", "feed"]],
@@ -21775,7 +21825,7 @@ finally:
      gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES, gl.OTA_MARK, gl.OTA_SHADOW,
      gl._mem_reboot, gl._mem_reboot_soon, _ota_dir, gl._diag_write,
      gl.NTP_SERVER, gl._ntp_ask, gl.up["url"], gl._wifi_begin_round,
-     gl._try_roam_home, gl.socket, gl.read_uart, gl.feed,
+     gl._try_roam_home, gl.socket, gl._rcv.read_uart, gl.feed,
      gl._rtc_sync, gl._tls_wrap, gl._ota_promote, gl._rm,
      gl.wifi["wlan"]) = _n2_saved
     gl.log.update(_n2_log)

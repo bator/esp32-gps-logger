@@ -90,7 +90,7 @@ gl.WEB_PAGE_GZ = gz_path or "/nonexistent-gps-logger-loopback/web.html.gz"
 gl.WEB = True
 gl.WEB_DEADLINE = 1                     # s, short for the test
 gl.WEB_TIMEOUT = 0.4
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 gl.wifi_reset()
 gl.up_reset()
@@ -347,7 +347,7 @@ check("a trickling request is dropped at WEB_DEADLINE, unanswered",
       outs == [] and 900 <= ms <= 1600, (outs, ms))
 
 # a client that resets the connection mid-reply
-real_uart = gl.read_uart
+real_uart = gl._rcv.read_uart
 victim = [None]
 
 
@@ -361,7 +361,7 @@ def reset_client():
         time.sleep_ms(50)
 
 
-gl.read_uart = reset_client
+gl._rcv.read_uart = reset_client
 s = client(req)
 victim[0] = s
 crash = None
@@ -369,16 +369,16 @@ try:
     tick()
 except Exception as e:
     crash = e
-gl.read_uart = real_uart
+gl._rcv.read_uart = real_uart
 check("a reset mid-reply ends the reply, no raise",
       crash is None and victim[0] is None
       and sum(outs) < len(page), (crash, len(outs), sum(outs)))
 
 # reply slower than the deadline (a slow link: every chunk 150 ms)
-gl.read_uart = lambda: time.sleep_ms(150)
+gl._rcv.read_uart = lambda: time.sleep_ms(150)
 s = client(req)
 ms = tick()
-gl.read_uart = real_uart
+gl._rcv.read_uart = real_uart
 got = read_all(s)
 check("a reply past WEB_DEADLINE is cut there",
       ms <= 1600 and len(got) < len(page), (ms, len(got)))
@@ -435,12 +435,12 @@ if gz_path:
         f = open(sys.argv[2], "rb")
         page = f.read()
         f.close()
-    gl.read_uart = sample
+    gl._rcv.read_uart = sample
     s = client(req)
     gc.collect()
     free0 = gc.mem_free()
     tick()
-    gl.read_uart = real_uart
+    gl._rcv.read_uart = real_uart
     got = read_all(s)
     ih, _, ib = got.partition(b"\r\n\r\n")
     check("GET / without gzip, only web.html.gz on the board: web.html "
