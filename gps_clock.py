@@ -123,3 +123,33 @@ def utc_s(anchor):
     if anchor is None:
         return None
     return anchor[0] + age_s(anchor[1])
+
+# --- Marks (ticks) ------------------------------------------------------------------
+# ticks_ms wraps every 2**30 ms and ticks_diff is signed, so a timestamp older
+# than ~6.2 days reads as being in the future. Ages and deadlines go through
+# these helpers: a wrapped past timestamp counts as very old, a deadline that
+# lies further ahead than it could ever have been scheduled counts as due.
+
+TICKS_OLD = 1 << 29                      # "very old" for a wrapped age
+TICKS_SKEW = 1000                        # ms a timestamp may be "ahead"
+TICKS_CAP = 86400000                     # ms after which gps_check forgets
+                                         # a receiver timestamp (it would
+                                         # read as fresh again after 2**30)
+
+def recent(now, t, ms):
+    """t (ticks, or None: never) is under ms old."""
+    return t is not None and age(now, t) < ms
+
+def age(now, t):
+    """ms since ticks t. A timestamp taken just after now (say read_uart()
+    ran between the two ticks_ms() calls) is age 0; a wrapped (large
+    negative) difference is TICKS_OLD."""
+    d = time.ticks_diff(now, t)
+    if d >= 0:
+        return d
+    return 0 if d > -TICKS_SKEW else TICKS_OLD
+
+def waiting(now, at, cap):
+    """True while deadline at (scheduled at most cap ms ahead) is ahead."""
+    d = time.ticks_diff(at, now)
+    return 0 < d <= cap

@@ -90,7 +90,7 @@ gl.LOG_DIR = "/nonexistent-gps-logger-smoke"
 gl.HIST_DIR = "/nonexistent-gps-logger-smoke-hist"
 if 1.0 + 1e-12 != 1.0:                  # a double build: the board's single
     gl._RF = gl.array("d", bytes(8 * 3 * gl.STILL_DEP_MAX))  # keeps its digits
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 gl.wifi_reset()
 gl.up_reset()
@@ -119,11 +119,11 @@ def nm(body):
     return ("$%s*%02X" % (body, c)).encode()
 
 
-gl.handle(nm("GNRMC,120001.00,A,4728.0000,N,01900.0000,E,0.1,,291026,,,A,V"))
-gl.handle(nm("GNGGA,120001.00,4728.0000,N,01900.0000,E,1,12,0.9,100.0,M,"
+gl._rcv.handle(nm("GNRMC,120001.00,A,4728.0000,N,01900.0000,E,0.1,,291026,,,A,V"))
+gl._rcv.handle(nm("GNGGA,120001.00,4728.0000,N,01900.0000,E,1,12,0.9,100.0,M,"
              "40.0,M,,"))
 check("NMEA parsed (GN talker)", gl.st["ok"] == 2 and gl.st["err"] == 0)
-gl.handle(b"$GNGGA,1200" + nm("GNGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2,1"))
+gl._rcv.handle(b"$GNGGA,1200" + nm("GNGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2,1"))
 check("cut-off sentence glued to a whole one", gl.st["fixtype"] == 3)
 
 # a time or date digit flipped past the checksum (two flipped bits pass the
@@ -131,7 +131,7 @@ check("cut-off sentence glued to a whole one", gl.st["fixtype"] == 3)
 # the track made a last_t no real time ever sorted above (no line, no anchor
 # point until a reboot). Through the parser and log_tick, on the board's
 # floats too.
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 gl.st["settled"] = True
 k = [0]
@@ -140,8 +140,8 @@ k = [0]
 def nd_sec(t, date):
     k[0] += 1
     lat = "4728.%04d" % (k[0] * 20)                      # ~37 m a second
-    gl.handle(nm("GNRMC,%s,A,%s,N,01900.0000,E,0.1,,%s,,,A,V" % (t, lat, date)))
-    gl.handle(nm("GNGGA,%s,%s,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,," % (t, lat)))
+    gl._rcv.handle(nm("GNRMC,%s,A,%s,N,01900.0000,E,0.1,,%s,,,A,V" % (t, lat, date)))
+    gl._rcv.handle(nm("GNGGA,%s,%s,N,01900.0000,E,1,12,0.9,100.0,M,40.0,M,," % (t, lat)))
     gl.log_tick()
 
 
@@ -158,7 +158,7 @@ check("a non-digit in the time or date is a bad sentence, the track goes on",
       e1 == e0 + 1 and e2 == e1 + 2 and len(gl.log["batch"]) == 10
       and gl.log["last_t"] == "2026-10-29T12:00:10Z"
       and gl.st["date"] == "2026-10-29")
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 # a date or time that does not exist is none (a month 13, an hour 25), and a
 # fix a minute and more behind the last line lets go of it after ten in a row
@@ -172,7 +172,7 @@ gl.log["last_t"] = "2026-10-29T12:50:03Z"
 for i in range(gl.TIME_BACK_N):
     gl._time_back("2026-10-29T12:00:00Z", gl.log["last_t"])
 check("time back: a false time 50 min ahead is let go of", gl.log["last_t"] is None)
-gl.reset()
+gl._rcv.reset()
 gl.log_reset()
 
 
@@ -220,9 +220,9 @@ def nmea_second(k):
     return b"\r\n".join(out) + b"\r\n"
 
 
-saved_uart = gl.uart
-gl.uart = feed = _Feed()
-gl.reset()
+saved_uart = gl._rcv.uart
+gl._rcv.uart = feed = _Feed()
+gl._rcv.reset()
 secs = [nmea_second(k) for k in range(10)]
 n_sent = 13 * len(secs)
 gc.collect()
@@ -230,22 +230,22 @@ gc.disable()
 a0 = gc.mem_alloc()
 for s in secs:
     feed.feed(s)
-    gl.read_uart()
+    gl._rcv.read_uart()
 nmea_alloc = gc.mem_alloc() - a0
 gc.enable()
-gl.uart = saved_uart
+gl._rcv.uart = saved_uart
 print("nmea alloc %d B for %d sentences, %d B each"
       % (nmea_alloc, n_sent, nmea_alloc // n_sent))
 check("NMEA read: %d sentences parsed" % n_sent,
       gl.st["ok"] == n_sent and gl.st["err"] == 0 and gl.st["seq"] == 9)
 check("NMEA read: under %d B allocated a sentence" % NMEA_BUDGET,
       nmea_alloc <= NMEA_BUDGET * n_sent)
-gl.reset()
+gl._rcv.reset()
 
 # the satellite list from GSV, closed by the next round's first sentence
-gl.handle(nm("GNGSA,A,3,07,,,,,,,,,,,,1.5,0.9,1.2,1"))
-gl.handle(nm("GPGSV,1,1,02,07,60,010,41,11,,,,1"))
-gl.handle(nm("GPGSV,1,1,00,1"))
+gl._rcv.handle(nm("GNGSA,A,3,07,,,,,,,,,,,,1.5,0.9,1.2,1"))
+gl._rcv.handle(nm("GPGSV,1,1,02,07,60,010,41,11,,,,1"))
+gl._rcv.handle(nm("GPGSV,1,1,00,1"))
 svs = {v[0]: v for v in gl.st["svs"] or ()}
 check("GSV list parsed", len(svs) == 2 and svs[7][:5] == (7, 41, 60, 10, True)
       and svs[11][2] is None)
@@ -341,7 +341,7 @@ saved_svs = gl.st["svs"]
 
 # the departure ring rebuilt: the very lines _sample_line wrote
 def ring_lines():
-    gl.reset()
+    gl._rcv.reset()
     gl.log_reset()
     gl.log["still"] = sl = gl._still_state()
     sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
@@ -369,7 +369,7 @@ def ring_lines():
 
 
 check("departure ring rebuilds its lines exactly (single precision)", ring_lines())
-gl.reset()
+gl._rcv.reset()
 gl.st["svs"] = saved_svs
 
 try:
