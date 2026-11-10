@@ -1,7 +1,10 @@
-# The Clock's date maths and the one test of a real UTC time. Frozen with the
-# logger (tools/build_firmware.sh), or installed beside it as gps_clock.mpy
-# (deploy.sh). Pure: no state, no hardware, importable on a PC.
-#
+# The Clock: date maths, the one test of a real UTC time, and the Stamps.
+# Frozen with the logger (tools/build_firmware.sh), or installed beside it as
+# gps_clock.mpy (deploy.sh). Importable on a PC: time.ticks_* is only called
+# by the Stamp functions, which take it from the time module (tests replace
+# those).
+import time
+
 # UTC seconds <-> date without time.mktime (its epoch and time zone differ
 # between ports); proleptic Gregorian, days since 1970-01-01.
 
@@ -75,3 +78,38 @@ def stamp_s(secs):
     v = (y, m, d, r // 3600, r // 60 % 60, r % 60)
     return ("%04d-%02d-%02dT%02d:%02d:%02dZ" % v,
             "%04d%02d%02dT%02d%02d%02dZ" % v)
+
+# --- Stamps ------------------------------------------------------------------
+# A Stamp is a moment in whole seconds of uptime, for anything that can live
+# longer than a minute (ADR 0001). time.ticks_ms wraps every 2**30 ms (12.4
+# days) and reads wrongly from 2**29, so the uptime is summed up from tick
+# differences here: stamp() has to run at least once in that time (the main
+# loop does). A None Stamp means never.
+NEVER = 1 << 29                          # age_s(None), seconds: older than any
+
+_up = [0, None, 0]                       # uptime s, the ticks then, ms over s
+
+def stamp(now=None):
+    """The current Stamp: seconds since boot. now: the loop's ticks_ms."""
+    if now is None:
+        now = time.ticks_ms()
+    u = _up
+    if u[1] is None:                     # (first call: the ticks count from boot)
+        u[0], u[1], u[2] = now // 1000, now, now % 1000
+        return u[0]
+    ms = u[2] + time.ticks_diff(now, u[1])
+    u[1] = now
+    u[0] += ms // 1000
+    u[2] = ms % 1000
+    return u[0]
+
+def age_s(st):
+    """Seconds since Stamp st; NEVER for None. Never negative."""
+    if st is None:
+        return NEVER
+    a = stamp() - st
+    return a if a > 0 else 0
+
+def recent_s(st, secs):
+    """st (a Stamp, or None: never) is under secs old."""
+    return st is not None and age_s(st) < secs

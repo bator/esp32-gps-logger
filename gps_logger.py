@@ -12,6 +12,7 @@ except ImportError:
     FROZEN = False
 from gps_clock import (days as _days, civil as _civil, ymd_ok as _ymd_ok,
                        tc_ok as _tc_ok, dt_s as _dt_s, stamp_s as _stamp_s,
+                       stamp as _stamp, age_s as _age_s, recent_s as _recent_s,
                        EPOCH_DAYS, FIX_S_END)
 
 # Collect garbage early and often. When an allocation doesn't fit, the ESP32
@@ -1226,20 +1227,9 @@ def _diag_tail(path, n):
     except OSError:
         return out[-n:]
 
-# whole seconds since boot, ticks then, ms over the seconds (one count of
-# ms passed the small-int range after 12.4 days: a heap long every loop)
-_up = [time.ticks_ms() // 1000, time.ticks_ms(), time.ticks_ms() % 1000]
-
-def uptime_s(now=None):
-    """Seconds since boot. ticks_ms wraps every 2^30 ms (12.4 days), so
-    the time is summed up from tick differences (called every loop)."""
-    if now is None:
-        now = time.ticks_ms()
-    ms = _up[2] + time.ticks_diff(now, _up[1])
-    _up[1] = now
-    _up[0] += ms // 1000
-    _up[2] = ms % 1000
-    return _up[0]
+# Whole seconds since boot: the current Stamp (gps_clock sums the ticks up,
+# the main loop calls it so ticks_ms never wraps unseen)
+uptime_s = _stamp
 
 # How long the run before this boot lasted, from the last diag lines it
 # wrote: up (s, to within DIAG; 0 = it ended before its first status line),
@@ -1828,14 +1818,12 @@ def _wifi_diag(kind, line):
     """A WiFi event in the diag log (a drop and why the reconnects failed
     were only on the console): one line of a kind per WIFI_DIAG_GAP, the
     ones in between counted into the next."""
-    now = time.ticks_ms()
     at, more = wifi["diag_at"], wifi["diag_more"]
-    t = at.get(kind)
-    if _recent(now, t, WIFI_DIAG_GAP):
+    if _recent_s(at.get(kind), WIFI_DIAG_GAP // 1000):
         more[kind] = more.get(kind, 0) + 1
         return
     n = more.pop(kind, 0)
-    at[kind] = now
+    at[kind] = _stamp()
     _diag_write(line + (" (+%d more)" % n if n else ""))
 
 def _mark_failed(ssid, why=""):
@@ -1858,7 +1846,7 @@ def _mark_failed(ssid, why=""):
             now = wifi["failed"][ssid]
             b = wifi["hid_wait"]
             wifi["hid_wait"] = min(max(b * 2, ROAM_CHECK), ROAM_BACKOFF_MAX)
-            wifi["hid_at"] = now
+            wifi["hid_at"] = _stamp()
             b = wifi["blank_bssid"]
             if (b is not None and b not in wifi["home_aps"]
                     and not _blank_bad(b, now)):
@@ -2179,8 +2167,7 @@ def _hidden_home_target(now, arrival=False):
         return None
     if not _blank_home_ok():
         return None
-    at = wifi["hid_at"]
-    if _recent(now, at, wifi["hid_wait"]):
+    if _recent_s(wifi["hid_at"], wifi["hid_wait"] // 1000):
         return None                      # a hidden-home roam failed lately
     for n in wifi["nets"]:
         if (n.get("home") and n.get("hidden")
@@ -2758,10 +2745,9 @@ def _home_seen(aps):
     else:
         return
     now = time.ticks_ms()
-    at = wifi["seen_at"]
-    if _recent(now, at, wifi["seen_wait"]):
+    if _recent_s(wifi["seen_at"], wifi["seen_wait"] // 1000):
         return
-    wifi["seen_at"] = now
+    wifi["seen_at"] = _stamp()
     wifi["seen_wait"] = min(wifi["seen_wait"] * 2, WIFI_BACKOFF_MAX)
     if state == "sleep":
         wifi["wake"] = True
@@ -3498,10 +3484,8 @@ def _werr(what, e=None):
     nowhere. Never raises (it runs when heap is short too)."""
     log["err"] += 1
     try:
-        now = time.ticks_ms()
-        at = log["err_at"]
-        if not _recent(now, at, WERR_EVERY):
-            log["err_at"] = now
+        if not _recent_s(log["err_at"], WERR_EVERY // 1000):
+            log["err_at"] = _stamp()
             _diag_write("track %s error %d %r %s" % (
                 what, log["err"], e, (log["file"] or "-")[-19:]))
     except MemoryError:
@@ -4459,10 +4443,9 @@ def log_tick():
             # nothing is recorded, but NEW_FILE_GAP counts from the loss,
             # not from when space returns
             log["fix"], log["lost_at"] = False, now
-        last = log["full_check"]
-        if _recent(now, last, FULL_CHECK):
+        if _recent_s(log["full_check"], FULL_CHECK // 1000):
             return
-        log["full_check"] = now
+        log["full_check"] = _stamp()
         room = free()
         if room is None or room < MIN_FREE:
             return
@@ -6284,7 +6267,7 @@ def upload_tick():
             _fs_err(now)
             return
         up["sent"] += n_ok
-        up["ok_at"] = now
+        up["ok_at"] = _stamp()
         up["fail4"] = 0
         up["srv"] = None
         up["backoff"] = BACKOFF_START
@@ -7256,7 +7239,7 @@ def _web_rows():
         ("upload", up["state"]),
         ("upload_err", up["err"]),
         ("upload_age_s", None if up["ok_at"] is None
-         else _age(now, up["ok_at"]) // 1000),
+         else _age_s(up["ok_at"])),
         ("days", _hist_days()),
         ("stay", "yes" if still.get("active") else "no"),
         ("uptime", uptime_s()),
