@@ -6921,7 +6921,7 @@ import os, sys
 a = sys.argv[1:]
 if a[:1] == ["-c"]:
     sys.exit(0)
-if a and a[0].endswith("web_min.py"):      # the page's gzip: the real tool
+if a and a[0].endswith(("web_min.py", "firmware.py")):   # the real tools
     os.execv(sys.executable, [sys.executable] + a)
 if os.environ.get("FAKE_PY_LOG"):
     with open(os.environ["FAKE_PY_LOG"], "a") as f:
@@ -7000,6 +7000,7 @@ def deploy_run(env_extra):
     if web_min:
         shutil.copy(os.path.join(ROOT, "tools", "web_min.py"),
                     os.path.join(work, "tools"))
+    shutil.copy(os.path.join(ROOT, "tools", "firmware.py"), os.path.join(work, "tools"))
     os.makedirs(os.path.join(work, ".venv", "bin"))
     for n, src in (("python", FAKE_PY), ("mpremote", FAKE_MPREMOTE),
                    ("shim.py", FAKE_SHIM)):
@@ -7414,6 +7415,7 @@ def build_run(args, env_extra, dirty=False):
     os.makedirs(os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "tools", "build_firmware.sh"),
                 os.path.join(work, "tools"))
+    shutil.copy(os.path.join(ROOT, "tools", "firmware.py"), os.path.join(work, "tools"))
     if web_min:
         shutil.copy(os.path.join(ROOT, "tools", "web_min.py"),
                     os.path.join(work, "tools"))
@@ -17121,6 +17123,42 @@ for _n in _ast.walk(_ast.parse(_slurp(os.path.join(ROOT, "gps_logger.py")))):
         _rw.append(_n.lineno)
 check("RX-STATUS: gps_logger.py writes nothing into st (only the Receiver does)",
       _rw == [], repr(_rw))
+
+# FW-RECIPE: tools/firmware.py is the one recipe for build_firmware.sh and
+# deploy.sh: the manifest string it signs is the one the board checks
+# (_ota_signed), and stale() names the first frozen source that differs
+_fw_spec = importlib.util.spec_from_file_location("fw_recipe", os.path.join(ROOT, "tools", "firmware.py"))
+_fw = importlib.util.module_from_spec(_fw_spec)
+_fw_spec.loader.exec_module(_fw)
+_fw_ms = [
+    {"build": 1793557995, "commit": "abc1234", "size": 1, "sha256": "0" * 64, "url": "m.bin"},
+    {"build": 2, "commit": "d", "size": 3, "sha256": "f" * 64, "url": "u", "board": "GPS_LOGGER_S3",
+     "files": [{"path": "/web.html.gz", "size": 5, "sha256": "a" * 64, "url": "w.gz"}]},
+    {"build": 3, "commit": "e", "size": 4, "sha256": "b" * 64, "url": "v", "board": "X",
+     "files": [{"path": "/a", "size": 1, "sha256": "c" * 64, "url": "a"},
+               {"path": "/b", "size": 2, "sha256": "d" * 64, "url": "b"}]}]
+_fw_sig = [(_fw.signed(m), gl._ota_signed(m).decode()) for m in _fw_ms]
+_fw_now = [_fw.digest(names, ROOT) for _, names, _ in _fw.MARKER]
+_fw_st = [_fw.stale(_fw_now, ROOT)]
+for _i in range(len(_fw_now)):
+    _v = list(_fw_now)
+    _v[_i] = "0" * 64
+    _fw_st.append(_fw.stale(_v, ROOT))
+_fw_old = (_fw.stale([_fw_now[0], "-", "", "-"], ROOT), _fw.stale(["-"] + _fw_now[1:], ROOT))
+with open(os.path.join(ROOT, "gps_tft.py"), "rb") as f:
+    _fw_tft = f.read()
+with open(os.path.join(ROOT, "gps_tft_font.py"), "rb") as f:
+    _fw_tft += f.read()
+check("FW-RECIPE: tools/firmware.py signs what the board's _ota_signed checks; its "
+      "marker holds TFT/BOOT/CLOCK/RX; stale() names the first differing source, skips "
+      "fields an older marker lacks, a marker without SHA is stale",
+      all(a == b for a, b in _fw_sig)
+      and _fw.marker_lines(ROOT)[0] == 'TFT = "%s"' % hashlib.sha256(_fw_tft).hexdigest()
+      and [x.split(" = ")[0] for x in _fw.marker_lines(ROOT)] == ["TFT", "BOOT", "CLOCK", "RX"]
+      and _fw_st == [None, "gps_logger.py", "gps_tft.py / gps_tft_font.py", "gps_boot.py",
+                     "gps_clock.py", "gps_receiver.py"]
+      and _fw_old == (None, "gps_logger.py"),
+      repr((_fw_sig, _fw_st, _fw_old)))
 
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()

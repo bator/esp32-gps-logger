@@ -137,14 +137,9 @@ module("gps_tft.py", base_path="$OUT", opt=3)
 module("gps_tft_font.py", base_path="$OUT", opt=3)
 EOF
 # the display's code, gps_boot.py, gps_clock.py and gps_receiver.py, in the
-# marker too (deploy.sh compares all five; an older marker without TFT, BOOT,
-# CLOCK or RX still passes it)
-{
-    printf 'TFT = "%s"\n' "$(cat gps_tft.py gps_tft_font.py | sha256sum | cut -d" " -f1)"
-    printf 'BOOT = "%s"\n' "$(sha256sum gps_boot.py | cut -d" " -f1)"
-    printf 'CLOCK = "%s"\n' "$(sha256sum gps_clock.py | cut -d" " -f1)"
-    printf 'RX = "%s"\n' "$(sha256sum gps_receiver.py | cut -d" " -f1)"
-} >> "$OUT/gps_frozen.py"
+# marker too (tools/firmware.py: what each field hashes; deploy.sh compares
+# them with it; an older marker without TFT, BOOT, CLOCK or RX still passes)
+python3 tools/firmware.py marker >> "$OUT/gps_frozen.py"
 cp gps_tft.py gps_tft_font.py "$OUT/"
 
 # shellcheck disable=SC1091
@@ -299,32 +294,8 @@ case "$MODE" in
     cp "$OUT/micropython.bin" "$OUT/ota/$BINF"
     # stripped and gzipped as deploy.sh does it, the firmware's own window
     python3 tools/web_min.py web.html "$OUT/ota/web-$COMMIT.html.gz"
-    python3 - "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" "$BOARD" <<'EOF'
-import hashlib, hmac, json, os, sys
-d, key_file, build, commit, board = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
-key = open(key_file, "rb").read().strip()
-def meta(name):
-    b = open(os.path.join(d, name), "rb").read()
-    return len(b), hashlib.sha256(b).hexdigest()
-binf = "micropython-%s.bin" % commit
-size, sha = meta(binf)
-m = {"build": build, "commit": commit, "size": size, "sha256": sha,
-     "url": binf, "files": []}
-# the page only gzipped (an older firmware after a rollback takes this too)
-for path, name in (("/web.html.gz", "web-%s.html.gz" % commit),):
-    n, h = meta(name)
-    m["files"].append({"path": path, "size": n, "sha256": h, "url": name})
-# the bytes gps_logger._ota_signed covers
-t = "%d|%s|%d|%s|%s" % (m["build"], m["commit"], m["size"], m["sha256"], m["url"])
-for f in m["files"]:
-    t += "|%s|%d|%s|%s" % (f["path"], f["size"], f["sha256"], f["url"])
-m["board"] = board
-t += "|board=" + board
-m["hmac"] = hmac.new(key, t.encode(), hashlib.sha256).hexdigest()
-with open(os.path.join(d, "manifest.json"), "w") as f:
-    json.dump(m, f)
-print("manifest: build", build, "commit", commit, "size", size)
-EOF
+    # the manifest and its HMAC (tools/firmware.py: the string the board checks)
+    python3 tools/firmware.py manifest "$OUT/ota" "$KEY_FILE" "$BUILD" "$COMMIT" "$BOARD"
     # each as <name>.tmp, then moved over the live one (one rename: a board
     # downloading it keeps reading the old file), the named files first,
     # the manifest naming them last
