@@ -8786,6 +8786,24 @@ finally:
 check("GPS-21: uptime keeps counting past the 12.4-day ticks wrap",
       ups == [k * 86400 for k in range(1, 15)], repr(ups[-3:]))
 
+# GPS-22: the satellite-list skip window is GSV_EVERY long; one left over
+# from 7 days ago (past 2**29 ms on the wrapping clock) skips nothing
+saved_t = (time.ticks_diff, time.ticks_add, _clock[0], dict(gl._uc_sv))
+time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
+time.ticks_add = lambda a, b: (a + b) & (TPW - 1)
+try:
+    _clock[0] = 5000
+    gl._uc_sv["until"] = time.ticks_add(5000, 2000)
+    skip_fresh = gl._uc_gsv_skip()
+    _clock[0] = (5000 + 7 * 86400000) & (TPW - 1)
+    skip_stale = gl._uc_gsv_skip()
+    cleared = gl._uc_sv["until"] is None
+finally:
+    time.ticks_diff, time.ticks_add, _clock[0] = saved_t[:3]
+    gl._uc_sv.update(saved_t[3])
+check("GPS-22: a GSV skip window 7 days old is over and cleared, a fresh one skips",
+      skip_fresh and not skip_stale and cleared, "%r %r %r" % (skip_fresh, skip_stale, cleared))
+
 # GPS: used from the satellite list (GGA stops at 12), a banner across reads
 gl.reset()
 gl.st["used"] = 12
@@ -9833,6 +9851,25 @@ try:
     os.remove(trk)
     check("W-9: all tracks held -> wait until the first hold ends",
           1790000 <= wait <= 1800000 and due == 0, "%r %r" % (wait, due))
+
+    # W-9b: a hold left over from before a long trip is due again, on the
+    # wrapping clock it reads 7 days (past 2**29 ms) after it was set
+    make_trk(trk, 3)
+    _w9 = 1 << 30
+    _w9d, _w9a = time.ticks_diff, time.ticks_add
+    time.ticks_diff = lambda a, b: (a - b + (_w9 >> 1)) % _w9 - (_w9 >> 1)
+    time.ticks_add = lambda a, b: (a + b) % _w9
+    try:
+        gl.up.update(state="held", next_at=0)
+        gl.up["hold"] = {trk: time.ticks_add(5000, 1000)}
+        w9_fresh = gl._upload_wait(5000)
+        w9_stale = gl._upload_wait((5000 + 7 * 86400000) % _w9)
+    finally:
+        time.ticks_diff, time.ticks_add = _w9d, _w9a
+        gl.up["hold"] = {}
+        os.remove(trk)
+    check("W-9b: a hold 7 days old is due (no wait), a fresh one still waits",
+          w9_fresh == 1000 and w9_stale == 0, "%r %r" % (w9_fresh, w9_stale))
 
     # W-22: lost -> offline stops the IDF reconnect before the round
     w = rv_connect(["hot"], [("hot", -50)])
