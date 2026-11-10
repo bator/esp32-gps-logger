@@ -267,9 +267,15 @@ _SNAP = ("seq", "lat", "lon", "alt", "hdop", "hdop_at", "std", "std_at",
 def _snap():
     return tuple(st[k] for k in _SNAP)
 
-def _load(snap):
-    for i in range(len(_SNAP)):
-        st[_SNAP[i]] = snap[i]
+# a Fix's fields by index (_SNAP's order)
+F_SEQ, F_LAT, F_LON, F_ALT, F_HDOP, F_HDOP_AT, F_STD, F_STD_AT, F_POS_AT, \
+    F_TIME, F_DATE, F_VALID, F_EPOCHS = range(13)
+
+def drain(seen):
+    """The published seconds after seq seen, oldest first, as Fixes (tuples in
+    _SNAP's order), and the queue emptied. st stays the latest second."""
+    q, st["q"] = st["q"], []
+    return [f for f in q if f[F_SEQ] > seen]
 
 # GGA quality 6 / RMC mode E: an estimate (dead reckoning, the last fix
 # carried on), no fix. GGA 1-5 are (GPS, DGPS, PPS, RTK fixed / float)

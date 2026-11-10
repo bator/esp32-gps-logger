@@ -10282,7 +10282,7 @@ try:
     w = rv_connect([], [("cafe", -60, b"\x04" * 6), ("hot", -50)])
     real_ss = gl._stay_scan
 
-    def wb_boom(aps):
+    def wb_boom(aps, fx=None):
         raise MemoryError("memory allocation failed")
     gl._stay_scan = wb_boom
     wb_err = []
@@ -11046,7 +11046,7 @@ check("L-12: no heartbeat before queued seconds (lines in time order)",
 # L-24: the arrival file could not be closed: the stay still rotates it
 sv_reset()
 real_close = gl._close_file
-gl._close_file = lambda: False
+gl._close_file = lambda fx=None: False
 try:
     sv_drift(150)
 finally:
@@ -16368,7 +16368,7 @@ gl.wifi["nets"] = [{"ssid": "home", "pw": "x", "home": True,
                     "hidden": False, "bssid": None, "ip": None}]
 stays = []
 _ss = gl._stay_scan
-gl._stay_scan = lambda aps: stays.append(len(aps))
+gl._stay_scan = lambda aps, fx=None: stays.append(len(aps))
 try:
     e7 = [gl._scan_known(_EmptyW()), gl._scan_known(_EmptyW())]
     gl.wifi["empty"] = 0
@@ -17014,6 +17014,60 @@ _ca_s = _gck.stamp()
 check("CLOCK-ANCHOR: utc_s of an Anchor is its time plus its Stamp's age; None without one",
       _gck.utc_s(None) is None and _gck.utc_s((1000, _ca_s - 5)) == 1005
       and _gck.utc_s((1000, _ca_s)) == 1000, "")
+
+# RX-DRAIN: queued seconds come out of the Receiver as Fixes, oldest first and
+# only those not seen; st stays the latest second while each one is sampled
+# (it was swapped to each queued one and back, and left on an old one when a
+# sample raised)
+_rd = gl._rcv
+check("RX-DRAIN: a Fix's field indexes are _SNAP's order",
+      [_rd._SNAP[i] for i in (_rd.F_SEQ, _rd.F_LAT, _rd.F_LON, _rd.F_ALT, _rd.F_HDOP,
+                              _rd.F_HDOP_AT, _rd.F_STD, _rd.F_STD_AT, _rd.F_POS_AT,
+                              _rd.F_TIME, _rd.F_DATE, _rd.F_VALID, _rd.F_EPOCHS)]
+      == list(_rd._SNAP), "")
+_rd.reset()
+gl.log_reset()
+_rd_q = []
+for _k in range(1, 5):
+    gl.st.update(seq=_k, lat=47.5 + _k * 0.001, lon=19.0, alt=100.0, hdop=1.0,
+                 hdop_at=_clock[0], std=None, std_at=None, pos_at=_clock[0] + _k,
+                 time="12:00:%02d" % _k, date="2026-11-10", valid=True, epochs=5)
+    _rd_q.append(_rd._snap())
+gl.st["q"] = list(_rd_q)
+gl.log["seq"] = 1                        # the first was sampled already
+_rd_seen, _rd_saved = [], gl._sample
+gl._sample = lambda now, fx=None: _rd_seen.append((now, fx[_rd.F_SEQ], gl.st["seq"],
+                                                  gl.st["lat"], fx[_rd.F_LAT]))
+try:
+    gl._drain_q()
+finally:
+    gl._sample = _rd_saved
+_rd_left = (gl.st["q"], gl.log["seq"])
+check("RX-DRAIN: seconds 2-4 sampled in order as their own Fix at their ticks, st the "
+      "latest (seq 4) all the while, the queue emptied",
+      [x[1] for x in _rd_seen] == [2, 3, 4]
+      and [x[0] for x in _rd_seen] == [_clock[0] + 2, _clock[0] + 3, _clock[0] + 4]
+      and all(x[2] == 4 and x[3] == _rd_q[3][_rd.F_LAT] for x in _rd_seen)
+      and [x[4] for x in _rd_seen] == [q[_rd.F_LAT] for q in _rd_q[1:]]
+      and _rd_left == ([], 4), repr((_rd_seen, _rd_left)))
+gl.st["q"] = list(_rd_q)
+gl.log["seq"] = 0
+def _rd_boom(now, fx=None):
+    raise MemoryError("memory allocation failed")
+gl._sample = _rd_boom
+try:
+    try:
+        gl._drain_q()
+        _rd_raised = False
+    except MemoryError:
+        _rd_raised = True
+finally:
+    gl._sample = _rd_saved
+check("RX-DRAIN: a sample that raises leaves st on the latest second, not a queued one",
+      _rd_raised and gl.st["seq"] == 4 and gl.st["time"] == "12:00:04"
+      and gl.st["lat"] == _rd_q[3][_rd.F_LAT], repr((gl.st["seq"], gl.st["time"])))
+_rd.reset()
+gl.log_reset()
 
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
@@ -19161,7 +19215,7 @@ hl.log["file"] = "x"
 hl.log.update(fix=False, lost_at=hl._stamp() - hl.NEW_FILE_GAP - 1, created=True)
 hl.st.update(valid=True, lat=10.0, lon=20.0, pos_at=_clock[0], rx=_clock[0])
 _cf0 = hl._close_file
-hl._close_file = lambda: True
+hl._close_file = lambda fx=None: True
 hl.log["last_sample"] = _clock[0]
 hl.log_tick()
 _gap = _Rt.trip
