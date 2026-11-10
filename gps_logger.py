@@ -5034,20 +5034,30 @@ def _mem_reboot(why):
         pass
     machine.reset()
 
+def _reboot_for_memory(why, say=None, home=True):
+    """The memory reboot, for each of its reasons (TLS out of memory, a low
+    IDF block or Python heap, a tick's lasting MemoryError), under one rule:
+    never while an OTA image is pending (a reset aborts it and blames the
+    build), at most one per LOWIDF_REBOOT_GAP whatever the reason
+    (_mem_reboot_soon: a lasting cause rebooted every few minutes), and for
+    the upload's reasons (home) only at home. say: the console line before
+    it. -> True: rebooting (_mem_reboot), False: not now."""
+    if (home and not at_home()) or _ota_wants_radio() or _mem_reboot_soon():
+        return False
+    if say:
+        print(say)
+    _mem_reboot(why)
+    return True
+
 def _tls_reboot():
     """TLS_REBOOT_N TLS allocations failed in a row at home: the IDF heap
-    is fragmented for good. Write what is in RAM and restart; at most one
-    per LOWIDF_REBOOT_GAP, as _low_reboot (one that does not help, a
-    certificate chain over TLS_MIN_KB, rebooted every ~2.5 min)."""
-    if up["enomem"] < TLS_REBOOT_N or not at_home():
+    is fragmented for good. A memory reboot (_reboot_for_memory: one that
+    does not help, a certificate chain over TLS_MIN_KB, rebooted every ~2.5
+    min before the gap)."""
+    if up["enomem"] < TLS_REBOOT_N:
         return False
-    if _ota_wants_radio():
-        return False                     # (a reset aborts a pending image)
-    if _mem_reboot_soon():
-        return False
-    print("upload: TLS out of memory %d times, reboot" % up["enomem"])
-    _mem_reboot("tls memory %d" % up["enomem"])
-    return True
+    return _reboot_for_memory("tls memory %d" % up["enomem"],
+                              "upload: TLS out of memory %d times, reboot" % up["enomem"])
 
 def _low_ms(now, at, seen):
     """ms a low-heap episode (up[at]: its start, up[seen]: its last
@@ -5066,14 +5076,11 @@ def _low_reboot(fmt, n, low_ms):
     restart. Its own reason, not the ENOMEM run; at most one per
     LOWIDF_REBOOT_GAP for either (LOWIDF_MARK tells the next boot).
     fmt % n: what is low ("idf %d KB", "mem %d B")."""
-    if not at_home() or low_ms < LOWIDF_WAIT or _ota_wants_radio():
-        return False                     # (a reset aborts a pending image)
-    if _mem_reboot_soon():
-        return False                     # rebooted for it a short while ago
+    if low_ms < LOWIDF_WAIT:
+        return False
     what = fmt % n
-    print("upload: low %s for %d s, reboot" % (what, low_ms // 1000))
-    _mem_reboot("low %s %d s" % (what, low_ms // 1000))
-    return True
+    return _reboot_for_memory("low %s %d s" % (what, low_ms // 1000),
+                              "upload: low %s for %d s, reboot" % (what, low_ms // 1000))
 
 def _env_bad(url, key):
     """Why GEO_URL / API_KEY cannot go into a request head, or None. Both
@@ -7714,9 +7721,10 @@ def _guarded(name, fn, arg=None):
             if pending_ota:
                 if c[0] >= GUARD_PEND_MAX:
                     raise
-            elif c[0] >= GUARD_MEM_MAX and not _mem_reboot_soon():
-                c[0] = 0
-                _mem_reboot("guarded memory " + name)
+            elif c[0] >= GUARD_MEM_MAX:
+                n, c[0] = c[0], 0
+                if not _reboot_for_memory("guarded memory " + name, home=False):
+                    c[0] = n             # (not now: it goes on counting)
         if name == "upload":
             # (after the POST, before the commit: the same batch went up
             # again every TICK_PAUSE for ever)
