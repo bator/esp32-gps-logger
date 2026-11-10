@@ -113,3 +113,13 @@ def age_s(st):
 def recent_s(st, secs):
     """st (a Stamp, or None: never) is under secs old."""
     return st is not None and age_s(st) < secs
+
+# --- Anchors ------------------------------------------------------------------
+# An Anchor ties a UTC time to the uptime: (seconds since 2020, Stamp then),
+# from a fix or from NTP. It needs no rebasing: a Stamp does not wrap.
+
+def utc_s(anchor):
+    """Seconds since 2020 now by the Anchor, or None without one."""
+    if anchor is None:
+        return None
+    return anchor[0] + age_s(anchor[1])
