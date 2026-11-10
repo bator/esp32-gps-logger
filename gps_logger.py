@@ -1999,11 +1999,10 @@ def _home_veto(now, sl):
     is a GPS jump, not a departure (measured: a 194 m multipath jump ended a
     home stay and uploaded 80 drift points). After a veto, departures wait
     STILL_HOME_HOLD before the next check."""
-    at = sl.get("veto_at")
-    if _recent(now, at, STILL_HOME_HOLD):
+    if _recent_s(sl.get("veto_at"), STILL_HOME_HOLD // 1000):
         return True
     if home_in_range():
-        sl["veto_at"] = now
+        sl["veto_at"] = _stamp()
         print("stay kept: home in range")
         return True
     return False
@@ -3223,7 +3222,7 @@ def _still_hold():
     if sl["active"]:
         return None
     la = sl["last_at"]
-    if la is not None and _age(time.ticks_ms(), la) >= HOLD_RELEASE:
+    if la is not None and _age_s(la) >= HOLD_RELEASE // 1000:
         return None
     h = sl["hold_tc"]                    # a window restarted after a gap
     c = None
@@ -3842,7 +3841,7 @@ def _still_gap(now, pos):
     (judged by the open window alone, its lines moved on to the new file)."""
     sl = log["still"]
     la = sl["last_at"]
-    if la is None or _age(now, la) <= STILL_GAP or sl["gap_seen"] == la:
+    if la is None or _age_s(la) <= STILL_GAP // 1000 or sl["gap_seen"] == la:
         return
     sl["gap_seen"] = la
     p = sl["prev"]
@@ -3871,21 +3870,21 @@ def _still_window(now, pos):
     cannot add up 60 latitudes to the metre."""
     sl = log["still"]
     _still_gap(now, pos)
-    sl["last_at"], sl["pos"] = now, pos
+    sl["last_at"], sl["pos"] = _stamp(), pos
     if sl["win_at"] is None:
-        sl.update(win_at=now, win_tc=_tc(), ref=pos, sum=[0.0, 0.0, 0],
+        sl.update(win_at=_stamp(), win_tc=_tc(), ref=pos, sum=[0.0, 0.0, 0],
                   qs=[])
     r, sm, qs = sl["ref"], sl["sum"], sl["qs"]
-    while len(qs) < 3 and (_age(now, sl["win_at"])
-                           >= (len(qs) + 1) * (STILL_WINDOW // 4)):
+    while len(qs) < 3 and (_age_s(sl["win_at"])
+                           >= (len(qs) + 1) * (STILL_WINDOW // 4000)):
         qs.append((sm[0], sm[1], sm[2]))   # the sums up to each quarter's
                                            # end (see _walking)
     sm[0] += pos[0] - r[0]
     sm[1] += _dlon(pos[1] - r[1])        # (across 180° too)
     sm[2] += 1
-    if _age(now, sl["win_at"]) < STILL_WINDOW:
+    if _age_s(sl["win_at"]) < STILL_WINDOW // 1000:
         return None
-    if sm[2] < STILL_MIN_FIXES and _age(now, sl["win_at"]) < STILL_WINDOW_MAX:
+    if sm[2] < STILL_MIN_FIXES and _age_s(sl["win_at"]) < STILL_WINDOW_MAX // 1000:
         return None                      # sparse fixes: collect more first
     c = None
     if sm[2] >= STILL_MIN_FIXES:
@@ -3965,13 +3964,13 @@ def _still_heartbeat(now):
         return
     t, tc = _stamp_s(c[0] + age // 1000)
     if log["last_t"] is not None and t <= log["last_t"]:
-        sl["hb_at"] = time.ticks_add(now, 1000 - STILL_HEARTBEAT)
+        sl["hb_at"] = _stamp() + (1000 - STILL_HEARTBEAT) // 1000
         return
     a = sl["anchor"]
-    sl["hb_at"] = now
+    sl["hb_at"] = _stamp()
     if log["file"] is None:
         start_file(_tcn(tc))
-        sl["file_at"] = now
+        sl["file_at"] = _stamp()
     h = log["hb"]
     h.append(tc)
     if len(h) > 8:                       # (never fed to the route: no TFT)
@@ -3993,7 +3992,7 @@ def _still_beat(now):
     if at_home():
         _still_close(now)                # also after a WiFi drop, fix or not
         if not sl["home"] and (sl["last_at"] is None
-                               or _age(now, sl["last_at"]) >= STILL_GAP):
+                               or _age_s(sl["last_at"]) >= STILL_GAP // 1000):
             # an away stay, home now, no usable fix for STILL_GAP: the way
             # home had no fix (a train) and no WiFi verdict (no access
             # points at that place). Left running, it stamped the old place
@@ -4006,25 +4005,25 @@ def _still_beat(now):
     # age-close is off during a stay: it would open a file per heartbeat).
     if (log["file"] is not None and sl["file_at"] is not None
             and wifi["state"] == "connected"
-            and _age(now, sl["file_at"]) >= STILL_FILE):
+            and _age_s(sl["file_at"]) >= STILL_FILE // 1000):
         _still_close(now)
-    if _recent(now, sl["hb_at"], STILL_HEARTBEAT):
+    if _recent_s(sl["hb_at"], STILL_HEARTBEAT // 1000):
         return
-    if (_recent(now, sl["last_at"], STILL_GAP)
+    if (_recent_s(sl["last_at"], STILL_GAP // 1000)
             and sl["last_d"] > STILL_NEAR):
         return
-    if (_recent(now, sl["far_at"], STILL_BACK)
+    if (_recent_s(sl["far_at"], STILL_BACK // 1000)
             and sl["hb_at"] is not None
-            and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT):
+            and _age_s(sl["hb_at"]) < 2 * STILL_HEARTBEAT // 1000):
         return
     # Nor while the departure ring is a run already STILL_RUN out from where
     # it began, still within STILL_NEAR: a walk out. The anchor stamped 25 s
     # into it at 2 m/s, and the way out (only what follows the last line)
     # began 52 m out, a second after it. Late by at most one STILL_HEARTBEAT.
     n, i = sl["rn"], sl["ri"]
-    if (n > 1 and _recent(now, sl["last_at"], STILL_GAP)
+    if (n > 1 and _recent_s(sl["last_at"], STILL_GAP // 1000)
             and sl["hb_at"] is not None
-            and _age(now, sl["hb_at"]) < 2 * STILL_HEARTBEAT
+            and _age_s(sl["hb_at"]) < 2 * STILL_HEARTBEAT // 1000
             and _RF[3 * ((i + n - 1) % len(_RT)) + 2] - _RF[3 * i + 2]
             >= STILL_RUN):
         return
@@ -4099,7 +4098,7 @@ def _still_enter(now, anchor, since_tc, n, c=None):
     # STILL_GAP" in _still_beat, so home WiFi coming up just after arriving
     # ended the stay as "home without a fix"
     sl.update(active=True, anchor=anchor, aref=anchor,
-              n=min(n, STILL_MEAN_N), last_at=now)
+              n=min(n, STILL_MEAN_N), last_at=_stamp())
     b = log["batch"]
     i = 0
     while i < len(b) and b[i][-17:-1] < since_tc:
@@ -4159,16 +4158,16 @@ def _still_enter(now, anchor, since_tc, n, c=None):
     del b[i:k]
     _still_close()                       # the arrival uploads during the stay
     if log["file"] is not None:
-        sl["file_at"] = now              # close failed: rotate it later
+        sl["file_at"] = _stamp()         # close failed: rotate it later
     if at_home():
         sl["home"] = True
     elif out:
-        sl["hb_at"] = now                # (the way out goes on: no anchor
+        sl["hb_at"] = _stamp()           # (the way out goes on: no anchor
                                          # point after it)
     elif wifi_wake():
         # the radio slept: the first anchor point waits for the round, so
         # a home stay is not stamped with one
-        sl["hb_at"] = time.ticks_add(now, WIFI_WAKE_WAIT - STILL_HEARTBEAT)
+        sl["hb_at"] = _stamp() + (WIFI_WAKE_WAIT - STILL_HEARTBEAT) // 1000
     else:
         _still_heartbeat(now)
     print("stay", "home" if sl["home"] else "away", "kept", i, out)
@@ -4202,13 +4201,12 @@ def _stay_scan(aps):
     if not learning:
         if not known:
             return
-        now = time.ticks_ms()
         if not any(b in known for r, b in seen):
             sl["ap_miss"] += 1
             if sl["ap_miss_at"] is None:
-                sl["ap_miss_at"] = now
+                sl["ap_miss_at"] = _stamp()
             if (sl["ap_miss"] >= STAY_WIFI_MISS
-                    and _age(now, sl["ap_miss_at"]) >= STAY_WIFI_GONE):
+                    and _age_s(sl["ap_miss_at"]) >= STAY_WIFI_GONE // 1000):
                 print("stay left, wifi: none of %d access points in %d scans"
                       % (len(known), sl["ap_miss"]))
                 _diag_write("stay left wifi aps %d scans %d"
@@ -4333,7 +4331,7 @@ def _still_active(now, pos):
     sl = log["still"]
     a = sl["anchor"]
     d = _dist(a[0], a[1], pos[0], pos[1])
-    gap = sl["last_at"] is not None and _age(now, sl["last_at"]) > STILL_GAP
+    gap = sl["last_at"] is not None and _age_s(sl["last_at"]) > STILL_GAP // 1000
     if d > STILL_EXIT and (gap or sl["gap_at"] is not None):
         # Back after a fix gap out past STILL_EXIT (a metro or a garage,
         # then sitting still elsewhere): there may be no receding run to
@@ -4352,18 +4350,18 @@ def _still_active(now, pos):
             if gap or g is None:         # (a walk on out there keeps
                 sl["rn"] = 0             # its way out in the ring)
                 sl["far_n"], sl["far_d"], sl["far_slow"] = 0, 0, 0
-            sl.update(gap_ref=pos, gap_at=now, gap_n=1)
+            sl.update(gap_ref=pos, gap_at=_stamp(), gap_n=1)
         elif d + STILL_TOL >= sl["last_d"]:
             sl["gap_n"] += 1
         _ring_add(sl, now, pos, d)
         if _still_recede(sl, d) or d > STILL_GAP_JUMP or (
                 sl["gap_n"] >= STILL_MIN_FIXES
-                and _age(now, sl["gap_at"]) >= STILL_GAP_STAY):
+                and _age_s(sl["gap_at"]) >= STILL_GAP_STAY // 1000):
             if not (sl["home"] and _home_veto(now, sl)):
                 sl["far_d"] = d          # (for the "stay end" line)
                 _still_leave()
                 return
-            sl.update(gap_ref=pos, gap_at=now, gap_n=1, far_n=0, far_d=0,
+            sl.update(gap_ref=pos, gap_at=_stamp(), gap_n=1, far_n=0, far_d=0,
                       far_slow=0)
     elif d > STILL_EXIT and d + STILL_TOL >= sl["far_d"]:
         _ring_add(sl, now, pos, d)
@@ -4415,9 +4413,9 @@ def _still_active(now, pos):
                     sl["rn"] = 0         # (distances from the old anchor)
                     _ring_add(sl, now, pos, d)
                     print("stay moved")
-    sl["last_at"], sl["last_d"] = now, d
+    sl["last_at"], sl["last_d"] = _stamp(), d
     if d > STILL_NEAR:
-        sl["far_at"] = now
+        sl["far_at"] = _stamp()
     home = bool(at_home())
     if home != sl["home"]:
         sl["home"] = home
@@ -7909,7 +7907,7 @@ def _tft_light(now):
     in the diag, the first setting is not."""
     L = _tft_l
     sl = log["still"]
-    if sl["active"] or (at_home() and not _recent(now, sl["last_at"], STILL_GAP)):
+    if sl["active"] or (at_home() and not _recent_s(sl["last_at"], STILL_GAP // 1000)):
         if L[1] is None:
             L[1] = now
     else:

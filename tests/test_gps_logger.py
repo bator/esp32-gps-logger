@@ -5144,7 +5144,7 @@ try:
     # ORDER: an anchor point due while the car drives off
     sv_reset()
     sv_drift(150, box=10.0, step=3.0)
-    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 4000
+    gl.log["still"]["hb_at"] = gl._stamp() - gl.STILL_HEARTBEAT // 1000 + 4
     for i in range(1, 41):
         hb_fix(i * 6.0, 0, speed=22.0)
     lines = sv_lines()
@@ -5163,7 +5163,7 @@ try:
     sv_reset()
     sv_drift(150, box=10.0, step=3.0)
     n0 = len(sv_lines())
-    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 25000
+    gl.log["still"]["hb_at"] = gl._stamp() - gl.STILL_HEARTBEAT // 1000 + 25
     for i in range(1, 201):
         sv_fix(i * 2.0, 0, speed=2.0)
     gl.flush()
@@ -5187,7 +5187,7 @@ try:
     sv_reset()
     sv_drift(150, box=10.0, step=3.0)
     n0 = len(sv_lines())
-    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 4000
+    gl.log["still"]["hb_at"] = gl._stamp() - gl.STILL_HEARTBEAT // 1000 + 4
     for i in range(60):
         sv_fix(90.0 + (i % 7), 30.0)               # at the car, 95 m out
     n1 = len(sv_lines())
@@ -5209,7 +5209,7 @@ try:
     # ... and coming back to stay: the anchor points go on once it holds
     sv_reset()
     sv_drift(150, box=10.0, step=3.0)
-    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT + 4000
+    gl.log["still"]["hb_at"] = gl._stamp() - gl.STILL_HEARTBEAT // 1000 + 4
     for i in range(30):
         sv_fix(90.0, 30.0)
     n1 = len(sv_lines())
@@ -5225,7 +5225,7 @@ try:
     # ... and under drift out past STILL_NEAR all the time it is late, not lost
     sv_reset()
     sv_drift(150, box=10.0, step=3.0)
-    gl.log["still"]["hb_at"] = _clock[0] - gl.STILL_HEARTBEAT
+    gl.log["still"]["hb_at"] = gl._stamp() - gl.STILL_HEARTBEAT // 1000
     n1 = len(sv_lines())
     wait = None
     for i in range(gl.STILL_HEARTBEAT // 1000 + 10):
@@ -5551,7 +5551,7 @@ try:
                           % k for k in (0, 5)]
     gl.flush()
     old = gl.log["file"]
-    gl.log["still"].update(win_at=_clock[0], win_tc="20261018T080010Z")
+    gl.log["still"].update(win_at=gl._stamp(), win_tc="20261018T080010Z")
     gl.log["batch"][:] = ["47.500100,19.000000,100.0,1.0,20261018T0800%02dZ\n"
                           % k for k in (10, 15)]
     closed = gl._close_file()
@@ -16860,6 +16860,36 @@ check("CLOCK-STAMP-WEB: a fresh drop searches for the page; 12.4 days and 10 min
       "it does not (a tick mark read that as 10 min)",
       _cw_fresh is True and _cw_stale is False, repr((_cw_fresh, _cw_stale)))
 
+# CLOCK-STAMP-STAY: the stay's last_at is a Stamp: lines held back for a stay
+# window are let go HOLD_RELEASE after the last usable fix, also when that fix
+# was 12.4 days and a minute ago (a tick Mark read that as a minute: held on)
+_ch_save = (time.ticks_diff, time.ticks_add, time.ticks_ms, list(_gck._up), _clock[0])
+time.ticks_diff = lambda a, b: (a - b + (_cs_w >> 1)) % _cs_w - (_cs_w >> 1)
+time.ticks_add = lambda a, b: (a + b) % _cs_w
+time.ticks_ms = lambda: _clock[0]
+try:
+    _gck._up[:] = [0, None, 0]
+    _clock[0] = 5000
+    gl.log_reset()
+    _ch = gl.log["still"]
+    _ch.update(last_at=_gck.stamp(), hold_tc="20261110T120000Z")
+    _clock[0] = 65000                     # a minute on
+    _ch_fresh = gl._still_hold()
+    _t = 65000
+    _ch_end = 65000 + _cs_w
+    while _t < _ch_end:
+        _t = min(_t + 30000, _ch_end)
+        _clock[0] = _t % _cs_w
+        _gck.stamp()
+    _ch_stale = gl._still_hold()
+finally:
+    time.ticks_diff, time.ticks_add, time.ticks_ms, _ch_up, _clock[0] = _ch_save
+    _gck._up[:] = _ch_up
+    gl.log_reset()
+check("CLOCK-STAMP-STAY: a minute after the last usable fix the stay window still "
+      "holds its lines; 12.4 days and a minute after, they are let go",
+      _ch_fresh == "20261110T120000Z" and _ch_stale is None, repr((_ch_fresh, _ch_stale)))
+
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
 gl.uptime_s()                            # (the first call: the ticks count from boot)
@@ -18770,15 +18800,16 @@ _sl.update(active=True, anchor=(10.5, 20.5))
 hl.log["clock"] = (_DAY, _clock[0])
 hl.log["last_t"] = hl._stamp_s(_DAY + 30)[0]
 hl._still_heartbeat(_clock[0])
-_hb_wait = (len(hl.log["batch"]), _sl["hb_at"] is not None
-            and hl._recent(_clock[0] + 999, _sl["hb_at"], hl.STILL_HEARTBEAT)
-            and not hl._recent(_clock[0] + 1000, _sl["hb_at"], hl.STILL_HEARTBEAT))
+_hb_due = hl._recent_s(_sl["hb_at"], hl.STILL_HEARTBEAT // 1000)   # (hb_at: a Stamp)
+_clock[0] += 1000
+_hb_wait = (len(hl.log["batch"]), _sl["hb_at"] is not None and _hb_due
+            and not hl._recent_s(_sl["hb_at"], hl.STILL_HEARTBEAT // 1000))
 hl.log["last_t"] = None
-hl._still_heartbeat(_clock[0] + 1000)
+hl._still_heartbeat(_clock[0])
 check("ROUTE-HB-WAIT: an anchor point whose time would not follow the last line is not "
       "written, and the next try is a second on, not every pass; then it is written",
-      _hb_wait == (0, True) and len(hl.log["batch"]) == 1 and _sl["hb_at"] == _clock[0] + 1000,
-      repr((_hb_wait, len(hl.log["batch"]), _sl["hb_at"], _clock[0])))
+      _hb_wait == (0, True) and len(hl.log["batch"]) == 1 and _sl["hb_at"] == hl._stamp(),
+      repr((_hb_wait, len(hl.log["batch"]), _sl["hb_at"], hl._stamp())))
 hl.log_reset()
 
 # through the logger itself: only what flush() really wrote counts
@@ -20095,7 +20126,7 @@ _rg_d = []
 for _dd in (0, 299000, 301000):
     hl._tft_light(_T + _dd)
     _rg_d.append(_lt.lv[-1])
-_rg_sl["last_at"] = _T + 302000                # a usable fix: not a stay
+_rg_sl["last_at"] = hl._stamp()                # a usable fix: not a stay
 hl._tft_light(_T + 302000)
 _rg_d.append(_lt.lv[-1])
 _rg_sl["last_at"] = None
