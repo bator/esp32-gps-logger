@@ -6970,8 +6970,8 @@ def deploy_run(env_extra):
     """deploy.sh in a fresh copy of the repo files against a fake board
     that holds an older install: (rc, stdout, stderr, board dir, calls)."""
     work = tempfile.mkdtemp(dir=dp_td)
-    for n in ("deploy.sh", "gps_logger.py", "main.py", "web.html", "gps_boot.py",
-              "gps_tft.py", "gps_tft_font.py"):
+    for n in ("deploy.sh", "gps_logger.py", "gps_clock.py", "main.py", "web.html",
+              "gps_boot.py", "gps_tft.py", "gps_tft_font.py"):
         shutil.copy(os.path.join(ROOT, n), work)
     os.makedirs(os.path.join(work, "tools"))
     if web_min:
@@ -7002,6 +7002,8 @@ def deploy_run(env_extra):
             sha = hashlib.sha256(f.read()).hexdigest()
         with open(os.path.join(work, "gps_boot.py"), "rb") as f:
             boot_sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(work, "gps_clock.py"), "rb") as f:
+            clock_sha = hashlib.sha256(f.read()).hexdigest()
         tft_sha = hashlib.sha256()
         for n in ("gps_tft.py", "gps_tft_font.py"):
             with open(os.path.join(work, n), "rb") as f:
@@ -7011,11 +7013,13 @@ def deploy_run(env_extra):
                 fz, "abc1234"))                 # "old": no SHA (first builds)
             if fz != "old":
                 f.write('SHA = "%s"\n' % (sha if fz != "stale" else "0" * 64))
-            if fz in ("full", "tft-stale", "boot-stale", "quote", "dirty"):  # a marker with the
+            if fz in ("full", "tft-stale", "boot-stale", "clock-stale", "quote", "dirty"):  # a marker with the
                 f.write('TFT = "%s"\n' % (tft_sha.hexdigest()  # display's and
                                           if fz != "tft-stale" else "0" * 64))
                 f.write('BOOT = "%s"\n' % (boot_sha           # gps_boot.py's SHA
                                            if fz != "boot-stale" else "0" * 64))
+                f.write('CLOCK = "%s"\n' % (clock_sha         # and gps_clock.py's
+                                            if fz != "clock-stale" else "0" * 64))
     env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_LOGGER=os.path.join(work, "logger"),
@@ -7076,7 +7080,8 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and dev_file(dev, "gps_logger.py") is None
           and not [n for n in os.listdir(dev) if n.endswith(".dpl")]
           and dev_file(dev, ".rtc") == b"0"
-          and len(cps) == 3 and all(c[2].endswith(".dpl") for c in cps)
+          and dev_file(dev, "gps_clock.py") is None
+          and len(cps) == 4 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Heltec Wireless Tracker" in out and "(xtensawin)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
@@ -7099,13 +7104,13 @@ if shutil.which("bash") and shutil.which("sha256sum"):
         with open(pl) as f:
             dp_opt.append(f.read().split("\n")[:-1])
     opt_src = {}
-    for n in ("gps_logger.py", "gps_boot.py", "gps_tft.py"):
+    for n in ("gps_logger.py", "gps_clock.py", "gps_boot.py", "gps_tft.py"):
         with open(os.path.join(ROOT, n)) as f:
             opt_src[n] = [ln for ln in f.read().splitlines()
                           if re.match(r"\s*assert\b", ln) or "__debug__" in ln]
     check("DEPLOY-OPT3: deploy.sh compiles with -O3, plain and FORCE_MPY; no "
           "assert or __debug__ in what is compiled that way",
-          len(dp_opt) == 2 and all(len(c) == 1 and "-O3" in c[0].split()
+          len(dp_opt) == 2 and all(len(c) == 2 and all("-O3" in x.split() for x in c)
                                    for c in dp_opt)
           and not any(opt_src.values()), repr((dp_opt, opt_src)))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
@@ -7190,6 +7195,19 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           == ["main.py", "web.html.gz"],
           "%r %r %r" % ((rc_b, err_b[-300:]), (rc_t, err_t[-200:]),
                         (rc_f, out_f[-200:], err_f[-300:])))
+    # DEPLOY-CLOCK: gps_clock.py is frozen with the logger and compared like
+    # gps_boot.py; a plain board gets gps_clock.mpy beside gps_logger.mpy, and a
+    # frozen one loses a gps_clock.mpy (or .py) that would shadow its module
+    rc_c, out_c, err_c, dev_c, calls_c = deploy_run({"FAKE_FROZEN": "clock-stale"})
+    rc_p, out_p, err_p, dev_p, calls_p = deploy_run({})
+    check("DEPLOY-CLOCK: a frozen gps_clock.py not this one stops, naming it; a "
+          "plain board gets both .mpy files",
+          rc_c != 0 and "gps_clock.py" in err_c
+          and not [c for call in calls_c for c in call if c[0] == "cp"]
+          and rc_p == 0 and dev_file(dev_p, "gps_clock.mpy") is not None
+          and sorted(c[1] for call in calls_p for c in call if c[0] == "cp")
+          == ["gps_clock.mpy", "gps_logger.mpy", "main.py", "web.html.gz"],
+          "%r %r" % ((rc_c, err_c[-200:]), (rc_p, err_p[-200:])))
     # DEPLOY-RT2 (RT2-5): the marker's words go to the shell only as words: a
     # quote in the commit is no answer (it used to be spliced into the Python
     # run on the board, a SyntaxError after the copy); a "-dirty" commit is one;
@@ -7362,6 +7380,7 @@ def build_run(args, env_extra, dirty=False):
         shutil.copy(os.path.join(ROOT, "tools", "web_min.py"),
                     os.path.join(work, "tools"))
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_clock.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft_font.py"), work)
@@ -7478,8 +7497,8 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
         [], {"BOARD_DIR": os.path.join(ROOT, "boards", "GPS_LOGGER_S3")})
     with open(os.path.join(work_s3, "firmware", "manifest.py")) as f:
         man_s3 = re.findall(man_re, f.read())
-    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_boot", "gps_tft",
-                                     "gps_tft_font")]
+    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_clock", "gps_boot",
+                                     "gps_tft", "gps_tft_font")]
     check("BUILD-OPT3: the frozen modules with code leave the line numbers out "
           "(opt=3: ~10 KB of the logger), the display's too",
           rc == 0 and rc_s3 == 0 and all(x in man_s3 for x in opt3)
@@ -7698,6 +7717,13 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           rc6 == 0 and 'module("gps_boot.py"' in m6
           and fr6.get("BOOT") == hashlib.sha256(boot6).hexdigest(),
           repr({k: fr6.get(k) for k in ("COMMIT", "SHA", "TFT", "BOOT")}))
+    with open(os.path.join(work6, "gps_clock.py"), "rb") as f:
+        clock6 = f.read()
+    check("BUILD-CLOCK: gps_clock.py is frozen (opt=3) and the marker carries its SHA-256 "
+          "as CLOCK (deploy.sh compares it)",
+          rc6 == 0 and 'module("gps_clock.py", base_path' in m6
+          and fr6.get("CLOCK") == hashlib.sha256(clock6).hexdigest(),
+          repr({k: fr6.get(k) for k in ("COMMIT", "SHA", "CLOCK")}))
     # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
     # names /web.html.gz alone, made with the board's small window (it
     # inflates it for a client without gzip); an older firmware (after a
@@ -8785,6 +8811,40 @@ finally:
     time.ticks_ms, time.ticks_diff = saved_t
 check("GPS-21: uptime keeps counting past the 12.4-day ticks wrap",
       ups == [k * 86400 for k in range(1, 15)], repr(ups[-3:]))
+
+# CLOCK-MOD: the date maths and the test of a real UTC time live in gps_clock.py
+# (frozen/deployed beside the logger); the logger's names are its functions
+import gps_clock as _gc
+import gps_boot as _gb
+check("CLOCK-MOD: the logger uses gps_clock's functions, not copies; the OTA shadow list "
+      "names gps_clock beside gps_logger, the same in gps_boot",
+      (gl._days, gl._civil, gl._ymd_ok, gl._tc_ok, gl._dt_s, gl._stamp_s)
+      == (_gc.days, _gc.civil, _gc.ymd_ok, _gc.tc_ok, _gc.dt_s, _gc.stamp_s)
+      and (gl.EPOCH_DAYS, gl.FIX_S_END) == (_gc.EPOCH_DAYS, _gc.FIX_S_END)
+      and "/gps_clock.mpy" in gl.OTA_SHADOW and "/gps_clock.py" in gl.OTA_SHADOW
+      and tuple(_gb.OTA_SHADOW) == tuple(gl.OTA_SHADOW), repr(gl.OTA_SHADOW))
+_cm_rt = all(_gc.civil(_gc.days(y, m, d)) == (y, m, d)
+             for y in (2020, 2024, 2026, 2099, 2100) for m in range(1, 13)
+             for d in (1, 28, 31 if m in (1, 3, 5, 7, 8, 10, 12) else 28 if m == 2 else 30))
+_cm_leap = (_gc.civil(_gc.days(2024, 2, 29)) == (2024, 2, 29)
+            and _gc.civil(_gc.days(2100, 2, 28) + 1) == (2100, 3, 1))
+_cm_s = _gc.dt_s("2026-11-10", "12:34:56")
+check("CLOCK-MOD: days/civil round-trip across leap years; EPOCH_DAYS is 2020-01-01; "
+      "dt_s and stamp_s are inverse, an ISO time is both date and time",
+      _cm_rt and _cm_leap and _gc.days(2020, 1, 1) == _gc.EPOCH_DAYS
+      and _cm_s == (_gc.days(2026, 11, 10) - _gc.EPOCH_DAYS) * 86400 + 45296
+      and _gc.stamp_s(_cm_s) == ("2026-11-10T12:34:56Z", "20261110T123456Z")
+      and _gc.dt_s("2026-11-10T12:34:56Z", "2026-11-10T12:34:56Z", 11) == _cm_s,
+      repr((_cm_rt, _cm_leap, _cm_s)))
+check("CLOCK-MOD: ymd_ok / tc_ok / dt_s refuse what is no UTC time (month 13, hour 25, "
+      "Feb 29 of 2100, April 31, 2019, 2100) and take the real ones (Feb 29 of 2024)",
+      _gc.ymd_ok(2024, 2, 29, 0, 0, 0) and _gc.ymd_ok(2099, 12, 31, 23, 59, 59)
+      and not _gc.ymd_ok(2026, 13, 1, 0, 0, 0) and not _gc.ymd_ok(2026, 11, 10, 25, 0, 0)
+      and not _gc.ymd_ok(2100, 2, 29, 0, 0, 0) and not _gc.ymd_ok(2019, 12, 31, 0, 0, 0)
+      and not _gc.ymd_ok(2100, 1, 1, 0, 0, 0) and not _gc.ymd_ok(2026, 4, 31, 0, 0, 0)
+      and _gc.tc_ok(b"x20261110T123456Z", 1) and not _gc.tc_ok(b"20261310T123456Z", 0)
+      and _gc.dt_s("2026-13-10", "12:34:56") is None and _gc.dt_s("abc", "12:34:56") is None,
+      "")
 
 # GPS-22: the satellite-list skip window is GSV_EVERY long; one left over
 # from 7 days ago (past 2**29 ms on the wrapping clock) skips nothing

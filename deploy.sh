@@ -43,7 +43,7 @@ PORT=${PORT:-/dev/ttyUSB0}
 VENV=${VENV:-.venv}                      # python, pip and mpremote come from it
 PY=$VENV/bin/python
 MPREMOTE=$VENV/bin/mpremote
-FILES="gps_logger.mpy main.py web.html.gz"
+FILES="gps_logger.mpy gps_clock.mpy main.py web.html.gz"
 
 # mpy-cross must match the firmware's .mpy version (MicroPython 1.29)
 if ! "$PY" -c "import mpy_cross" 2>/dev/null; then
@@ -95,32 +95,33 @@ echo "Board: $MACHINE ($ARCH)"
 
 # A firmware built by tools/build_firmware.sh has the logger frozen in (and
 # a gps_frozen marker with the SHA-256 of the gps_logger.py it was built
-# from, TFT for the display's modules and BOOT for gps_boot.py, main.py's
-# OTA/boot-retry helpers): a gps_logger.mpy on flash would shadow it and
-# bring its ~100 KB back into the Python heap, so only main.py and the page
-# go up. Only an explicit answer counts: anything else (a garbled or missing
-# reply) stops. An older marker has no TFT or BOOT ('-'): those are not
-# compared then.
+# from, TFT for the display's modules, BOOT for gps_boot.py, main.py's
+# OTA/boot-retry helpers, and CLOCK for gps_clock.py): a gps_logger.mpy on
+# flash would shadow it and bring its ~100 KB back into the Python heap, so
+# only main.py and the page go up. Only an explicit answer counts: anything else (a garbled or missing
+# reply) stops. An older marker has no TFT, BOOT or CLOCK ('-'): those are
+# not compared then.
 FROZEN=$("$MPREMOTE" connect "$PORT" exec "
 try:
     import gps_frozen
     print('frozen', gps_frozen.COMMIT, getattr(gps_frozen, 'SHA', '-'), getattr(gps_frozen, 'TFT', '-'),
-          getattr(gps_frozen, 'BOOT', '-'))
+          getattr(gps_frozen, 'BOOT', '-'), getattr(gps_frozen, 'CLOCK', '-'))
 except ImportError:
-    print('plain')" | tr -d '\r' | grep -E '^(frozen [A-Za-z0-9._-]+ [A-Za-z0-9._-]+( [A-Za-z0-9._-]+){0,2}|plain)$' | tail -n 1 || true)
+    print('plain')" | tr -d '\r' | grep -E '^(frozen [A-Za-z0-9._-]+ [A-Za-z0-9._-]+( [A-Za-z0-9._-]+){0,3}|plain)$' | tail -n 1 || true)
 RM_MPY=0                                 # (a frozen logger: drop a gps_logger.mpy that shadows it)
 case "$FROZEN" in
     frozen*)
-        read -r _ FCOMMIT FSHA FTFT FBOOT <<< "$FROZEN"
+        read -r _ FCOMMIT FSHA FTFT FBOOT FCLOCK <<< "$FROZEN"
         if [ "${FORCE_MPY:-0}" = 1 ]; then
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
             echo "WARNING: it shadows the frozen one and takes ~100 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
             "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
+            "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_clock.mpy gps_clock.py
         else
-            # (the display's code and gps_boot.py on the board that has them
-            # in the marker: an older firmware has no TFT or BOOT, the
-            # logger's SHA alone then)
+            # (the display's code, gps_boot.py and gps_clock.py on the board
+            # that has them in the marker: an older firmware has no TFT, BOOT
+            # or CLOCK, the logger's SHA alone then)
             STALE=""
             if [ "$FSHA" != "$(sha256sum gps_logger.py | cut -d' ' -f1)" ]; then
                 STALE="gps_logger.py"
@@ -130,6 +131,9 @@ case "$FROZEN" in
             elif [ -n "${FBOOT:-}" ] && [ "$FBOOT" != "-" ] && \
                  [ "$FBOOT" != "$(sha256sum gps_boot.py | cut -d' ' -f1)" ]; then
                 STALE="gps_boot.py"
+            elif [ -n "${FCLOCK:-}" ] && [ "$FCLOCK" != "-" ] && \
+                 [ "$FCLOCK" != "$(sha256sum gps_clock.py | cut -d' ' -f1)" ]; then
+                STALE="gps_clock.py"
             fi
             if [ -n "$STALE" ]; then
                 echo "The frozen logger ($FCOMMIT) is not this $STALE: run" >&2
@@ -142,7 +146,8 @@ case "$FROZEN" in
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
         fi ;;
-    plain) "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py ;;
+    plain) "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
+           "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_clock.mpy gps_clock.py ;;
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
@@ -237,7 +242,9 @@ for n in '$FILES'.split():
         os.rename(n + '.dpl', n)
 'web.html' in os.listdir() and os.remove('web.html')
 'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
-$RM_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')" \
+'gps_clock.py' in os.listdir() and os.remove('gps_clock.py')
+$RM_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')
+$RM_MPY and 'gps_clock.mpy' in os.listdir() and os.remove('gps_clock.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
     ${RESET[@]+"${RESET[@]}"}
