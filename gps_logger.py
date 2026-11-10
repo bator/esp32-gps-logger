@@ -13,6 +13,7 @@ except ImportError:
 from gps_clock import (days as _days, civil as _civil, ymd_ok as _ymd_ok,
                        tc_ok as _tc_ok, dt_s as _dt_s, stamp_s as _stamp_s,
                        stamp as _stamp, age_s as _age_s, recent_s as _recent_s,
+                       utc_s as _utc_s,
                        EPOCH_DAYS, FIX_S_END)
 
 # Collect garbage early and often. When an allocation doesn't fit, the ESP32
@@ -3954,10 +3955,7 @@ def _still_heartbeat(now):
     c = log["clock"]
     if c is None:
         return
-    age = _age(now, c[1])
-    if age >= TICKS_OLD:
-        return
-    t, tc = _stamp_s(c[0] + age // 1000)
+    t, tc = _stamp_s(_utc_s(c))
     if log["last_t"] is not None and t <= log["last_t"]:
         sl["hb_at"] = _stamp() + (1000 - STILL_HEARTBEAT) // 1000
         return
@@ -4520,7 +4518,7 @@ def _sample(now):
         return                           # (no date: a second with GGA only,
                                          # e.g. the first after a warm boot;
                                          # or see FIX_S_END)
-    log["clock"] = (secs, now)           # GPS time for the heartbeat (2020)
+    log["clock"] = (secs, _stamp())      # the GPS Anchor: heartbeat, page, RTC
     if not _usable(now):
         return
     lt = log["last_t"]
@@ -5689,24 +5687,23 @@ def _rtc_sync(now):
     verified POST failed. Set it from the GPS fix (valid, a date in
     2020-2087) before a POST; while it was not set yet and the fix is gone
     (a board that had one outdoors and is indoors now), from the last fix's
-    clock run on by the ticks (log["clock"], as _local_hm does), else from
+    clock run on by the uptime (log["clock"], as _local_hm does), else from
     NTP's answer (ntp_tick: no fix since the boot, or none to set it
     with): once a boot, again only when it drifted more than RTC_DRIFT s.
     Seconds since 2020 (small ints)."""
     src = ""
     if has_fix(now):
-        at = st["pos_at"]
         s = _fix_s()
+        if s is None:
+            return
+        s += _age(now, st["pos_at"]) // 1000
     elif not _rtc_set[0] and (log["clock"] or _ntp[0]):
         # no fix now: the clock a fix gave this boot, else NTP's answer,
-        # until a fix sets it
-        s, at = log["clock"] or _ntp[0]
+        # until a fix sets it (an Anchor: its UTC runs on with the uptime)
+        s = _utc_s(log["clock"] or _ntp[0])
         src = " gps" if log["clock"] else " ntp"
     else:
         return
-    if s is None or _age(now, at) >= TICKS_OLD:
-        return
-    s += _age(now, at) // 1000
     d = s // 86400
     y, m, dd = _civil(d + EPOCH_DAYS)
     if not 2020 <= y <= 2087:
@@ -7974,8 +7971,9 @@ NTP_RETRY = 60000                        # ms after a failed try, doubling to ..
 NTP_RETRY_MAX = 3600000                  # ... this
 NTP_AGAIN = 21600000                     # ms an answer is used before a new one
 _NTP_2020 = 3786825600                   # 2020-01-01 in seconds since 1900
-_ntp = [None, None, NTP_RETRY]           # (seconds since 2020, ticks) of the answer;
-                                         # ticks of the last try; the wait after it
+_ntp = [None, None, NTP_RETRY]           # the answer's Anchor (seconds since 2020,
+                                         # Stamp); Stamp of the last try; the wait
+                                         # after it (ms)
 
 def _ntp_env(env):
     global NTP_SERVER
@@ -8031,9 +8029,9 @@ def ntp_tick(now):
     n = _ntp
     if (not NTP_SERVER or wifi["state"] != "connected"
             or (log["clock"] is not None and not _need_rtc())
-            or _recent(now, n[1], n[2])):
+            or _recent_s(n[1], n[2] // 1000)):
         return
-    n[1] = now
+    n[1] = _stamp()
     read_uart()
     feed()
     t = _ntp_ask()
@@ -8042,38 +8040,22 @@ def ntp_tick(now):
     if t is None:
         n[2] = min(n[2] * 2, NTP_RETRY_MAX)
         return
-    n[0], n[2] = (t, time.ticks_ms()), NTP_AGAIN
+    n[0], n[2] = (t, _stamp()), NTP_AGAIN
     _tft_t[4] = 0
     _diag_write("clock ntp %s" % _stamp_s(t)[0])
 
-CLOCK_ON = 3600000                       # ms a clock stamp runs on before rebased
-
-def _clock_on(now, c):
-    """c, a (seconds since 2020, ticks) clock stamp (log["clock"], _ntp[0]), moved up
-    to now by whole seconds once it is CLOCK_ON old (called every loop). Only a fix
-    renews log["clock"], and past 2**29 ms (6.2 days indoors) its age reads
-    TICKS_OLD (--:--, the route's day stuck), past 2**30 young again (12 days
-    early)."""
-    if c is None:
-        return c
-    a = _age(now, c[1])
-    if a < CLOCK_ON or a >= TICKS_OLD:
-        return c
-    a //= 1000
-    return (c[0] + a, time.ticks_add(c[1], a * 1000))
-
 def _local_hm():
     """"HH:MM" in Hungary from the fix's UTC; with the receiver silent (its time
-    stands still then) or no fix yet, from the last fix's clock run on by the
-    ticks, else NTP's (as _rt_tick); "--:--" without any."""
+    stands still then) or no fix yet, from the last fix's Anchor run on by the
+    uptime, else NTP's (as _rt_tick); "--:--" without any."""
     d, t = st["date"], st["time"]
     rx = st["rx"]
     now = time.ticks_ms()
     if not d or not t or not _recent(now, rx, NO_DATA):
         c = log["clock"] or _ntp[0]
-        if c is None or _age(now, c[1]) >= TICKS_OLD:
+        if c is None:
             return "--:--"
-        d = _stamp_s(c[0] + _age(now, c[1]) // 1000)[0]
+        d = _stamp_s(_utc_s(c))[0]
         t = d[11:]
     try:
         y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
@@ -8454,8 +8436,8 @@ def _rt_tick(now):
         return
     R.drawn = now
     c = log["clock"] or _ntp[0]
-    if c is not None and _age(now, c[1]) < TICKS_OLD:
-        d = _rt_day(c[0] + _age(now, c[1]) // 1000)
+    if c is not None:
+        d = _rt_day(_utc_s(c))
         if R.waiting or d > R.day:
             if d != R.day:
                 _rt_reset(d)
@@ -8706,9 +8688,6 @@ def _loop():
     while True:
         feed()
         uptime_s()                       # sums ticks before they wrap
-        now = time.ticks_ms()
-        log["clock"] = _clock_on(now, log["clock"])
-        _ntp[0] = _clock_on(now, _ntp[0])
         read_uart()
         gps_check(time.ticks_ms())
         log_tick()

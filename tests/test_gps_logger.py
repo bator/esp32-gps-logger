@@ -9873,7 +9873,7 @@ try:
     gl.WEB, gl.WEB_AWAY = True, False
     w = rv_connect(["hot"], [("hot", -50), ("cafe", -60, b"\x04" * 6)])
     conn = gl.wifi["state"] == "connected" and not gl.wifi["home"]
-    gl.log["clock"] = (800000000, _clock[0])
+    gl.log["clock"] = (800000000, gl._stamp())
     gl.log["still"] = sl = gl._still_state()
     sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=100)
     states = []
@@ -16970,6 +16970,12 @@ check("CLOCK-STAMP-OTA: a minute after an update check none is due; 12.4 days an
       "minute after, one is",
       _co_fresh == 0 and _co_stale == 1, repr((_co_fresh, _co_stale)))
 
+# CLOCK-ANCHOR: an Anchor (UTC seconds, Stamp) runs on with the uptime
+_ca_s = _gck.stamp()
+check("CLOCK-ANCHOR: utc_s of an Anchor is its time plus its Stamp's age; None without one",
+      _gck.utc_s(None) is None and _gck.utc_s((1000, _ca_s - 5)) == 1005
+      and _gck.utc_s((1000, _ca_s)) == 1000, "")
+
 # R2-UPTIME: uptime counts from boot (ticks at import), not from the import
 gl = _reload_logger()
 gl.uptime_s()                            # (the first call: the ticks count from boot)
@@ -18349,42 +18355,40 @@ hl.st["rx"] = _clock[0] - hl.NO_DATA
 check("TFT-CLOCK-SILENT: a silent receiver's clock shows --:--, not a stopped time",
       _ls("2026-11-04", "10:42:10") == "--:--")
 hl.log["clock"] = ((hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 + 42 * 60 + 10,
-                   _clock[0] - 60000)
+                   hl._stamp() - 60)       # (an Anchor: UTC and the Stamp then)
 check("TFT-CLOCK-RUNS: with the receiver silent the last fix's clock runs on by the "
-      "ticks (as the route's day does): a minute on, 11:43",
+      "uptime (as the route's day does): a minute on, 11:43",
       _ls("2026-11-04", "10:42:10") == "11:43", _ls("2026-11-04", "10:42:10"))
-# 13 days with no fix, the loop rebasing both stamps: past 2**29 ms the age read
+# 13 days with no fix, the loop summing the uptime only: the Anchors (a fix's
+# and NTP's) need no rebasing. With tick stamps, past 2**29 ms the age read
 # TICKS_OLD (--:--), past 2**30 young again (10:15 behind)
-_cw_ticks = (time.ticks_ms, time.ticks_diff, time.ticks_add)
+_cw_ticks = (time.ticks_ms, time.ticks_diff, time.ticks_add, list(_gck._up))
 _CW = 1 << 30
 time.ticks_ms = lambda: _clock[0] & (_CW - 1)
 time.ticks_diff = lambda a, b: ((a - b + _CW // 2) & (_CW - 1)) - _CW // 2
 time.ticks_add = lambda a, b: (a + b) & (_CW - 1)
 _cw_s = (hl._days(2026, 11, 4) - hl.EPOCH_DAYS) * 86400 + 10 * 3600 + 42 * 60 + 10
 _cw_at, _cw_ntp, _cw_hm = _clock[0], hl._ntp[0], []
-hl.log["clock"] = (_cw_s, _clock[0] & (_CW - 1))
-hl._ntp[0] = (_cw_s + 7, _clock[0] & (_CW - 1))
+_gck._up[:] = [0, _clock[0] & (_CW - 1), 0]   # (the Anchors on a whole second)
+hl.log["clock"] = (_cw_s, hl._stamp())
+hl._ntp[0] = (_cw_s + 7, hl._stamp())
 try:
     for _cw_day in (7, 13):
         while _clock[0] - _cw_at < _cw_day * 86400000:
             _clock[0] += 1234567             # (not whole seconds: no drift either)
-            _cw_now = _clock[0] & (_CW - 1)
-            hl.log["clock"] = hl._clock_on(_cw_now, hl.log["clock"])
-            hl._ntp[0] = hl._clock_on(_cw_now, hl._ntp[0])
-        _cw_now = _clock[0] & (_CW - 1)
+            hl.uptime_s()                    # (what _loop does every pass)
         _cw_t = hl._stamp_s(_cw_s + (_clock[0] - _cw_at) // 1000)[0]   # (CET: UTC+1)
         _cw_hm.append((_ls(None, None) == "%02d:%s" % ((int(_cw_t[11:13]) + 1) % 24, _cw_t[14:16]),
-                       [c[0] + hl._age(_cw_now, c[1]) // 1000 - _cw_s
-                        for c in (hl.log["clock"], hl._ntp[0])]))
+                       [hl._utc_s(c) - _cw_s for c in (hl.log["clock"], hl._ntp[0])]))
 finally:
-    time.ticks_ms, time.ticks_diff, time.ticks_add = _cw_ticks
+    time.ticks_ms, time.ticks_diff, time.ticks_add, _cw_up = _cw_ticks
+    _gck._up[:] = _cw_up
 _cw_el = (_clock[0] - _cw_at) // 1000
 check("TFT-CLOCK-WRAP: with no fix for 7 and 13 days the last fix's clock and NTP's run "
-      "on to the second, past the 2**29 and 2**30 ms of the ticks",
+      "on to the second, past the 2**29 and 2**30 ms of the ticks, with no rebasing",
       _cw_hm[0][0] and _cw_hm[1][0]
       and _cw_hm[1][1] == [_cw_el, _cw_el + 7]
-      and 'log["clock"] = _clock_on(now, log["clock"])' in inspect.getsource(hl._loop)
-      and "_ntp[0] = _clock_on(now, _ntp[0])" in inspect.getsource(hl._loop),
+      and not hasattr(hl, "_clock_on") and "_clock_on" not in inspect.getsource(hl._loop),
       repr((_cw_hm, _cw_el)))
 _clock[0] = _cw_at
 hl._ntp[0] = _cw_ntp
@@ -18760,7 +18764,7 @@ def _rview(s=None):
     """A look at the route, the clock at s."""
     _clock[0] += hl.ROUTE_DRAW
     if s is not None:
-        hl.log["clock"] = (s, _clock[0])
+        hl.log["clock"] = (s, hl._stamp())
     hl._rt_tick(_clock[0])
     return _Rt.view
 
@@ -18877,7 +18881,7 @@ check("ROUTE-RMC-ONLY: a line without height and HDOP (a second with RMC only) i
 hl.log_reset()
 _sl = hl.log["still"]
 _sl.update(active=True, anchor=(10.5, 20.5))
-hl.log["clock"] = (_DAY, _clock[0])
+hl.log["clock"] = (_DAY, hl._stamp())
 hl.log["last_t"] = hl._stamp_s(_DAY + 30)[0]
 hl._still_heartbeat(_clock[0])
 _hb_due = hl._recent_s(_sl["hb_at"], hl.STILL_HEARTBEAT // 1000)   # (hb_at: a Stamp)
@@ -18924,7 +18928,7 @@ _after = _Rt.cm
 # an anchor point written by the logger
 _sl = hl.log["still"]
 _sl.update(anchor=(10.5, 20.5), active=True)
-hl.log["clock"] = (_DAY + 100, _clock[0])
+hl.log["clock"] = (_DAY + 100, hl._stamp())
 hl._still_heartbeat(_clock[0])
 _hb = len(hl.log["batch"])
 hl.flush(None)
@@ -18939,7 +18943,7 @@ check("ROUTE-FLUSH: lines count when flush() wrote them, not when recorded nor w
 # the drift a stay's proof drops never counted
 _rfresh()
 hl.log_reset()
-hl.log["clock"] = (_DAY, _clock[0])
+hl.log["clock"] = (_DAY, hl._stamp())
 for _i in range(10):
     _rrec(_i * 50, _DAY + _i)
 for _i in range(40):                     # standing at 450 m, 20 m of drift a line
@@ -19298,18 +19302,22 @@ _n_dw = hl._diag_write
 hl._diag_write = _n_diag.append
 hl.ntp_tick(_clock[0])
 hl._diag_write = _n_dw
-_n_ok = hl._ntp[0] == (_DAY, _clock[0]) and hl._ntp[2] == hl.NTP_AGAIN
+_n_ok = hl._ntp[0] == (_DAY, hl._stamp()) and hl._ntp[2] == hl.NTP_AGAIN
 _n_asked = len(_NtpMod.asked)
-hl.ntp_tick(_clock[0] + hl.NTP_AGAIN - 1)
+_n_t0 = _clock[0]                        # (the try's time is a Stamp: the clock moves)
+_clock[0] = _n_t0 + hl.NTP_AGAIN - 1000
+hl.ntp_tick(_clock[0])
 _n_held = len(_NtpMod.asked) == _n_asked
-hl.log["clock"] = (_DAY, _clock[0])
+hl.log["clock"] = (_DAY, hl._stamp())
 _n_url = hl.up["url"]
 hl.up["url"] = "http://d.example"        # (https asks on: RN2-5)
-hl.ntp_tick(_clock[0] + hl.NTP_AGAIN * 2)
+_clock[0] = _n_t0 + hl.NTP_AGAIN * 2
+hl.ntp_tick(_clock[0])
 hl.up["url"] = _n_url
 _n_fixed = len(_NtpMod.asked) == _n_asked
 hl.log["clock"] = None
-hl.ntp_tick(_clock[0] + hl.NTP_AGAIN)
+_clock[0] = _n_t0 + hl.NTP_AGAIN * 3
+hl.ntp_tick(_clock[0])
 _n_again = len(_NtpMod.asked) == _n_asked + 1
 check("NTP-TICK: only connected, with a server and before a fix told the time; a failed try "
       "waits, doubling to the cap; an answer lasts NTP_AGAIN, says one diag line and "
@@ -19324,16 +19332,16 @@ check("NTP-TICK: only connected, with a server and before a fix told the time; a
 _clock[0] += 1000
 hl.st["rx"] = _clock[0]
 
-hl._ntp[0] = (_DAY, _clock[0])
+hl._ntp[0] = (_DAY, hl._stamp())
 _h_summer = _ls(None, None)
-hl._ntp[0] = (_DAY - 86400 * 150, _clock[0])
+hl._ntp[0] = (_DAY - 86400 * 150, hl._stamp())
 _h_winter = _ls(None, None)
 _h_gps = _ls("2026-11-04", "10:42:10")
 hl.st["rx"] = _clock[0] - hl.NO_DATA
-hl._ntp[0] = (_DAY, _clock[0])
+hl._ntp[0] = (_DAY, hl._stamp())
 _h_silent = _ls("2026-11-04", "10:42:10")
 hl.st["rx"] = _clock[0]
-hl._ntp[0] = (_DAY, _clock[0] - 60000)
+hl._ntp[0] = (_DAY, hl._stamp() - 60)
 _h_runs = _ls(None, None)
 _clock_old = _clock[0]
 hl._ntp[0] = None
@@ -19347,21 +19355,21 @@ hl.st.update(date=None, time=None)
 
 _rboot(_good)
 _rview()
-hl._ntp[0] = (_DAY + 7100, _clock[0])
+hl._ntp[0] = (_DAY + 7100, hl._stamp())
 _rview()
 _r_same = (_Rt.waiting, _Rt.view[1], _Rt.km, _Rt.cm)
 _rboot(_good)
 _rview()
-hl._ntp[0] = (_DAY + 86400, _clock[0])
+hl._ntp[0] = (_DAY + 86400, hl._stamp())
 _rview()
 _r_next = (_Rt.waiting, _Rt.view[1], _Rt.km)
 _rboot(None)
-hl._ntp[0] = (_DAY, _clock[0])
+hl._ntp[0] = (_DAY, hl._stamp())
 _rview()
 _r_nofile = (_Rt.view[1], _Rt.km)
 _rboot(_good)
-hl._ntp[0] = (_DAY + 86400, _clock[0])
-hl.log["clock"] = (_DAY + 7100, _clock[0])
+hl._ntp[0] = (_DAY + 86400, hl._stamp())
+hl.log["clock"] = (_DAY + 7100, hl._stamp())
 _rview()
 _r_fixwins = (_Rt.view[1], _Rt.km, _Rt.cm)
 hl.log["clock"] = None
@@ -19411,18 +19419,18 @@ def _rn_count(a, b):
 os.rename = _rn_count
 _rt_s = _DAY
 _rx_ = 0
-hl.log["clock"] = (_rt_s, _clock[0])
+hl.log["clock"] = (_rt_s, hl._stamp())
 for _m in range(60):                     # a drive of an hour: a batch a minute, 6 looks
     _rfeed(*[_rat(_rx_ + _i * 10, 0, _rt_s + _m * 60 + _i) for _i in range(60)])
     _rx_ += 600
     for _i in range(6):
         _clock[0] += hl.ROUTE_DRAW
-        hl.log["clock"] = (_rt_s + _m * 60 + _i * 10, _clock[0])
+        hl.log["clock"] = (_rt_s + _m * 60 + _i * 10, hl._stamp())
         hl._rt_tick(_clock[0])
 _w_drive = len(_renames)
 _via_tmp = _renames and all(a == hl.ROUTE_FILE + ".tmp" and b == hl.ROUTE_FILE for a, b in _renames)
 _clock[0] += hl.ROUTE_DRAW
-hl.log["clock"] = (_rt_s + 3599, _clock[0])
+hl.log["clock"] = (_rt_s + 3599, hl._stamp())
 hl._rt_tick(_clock[0])
 _renames[:] = []
 hl.log["still"]["active"] = True
@@ -19430,7 +19438,7 @@ _rfeed(_rat(_rx_, 0, _rt_s + 3600))
 _w_stay0 = 0
 for _i in range(360):                    # an hour's stay: one write at its start
     _clock[0] += hl.ROUTE_DRAW
-    hl.log["clock"] = (_rt_s + 3600 + _i * 10, _clock[0])
+    hl.log["clock"] = (_rt_s + 3600 + _i * 10, hl._stamp())
     hl._rt_tick(_clock[0])
     if not _i:
         _w_stay0 = len(_renames)
@@ -19438,7 +19446,7 @@ _w_stay = len(_renames)
 _renames[:] = []
 for _i in range(6 * 60 * 24):            # standing a day with nothing new: none
     _clock[0] += hl.ROUTE_DRAW
-    hl.log["clock"] = (_rt_s + 3600 + _i * 10, _clock[0])
+    hl.log["clock"] = (_rt_s + 3600 + _i * 10, hl._stamp())
     hl._rt_tick(_clock[0])
 _w_idle = len(_renames)
 hl.log["still"]["active"] = False
@@ -19462,7 +19470,7 @@ _s_fail = True
 try:
     for _i in range(30):                 # 5 minutes of a stay on a failing flash
         _clock[0] += hl.ROUTE_DRAW
-        hl.log["clock"] = (_rt_s + 3700 + _i * 10, _clock[0])
+        hl.log["clock"] = (_rt_s + 3700 + _i * 10, hl._stamp())
         try:
             hl._tft_state(_clock[0])
         except Exception:
@@ -21236,7 +21244,8 @@ try:
     # RN-6: with /ca.der and no fix since the boot (indoors, at home) every
     # verified POST failed the certificate's dates until the first fix: the
     # NTP answer sets the clock meanwhile, a fix sets it again when it
-    # differs (the fix wins), a stale answer (the ticks wrapped) does not
+    # differs (the fix wins), and an answer a week old a week on (an Anchor
+    # does not go stale: its Stamp does not wrap)
     _rn_st = dict((k, gl.st.get(k)) for k in ("valid", "date", "time", "lat",
                                               "pos_at"))
     _rn_ntp = list(gl._ntp)
@@ -21248,7 +21257,7 @@ try:
         secs = ((_dt.date(2026, 10, 31) - _dt.date(2020, 1, 1)).days * 86400
                 + 12 * 3600)
         diag_clear()
-        gl._ntp[0] = (secs, _clock[0] - 5000)
+        gl._ntp[0] = (secs, gl._stamp() - 5)
         gl._rtc_sync(_clock[0])
         gl._rtc_sync(_clock[0])          # set already: nothing
         rn6 = [RTC.sets[:], [l for l in diag_lines() if l.startswith("clock")]]
@@ -21259,7 +21268,7 @@ try:
         gl.st.update(valid=False)
         RTC.sets[:] = []
         gl._rtc_set[0] = False
-        gl._ntp[0] = (secs, _clock[0] - gl.TICKS_OLD - 10)
+        gl._ntp[0] = (secs, gl._stamp() - 7 * 86400)
         gl._rtc_sync(_clock[0])
         rn6.append(RTC.sets[:])
     finally:
@@ -21269,10 +21278,13 @@ try:
         RTC.sets[:] = []
         diag_clear()
     check("RN-6: no fix since boot: the clock is set from NTP's answer once "
-          "(clock set ... ntp), a fix later sets it again, a stale answer not",
+          "(clock set ... ntp), a fix later sets it again, an answer a week old "
+          "a week on",
           rn6 == [[(2026, 10, 31, wd, 12, 0, 5, 0)],
                   ["clock set 2026-10-31T12:00:05Z ntp"],
-                  [(2026, 10, 31, wd, 12, 0, 25, 0)], []], repr(rn6))
+                  [(2026, 10, 31, wd, 12, 0, 25, 0)],
+                  [(2026, 11, 7, _dt.date(2026, 11, 7).weekday(), 12, 0, 0, 0)]],
+          repr(rn6))
     # RN-7: Accept-Encoding read like Host (a bare-LF head too), a gzip
     # token with q=0 is no gzip (the bare-LF client got the page inflated,
     # ~5 KB of heap at a bad moment)
@@ -21504,21 +21516,23 @@ try:
     RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
     gl._rtc_set[0] = False
     diag_clear()
-    gl._ntp[0] = (secs + 3600, _clock[0] - 1000)
-    gl.log["clock"] = (secs, _clock[0] - 30000)
+    gl._ntp[0] = (secs + 3600, gl._stamp() - 1)
+    gl.log["clock"] = (secs, gl._stamp() - 30)
     gl._rtc_sync(_clock[0])
     n2_4 = [RTC.sets[:], [l for l in diag_lines() if l.startswith("clock")]]
     RTC.sets[:] = []
     gl._rtc_set[0] = False
-    gl.log["clock"] = (secs, _clock[0] - gl.TICKS_OLD - 10)
+    gl.log["clock"] = (secs, gl._stamp() - 7 * 86400)
     gl._ntp[0] = None
     gl._rtc_sync(_clock[0])
     n2_4.append(RTC.sets[:])
     check("RN2-4: no fix now, none set the board clock yet: the last fix's "
-          "clock run on by the ticks sets it (over NTP's answer), a stale "
-          "one does not",
+          "clock run on by the uptime sets it (over NTP's answer), one a week "
+          "old a week on",
           n2_4 == [[(2026, 10, 31, wd, 12, 0, 30, 0)],
-                   ["clock set 2026-10-31T12:00:30Z gps"], []], repr(n2_4))
+                   ["clock set 2026-10-31T12:00:30Z gps"],
+                   [(2026, 11, 7, _dt.date(2026, 11, 7).weekday(), 12, 0, 0, 0)]],
+          repr(n2_4))
     gl._rtc_set[0] = False
     RTC.sets[:] = []
     diag_clear()
@@ -21530,7 +21544,7 @@ try:
     gl._ntp_ask = lambda: asked.append(1)
     gl.NTP_SERVER = "ntp.test"
     gl.wifi["state"] = "connected"
-    gl.log["clock"] = (secs, _clock[0])
+    gl.log["clock"] = (secs, gl._stamp())
     n2_5 = []
     for url, ota_url, rtc_set, clk in (
             ("https://d.example", "http://ota.lan/m.json", False, True),
@@ -21540,7 +21554,7 @@ try:
             ("http://d.example", "http://ota.lan/m.json", False, False)):
         gl.up["url"], gl.OTA_URL = url, ota_url
         gl._rtc_set[0] = rtc_set
-        gl.log["clock"] = (secs, _clock[0]) if clk else None
+        gl.log["clock"] = (secs, gl._stamp()) if clk else None
         gl._ntp[:] = [None, None, gl.NTP_RETRY]
         del asked[:]
         gl.ntp_tick(_clock[0])
