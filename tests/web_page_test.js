@@ -15,7 +15,7 @@ const d = JSON.parse(text);
 const v = ctx.view(d);
 // every status.json key: the page shows it, or it is for the raw JSON only
 const SHOWN = ("fix sats hdop utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
-  "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days stay uptime prev_run " +
+  "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days day_span stay uptime prev_run " +
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
   "track_drop", "write_errs", "q_thin", "pos6"];
@@ -175,7 +175,7 @@ hx[0].status = 200;
 hx[0].responseText = "x".repeat(16384);
 hx[0].onload();
 hx = p.xhrs.filter((x) => x.url.indexOf("/hist?") === 0);
-hd.again = hx.length > 1 && hx[1].url === hx[0].url.replace("&o=0", "&o=16384");
+hd.again = hx.length > 1 && hx[1].url === hx[0].url.replace("&o=0", "&o=16384").replace(/&t=\d{6}$/, "");
 v.hist = hd;
 // The new boxes: GPS link, last upload, day picker, track parse (speed),
 // profile, GPX, and picking a past day on the page
@@ -307,8 +307,9 @@ ft.band = (() => {
 // (folded into the stop), a 0.5 km walk (10 min)
 const tp = [], dLat = 1 / 110.54;
 for (let k = 0; k <= 20; k++) tp.push([d0 + 8 * 3600000 + k * 60000, 47 + k * 0.06 * dLat, 18, 100]);
-for (let k = 0; k < 3; k++) tp.push([d0 + 10 * 3600000 + k * 60000, 47.02, 18, 100]);
-for (let k = 0; k <= 10; k++) tp.push([d0 + 11 * 3600000 + k * 60000, 47.02 + k * 0.05 * dLat, 18, 100]);
+const e1 = 47 + 20 * 0.06 * dLat;      // (where the walk ended: a stop, not a gap)
+for (let k = 0; k < 3; k++) tp.push([d0 + 10 * 3600000 + k * 60000, e1, 18, 100]);
+for (let k = 0; k <= 10; k++) tp.push([d0 + 11 * 3600000 + k * 60000, e1 + k * 0.05 * dLat, 18, 100]);
 const trips = c0.tripsOf(tp);
 ft.trips = trips.map((t) => [t.i0, t.i1, (t.t0 - d0) / 60000, (t.t1 - d0) / 60000, Math.round(t.km * 100) / 100]);
 ft.timeline = c0.timeline(trips, 1, true);
@@ -676,8 +677,8 @@ ft.wr4 = (() => {
   full.write("é", 100, "utf8");
   reply(f2, full);
   const n2 = hx(q2).filter((x) => !x.done);
-  return [body.length, again.length ? +again[0].url.replace(/.*&o=/, "") : null,
-    n2.length ? n2[0].url === f2.url.replace("&o=0", "&o=16384") : null, q.c.hist.pts.length];
+  return [body.length, again.length ? +again[0].url.match(/&o=(\d+)/)[1] : null,
+    n2.length ? n2[0].url === f2.url.replace("&o=0", "&o=16384").replace(/&t=\d{6}$/, "") : null, q.c.hist.pts.length];
 })();
 // HIST-NEXT: a .trb day's reply is its decoded text: X-Hist-Next is where
 // to ask from next (not o + the bytes received), again while short of
@@ -911,5 +912,116 @@ if (process.env.TIME_VECTORS) v.utc = JSON.parse(fs.readFileSync(process.env.TIM
 // the kinds of diag lines (tests/test_gps_logger.py passes one of each
 // format gps_logger.py writes)
 if (process.env.EV_LINES) v.kinds = JSON.parse(fs.readFileSync(process.env.EV_LINES, "utf8")).map((l) => c0.evKind(l));
+// REVIEW-2026-11-11 (the live page's review, Bator: "every bug and every
+// improvement"): each finding's regression
+ft.rev = (() => {
+  const out = {};
+  // 1. a day being read: what is in so far says so, the figures faded; the
+  // day kept once read, picked again it asks the board nothing
+  const q = page(1600);
+  q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null, days: ["20261103", "20261104"]});
+  q.xhrs[0].onload();
+  const hq = () => q.xhrs.filter((x) => x.url.indexOf("/hist?") === 0 && !x.done);
+  for (let n = 0; n < 6 && hq().length; n++) { const x = hq()[0]; x.done = true; x.status = 204; x.responseText = ""; x.onload(); }
+  q.c.pick("20261104");
+  const d4 = new Date(2026, 10, 4, 8, 0, 0).getTime(), walk = (k0, n, la) => {
+    let b = "";
+    for (let k = 0; k < n; k++) b += trkLine(d4 + (k0 + k) * 1000, la + k * 0.00005, 18.4);
+    return b;
+  };
+  // (the seek first where the local day begins inside a UTC day)
+  for (let n = 0; n < 4 && hq().length && /&t=/.test(hq()[0].url); n++) {
+    const x = hq()[0];
+    x.done = true; x.status = 200; x.responseText = "";
+    x.headers = {"X-Hist-Next": "0", "X-Hist-End": "0", "X-Hist-Seek": "0"};
+    x.onload();
+  }
+  for (let n = 0; n < 4 && hq().length && hq()[0].url.indexOf("d=20261104&") < 0; n++) {
+    const x = hq()[0]; x.done = true; x.status = 204; x.responseText = ""; x.onload();
+  }
+  let x = hq()[0];
+  x.done = true; x.status = 200; x.responseText = walk(0, 60, 47.1);
+  x.headers = {"X-Hist-Next": "100", "X-Hist-End": "200"};
+  x.onload();
+  q.c.placeMap(q.c.mapD || {position: null});
+  out.partial = [q.doc.getElementById("tline").innerHTML.indexOf('<p class="hint ldg">Reading the day&hellip;</p>') === 0,
+    q.doc.getElementById("tkpi").className, q.c.hist.busy];
+  x = hq()[0];
+  x.done = true; x.status = 200; x.responseText = walk(600, 60, 47.2);
+  x.headers = {"X-Hist-Next": "200", "X-Hist-End": "200"};
+  x.onload();
+  for (let n = 0; n < 4 && hq().length; n++) { const y = hq()[0]; y.done = true; y.status = 204; y.responseText = ""; y.onload(); }
+  out.whole = [q.doc.getElementById("tline").innerHTML.indexOf("Reading") < 0, q.doc.getElementById("tkpi").className,
+    q.c.hist.done, q.c.hist.pts.length];
+  q.c.pick("");
+  for (let n = 0; n < 6 && hq().length; n++) { const y = hq()[0]; y.done = true; y.status = 204; y.responseText = ""; y.onload(); }
+  const before = q.xhrs.length;
+  q.c.pick("20261104");
+  out.cached = [q.xhrs.length - before, q.c.hist.pts.length, q.c.hist.done, q.c.histDue()];
+  // 2. a trip row is a button: focusable, Enter and Space pick it
+  const k2 = q.c;
+  k2.hist.hl = null;
+  const ev = (key) => ({key: key, prevented: false, preventDefault() { this.prevented = true; }});
+  const e1 = ev("Enter"), e2 = ev(" "), e3 = ev("a");
+  k2.trKey(e1, 0);
+  const hl1 = k2.hist.hl;
+  k2.trKey(e2, 0);
+  k2.trKey(e3, 1);
+  out.keys = [hl1, k2.hist.hl, e1.prevented, e3.prevented];
+  // 3. the next trip starting 6 km away: no signal, not a stop
+  const t0 = new Date(2026, 9, 30, 17, 0, 0).getTime(), tp = [], dLat = 1 / 110.54;
+  for (let k = 0; k <= 15; k++) tp.push([t0 + k * 60000, 47.50 + k * 0.1 * dLat, 19.08, 100]);
+  for (let k = 0; k <= 40; k++) tp.push([t0 + 66 * 60000 + k * 60000, 47.46 - k * 1.5 * dLat, 19.02, 100]);
+  const tr = q.c.tripsOf(tp);
+  out.gap = [tr.length, Math.round(tr[1].m0 / 100) / 10, q.c.timeline(tr, null, true)];
+  // 4. a UTC day's next local day only where a point is (Budapest: the
+  // file 20261108 ending 22:59 UTC offers no Mon 9)
+  out.spans = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTime(), (c) => [
+    c.dayList(["20261108"], {"20261108": [3, 82799]}),
+    c.dayList(["20261108"], {"20261108": [3, 84000]}),
+    c.dayList(["20261108"], {}),
+    c.dayList(["20261108"], {"20261108": [5, 2]})]);
+  // 7. a map not laid out (0 wide): no view, no NaN; laid out again: drawn
+  const m = page(1600);
+  m.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: "47.18536, 18.42730", hdop: 1});
+  m.xhrs[0].onload();
+  m.c.hist.pts.push([Date.now() - 60000, 47.18, 18.42, 100], [Date.now() - 30000, 47.181, 18.421, 100]);
+  m.c.trkKey = ""; m.c.mapKey = "";
+  m.map.offsetWidth = 0;
+  m.c.window.onresize();
+  const nan0 = /NaN/.test(m.doc.getElementById("trk").innerHTML + m.doc.getElementById("tiles").style.transform);
+  m.map.offsetWidth = 1100;
+  m.c.window.onresize();
+  out.nan = [nan0, /NaN/.test(m.doc.getElementById("trk").innerHTML), m.doc.getElementById("trk").innerHTML.indexOf("<path") >= 0];
+  // 10. the live pin FIT_X from the sides on a phone (its ring whole)
+  out.fit = (() => {
+    const c = page(375).c, el = {offsetWidth: 375, offsetHeight: 300}, b = c.mapBand(el);
+    c.hist = c.histNew(null);
+    for (let k = 0; k < 600; k++) c.hist.pts.push([Date.now() - (600 - k) * 1000, 47.18 + k * 0.0002, 18.30 + k * 0.0008, 120]);
+    const e = c.hist.pts[599], fv = c.fitView(e[1], e[2], el, true, b);
+    const xs = [c.hist.pts[0], e].map((p2) => 375 / 2 + (c.wpx(p2[1], p2[2], fv.z)[0] - fv.X) * fv.sc);
+    return [c.FIT_X, Math.round(Math.min(xs[0], xs[1])), Math.round(375 - Math.max(xs[0], xs[1]))];
+  })();
+  // seek: the first request for a local day inside a UTC day carries t=, a
+  // seek's answer (no lines) moves o on; X-Hist-Seek 1 asks again with t
+  out.seek = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTime(), (c) => {
+    const urls = [];
+    c.XMLHttpRequest = function () { urls.push(this); };
+    c.XMLHttpRequest.prototype.open = function (mm, u) { this.url = u; };
+    c.XMLHttpRequest.prototype.send = function () {};
+    c.XMLHttpRequest.prototype.overrideMimeType = function () {};
+    c.XMLHttpRequest.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };
+    c.document = {getElementById: () => null};
+    c.mapD = null;
+    c.trackPaint = () => {};
+    c.hist = c.histNew("20261108");
+    c.histLoad();
+    const said = (n, hh) => { const r = urls[n]; r.status = 200; r.responseText = ""; r.headers = hh; r.onload(); };
+    said(0, {"X-Hist-Next": "500", "X-Hist-End": "900", "X-Hist-Seek": "1"});
+    said(1, {"X-Hist-Next": "700", "X-Hist-End": "900", "X-Hist-Seek": "0"});
+    return urls.map((r) => r.url);
+  });
+  return out;
+})();
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));

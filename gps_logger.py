@@ -153,6 +153,8 @@ HIST_DIR = "/hist"                       # the day history the page draws:
 HIST_DAYS = 7                            # each written line, a .trb a UTC
                                          # day, the last HIST_DAYS kept
 HIST_REPLY = 16384                       # text bytes about per /hist reply
+HIST_SEEK_MS = 1500                      # ms a /hist?t= seek or a day's span
+                                         # scans its keyframes at most
 MIN_FREE = 32768                         # bytes of flash kept free
 HIST_RESERVE = 1048576                   # bytes kept free from the day
                                          # history: older days go first
@@ -6285,6 +6287,7 @@ def _web_rows():
         ("upload_age_s", None if up["ok_at"] is None
          else _age_s(up["ok_at"])),
         ("days", _hist_days()),
+        ("day_span", _hist_spans()),
         ("stay", "yes" if still.get("active") else "no"),
         ("uptime", uptime_s()),
         ("prev_uptime", prev_run["up"]),
@@ -6669,16 +6672,28 @@ def _web_hist(c, path):
     X-Hist-End where the day's records end now (the page asks again while
     short of it, then once a minute from there: an append starts there). A
     .trk day (older firmware) is sent as it is, from byte N, HIST_REPLY
-    bytes at most, no X-Hist-Next (the page counts bytes). A missing day is
-    a 404."""
-    d, o = "", 0
+    bytes at most, no X-Hist-Next (the page counts bytes). With t=HHMMSS
+    (a .trb day) no lines: X-Hist-Next is where the points from that UTC
+    time on begin (_hist_seek), X-Hist-Seek 1 when the seek ran out of
+    time (ask again with t from there). A day without a file is a 204 (the
+    page asks for today's before its first point, every minute: a 404 was
+    a console error each time); a bad day, o or t a 404."""
+    d, o, t = "", 0, -1
     try:
         for kv in path[6:].decode().split("&"):
             if kv.startswith("d="):
                 d = kv[2:]
             elif kv.startswith("o="):
                 o = int(kv[2:])
+            elif kv.startswith("t="):
+                v = kv[2:]
+                t = -2
+                if len(v) == 6 and v.isdigit() and v < "240000" \
+                        and v[2:4] < "60" and v[4:] < "60":
+                    t = int(v[:2]) * 3600 + int(v[2:4]) * 60 + int(v[4:])
     except (UnicodeError, ValueError):
+        d = ""
+    if t == -2:
         d = ""
     f = name = None
     if len(d) == 8 and d.isdigit() and o >= 0:
@@ -6689,18 +6704,23 @@ def _web_hist(c, path):
             except OSError:
                 pass
     if f is None:
-        _web_send(c, "404 Not Found", "text/plain", ("no such day",))
+        if len(d) == 8 and d.isdigit() and o >= 0 and t != -2:
+            _web_send(c, "204 No Content", "text/plain", ())
+        else:
+            _web_send(c, "404 Not Found", "text/plain", ("no such day",))
         return
     try:
         size = os.stat(name)[6]
         if name.endswith(TRB):
-            n = len(FOOTER)
-            end = size
-            if size >= n:
-                f.seek(size - n)
-                if f.read(n) == FOOTER.encode():
-                    end = size - n       # (the next append's keyframe)
+            end = _hist_end(f, size)
             o = min(o, end)
+            if t >= 0:
+                nxt, more = _hist_seek(f, o, end, t)
+                _web_head(c, "200 OK", "text/plain",
+                          "Content-Length: 0\r\nX-Hist-Next: %d\r\n"
+                          "X-Hist-End: %d\r\nX-Hist-Seek: %d\r\n" % (
+                              nxt, end, more))
+                return
             k, nxt = _hist_lines(f, o, end, None)
             _web_head(c, "200 OK", "text/plain",
                       "Content-Length: %d\r\nX-Hist-Next: %d\r\n"
@@ -6763,6 +6783,133 @@ def _web_diag_file(c, path):
         f.close()
 
 _kw = [None] * 12                        # the /hist reply's decoder state
+
+def _hist_end(f, size):
+    """Where a day history .trb's records end: its footer's start (the next
+    append's keyframe goes there), else its size (a cut last append)."""
+    n = len(FOOTER)
+    if size >= n:
+        f.seek(size - n)
+        if f.read(n) == FOOTER.encode():
+            return size - n
+    return size
+
+def _kf_s(a, b):
+    """The UTC time of day (s) of the keyframe line _rbuf[a:b] ("=...,
+    YYYYMMDDTHHMMSSZ\n"), read off its text (no decoding), or -1."""
+    if (b - a < 18 or _rbuf[a] != 61 or _rbuf[b - 1] != 10
+            or _rbuf[b - 2] != 90 or _rbuf[b - 9] != 84):
+        return -1
+    r = 0
+    for k in (b - 8, b - 6, b - 4):
+        h, l = _rbuf[k] - 48, _rbuf[k + 1] - 48
+        if not (0 <= h <= 9 and 0 <= l <= 9):
+            return -1
+        r = r * 60 + h * 10 + l
+    return r
+
+def _hist_seek(f, o, end, t):
+    """Where a read of the day history .trb f from o (a record start) must
+    begin to hold every point from t (s into the UTC day) on: the last
+    keyframe at or before t, scanned up to the first one after t. Only the
+    keyframes' text is read, the deltas skipped undecoded (decoding is
+    what a /hist reply spends its ~2.4 s on: a local day east of UTC began
+    with the whole UTC day before it, ~16 replies for its last hour). A
+    keyframe earlier than the one before it (a late append) stops it
+    there: what follows is read. -> (offset, more): more is 1 when
+    HIST_SEEK_MS ran out first, past a keyframe (ask again from offset);
+    the WDT fed and the UART read every 64 records."""
+    best, last, i = o, -1, 0
+    t0 = time.ticks_ms()
+    _rd_open(o)
+    while _rd[0] + _rd[2] < end:
+        if not _rd_rec(f):
+            break
+        a, b = _rd[1], _rd[2]
+        if a < b and _rbuf[a] == 61:
+            k = _kf_s(a, b)
+            if k >= 0:
+                if k > t or k < last:
+                    return best, 0
+                best, last = _rd[0] + a, k
+        i += 1
+        if not i & 63:
+            feed()
+            _rcv.read_uart()
+            if time.ticks_diff(time.ticks_ms(), t0) > HIST_SEEK_MS:
+                return best, int(best > o)
+    return best, 0
+
+def _hist_span(f, size):
+    """The UTC times of day (s) of a day history .trb's first and last
+    point -> [first, last], None without a keyframe or when HIST_SEEK_MS
+    runs out: the first keyframe's, the latest keyframe's or decoded
+    point's after the last keyframe (its deltas only are decoded)."""
+    end = _hist_end(f, size)
+    first, hi, lk, i = -1, -1, -1, 0
+    t0 = time.ticks_ms()
+    _rd_open(0)
+    while _rd[0] + _rd[2] < end:
+        if not _rd_rec(f):
+            break
+        a, b = _rd[1], _rd[2]
+        if a < b and _rbuf[a] == 61:
+            k = _kf_s(a, b)
+            if k >= 0:
+                if first < 0:
+                    first = k
+                hi = max(hi, k)
+                lk = _rd[0] + a
+        i += 1
+        if not i & 63:
+            feed()
+            _rcv.read_uart()
+            if time.ticks_diff(time.ticks_ms(), t0) > HIST_SEEK_MS:
+                return None
+    if lk < 0:
+        return None
+    s = _kw
+    s[0] = None
+    _rd_open(lk)
+    while _rd[0] + _rd[2] < end:
+        if not _rd_rec(f):
+            break
+        a, b = _rd[1], _rd[2]
+        if a == b:
+            s[0] = None
+        elif _kb_rec(a, b, s) > 0 and s[0] is not None:
+            hi = max(hi, s[0] % 86400)
+    return [first, hi]
+
+_hsp = {}                                # day -> [file size, span] (_hist_spans)
+
+def _hist_spans():
+    """{"YYYYMMDD": [first, last]}: each .trb day's first and last point (s
+    into the UTC day, _hist_span) for the page's day picker (a UTC day
+    offers the local days of both: east of UTC its last hour is the next
+    local day, offered only when a point is there). Kept per day with the
+    file's size: one day (re)read a call at most, the others as they
+    were; a .trk day (older firmware) or one not read yet has none."""
+    days = _hist_days()
+    for d in list(_hsp):
+        if d not in days:
+            del _hsp[d]
+    out, done = {}, False
+    for d in days:
+        name = HIST_DIR + "/" + d + TRB
+        size = _file_size(name)
+        e = _hsp.get(d)
+        if size and not done and (e is None or e[0] != size):
+            done = True
+            try:
+                with open(name, "rb") as f:
+                    sp = _hist_span(f, size)
+            except OSError:
+                sp = None
+            e = _hsp[d] = [size, sp]
+        if e is not None and e[0] == size and e[1]:
+            out[d] = e[1]
+    return out
 
 def _hist_lines(f, o, end, c):
     """The text lines of the day history .trb f from o (a keyframe, or
