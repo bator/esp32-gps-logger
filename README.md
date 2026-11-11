@@ -822,7 +822,18 @@ decodes the records twice, for the `Content-Length` first), with
 `X-Hist-End: <offset>` (where the day's records end now, the footer's
 start). The page asks again from `X-Hist-Next` while it is short of
 `X-Hist-End`, and after that only for what is new, once a minute, from
-there: the next append's keyframe starts there. A day is ~6-7 bytes a point
+there: the next append's keyframe starts there. A local day that begins
+inside a UTC day (east of UTC: its first hour is the UTC day before) asks
+that day with `&t=HHMMSS` (the local midnight in UTC) first: the board
+answers no lines, only `X-Hist-Next` at the last keyframe before that time,
+found by the keyframes' text without decoding the deltas (`HIST_SEEK_MS`;
+`X-Hist-Seek: 1` when it ran out of time: ask again from there), so a past
+day no longer reads the whole UTC day before it (~16 replies of ~2.4 s for
+its last hour). A day without a file is a `204` (the page asks for today's
+every minute before its first point). `status.json`'s `day_span` gives each
+`.trb` day's first and last point (seconds into the UTC day; one day read a
+request, kept with its file size), so the day picker offers a UTC day's next
+local day only when a point is there. A day is ~6-7 bytes a point
 (~50 as text): a 2 h drive at 1 Hz ~50 KB instead of ~370 KB, the 7 days
 of 2 h a day ~0.35 MB instead of ~2.6 MB. Days written as text by older
 firmware (`/hist/YYYYMMDD.trk`) are listed and drawn as before (sent as

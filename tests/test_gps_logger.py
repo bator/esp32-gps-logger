@@ -720,7 +720,7 @@ def check(name, cond, detail=""):
         print("PASS  %s" % name)
     else:
         failed += 1
-        msg = "FAIL  %s%s" % (name, (" - " + detail) if detail else "")
+        msg = "FAIL  %s%s" % (name, (" - " + str(detail)) if detail else "")
         print(msg)
         failures.append(msg)
 
@@ -9695,8 +9695,16 @@ try:
           == str(len(rw) - 5) and end[0] == b"HTTP/1.0 200 OK"
           and end[2] == b"" and end[1].get("X-Hist-Next") == str(len(rw) - 5),
           repr((a, end)))
-    check("HIST-WEB: a bad day, offset or a missing day is a 404",
-          bad == [b"HTTP/1.0 404 Not Found"] * 5, repr(bad))
+    nob = _hget(b"d=20250101&o=0")
+    badt = [_hget(b"d=20261101&o=0&t=" + q)[0]
+            for q in (b"99", b"240000", b"126000", b"12000x", b"")]
+    check("HIST-WEB: a bad day, offset or t is a 404; a day without a file "
+          "a 204 with no body (the page asks for today's before its first "
+          "point: a 404 was a console error every minute)",
+          bad[:4] == [b"HTTP/1.0 404 Not Found"] * 4
+          and bad[4] == nob[0] == b"HTTP/1.0 204 No Content"
+          and nob[2] == b"" and badt == [b"HTTP/1.0 404 Not Found"] * 5,
+          repr((bad, nob, badt)))
 
     # a realistic day: 1 Hz drives uploaded in batches of UPLOAD_BATCH, a
     # TRK1 track among them, and lines the encoder keeps as keyframes (no
@@ -9732,6 +9740,88 @@ try:
               for o_, nx, e_, n_, cl in rr)
           and reps[-1][1] == reps[-1][2] == len(raw) - 5,
           repr((reps[:3], reps2[:3])))
+
+    # HIST-SEEK: /hist?t=HHMMSS finds where the points from that UTC time
+    # on begin by the keyframes' text alone (a local day east of UTC asks
+    # only for its UTC day before's last hour), then the page reads on
+    def _hsec(x):
+        return int(x[-8:-6]) * 3600 + int(x[-6:-4]) * 60 + int(x[-4:-2])
+    seek_bad = []
+    for hms in ("000000", "065959", "070000", "071000", "090000",
+                "113000", "120001", "163000", "170500", "235959"):
+        q = hms.encode()
+        sk = _hget(b"d=%s&o=0&t=%s" % (day.encode(), q))
+        off = int(sk[1].get("X-Hist-Next", -1))
+        tx_, _ = _hpage(day, off)
+        t_ = int(hms[:2]) * 3600 + int(hms[2:4]) * 60 + int(hms[4:])
+        want = [x for x in dl if _hsec(x) >= t_]
+        got = [x for x in tx_.splitlines(True) if _hsec(x) >= t_]
+        if not (sk[0] == b"HTTP/1.0 200 OK" and sk[2] == b""
+                and sk[1].get("Content-Length") == "0"
+                and sk[1].get("X-Hist-Seek") == "0"
+                and (off == 0 or raw[off:off + 1] == b"=")
+                and got == want
+                and (t_ < 25200 + 600 or off > 0)
+                and len(tx_) <= len("".join(dl))):
+            seek_bad.append((hms, off, len(got), len(want)))
+    s1 = _hget(b"d=%s&o=0&t=163000" % day.encode())
+    gl.HIST_SEEK_MS = -1                 # (out of time after 64 records)
+    try:
+        o_, steps = 0, 0
+        while steps < 500:
+            r_ = _hget(b"d=%s&o=%d&t=163000" % (day.encode(), o_))
+            steps += 1
+            o_ = int(r_[1]["X-Hist-Next"])
+            if r_[1]["X-Hist-Seek"] == "0":
+                break
+    finally:
+        gl.HIST_SEEK_MS = 1500
+    check("HIST-SEEK: /hist?t= answers no lines and the last keyframe at or "
+          "before t (X-Hist-Next), from which every point from t on is "
+          "read; out of time: X-Hist-Seek 1, asked again from there, the "
+          "same place in the end",
+          not seek_bad and int(s1[1]["X-Hist-Next"]) > len(raw) // 2
+          and o_ == int(s1[1]["X-Hist-Next"]) and steps > 3,
+          repr((seek_bad, s1[1], o_, steps)))
+    # a late append (an earlier batch uploaded after a later one): the seek
+    # stops at the keyframe that goes back in time, nothing after it lost
+    lday = "20261109"
+    la_ = _drive(lday, 200, t0=36000)
+    lb_ = _drive(lday, 200, t0=82800, seed=5)
+    lc_ = _drive(lday, 200, t0=79200, seed=6)
+    for part in (la_, lb_, lc_):
+        hist_add(part, len(part))
+    lsk = _hget(b"d=%s&o=0&t=230000" % lday.encode())
+    ltx, _ = _hpage(lday, int(lsk[1]["X-Hist-Next"]))
+    lwant = [x for x in la_ + lb_ + lc_ if _hsec(x) >= 82800]
+    check("HIST-SEEK: a late append's earlier points after a later batch: "
+          "every point from t on still read",
+          [x for x in ltx.splitlines(True) if _hsec(x) >= 82800] == lwant
+          and int(lsk[1]["X-Hist-Next"]) > 0, repr(lsk[1]))
+    # HIST-SPAN: each day's first and last point (s into the UTC day) for
+    # the page's day picker: one day read a call, kept with its size
+    gl._hsp.clear()
+    gl._hd[1] = None
+    sp1 = gl._hist_spans()
+    sp2 = gl._hist_spans()
+    for _ in range(12):
+        sp3 = gl._hist_spans()
+    want_sp = [min(_hsec(x) for x in dl), max(_hsec(x) for x in dl)]
+    lsp = [min(_hsec(x) for x in la_), max(_hsec(x) for x in la_ + lb_ + lc_)]
+    n_before = len(sp3)
+    hist_add([_hl(day, "231500")], 1)
+    sp4 = gl._hist_spans()
+    js_ = json.loads(_web_json())
+    check("HIST-SPAN: status.json day_span: a .trb day's first and last "
+          "point, one day read a call, read again when its file grows (a "
+          "late append: the last up to a keyframe's 64 deltas early)",
+          len(sp1) == 1 and len(sp2) == 2 and sp3.get(day) == want_sp
+          and (sp3.get(lday) or [0, 0])[0] == lsp[0]
+          and lsp[1] - 2 * gl.KEY_EVERY <= (sp3.get(lday) or [0, 0])[1] <= lsp[1]
+          and n_before >= 3
+          and sp4.get(day) == [want_sp[0], 23 * 3600 + 900]
+          and js_.get("day_span", {}).get(day) == [want_sp[0], 23 * 3600 + 900],
+          repr((sp1, sp2, sp3, sp4, js_.get("day_span"))))
     # the page asks from where it got to while a batch is added; then a
     # minute later only for what is new (from X-Hist-End: the new append's
     # keyframe overwrote the footer there)
@@ -13275,16 +13365,32 @@ elif node is None:
     print("SKIP  PAGE: node not installed")
 else:
     here = os.path.dirname(os.path.abspath(__file__))
-    out = []
+    out, raws = [], []
     for js in (page_json, page_json2, page_json3):
         r = subprocess.run([node, os.path.join(here, "web_page_test.js"),
                             os.path.join(here, "..", "web.html")],
                            input=js, capture_output=True, text=True)
+        raws.append(r.stdout)
         try:
-            out.append(json.loads(r.stdout))
+            # (an item's words joined by &nbsp;: the checks below read the
+            # words, PAGE-NBSP the joins)
+            out.append(json.loads(r.stdout.replace("&nbsp;", " ")))
         except ValueError:
             out.append({"error": r.stdout + r.stderr})
     v, v2, v3 = out
+    try:
+        nb_sys = json.loads(raws[0]).get("sys", "")
+    except ValueError:
+        nb_sys = ""
+    nb_items = re.findall(r"<span>(.*?)</span>", nb_sys)
+    check("PAGE-NBSP: a Logger item's words stay together (a phone broke "
+          "\"-63 / dBm\" and \"35/93 / KB\"), only \" &middot; \" breaks, "
+          "the Wi-Fi icon's tag untouched",
+          nb_items and all(" " not in x.replace(" &middot; ", "").split("<svg")[0]
+                           for x in nb_items)
+          and "&nbsp;dBm" in nb_sys and "&nbsp;KB" in nb_sys
+          and '<svg class="wi" viewBox="0 0 24 18">' in nb_sys,
+          nb_sys[:600])
     sy, sy2, sy3 = v.get("sys", ""), v2.get("sys", ""), v3.get("sys", "")
     check("PAGE: the GPS receiver row shows HDOP, a dash without one; no "
           "accuracy tile",
@@ -13314,7 +13420,7 @@ else:
                              text=True)
         if time.localtime()[:3] == time.localtime(now_)[:3]:
             break
-    rbj = json.loads(rb_.stdout)
+    rbj = json.loads(rb_.stdout.replace("&nbsp;", " "))
     syb, dlb, upb = rbj.get("sys", ""), rbj.get("dl", ""), rbj.get("up", "")
 
     def _hm(t):
@@ -13323,8 +13429,9 @@ else:
         same = lt[:3] == time.localtime(now_)[:3]
         return time.strftime("%H:%M" if same else "%m-%d %H:%M", lt)
 
-    boots = ['<div class=""><small>Running</small><b>2 h 54 min &middot; since '
-             '%s</b></div><div class=""><small>Last boot</small><b>hard reset</b>'
+    # (no Running: the top bar's UP is the uptime; the boot's time is
+    # the Last boot's)
+    boots = ['<div class=""><small>Last boot</small><b>hard reset &middot; %s</b>'
              '</div><div class=""><small>Previous run</small><b>2 min 30 s, until %s</b>'
              '</div>' % (_hm(x), _hm(x - 30))
              for x in (now_ - 10492, now_ - 10492 - 60)]
@@ -13336,7 +13443,7 @@ else:
           any(b_ in dlb for b_ in boots) and fwl in syb
           and upb.endswith("&middot; FW 86fb9c8")
           and rbj.get("unlabeled") == [],
-          (dlb[:400], syb[syb.find("Firmware") - 40:]))
+          repr((dlb[:400], syb[syb.find("Firmware") - 40:])))
     check("PAGE: the Logger labels every row, no UBX or fix source",
           v3.get("unlabeled") == [] and " ubx" not in sy3
           and "NAV-PVT" not in sy3, sy3[:1500])
@@ -13372,7 +13479,11 @@ else:
           "satellite in use (the others only counted), no dB-Hz",
           '<b class="q-fair">Fair overall</b>' in sgn
           and "0 strong, 1 fair, 0 weak" in sgn
-          and "2 more in view, not in use" in sgn
+          and "in view" not in sgn
+          and ("2 more heard, not in use" in sgn
+               or ("more heard, not in use" in sgn
+                   and " in the sky without a signal" in sgn)
+               or "2 in the sky without a signal" in sgn)
           and sg == '<p><span>GPS 16</span><s class="q-fair" style="width:52%"></s></p>'
           and "dB" not in sg + sgn, (sg[:400], sgn))
     check("PAGE: Logger - every JSON key labelled, escaped; a row a "
@@ -13488,7 +13599,13 @@ else:
           (evt[-900:], evg[:300]))
     check("PAGE-EV: the list - a row a kind with its name, detail, "
           "per-hour sparkline, count and last seen",
-          evg.count('<div class="er') == 22
+          # (the minor kinds - Receiver start, Stay ended, Other - one
+          # "Minor" row at the end: 22 rows before)
+          evg.count('<div class="er') == 20
+          and re.search(r'<div class="er t-mut"><time>[^<]*</time><span>Minor <em>Receiver start 3 '
+                        r'&middot; Stay ended 1 &middot; Other 2</em></span><i class="sk"></i><b>6</b></div>$',
+                        evg) is not None
+          and evg.count("t-mut") == 1
           and re.search(r'<div class="er t-bad"><time>10:46</time><span>GPS reset loop <em>'
                         r'[^<]*(<em>[^<]*</em>)?</em></span><i class="sk">.*?</i><b>4</b></div>', evg)
           is not None, evg[:900])
@@ -13713,8 +13830,10 @@ else:
     p2 = main_path(p2c) + '"/>' + p2c[p2c.find("<circle"):]
     check("PAGE-HIST: the day history is asked after the first status, "
           "from byte 0, then only from where it got to",
-          dom.get("hist") == ["/hist?d=D&o=0"]
-          and hd.get("urls2") == ["/hist?d=D&o=%s" % hd.get("cut")]
+          # (&t=: the board skips to the local midnight, HIST-SEEK-PAGE)
+          [re.sub(r"&t=\d{6}$", "", u) for u in dom.get("hist") or []] == ["/hist?d=D&o=0"]
+          and [re.sub(r"&t=\d{6}$", "", u) for u in hd.get("urls2") or []]
+          == ["/hist?d=D&o=%s" % hd.get("cut")]
           and not hd.get("busy1") and hd.get("again"), repr(hd)[:600])
     check("PAGE-HIST: lines since local midnight, a cut line kept for the "
           "next reply, a gap over 5 min breaks the path",
@@ -13844,7 +13963,8 @@ else:
           and (ft.get("nav0") or [""])[0].endswith('<button class="on" onclick="pick(\'\')">Today</button>')
           and '<button onclick="pick(\'20261030\')">Fri 30</button>' in (ft.get("nav0") or [""])[0]
           and (ft.get("nav0") or [0])[1:] == [False, True]
-          and ft.get("pickUrls") == ["/hist?d=%s&o=0" % pd[0]]
+          and [re.sub(r"&t=\d{6}$", "", u) for u in ft.get("pickUrls") or []]
+          == ["/hist?d=%s&o=0" % pd[0]]
           and ft.get("pickPts") == 5 and ft.get("pickDone") is True
           and ft.get("pickMap") == "map nofix" and ft.get("pickTrk") is True
           and '<button class="on" onclick="pick(\'20261030\')">Fri 30</button>' in (ft.get("nav1") or [""])[0]
@@ -13866,9 +13986,15 @@ else:
           and _dd.get("on0") == len(_dd["labels"]) - 1 and _dd.get("on1") == _dd["on0"] - 1
           and _dd.get("on2") == _dd["on0"]
           and _dd.get("first") == '<p class="hint">Reading the day&hellip;</p>'
-          and _dd.get("today") == '<p class="hint">No trip yet today.</p>'
+          # (an empty day offers the chip before it: Thu 5 east of UTC,
+          # Wed 4 in UTC as CI runs)
+          and (lambda m_: m_ is not None and m_.group(1) == _dd["labels"][-2])(re.match(
+              r'<p class="hint">No trip yet today\.</p><button class="btn" onclick="pick\(\'2026110\d\'\)">'
+              r'&lsaquo; (\w{3} \d+)</button>$', _dd.get("today") or ""))
           and _dd.get("busy") == '<p class="hint">Reading the day&hellip;</p>'
-          and _dd.get("failed") == '<p class="hint">No trip this day.</p>'
+          and (lambda m_: m_ is not None and m_.group(1) in _dd["labels"][:-1])(re.match(
+              r'<p class="hint">No trip this day\.</p><button class="btn" onclick="pick\(\'2026110\d\'\)">'
+              r'&lsaquo; (\w{3} \d+)</button>$', _dd.get("failed") or ""))
           and ft.get("pickBusy") == '<p class="hint">Reading the day&hellip;</p>'
           and _days_css is not None and "flex-wrap:wrap" in _days_css.group(1)
           and "overflow" not in _days_css.group(1)
@@ -13884,11 +14010,13 @@ else:
           "rows; the picked trip marked",
           ft.get("trips") == [[0, 20, 480, 500, 1.2], [24, 34, 660, 670, 0.5]]
           and ft.get("timeline") == (
-              '<div class="tr go" onclick="hlTrip(0)"><time>08:00</time><i>'
+              '<div class="tr go" role="button" tabindex="0" aria-pressed="false" data-k="0" '
+              'onclick="hlTrip(0)" onkeydown="trKey(event,0)"><time>08:00</time><i>'
               '</i><span><b>1.20 km</b> &middot; 20 min &middot; 4 km/h'
               '</span></div><div class="tr st"><time>08:20</time><i></i>'
-              '<span>stop 2 h 40 min</span></div><div class="tr go on" '
-              'onclick="hlTrip(1)"><time>11:00</time><i></i><span><b>0.50 '
+              '<span>stop 2 h 40 min</span></div><div class="tr go on" role="button" '
+              'tabindex="0" aria-pressed="true" data-k="1" onclick="hlTrip(1)" '
+              'onkeydown="trKey(event,1)"><time>11:00</time><i></i><span><b>0.50 '
               'km</b> &middot; 10 min &middot; 3 km/h</span></div><div '
               'class="tr end"><time>11:10</time><i></i><span></span></div>')
           and ft.get("timelineNone") == [
@@ -13904,9 +14032,9 @@ else:
     _pl = ft.get("placeLine") or ""
     check("PAGE-PLACE-LINE: a known place over its line, escaped, the row taller; an unknown one "
           "leaves the row exactly as without places",
-          '<div class="tr go pl" onclick="hlTrip(0)"' in _pl and "<strong>A &lt;b&gt;</strong><br><b>" in _pl
+          '<div class="tr go pl" role="button" tabindex="0" aria-pressed="false" data-k="0" onclick="hlTrip(0)"' in _pl and "<strong>A &lt;b&gt;</strong><br><b>" in _pl
           and '<div class="tr st pl">' in _pl and "<strong>B</strong><br>stop 2 h 40 min" in _pl
-          and '<div class="tr go on" onclick="hlTrip(1)"' in _pl
+          and 'data-k="1" onclick="hlTrip(1)"' in _pl and '<div class="tr go on"' in _pl
           and '<div class="tr end pl"><time>11:10</time><i></i><span><strong>C</strong></span>' in _pl
           and ft.get("placeSame") is True, _pl[:400])
     _pq = ft.get("placeQ") or {}
@@ -13997,6 +14125,46 @@ else:
           "byte), so a non-ASCII byte neither shifts the next o= nor makes "
           "a full reply look short",
           ft.get("wr4") == [80, 80, True, 2], repr(ft.get("wr4")))
+    # REVIEW-2026-11-11: the live page's review (Bator: every bug and every
+    # improvement), each finding's regression (tests/web_page_test.js rev)
+    _rv = ft.get("rev") or {}
+    check("REV-LOAD: a day being read shows what is in so far as such "
+          "(\"Reading the day...\" over the trips, the figures faded), then "
+          "the day whole; picked again it asks the board nothing",
+          _rv.get("partial") == [True, "kp busy", True]
+          and _rv.get("whole") == [True, "kp", True, 120]
+          and _rv.get("cached") == [0, 120, True, False], repr(_rv)[:600])
+    check("REV-KEYS: a trip row is a button for the keyboard: Enter and "
+          "Space pick it (again: the whole day), other keys do nothing",
+          _rv.get("keys") == [0, None, True, False], repr(_rv.get("keys")))
+    _gp = _rv.get("gap") or [0, 0, ""]
+    check("REV-GAP: a trip starting 7 km from where the one before ended: "
+          "\"no signal\" and how far, not a stop there (the metro from "
+          "Keleti to Kelenföld read as \"stop 51 min\" at Keleti)",
+          _gp[0] == 2 and _gp[1] == 7.4
+          and '<div class="tr st gap"><time>17:15</time><i></i><span>no signal 51 min '
+              '&middot; 7.4 km apart</span></div>' in _gp[2]
+          and "stop " not in _gp[2], repr(_gp)[:400])
+    check("REV-SPANS: a UTC day's next local day only where a point is "
+          "(day_span: no empty \"Mon 9\"); no span, or a bad one: both ends",
+          _rv.get("spans") == [["20261108", "20261111"],
+                               ["20261108", "20261109", "20261111"],
+                               ["20261108", "20261109", "20261111"],
+                               ["20261108", "20261109", "20261111"]],
+          repr(_rv.get("spans")))
+    check("REV-NAN: a map 0 wide (mid-resize) draws no view (no NaN path), "
+          "laid out again the track is back",
+          _rv.get("nan") == [False, False, True], repr(_rv.get("nan")))
+    check("REV-FIT: on a phone the track's ends (the live pin) FIT_X = 36 px "
+          "from the map's sides, its ring whole",
+          (_rv.get("fit") or [0])[0] == 36
+          and min((_rv.get("fit") or [0, 0, 0])[1:]) >= 35, repr(_rv.get("fit")))
+    check("HIST-SEEK-PAGE: a local day beginning inside a UTC day asks it "
+          "with t= (the local midnight in UTC); X-Hist-Seek 1 asks again from "
+          "X-Hist-Next with t, 0 reads on from there without it",
+          _rv.get("seek") == ["/hist?d=20261107&o=0&t=230000",
+                              "/hist?d=20261107&o=500&t=230000",
+                              "/hist?d=20261107&o=700"], repr(_rv.get("seek")))
     check("HIST-NEXT: a .trb day is asked again from X-Hist-Next (not "
           "from o + the bytes received) while short of X-Hist-End, a minute "
           "later from there; a reply that does not move on is not asked "
@@ -14056,8 +14224,49 @@ check("PAGE-DEAD: every CSS class is in the markup or the script; the dead rules
       "test-only lists gone; one copy each of the Mercator, metres, the position and the "
       "accuracy; == null, not both tests; the classes the tests read still drawn",
       not _pd_dead and not _pd_gone and set(_pd_one.values()) == {1} and not _pd_null
-      and all(w_ in page_src for w_ in ('"st" : "end"', '"fa"')),
+      and all(w_ in page_src for w_ in ('"st gap" : "st") : "end"', '"fa"')),
       repr((_pd_dead, _pd_gone, _pd_one, _pd_null)))
+# REV-STATIC (the review of 2026-11-11): a finger's target 44 px, the
+# selected trip and "Fair" readable in both themes, no pulse for reduced
+# motion, Logger and Sky side by side on a tablet, the satellite table
+# narrow, the diag time on one line, the arrows named, no fact twice
+def _rv_lum(h):
+    c = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    c = [x / 12.92 if x <= .03928 else ((x + .055) / 1.055) ** 2.4 for x in c]
+    return .2126 * c[0] + .7152 * c[1] + .0722 * c[2]
+
+
+def _rv_cr(a, b):
+    x, y = _rv_lum(a), _rv_lum(b)
+    return (max(x, y) + .05) / (min(x, y) + .05)
+
+
+_rv_root = re.findall(r":root\{([^}]*)", page_src)
+_rv_tok = [dict(re.findall(r"--([\w-]+):(#[0-9a-fA-F]{6}|var\(--\w+\))", r_)) for r_ in _rv_root[:2]]
+for _t in _rv_tok:
+    for _k, _x in list(_t.items()):
+        if _x.startswith("var("):
+            _t[_k] = _t.get(_x[6:-1], "#000000")
+_rv_c = [(round(_rv_cr(t_["rtx"], t_["b"]), 2), round(_rv_cr(t_["midt"], t_["b"]), 2),
+          round(_rv_cr(t_["mid"], t_["b"]), 2)) for t_ in _rv_tok] if len(_rv_tok) == 2 else []
+check("REV-STATIC: tap 44 px for a finger, contrast (picked trip, Fair: "
+      "4.5:1; the lime bars 3:1) dark and light, reduced motion, tablet "
+      "columns, a narrow satellite table, the diag time on one line, named "
+      "arrows, no uptime or position twice",
+      "@media(pointer:coarse){.btn,.days button{height:44px;min-width:44px}}" in page_src
+      and "summary{cursor:pointer;padding:15px 0;" in page_src
+      and len(_rv_c) == 2 and all(a_ >= 4.5 and b_ >= 4.5 and c_ >= 3 for a_, b_, c_ in _rv_c)
+      and "@media(prefers-reduced-motion:reduce){.pin:after{animation:none" in page_src
+      and "@media(min-width:600px) and (max-width:900px){.cols{grid-template-columns:1fr 1fr}" in page_src
+      and ".svt{width:100%;max-width:640px;" in page_src
+      and re.search(r"\.er\{display:grid;grid-template-columns:80px ", page_src) is not None
+      and ".er time{color:var(--m);white-space:nowrap}" in page_src
+      and 'aria-label="Older day"' in page_src and 'aria-label="Newer day"' in page_src
+      and 'dl("Running"' not in page_src and 'dl("Position"' not in page_src
+      # (a bare .rd rule also hit the legend's <i class="rd">: "worse" fell
+      # under its square)
+      and ".ldg{" in page_src and re.search(r"(^|\})\.rd\{", page_src, re.M) is None,
+      repr(_rv_c))
 # WEB-MIN: tools/web_min.py strips the page at build time (a // in a string or
 # a regex is no comment: the page has both); web.html keeps its comments
 _wm_js = (
