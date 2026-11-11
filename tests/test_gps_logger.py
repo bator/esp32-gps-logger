@@ -13986,11 +13986,15 @@ else:
           and _dd.get("on0") == len(_dd["labels"]) - 1 and _dd.get("on1") == _dd["on0"] - 1
           and _dd.get("on2") == _dd["on0"]
           and _dd.get("first") == '<p class="hint">Reading the day&hellip;</p>'
-          and _dd.get("today") == '<p class="hint">No trip yet today.</p><button class="btn" '
-                                  'onclick="pick(\'20261105\')">&lsaquo; Thu 5</button>'
+          # (an empty day offers the chip before it: Thu 5 east of UTC,
+          # Wed 4 in UTC as CI runs)
+          and (lambda m_: m_ is not None and m_.group(1) == _dd["labels"][-2])(re.match(
+              r'<p class="hint">No trip yet today\.</p><button class="btn" onclick="pick\(\'2026110\d\'\)">'
+              r'&lsaquo; (\w{3} \d+)</button>$', _dd.get("today") or ""))
           and _dd.get("busy") == '<p class="hint">Reading the day&hellip;</p>'
-          and _dd.get("failed") == '<p class="hint">No trip this day.</p><button class="btn" '
-                                   'onclick="pick(\'20261104\')">&lsaquo; Wed 4</button>'
+          and (lambda m_: m_ is not None and m_.group(1) in _dd["labels"][:-1])(re.match(
+              r'<p class="hint">No trip this day\.</p><button class="btn" onclick="pick\(\'2026110\d\'\)">'
+              r'&lsaquo; (\w{3} \d+)</button>$', _dd.get("failed") or ""))
           and ft.get("pickBusy") == '<p class="hint">Reading the day&hellip;</p>'
           and _days_css is not None and "flex-wrap:wrap" in _days_css.group(1)
           and "overflow" not in _days_css.group(1)
