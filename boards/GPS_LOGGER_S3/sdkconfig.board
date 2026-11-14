@@ -11,3 +11,8 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 # no BLE: the logger never uses it (~300 KB of the app, and the
 # controller's RAM)
 CONFIG_BT_ENABLED=n
+
+# the OTA health check and the crash rollback need the bootloader's
+# rollback (an image boots pending until gps_logger confirms it); pinned
+# here, not left to the port's sdkconfig.base
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

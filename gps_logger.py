@@ -957,11 +957,16 @@ def _scan_known(w, fx=None):
     and a roam, not for "home in range" or the keep-alive wake. A blank AP
     whose hidden-home try failed lately (blank_bad) is skipped. A
     MemoryError after the scan (the stay check, the copies below) is a
-    failed scan too: it escaped wifi_tick and reset the board."""
+    failed scan too: it escaped wifi_tick and reset the board. The UART is
+    read first, and the scan counts as a keep-alive pulse (pb_at): a round
+    that found nothing was followed by a pulse's scan in the same pass, ~4 s
+    with no read, more than the UART buffer holds."""
+    _rcv.read_uart()
     try:
         aps = w.scan()
     except SCAN_ERR:
         aps = None
+    wifi["pb_at"] = time.ticks_ms()
     if aps is not None and not _scan_empty(aps):
         try:
             return _scan_found(aps, fx)
@@ -1028,12 +1033,17 @@ def home_in_range(fx=None):
     (no home network configured, a connect in progress, scan failed).
     On the home link the bar is SEEN_MIN_RSSI: ROAM_MIN_RSSI is for
     jumping to a weak AP; associated at -78 dBm the board is at home, and
-    that False let a multipath jump end the home stay (_home_veto)."""
+    that False let a multipath jump end the home stay (_home_veto). The
+    same bar holds for the scan while the radio sleeps after the home link
+    (sleep_home): a home AP at -78 dBm was in range connected, out of it
+    asleep, and the veto let the drift go out (WEB=0 sleeps at home)."""
     w = wifi["wlan"]
     if w is None or not _has_home():
         return None
     state = wifi["state"]
     lim = ROAM_MIN_RSSI
+    if state != "connected" and wifi.get("sleep_home"):
+        lim = SEEN_MIN_RSSI
     if state == "connected" and wifi["home"]:
         lim = SEEN_MIN_RSSI
         r = _rssi(w)
@@ -1399,6 +1409,11 @@ def _wifi_got_ip(w):
     wifi["seen_wait"] = SEEN_WAIT
     if wifi["home"]:
         wifi["roam_backoff"] = ROAM_CHECK
+    _up_net_new(wifi["ssid"])
+    if _ntp[0] is None:
+        # no answer yet: a backoff grown on a network without internet
+        # does not carry over to this one (up to an hour of "--:--")
+        _ntp[1], _ntp[2] = None, NTP_RETRY
     print("wifi ok", wifi["ssid"] or "")
     return True
 
@@ -1768,6 +1783,7 @@ def keepalive_tick(now):
         w = _pb_wlan()
     if w is None:
         return
+    _rcv.read_uart()                     # (a round's scan may just have run)
     _pb_pulse_radio(w)
     wifi["pb_scans"] += 1
     feed()
@@ -1825,7 +1841,6 @@ def wifi_start(env=None):
         env = load_env(ENV_FILE)
     CPU_MHZ = _mhz_env(env, "CPU_MHZ", CPU_MHZ)
     CPU_MHZ_UPLOAD = _mhz_env(env, "CPU_MHZ_UP", CPU_MHZ_UPLOAD)
-    _set_freq(CPU_MHZ)
     wifi["nets"] = _load_nets(env)
     _has_home()                          # cached for wifi_tick
     for n in wifi["nets"]:
@@ -1838,6 +1853,17 @@ def wifi_start(env=None):
     up["url"] = env.get("GEO_URL", "").rstrip("/") or None
     up["key"] = env.get("API_KEY") or None
     _keepalive_env(env)
+    if wifi["nets"] or PB_KEEPALIVE:
+        # the radio is used (a network, or the keep-alive's scans): WiFi
+        # needs 80 MHz or more (_set_freq); 20 / 40 are for a board with
+        # the radio never on
+        if 0 < CPU_MHZ < 80:
+            print("CPU_MHZ", CPU_MHZ, "too slow for WiFi, using 80")
+            CPU_MHZ = 80
+        if 0 < CPU_MHZ_UPLOAD < 80:
+            print("CPU_MHZ_UP", CPU_MHZ_UPLOAD, "too slow for WiFi, using 80")
+            CPU_MHZ_UPLOAD = 80
+    _set_freq(CPU_MHZ)
     _web_env(env)
     _ota_env(env)
     _ntp_env(env)
@@ -1991,7 +2017,16 @@ def wifi_tick():
         wifi["backoff"] = WIFI_RETRY
         wifi["last_check"] = _stamp()
         wifi["rounds"] = 0               # a wake: the first round tries all
-        _wifi_begin_round(w)
+        try:
+            _wifi_begin_round(w)
+        except Exception:
+            # (a MemoryError outside the scan's own catch) the wake is not
+            # spent on a round that never ran: it came back only after
+            # WIFI_SLEEP, an arrival not uploaded, the radio on meanwhile
+            if wifi["state"] == "sleep":
+                wifi["wake"] = True
+                _radio_off(w)
+            raise
         return
     if _age_s(wifi["last_check"]) < wifi["backoff"] // 1000:
         return
@@ -2950,6 +2985,12 @@ def _still_window(now, pos, fx=None):
             # walk in before a stop: the pair waits for two calm windows.
             c = None
             sl["hold_tc"] = None
+    else:
+        # a sparse window timed out at STILL_WINDOW_MAX: it proves no stay
+        # and pairs with nothing, so what the restarted window held is
+        # track. Kept, an hour of fixes 40 s apart indoors stayed in RAM
+        # (HOLD_RELEASE never came: every sparse fix refreshed last_at).
+        sl["hold_tc"] = None
     prev = sl["prev"]
     sl["prev"] = (c, sl["win_tc"], sm[2]) if c else None
     sl["win_at"] = None
@@ -3718,7 +3759,7 @@ def up_reset():
               guard_hits=_guard["hits"], lowidf_at=None, lowidf_seen=None,
               lowpy_at=None, lowpy_seen=None, ok_at=None,
               lowidf_boot=lowboot, next_at=time.ticks_ms(),
-              rm_err={}, env_u=None, env_k=None, srv=None)
+              rm_err={}, env_u=None, env_k=None, srv=None, err_ssid=None)
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
     _tls_ctx[0] = None
@@ -4589,6 +4630,23 @@ def _up_err(state):
     up["err"] += 1
     up["state"] = state
 
+def _up_net_new(ssid):
+    """WiFi got an IP on ssid. Network and server errors collected on
+    another network say nothing about this one: the backoff starts over and
+    the next batch is due now. (A LAN-only GEO_URL failed on the hotspot all
+    the way, BACKOFF_MAX: home again, the first POST waited 30 min.) A 401
+    and the per-file holds of payload errors are the server's verdicts and
+    stay."""
+    es = up.get("err_ssid")
+    if es is None or es == ssid:
+        return
+    up["err_ssid"] = None
+    if up["state"] == "err 401":
+        return
+    up["backoff"] = BACKOFF_START
+    up["next_at"] = time.ticks_ms()
+    up["srv"] = None
+
 def _schedule(now, ms=None):
     if ms is None:
         b = up["backoff"]
@@ -4911,12 +4969,30 @@ def _raw_post(url, data, headers, timeout):
             feed()
             if _age(time.ticks_ms(), t0) >= HTTP_WAIT:
                 raise OSError(110)       # ETIMEDOUT
-        # what is left of HTTP_WAIT for the status line: a TLS 1.3 server's
-        # session tickets right after the handshake are the first POLLIN,
-        # and the answer then had only the connect timeout (15 s) to come
+        # the answer's first byte, not the first POLLIN: a TLS 1.3 server's
+        # session tickets right after the handshake are that, and the
+        # status line was then waited for in one blocking read, the UART
+        # unread for up to HTTP_WAIT. Non-blocking, a read that finds only
+        # tickets comes back None (EAGAIN: mbedTLS's WANT_READ, which can
+        # be read on from; a timeout on a TLS read cannot)
+        raw.setblocking(False)
+        first = None
+        while first is None:
+            try:
+                first = s.read(1)
+            except OSError as e:
+                if e.args[0] != 11:      # EAGAIN
+                    raise
+            if first is None:
+                _rcv.read_uart()
+                feed()
+                if _age(time.ticks_ms(), t0) >= HTTP_WAIT:
+                    raise OSError(110)
+                poll.poll(200)
+        # what is left of HTTP_WAIT for the rest of the status line
         raw.settimeout(max(HTTP_WAIT - _age(time.ticks_ms(), t0), 1000)
                        / 1000)
-        line = s.readline(HTTP_LINE)
+        line = first + s.readline(HTTP_LINE - 1) if first else first
         code = int(line.split(None, 2)[1])
         got = [None, None]
         try:
@@ -4983,12 +5059,20 @@ def _http_post(size):
              "Authorization": "Bearer %s" % up["key"]},
             HTTP_TIMEOUT)
         retry = _retry_after_ms(retry)
-        if 200 <= code < 300 and ctype and b"html" in ctype.lower():
-            # an HTML 2xx is a captive portal (or a proxy) answering, not
-            # Dawarich (JSON): without CA_FILE nothing else tells, and the
-            # batch counted as sent was deleted
-            print("upload: HTML answer, not Dawarich (captive portal?)")
-            _diag_write("upload err html %d (captive portal?)" % code)
+        ct = ctype.lower() if ctype else None
+        if 200 <= code < 300 and (code == 204
+                                  or (ct is not None and b"json" not in ct)):
+            # a 2xx that is no JSON (HTML, plain text, a 204 without a
+            # body) is a captive portal or a proxy answering, not Dawarich:
+            # without CA_FILE nothing else tells, and the batch counted as
+            # sent was deleted. (A 2xx whose head could not be read, no
+            # Content-Type, stays a 2xx: resending it would duplicate.)
+            if ct is not None and b"html" in ct:
+                print("upload: HTML answer, not Dawarich (captive portal?)")
+                _diag_write("upload err html %d (captive portal?)" % code)
+            else:
+                print("upload: %d not JSON, not Dawarich (proxy?)" % code)
+                _diag_write("upload err not json %d (captive portal?)" % code)
             code = None
         up["enomem"] = 0
         up["last_err"] = None
@@ -5105,11 +5189,16 @@ def _env_bad(url, key):
     return None if ok else "GEO_URL in .env: not http(s)://host[:port][/path]"
 
 def _due(files, held, now):
-    """files without those held back (_hold_file) for now."""
+    """files without those held back (_hold_file) for now. A hold that ran
+    out goes (any, not only one of files): only a 2xx for its file removed
+    it, so a deleted or parked track's hold stayed all boot, and past a
+    ticks half-wrap it could read as held again."""
+    for p in list(held):
+        if not _waiting(now, held[p], UP_WAIT_MAX):
+            del held[p]
     due = []
     for p in files:
-        t = held.get(p)
-        if t is None or not _waiting(now, t, UP_WAIT_MAX):
+        if p not in held:
             due.append(p)
     return due
 
@@ -5349,6 +5438,7 @@ def upload_tick():
         _schedule(now, retry if retry else AUTH_BACKOFF)
     else:
         _up_err("err " + ("net" if code is None else str(code)))
+        up["err_ssid"] = wifi["ssid"]        # (_up_net_new: a new network)
         _schedule(now, retry)
         if code is not None and len(files) > 1:
             # the same batch answered so SRV_ERR_MAX times in a row (a 5xx
@@ -5657,18 +5747,28 @@ def _slot_sha(part, size):
     return binascii.hexlify(h.digest()).decode()
 
 def _ota_bad():
+    """The builds marked bad. A token that is no number (bit rot, a hand
+    edit) is skipped, not the whole list: OTA_BAD is only appended to, so
+    one bad token forgot every bad build for good, and a crashing build was
+    installed again after each rollback."""
+    out = []
     try:
         with open(OTA_BAD) as f:
-            return [int(x) for x in f.read().split()]
-    except (OSError, ValueError):
-        return []
+            for x in f.read().split():
+                try:
+                    out.append(int(x))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
 
 def _ota_mark_bad(build):
     try:
         with open(OTA_BAD, "a") as f:
             f.write("%d\n" % build)
-    except OSError:
-        pass
+    except OSError as e:
+        _diag_write("ota bad mark %d %r" % (build, e))
 
 def _ota_tries():
     """(build, n) of OTA_TRIES, or (None, 0)."""
@@ -5788,9 +5888,14 @@ def _ota_mark(what):
     crash branch: the build is bad), "stop" (Ctrl-C, an mpremote session:
     the watchdog reset after it is not the build's fault), "boot"
     (ota_boot's reset into a slot set to boot but not run). Never
-    raises."""
+    raises. A crash or stop is the pending build's only when it is the one
+    running (gps_boot.crash() checks the same): the old firmware back after
+    a rollback for no fault of the new one, crashing before ota_boot read
+    the note, marked the new build bad for good (a Ctrl-C there turned a
+    watchdog verdict on it into a try)."""
     try:
-        if _file_size(OTA_PENDING) is None:
+        p = _ota_pending()
+        if p is None or (what != "boot" and p[0] != FW_BUILD):
             return
         with open(OTA_MARK, "w") as f:
             f.write(what)
@@ -5845,6 +5950,13 @@ def _ota_check():
     build = m["build"]
     if build <= FW_BUILD or build in _ota_bad():
         ota["state"] = "current"
+        return
+    if not FW_BUILD:
+        # a plain firmware (no gps_frozen): the modules deployed as files
+        # are not moved aside (_ota_shadow), so the old gps_logger.mpy
+        # would run on the new image, pass the health check and never
+        # update again
+        ota["state"] = "not frozen"
         return
     f = ota.get("failed")
     if (f is not None and f[0] == build
@@ -6640,7 +6752,9 @@ def _web_reply(c, req):
                       wifi["ip"] or "<board ip>", HOSTNAME),))
         return
     parts = req.split(None, 2)          # (HTTP/0.9: "GET /\r\n")
-    path = parts[1] if len(parts) > 1 else b"/"
+    if len(parts) < 2:
+        return                           # "GET " and no path: cut off
+    path = parts[1]
     parts = None
     if path.startswith(b"/status.json"):
         _web_status(c)
@@ -6840,15 +6954,24 @@ def _hist_seek(f, o, end, t):
                 return best, int(best > o)
     return best, 0
 
-def _hist_span(f, size):
+def _hist_span(f, size, e=None):
     """The UTC times of day (s) of a day history .trb's first and last
-    point -> [first, last], None without a keyframe or when HIST_SEEK_MS
-    runs out: the first keyframe's, the latest keyframe's or decoded
-    point's after the last keyframe (its deltas only are decoded)."""
+    point: the first keyframe's, the latest keyframe's or decoded point's
+    after the last keyframe (its deltas only are decoded). -> the day's
+    _hsp entry [size, span, first, hi, lk, off, more]: span [first, last],
+    None without a keyframe or while the keyframe scan is not through.
+    When HIST_SEEK_MS runs out it stops at a record start (off, more 1)
+    and the next call goes on from there; e, the entry of an earlier call,
+    also lets a grown file be scanned from where that one got to (a day
+    grows by appends at its footer). Before, a day too long for one scan
+    had no span for good, and a growing one was read from 0 at each poll."""
     end = _hist_end(f, size)
-    first, hi, lk, i = -1, -1, -1, 0
+    first, hi, lk, o = -1, -1, -1, 0
+    if e is not None and size >= e[0] and 0 < e[5] <= end:
+        first, hi, lk, o = e[2], e[3], e[4], e[5]
+    i = 0
     t0 = time.ticks_ms()
-    _rd_open(0)
+    _rd_open(o)
     while _rd[0] + _rd[2] < end:
         if not _rd_rec(f):
             break
@@ -6865,11 +6988,15 @@ def _hist_span(f, size):
             feed()
             _rcv.read_uart()
             if time.ticks_diff(time.ticks_ms(), t0) > HIST_SEEK_MS:
-                return None
+                return [size, None, first, hi, lk, _rd[0] + _rd[2], 1]
+    # where the next append begins; only past a footer: without one the
+    # last append may be cut, and the file is read again from its start
+    o = end if end < size else 0
     if lk < 0:
-        return None
+        return [size, None, first, hi, lk, o, 0]
     s = _kw
     s[0] = None
+    t = hi
     _rd_open(lk)
     while _rd[0] + _rd[2] < end:
         if not _rd_rec(f):
@@ -6878,10 +7005,10 @@ def _hist_span(f, size):
         if a == b:
             s[0] = None
         elif _kb_rec(a, b, s) > 0 and s[0] is not None:
-            hi = max(hi, s[0] % 86400)
-    return [first, hi]
+            t = max(t, s[0] % 86400)
+    return [size, [first, t], first, hi, lk, o, 0]
 
-_hsp = {}                                # day -> [file size, span] (_hist_spans)
+_hsp = {}                                # day -> _hist_span's entry
 
 def _hist_spans():
     """{"YYYYMMDD": [first, last]}: each .trb day's first and last point (s
@@ -6889,7 +7016,8 @@ def _hist_spans():
     offers the local days of both: east of UTC its last hour is the next
     local day, offered only when a point is there). Kept per day with the
     file's size: one day (re)read a call at most, the others as they
-    were; a .trk day (older firmware) or one not read yet has none."""
+    were (a scan HIST_SEEK_MS cut short goes on at the next call); a .trk
+    day (older firmware) or one not read yet has none."""
     days = _hist_days()
     for d in list(_hsp):
         if d not in days:
@@ -6899,14 +7027,13 @@ def _hist_spans():
         name = HIST_DIR + "/" + d + TRB
         size = _file_size(name)
         e = _hsp.get(d)
-        if size and not done and (e is None or e[0] != size):
+        if size and not done and (e is None or e[0] != size or e[6]):
             done = True
             try:
                 with open(name, "rb") as f:
-                    sp = _hist_span(f, size)
+                    e = _hsp[d] = _hist_span(f, size, e)
             except OSError:
-                sp = None
-            e = _hsp[d] = [size, sp]
+                e = _hsp[d] = [size, None, -1, -1, -1, 0, 0]
         if e is not None and e[0] == size and e[1]:
             out[d] = e[1]
     return out
@@ -7230,9 +7357,17 @@ def _need_rtc():
                                 or (OTA_URL or "").startswith("https"))
 
 def ntp_tick(now):
+    """Ask NTP while no fix has told the time this boot. Once one has, its
+    clock (log["clock"]) is what every reader takes over NTP's, and it is
+    also what sets the board clock (_rtc_sync): asking on cost a DNS lookup
+    and a UDP wait that could block past what the UART buffer holds, for
+    an answer nothing used."""
     n = _ntp
+    if log["clock"] is not None:
+        if _need_rtc():
+            _rtc_sync(now)
+        return
     if (not NTP_SERVER or wifi["state"] != "connected"
-            or (log["clock"] is not None and not _need_rtc())
             or _recent_s(n[1], n[2] // 1000)):
         return
     n[1] = _stamp()
@@ -7242,7 +7377,10 @@ def ntp_tick(now):
     feed()
     _rcv.read_uart()
     if t is None:
-        n[2] = min(n[2] * 2, NTP_RETRY_MAX)
+        # after an answer (NTP_AGAIN) the first failure retries in
+        # NTP_RETRY, not in NTP_RETRY_MAX
+        n[2] = NTP_RETRY if n[2] > NTP_RETRY_MAX else min(n[2] * 2,
+                                                          NTP_RETRY_MAX)
         return
     n[0], n[2] = (t, _stamp()), NTP_AGAIN
     _tft_t[4] = 0
@@ -7359,6 +7497,8 @@ ROUTE_W, ROUTE_H = 83, 51                # the pixels a point can land on
 ROUTE_DRAW = 10000                       # ms between looks at the route
 ROUTE_SAVE = 300000                      # ms between saves of a changed route (and
                                          # one when a stay starts)
+ROUTE_BACK = 300                         # s the clock may be behind the route's
+                                         # day before that day counts as false
 ROUTE_FILE = "/route.bin"
 ROUTE_HEAD = "<4siiiii"                  # magic, day, cm, step, last line's s, n
 ROUTE_MAGIC = b"RTE1"
@@ -7641,8 +7781,16 @@ def _rt_tick(now):
     R.drawn = now
     c = log["clock"] or _ntp[0]
     if c is not None:
-        d = _rt_day(_utc_s(c))
-        if R.waiting or d > R.day:
+        s = _utc_s(c)
+        d = _rt_day(s)
+        # the fix's clock more than ROUTE_BACK s before R.day began: R.day
+        # came from a false date (a corrupt digit past the checksum, a
+        # wrong NTP answer). Days only went forward, so today's route was
+        # gone and every line after it dropped until a reboot. (Not NTP's
+        # clock alone, and not a second's step back at midnight.)
+        back = (d < R.day and c is log["clock"]
+                and _rt_day(s + ROUTE_BACK) < R.day)
+        if R.waiting or d > R.day or back:
             if d != R.day:
                 _rt_reset(d)
             R.waiting = False

@@ -85,10 +85,13 @@ esac
 # A published destination is checked before the build (and long before any
 # upload): the path goes to scp as it is and to ssh shell-quoted, which agree
 # only on a plain one ("~/x" would be a directory called "~" for the ssh half)
-if [ "$MODE" = --publish ] && [ -n "${OTA_DEST:-}" ]; then
+# The key file too: a missing OTA_DEST or key failed only after the
+# ESP-IDF build
+if [ "$MODE" = --publish ]; then
+    : "${OTA_DEST:?OTA_DEST: where to copy firmware/ota (host:/path)}"
     case "$OTA_DEST" in
         *:*) _dhost=${OTA_DEST%%:*}; _ddir=${OTA_DEST#*:} ;;
-        *) _dhost=x; _ddir=. ;;          # (the check in --publish says what is wrong)
+        *) echo "OTA_DEST must be host:/path (scp and ssh)" >&2; exit 1 ;;
     esac
     case "$_dhost" in
         -*|"") echo "OTA_DEST: the host part must not be empty or start with a dash: '$OTA_DEST'" >&2; exit 1 ;;
@@ -99,6 +102,30 @@ if [ "$MODE" = --publish ] && [ -n "${OTA_DEST:-}" ]; then
             echo "spaces or shell specials: scp and the ssh rename would read it differently)" >&2
             exit 1 ;;
     esac
+    KEY_FILE=${OTA_KEY_FILE:-$HOME/.config/gps-logger/ota.key}
+    if [ ! -r "$KEY_FILE" ]; then
+        echo "No OTA key in $KEY_FILE (the board's .env OTA_KEY)" >&2
+        exit 1
+    fi
+    # the key is a secret: readable by everyone is refused, by the group warned
+    # (its content is never printed here)
+    KMODE=$(stat -c %a "$KEY_FILE" 2>/dev/null || stat -f %Lp "$KEY_FILE" 2>/dev/null || true)
+    case "$KMODE" in
+        ""|*[!0-7]*) echo "Could not read the mode of $KEY_FILE (chmod 600 it)" >&2 ;;
+        *)
+            if [ $(( 8#$KMODE & 4 )) -ne 0 ]; then
+                echo "The OTA key file $KEY_FILE is readable by everyone (mode $KMODE): chmod 600 it" >&2
+                exit 1
+            elif [ $(( 8#$KMODE & 32 )) -ne 0 ]; then
+                echo "WARNING: the OTA key file $KEY_FILE is readable by its group (mode $KMODE): chmod 600 it" >&2
+            fi ;;
+    esac
+    # the board reads it from .env: printable ASCII, no quotes or spaces
+    if ! tr -d '\n' < "$KEY_FILE" | LC_ALL=C grep -qE "^[!#-&(-~]{16,}$"; then
+        echo "The OTA key in $KEY_FILE must be 16+ printable ASCII characters" >&2
+        echo "without quotes or spaces (e.g. openssl rand -hex 32)" >&2
+        exit 1
+    fi
 fi
 
 mkdir -p "$OUT"
@@ -224,30 +251,6 @@ case "$MODE" in
 --publish)
     if [ -n "$DIRTY" ] || [ "$COMMIT" = unknown ]; then
         echo "Only a clean, committed tree is published ($COMMIT)" >&2
-        exit 1
-    fi
-    KEY_FILE=${OTA_KEY_FILE:-$HOME/.config/gps-logger/ota.key}
-    if [ ! -r "$KEY_FILE" ]; then
-        echo "No OTA key in $KEY_FILE (the board's .env OTA_KEY)" >&2
-        exit 1
-    fi
-    # the key is a secret: readable by everyone is refused, by the group warned
-    # (its content is never printed here)
-    KMODE=$(stat -c %a "$KEY_FILE" 2>/dev/null || stat -f %Lp "$KEY_FILE" 2>/dev/null || true)
-    case "$KMODE" in
-        ""|*[!0-7]*) echo "Could not read the mode of $KEY_FILE (chmod 600 it)" >&2 ;;
-        *)
-            if [ $(( 8#$KMODE & 4 )) -ne 0 ]; then
-                echo "The OTA key file $KEY_FILE is readable by everyone (mode $KMODE): chmod 600 it" >&2
-                exit 1
-            elif [ $(( 8#$KMODE & 32 )) -ne 0 ]; then
-                echo "WARNING: the OTA key file $KEY_FILE is readable by its group (mode $KMODE): chmod 600 it" >&2
-            fi ;;
-    esac
-    # the board reads it from .env: printable ASCII, no quotes or spaces
-    if ! tr -d '\n' < "$KEY_FILE" | LC_ALL=C grep -qE "^[!#-&(-~]{16,}$"; then
-        echo "The OTA key in $KEY_FILE must be 16+ printable ASCII characters" >&2
-        echo "without quotes or spaces (e.g. openssl rand -hex 32)" >&2
         exit 1
     fi
     : "${OTA_DEST:?OTA_DEST: where to copy firmware/ota (host:/path)}"
