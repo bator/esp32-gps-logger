@@ -1396,7 +1396,9 @@ Meshtastic, channel GpsLog) --MQTT--> tools/lora_bridge.py --Overland--> Dawaric
 1. Flash stock Meshtastic on it (flasher.meshtastic.org), then with the
    `meshtastic` CLI over USB: region `EU_868`, preset `MEDIUM_FAST`, the primary
    channel `GpsLog` with the board's key, uplink on, WiFi, MQTT to the home
-   broker (`root msh/EU_868/HU`, encryption on or off: the bridge reads both):
+   broker (`root msh/EU_868/HU`, MQTT encryption left on: the bridge takes only
+   encrypted packets, which only the channel key makes; `ALLOW_DECODED=1` for a
+   node with it off):
 
    ```bash
    KEY=$(python3 tools/lora_bridge.py key ~/.config/gps-logger/ota.key)
@@ -1413,7 +1415,9 @@ Meshtastic, channel GpsLog) --MQTT--> tools/lora_bridge.py --Overland--> Dawaric
    `python3-paho-mqtt`; systemd: `tools/gps-lora-bridge.service`; the env file's
    keys are in the script's docstring): it subscribes to
    the broker, decrypts the board's position packets (plain Python: no protobuf
-   or crypto library), drops the copies other gateways and relays bring, and posts
+   or crypto library), drops the copies other gateways and relays bring and any
+   position not newer than its node's last or out of a 2-day window (the channel's
+   AES-CTR is Meshtastic's, unauthenticated: no replay becomes a point), and posts
    each as an Overland point to `GEO_URL` (device `!xxxxxxxx-lora`, or
    `DEVICE_ID`). The board's own WiFi upload later brings the full track.
 

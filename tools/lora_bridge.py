@@ -16,6 +16,15 @@ ENV_FILE (KEY=VALUE lines, mode 600: it holds secrets):
   API_KEY      Dawarich's API key
   DEVICE_ID    the Overland device id (default: the board's node, !xxxxxxxx-lora)
   NODES        node ids to take (!a1b2c3d4,...; default: any on the channel)
+  ALLOW_DECODED  1: also take packets a gateway decoded (its MQTT encryption
+               off). Default 0: only encrypted ones, which only the channel
+               key makes (anyone who may publish to the broker could forge a
+               decoded one).
+
+The channel is Meshtastic's AES-CTR: unauthenticated by design (the home
+node must read it). A position is taken only with a time within MAX_AGE /
+MAX_AHEAD of now and after the last one taken from its node: a replayed or
+re-sent packet never becomes a point.
 
 Needs python3 and paho-mqtt (Debian: apt install python3-paho-mqtt) for
 "run"; the decoding is plain Python (no protobuf or crypto library), so
@@ -32,6 +41,8 @@ import urllib.request
 CHANNEL = "GpsLog"                       # gps_lora.CHANNEL
 LORA_SALT = b"gps-logger lora channel"   # gps_logger.LORA_SALT
 PORT_POSITION = 3
+MAX_AGE = 2 * 86400                      # s a position's time may be behind now
+MAX_AHEAD = 600                          # s it may be ahead (clocks)
 
 # --- AES (encryption only: CTR needs no more) ---------------------------------
 
@@ -192,15 +203,18 @@ def position(b):
             _one(f, 15), _one(f, 19), None if hd is None else hd / 100.0)
 
 
-def packet_data(mp, key):
+def packet_data(mp, key, decoded=False):
     """A MeshPacket's (from, id, Data fields) with the channel key, or None
-    (not ours: another channel, or not decodable)."""
+    (not ours: another channel, not decodable, or decoded by a gateway and
+    decoded not allowed)."""
     f = fields(mp)
     frm, pid = _one(f, 1), _one(f, 6)
     if frm is None or pid is None:
         return None
     frm, pid = struct.unpack("<I", frm)[0], struct.unpack("<I", pid)[0]
     dec = _one(f, 4)
+    if dec is not None and not decoded:
+        return None
     if dec is None:
         enc = _one(f, 5)
         if enc is None:
@@ -219,10 +233,12 @@ def node_id(n):
     return "!%08x" % n
 
 
-def handle(topic, payload, key, seen, nodes=None, device_id=None):
+def handle(topic, payload, key, seen, nodes=None, device_id=None, decoded=False,
+           now=None):
     """An MQTT message: the Overland features of the board's positions in
     it ([] for anything else). seen: the (from, id) already taken (the
-    same packet comes again through every gateway and relay)."""
+    same packet comes again through every gateway and relay) and, under
+    ("last", from), the newest time taken from each node."""
     if "/2/e/" not in topic:
         return []
     try:
@@ -231,7 +247,7 @@ def handle(topic, payload, key, seen, nodes=None, device_id=None):
         ch = _one(env, 2)
         if mp is None or (ch is not None and ch.decode("utf-8", "replace") != CHANNEL):
             return []
-        got = packet_data(mp, key)
+        got = packet_data(mp, key, decoded)
     except ValueError:
         return []
     if got is None:
@@ -243,7 +259,7 @@ def handle(topic, payload, key, seen, nodes=None, device_id=None):
         return []
     seen[(frm, pid)] = time.time()
     if len(seen) > 4096:
-        for k in sorted(seen, key=seen.get)[:2048]:
+        for k in sorted((k for k in seen if k[0] != "last"), key=seen.get)[:2048]:
             del seen[k]
     try:
         p = position(_one(d, 2))
@@ -251,6 +267,10 @@ def handle(topic, payload, key, seen, nodes=None, device_id=None):
         return []
     if p is None or p[3] is None or not (-90 <= p[0] <= 90 and -180 <= p[1] <= 180):
         return []
+    now = time.time() if now is None else now
+    if not now - MAX_AGE <= p[3] <= now + MAX_AHEAD or p[3] <= seen.get(("last", frm), 0):
+        return []
+    seen[("last", frm)] = p[3]
     props = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(p[3])),
              "device_id": device_id or node_id(frm) + "-lora"}
     if p[2] is not None:
@@ -278,7 +298,7 @@ def load_env(path):
 
 
 def config(env):
-    """(key, nodes, device_id, url, api_key) from the env file's values."""
+    """(key, nodes, device_id, url, api_key, decoded) from the env file's values."""
     if env.get("LORA_KEY"):
         key = base64.b64decode(env["LORA_KEY"])
     elif env.get("OTA_KEY_FILE"):
@@ -291,7 +311,7 @@ def config(env):
     nodes = set(int(n.strip().lstrip("!"), 16)
                 for n in env.get("NODES", "").split(",") if n.strip()) or None
     return (key, nodes, env.get("DEVICE_ID") or None,
-            env["GEO_URL"].rstrip("/"), env["API_KEY"])
+            env["GEO_URL"].rstrip("/"), env["API_KEY"], env.get("ALLOW_DECODED") == "1")
 
 
 def post(url, api_key, feats):
@@ -306,7 +326,7 @@ def post(url, api_key, feats):
 def run(path):
     import paho.mqtt.client as mqtt
     env = load_env(path)
-    key, nodes, dev, url, api_key = config(env)
+    key, nodes, dev, url, api_key, decoded = config(env)
     seen = {}
 
     def on_connect(c, ud, flags, rc, *a):
@@ -314,7 +334,11 @@ def run(path):
         c.subscribe(env.get("MQTT_TOPIC", "msh/#"))
 
     def on_message(c, ud, msg):
-        feats = handle(msg.topic, msg.payload, key, seen, nodes, dev)
+        try:
+            feats = handle(msg.topic, msg.payload, key, seen, nodes, dev, decoded)
+        except Exception as e:           # (a bad message: logged, not fatal)
+            print("bad message", msg.topic, repr(e), flush=True)
+            return
         if not feats:
             return
         for _ in range(3):

@@ -22549,35 +22549,46 @@ def _env_pkt(p, channel="GpsLog", decoded=None):
 
 _lbseen = {}
 _lbt = "msh/EU_868/HU/2/e/GpsLog/!deadbeef"
-_lb1 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbseen)
-_lb2 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbseen)          # again
-_lb3 = _lb.handle(_lbt, _env_pkt(_lp1[0]), _lo_key, {})              # the User
-_lb4 = _lb.handle(_lbt, _env_pkt(_lp2[0]), bytes(16), {})            # other key
-_lb5 = _lb.handle(_lbt.replace("/e/", "/json/"), _env_pkt(_lp2[0]), _lo_key, {})
-_lb6 = _lb.handle(_lbt, _env_pkt(_lp2[0], "LongFast"), _lo_key, {})
-_lb7 = _lb.handle(_lbt, _env_pkt(_lp2[0], decoded=bytes(_lb.ctr(
-    _lo_key, _lb.nonce(_lo_node, _lh2[2]), _lp2[0][16:]))), b"\0" * 16, {}, None, "trk")
-_lb8 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, {}, {0x12345678})
-_lb9 = _lb.handle(_lbt, b"\x0a\xff\x01garbage", _lo_key, {})
+_lbn = 1794657600 + 60                   # (the bridge's now: a minute after the fix)
+_lb_dec = _env_pkt(_lp2[0], decoded=bytes(_lb.ctr(_lo_key, _lb.nonce(_lo_node, _lh2[2]),
+                                                  _lp2[0][16:])))
+_lb1 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbseen, now=_lbn)
+_lb2 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbseen, now=_lbn)          # again
+_lb3 = _lb.handle(_lbt, _env_pkt(_lp1[0]), _lo_key, {}, now=_lbn)              # the User
+_lb4 = _lb.handle(_lbt, _env_pkt(_lp2[0]), bytes(16), {}, now=_lbn)            # other key
+_lb5 = _lb.handle(_lbt.replace("/e/", "/json/"), _env_pkt(_lp2[0]), _lo_key, {}, now=_lbn)
+_lb6 = _lb.handle(_lbt, _env_pkt(_lp2[0], "LongFast"), _lo_key, {}, now=_lbn)
+_lb7 = _lb.handle(_lbt, _lb_dec, b"\0" * 16, {}, None, "trk", True, now=_lbn)
+_lb8 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, {}, {0x12345678}, now=_lbn)
+_lb9 = _lb.handle(_lbt, b"\x0a\xff\x01garbage", _lo_key, {}, now=_lbn)
+_lb10 = _lb.handle(_lbt, _lb_dec, _lo_key, {}, now=_lbn)            # decoded, not allowed
+_lb11 = [_lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, {}, now=n_)   # too old / ahead
+         for n_ in (1794657600 + _lb.MAX_AGE + 1, 1794657600 - _lb.MAX_AHEAD - 1)]
+_lbs12 = {("last", _lo_node): 1794657600}                           # not newer
+_lb12 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbs12, now=_lbn)
 check("LORA-BRIDGE: the bridge turns the board's position packet into one Overland "
       "feature (lon/lat, the fix's UTC time, altitude, m/s, accuracy from HDOP, "
       "device !node-lora); the same packet again (another gateway), the User, "
-      "another key, a JSON topic, another channel, another node and garbage give "
-      "none; a gateway's decoded packet is taken as it is",
+      "another key, a JSON topic, another channel, another node, garbage, a "
+      "gateway-decoded packet (not allowed by default), a time out of the window "
+      "and one not newer than the node's last give none; a decoded one is taken "
+      "with ALLOW_DECODED",
       _lb1 == [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [18.4221, 47.1859]},
                 "properties": {"timestamp": "2026-11-14T12:00:00Z", "device_id": "!a1b2c3d4-lora",
                                "altitude": 119, "speed": 20, "horizontal_accuracy": 6.5}}]
       and _lb2 == [] and _lb3 == [] and _lb4 == [] and _lb5 == [] and _lb6 == []
       and len(_lb7) == 1 and _lb7[0]["properties"]["device_id"] == "trk"
-      and _lb8 == [] and _lb9 == [],
-      repr((_lb1, _lb2, _lb3, _lb4, _lb5, _lb6, _lb7, _lb8, _lb9)))
+      and _lb8 == [] and _lb9 == [] and _lb10 == [] and _lb11 == [[], []] and _lb12 == []
+      and _lbseen[("last", _lo_node)] == 1794657600,
+      repr((_lb1, _lb2, _lb3, _lb4, _lb5, _lb6, _lb7, _lb8, _lb9, _lb10, _lb11, _lb12)))
 _lbk = _lb.config({"OTA_KEY_FILE": os.devnull, "GEO_URL": "https://d.example/", "API_KEY": "k",
-                   "NODES": "!a1b2c3d4, 12345678"})
+                   "NODES": "!a1b2c3d4, 12345678", "ALLOW_DECODED": "1"})
 check("LORA-BRIDGE-KEY: the bridge derives the board's key from the OTA key as the "
       "board does (gps_logger.lora_key); its config reads NODES and GEO_URL",
       _lb.derived_key(b"0123456789abcdef0123") == gl.lora_key(b"0123456789abcdef0123")
       and len(gl.lora_key(b"x" * 64)) == 16
-      and _lbk[1] == {0xA1B2C3D4, 0x12345678} and _lbk[3] == "https://d.example",
+      and _lbk[1] == {0xA1B2C3D4, 0x12345678} and _lbk[3] == "https://d.example"
+      and _lbk[5] is True,
       repr(_lbk))
 
 # LORA-ENV: the logger's .env: OTA_KEY gives the derived key, LORA_KEY (base64 of
