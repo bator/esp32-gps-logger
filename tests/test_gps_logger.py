@@ -22271,6 +22271,7 @@ finally:
     diag_clear()
     shutil.rmtree(_n2_dir, ignore_errors=True)
 
+import base64
 import struct
 # --- LoRa: gps_lora.py (the board's SX1262 and its Meshtastic packets) and
 # tools/lora_bridge.py (the home side: MQTT -> Dawarich) -----------------------
@@ -22583,7 +22584,7 @@ check("LORA-BRIDGE-KEY: the bridge derives the board's key from the OTA key as t
 # 16/32 bytes) wins, a bad one leaves LoRa off, LORA=0 off, LORA_DBM/EVERY ranges
 _le_saved = (gl.LORA, gl.LORA_KEY, gl.LORA_DBM, gl.LORA_EVERY)
 _le = []
-for e_ in ({"OTA_KEY": " secretsecretsecret "}, {"OTA_KEY": "a", "LORA_KEY": "AAECAwQFBgcICQoLDA0ODw=="},
+for e_ in ({"OTA_KEY": " secretsecretsecret "}, {"OTA_KEY": "a", "LORA_KEY": base64.b64encode(bytes(range(16))).decode()},
            {"LORA_KEY": "bad#"}, {"LORA": "0", "OTA_KEY": "a"}, {},
            {"OTA_KEY": "a", "LORA_DBM": "10", "LORA_EVERY": "5"}):
     gl.LORA, gl.LORA_KEY, gl.LORA_DBM, gl.LORA_EVERY = True, None, 22, 60
