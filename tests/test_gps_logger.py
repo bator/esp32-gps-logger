@@ -9822,6 +9822,38 @@ try:
           and sp4.get(day) == [want_sp[0], 23 * 3600 + 900]
           and js_.get("day_span", {}).get(day) == [want_sp[0], 23 * 3600 + 900],
           repr((sp1, sp2, sp3, sp4, js_.get("day_span"))))
+    # HIST-SPAN-RESUME: a scan HIST_SEEK_MS cuts short goes on at the next
+    # call from where it got to, and a grown day is read from its old end
+    # only (before: a long day had no span for good, a growing one was read
+    # from 0 at each poll)
+    _hs_ms, _hs_open = gl.HIST_SEEK_MS, gl._rd_open
+    _hs_at = []
+    try:
+        gl.HIST_SEEK_MS = -1             # out after every 64 records
+        gl._rd_open = lambda o: (_hs_at.append(o), _hs_open(o))
+        gl._hsp.clear()
+        gl._hd[1] = None
+        calls = 0
+        while calls < 400 and day not in gl._hist_spans():
+            calls += 1
+        sp5 = gl._hist_spans().get(day)
+        starts = sorted(set(o for o in _hs_at if o))
+        gl.HIST_SEEK_MS = _hs_ms
+        old_end = gl._hsp[day][5]
+        hist_add([_hl(day, "234500")], 1)
+        del _hs_at[:]
+        sp6 = gl._hist_spans().get(day)
+        first_open = _hs_at[0] if _hs_at else None
+    finally:
+        gl.HIST_SEEK_MS, gl._rd_open = _hs_ms, _hs_open
+    check("HIST-SPAN-RESUME: a day scan cut short by HIST_SEEK_MS goes on "
+          "where it stopped until the span is there; a grown day is scanned "
+          "from its old end on",
+          sp5 == [want_sp[0], 23 * 3600 + 900] and calls > 3
+          and len(starts) >= calls - 1
+          and sp6 == [want_sp[0], 23 * 3600 + 2700]
+          and first_open == old_end and old_end > 0,
+          repr((sp5, sp6, calls, len(starts), first_open, old_end)))
     # the page asks from where it got to while a batch is added; then a
     # minute later only for what is new (from X-Hist-End: the new append's
     # keyframe overwrote the footer there)
@@ -11721,6 +11753,9 @@ class RvSock:
     def settimeout(self, t):
         self.timeout = t
 
+    def setblocking(self, b):
+        self.blocking = b
+
     def connect(self, addr):
         self.addr = addr
 
@@ -11728,6 +11763,20 @@ class RvSock:
         b = bytes(b)
         self.out += b
         return len(b)
+
+    def read(self, n=-1):
+        """(the answer's first byte; tickets: b"" items in self.early come
+        first, each a read that finds no application data)"""
+        e = getattr(self, "early", None)
+        if e:
+            e.pop(0)
+            return None
+        if self.rd >= len(self.resp) and getattr(self, "fail", None):
+            raise self.fail
+        n = len(self.resp) - self.rd if n is None or n < 0 else n
+        out = self.resp[self.rd:self.rd + n]
+        self.rd += len(out)
+        return out
 
     def readline(self, n=-1):
         self.limits = getattr(self, "limits", []) + [n]
@@ -22035,12 +22084,15 @@ try:
         gl.log["clock"] = (secs, gl._stamp()) if clk else None
         gl._ntp[:] = [None, None, gl.NTP_RETRY]
         del asked[:]
+        RTC.sets[:] = []
         gl.ntp_tick(_clock[0])
-        n2_5.append(len(asked))
-    check("RN2-5: after a fix NTP is asked while the board clock is not set "
-          "and https is used (GEO_URL or OTA_URL); not for http, not once "
-          "set; before a fix as before",
-          n2_5 == [1, 0, 1, 0, 1], repr(n2_5))
+        n2_5.append((len(asked), len(RTC.sets)))
+    check("RN2-5: after a fix NTP is not asked (its answer is never used): "
+          "the fix's clock sets the board clock while it is not set and "
+          "https is used (GEO_URL or OTA_URL); not for http, not once set; "
+          "before a fix NTP is asked as before",
+          n2_5 == [(0, 1), (0, 0), (0, 1), (0, 0), (1, 0)], repr(n2_5))
+    RTC.sets[:] = []
     gl.OTA_URL = "http://ota.lan/gps/manifest.json"
     gl._rtc_set[0] = False
 
@@ -22269,6 +22321,193 @@ finally:
     gl.up_reset()
     diag_clear()
     shutil.rmtree(_n2_dir, ignore_errors=True)
+
+# --- RV14: the review of 2026-11-14 --------------------------------------------
+
+_r3_dir = tempfile.mkdtemp(prefix="gpxlog-rv3-")
+_r3_saved = (gl.LOG_DIR, gl.DIAG)
+_r3_sec = [8 * 3600]
+_R3_M = 1 / 111195.0                     # degrees per metre (lat)
+
+
+def _r3_reset():
+    gl._rcv.reset()
+    gl.log_reset()
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.wifi.update(state="offline", home=False)
+    gl.st["settled"] = True
+    for n in os.listdir(_r3_dir):
+        os.remove(os.path.join(_r3_dir, n))
+
+
+def _r3_fix(east, north, speed=3.0, hdop=1.0):
+    _clock[0] += 1000
+    _r3_sec[0] += 1
+    s = _r3_sec[0]
+    gl.st.update(valid=True, date="2026-10-18",
+                 time="%02d:%02d:%02d" % (s // 3600 % 24, s // 60 % 60, s % 60),
+                 lat=47.5 + north * _R3_M,
+                 lon=19.0 + east * _R3_M / 0.6755, alt=100.0,
+                 pos_at=_clock[0], hdop=hdop, hdop_at=_clock[0], status="A",
+                 quality=1, fixtype=3, speed=speed)
+    gl.log_tick()
+
+
+try:
+    gl.LOG_DIR = _r3_dir
+    gl.DIAG = 0
+    _r3_reset()
+    _r3_rnd = random.Random(3)
+    # arrive: a drive, 20 s at the door, 40 s of HDOP 9, then indoors one
+    # usable fix every 40 s for an hour, 60-100 m off and wandering
+    for i in range(120):
+        _r3_fix(-1200 + i * 10, 0, speed=36)
+    for i in range(20):
+        _r3_fix(_r3_rnd.uniform(-5, 5), _r3_rnd.uniform(-5, 5))
+    for k in range(91):
+        for i in range(39):
+            _r3_fix(0, 0, hdop=9)
+        _r3_fix(80 + _r3_rnd.uniform(-25, 25), _r3_rnd.uniform(-25, 25))
+    r3_1 = (len(gl.log["batch"]), gl.log["still"]["hold_tc"],
+            gl.log["still"]["active"])
+    check("RV14-1: sparse windows that time out release the drift hold: after "
+          "an hour of fixes 40 s apart indoors (no stay proven) the lines do "
+          "not wait in RAM only",
+          r3_1[0] <= 10 and r3_1[1] is None and not r3_1[2], repr(r3_1))
+
+    # RV14-2: upload errors on another network do not delay this one
+    class _R3W(object):
+        def ifconfig(self):
+            return ("192.168.1.5", "", "", "")
+        def status(self, *a):
+            return -60
+    _r3_reset()
+    r3_2 = []
+    for st0, es, ssid in (("err net", "hot", "home"), ("err net", "home", "home"),
+                          ("err 401", "hot", "home"), ("err 503", None, "home")):
+        gl.up_reset()
+        now = time.ticks_ms()
+        gl.up.update(state=st0, err_ssid=es, backoff=gl.BACKOFF_MAX,
+                     next_at=time.ticks_add(now, gl.BACKOFF_MAX))
+        gl.wifi.update(ssid=ssid)
+        gl._wifi_got_ip(_R3W())
+        r3_2.append((gl.up["backoff"] == gl.BACKOFF_START,
+                     time.ticks_diff(gl.up["next_at"], now) <= 0))
+    check("RV14-2: WiFi up on another network than the upload errors came "
+          "from: the backoff starts over and the batch is due now; the same "
+          "network, a 401 or no error keep the backoff",
+          r3_2 == [(True, True), (False, False), (False, False),
+                   (False, False)], repr(r3_2))
+
+    # RV14-3: a scan reads the UART first and counts as a keep-alive pulse
+    _r3_ev = []
+    class _R3S(object):
+        def scan(self):
+            _r3_ev.append("scan")
+            return []
+        def active(self, *a):
+            return True
+    _r3_ru = gl._rcv.read_uart
+    try:
+        gl._rcv.read_uart = lambda *a: _r3_ev.append("uart")
+        gl.wifi_reset()
+        gl.wifi.update(state="not found", wlan=_R3S())
+        _clock[0] += gl.PB_KEEPALIVE + 1000
+        gl.wifi["pb_at"] = time.ticks_add(time.ticks_ms(), -gl.PB_KEEPALIVE - 1)
+        gl._scan_known(gl.wifi["wlan"])
+        n_scan = _r3_ev.count("scan")
+        gl.keepalive_tick(time.ticks_ms())
+        r3_3 = (_r3_ev[:2], n_scan, _r3_ev.count("scan"),
+                gl.wifi["pb_scans"])
+    finally:
+        gl._rcv.read_uart = _r3_ru
+        gl.wifi_reset()
+    check("RV14-3: a round's scan reads the UART before it and counts as the "
+          "keep-alive load: no second scan right after it in the same pass",
+          r3_3 == (["uart", "scan"], 1, 1, 0), repr(r3_3))
+
+    # RV14-4: TLS 1.3 tickets are the first POLLIN: the wait goes on,
+    # reading the UART, until the answer's first byte
+    class _R3Eagain(RvSock):
+        def read(self, n=-1):
+            if getattr(self, "eagain", 0):
+                self.eagain -= 1
+                raise OSError(11)
+            return RvSock.read(self, n)
+    _r3_ru = gl._rcv.read_uart
+    _r3_n = [0]
+    r3_4 = []
+    gl.socket, gl.select = fake_sockmod, fake_sel
+    sys.modules["tls"] = RvTls
+    tls_ctx_reset()
+    try:
+        gl._rcv.read_uart = lambda *a: _r3_n.__setitem__(0, _r3_n[0] + 1)
+        for kind in ("none", "eagain"):
+            sk = _R3Eagain(b"HTTP/1.0 201 Created\r\n\r\n", polls=0)
+            if kind == "none":
+                sk.early = [None] * 20
+            else:
+                sk.eagain = 20
+            rv_sock[0] = sk
+            _r3_n[0] = 0
+            r = gl._raw_post("https://d.example/x", b"{}", {}, 15)
+            r3_4.append((r[0], _r3_n[0] >= 20, sk.blocking is False))
+        # tickets past HTTP_WAIT: a timeout, not a block
+        sk = _R3Eagain(b"HTTP/1.0 201 Created\r\n\r\n", polls=0)
+        sk.early = [None] * (gl.HTTP_WAIT // 200 + 5)
+        rv_sock[0] = sk
+        try:
+            gl._raw_post("https://d.example/x", b"{}", {}, 15)
+            r3_4.append("no timeout")
+        except OSError as e:
+            r3_4.append(e.args[0])
+    finally:
+        gl._rcv.read_uart = _r3_ru
+        gl.socket, gl.select = real_mods[0], real_mods[1]
+        sys.modules["tls"] = real_mods[2]
+        tls_ctx_reset()
+    check("RV14-4: a POLLIN that is only TLS 1.3 session tickets (a read "
+          "gives None or EAGAIN) does not end the wait: the UART is read "
+          "until the answer comes, HTTP_WAIT still ends it",
+          r3_4 == [(201, True, True), (201, True, True), 110], repr(r3_4))
+
+    # RV14-5: the NTP backoff after an answer and on a new connection
+    _r3_na, _r3_ns, _r3_ntp = gl._ntp_ask, gl.NTP_SERVER, gl._ntp[:]
+    try:
+        gl.NTP_SERVER = "ntp.test"
+        gl._ntp_ask = lambda: None
+        gl.log_reset()
+        gl.wifi_reset()
+        gl.wifi["state"] = "connected"
+        gl._ntp[:] = [(1000, gl._stamp()), None, gl.NTP_AGAIN]
+        gl.ntp_tick(_clock[0])
+        r3_5 = [gl._ntp[2]]
+        gl.ntp_tick(_clock[0])           # not yet due
+        gl._ntp[1] = None
+        gl.ntp_tick(_clock[0])
+        r3_5.append(gl._ntp[2])
+        gl._ntp[:] = [None, gl._stamp(), gl.NTP_RETRY_MAX]
+        gl.wifi.update(ssid="home")
+        gl._wifi_got_ip(_R3W())
+        r3_5.append((gl._ntp[1], gl._ntp[2]))
+    finally:
+        gl._ntp_ask, gl.NTP_SERVER = _r3_na, _r3_ns
+        gl._ntp[:] = _r3_ntp
+        gl.wifi_reset()
+    check("RV14-5: the first NTP failure after an answer retries in "
+          "NTP_RETRY (it was an hour), and doubles from there; a new "
+          "connection with no answer yet starts the backoff over",
+          r3_5 == [gl.NTP_RETRY, 2 * gl.NTP_RETRY, (None, gl.NTP_RETRY)],
+          repr(r3_5))
+finally:
+    gl.LOG_DIR, gl.DIAG = _r3_saved
+    gl.wifi_reset()
+    gl.log_reset()
+    gl.up_reset()
+    gl._rcv.reset()
+    diag_clear()
+    shutil.rmtree(_r3_dir, ignore_errors=True)
 
 print()
 print("%d passed, %d failed" % (passed, failed))
