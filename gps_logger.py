@@ -1033,12 +1033,17 @@ def home_in_range(fx=None):
     (no home network configured, a connect in progress, scan failed).
     On the home link the bar is SEEN_MIN_RSSI: ROAM_MIN_RSSI is for
     jumping to a weak AP; associated at -78 dBm the board is at home, and
-    that False let a multipath jump end the home stay (_home_veto)."""
+    that False let a multipath jump end the home stay (_home_veto). The
+    same bar holds for the scan while the radio sleeps after the home link
+    (sleep_home): a home AP at -78 dBm was in range connected, out of it
+    asleep, and the veto let the drift go out (WEB=0 sleeps at home)."""
     w = wifi["wlan"]
     if w is None or not _has_home():
         return None
     state = wifi["state"]
     lim = ROAM_MIN_RSSI
+    if state != "connected" and wifi.get("sleep_home"):
+        lim = SEEN_MIN_RSSI
     if state == "connected" and wifi["home"]:
         lim = SEEN_MIN_RSSI
         r = _rssi(w)
@@ -1836,7 +1841,6 @@ def wifi_start(env=None):
         env = load_env(ENV_FILE)
     CPU_MHZ = _mhz_env(env, "CPU_MHZ", CPU_MHZ)
     CPU_MHZ_UPLOAD = _mhz_env(env, "CPU_MHZ_UP", CPU_MHZ_UPLOAD)
-    _set_freq(CPU_MHZ)
     wifi["nets"] = _load_nets(env)
     _has_home()                          # cached for wifi_tick
     for n in wifi["nets"]:
@@ -1849,6 +1853,17 @@ def wifi_start(env=None):
     up["url"] = env.get("GEO_URL", "").rstrip("/") or None
     up["key"] = env.get("API_KEY") or None
     _keepalive_env(env)
+    if wifi["nets"] or PB_KEEPALIVE:
+        # the radio is used (a network, or the keep-alive's scans): WiFi
+        # needs 80 MHz or more (_set_freq); 20 / 40 are for a board with
+        # the radio never on
+        if 0 < CPU_MHZ < 80:
+            print("CPU_MHZ", CPU_MHZ, "too slow for WiFi, using 80")
+            CPU_MHZ = 80
+        if 0 < CPU_MHZ_UPLOAD < 80:
+            print("CPU_MHZ_UP", CPU_MHZ_UPLOAD, "too slow for WiFi, using 80")
+            CPU_MHZ_UPLOAD = 80
+    _set_freq(CPU_MHZ)
     _web_env(env)
     _ota_env(env)
     _ntp_env(env)
@@ -2002,7 +2017,16 @@ def wifi_tick():
         wifi["backoff"] = WIFI_RETRY
         wifi["last_check"] = _stamp()
         wifi["rounds"] = 0               # a wake: the first round tries all
-        _wifi_begin_round(w)
+        try:
+            _wifi_begin_round(w)
+        except Exception:
+            # (a MemoryError outside the scan's own catch) the wake is not
+            # spent on a round that never ran: it came back only after
+            # WIFI_SLEEP, an arrival not uploaded, the radio on meanwhile
+            if wifi["state"] == "sleep":
+                wifi["wake"] = True
+                _radio_off(w)
+            raise
         return
     if _age_s(wifi["last_check"]) < wifi["backoff"] // 1000:
         return
@@ -5710,18 +5734,28 @@ def _slot_sha(part, size):
     return binascii.hexlify(h.digest()).decode()
 
 def _ota_bad():
+    """The builds marked bad. A token that is no number (bit rot, a hand
+    edit) is skipped, not the whole list: OTA_BAD is only appended to, so
+    one bad token forgot every bad build for good, and a crashing build was
+    installed again after each rollback."""
+    out = []
     try:
         with open(OTA_BAD) as f:
-            return [int(x) for x in f.read().split()]
-    except (OSError, ValueError):
-        return []
+            for x in f.read().split():
+                try:
+                    out.append(int(x))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
 
 def _ota_mark_bad(build):
     try:
         with open(OTA_BAD, "a") as f:
             f.write("%d\n" % build)
-    except OSError:
-        pass
+    except OSError as e:
+        _diag_write("ota bad mark %d %r" % (build, e))
 
 def _ota_tries():
     """(build, n) of OTA_TRIES, or (None, 0)."""
@@ -5841,9 +5875,14 @@ def _ota_mark(what):
     crash branch: the build is bad), "stop" (Ctrl-C, an mpremote session:
     the watchdog reset after it is not the build's fault), "boot"
     (ota_boot's reset into a slot set to boot but not run). Never
-    raises."""
+    raises. A crash or stop is the pending build's only when it is the one
+    running (gps_boot.crash() checks the same): the old firmware back after
+    a rollback for no fault of the new one, crashing before ota_boot read
+    the note, marked the new build bad for good (a Ctrl-C there turned a
+    watchdog verdict on it into a try)."""
     try:
-        if _file_size(OTA_PENDING) is None:
+        p = _ota_pending()
+        if p is None or (what != "boot" and p[0] != FW_BUILD):
             return
         with open(OTA_MARK, "w") as f:
             f.write(what)
@@ -5898,6 +5937,13 @@ def _ota_check():
     build = m["build"]
     if build <= FW_BUILD or build in _ota_bad():
         ota["state"] = "current"
+        return
+    if not FW_BUILD:
+        # a plain firmware (no gps_frozen): the modules deployed as files
+        # are not moved aside (_ota_shadow), so the old gps_logger.mpy
+        # would run on the new image, pass the health check and never
+        # update again
+        ota["state"] = "not frozen"
         return
     f = ota.get("failed")
     if (f is not None and f[0] == build

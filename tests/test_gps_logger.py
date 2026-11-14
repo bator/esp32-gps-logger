@@ -7696,6 +7696,23 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
                   for r_ in bad_dests.values()),
           repr((rc_k4, err_k4[-200:], rc_k0, err_k0[-200:],
                 {k_: (r_[0], r_[2][-120:]) for k_, r_ in bad_dests.items()})))
+    # BUILD-PUBLISH-EARLY: no OTA_DEST, one without "host:" or no key file
+    # stops --publish before the build (it failed only after ESP-IDF's)
+    early = [build_run(["--publish"], e_) for e_ in (
+        {"OTA_KEY_FILE": key_file},
+        {"OTA_KEY_FILE": key_file, "OTA_DEST": "fakehost"},
+        {"OTA_KEY_FILE": os.path.join(dp_td, "no-such.key"),
+         "OTA_DEST": "fakehost:" + dest_k})]
+    check("BUILD-PUBLISH-EARLY: --publish without OTA_DEST, with one that is "
+          "no host:/path or without its key file stops before the build",
+          all(r_[0] != 0 and "Built" not in r_[1]
+              and not [c for c in r_[4] if c[0] in ("scp", "ssh")]
+              for r_ in early)
+          and "OTA_DEST" in early[0][2] and "host:/path" in early[1][2]
+          and "No OTA key" in early[2][2]
+          and not os.path.exists(os.path.join(early[0][3], "firmware",
+                                              "manifest.py")),
+          repr([(r_[0], r_[2][-120:]) for r_ in early]))
     # BUILD-PUBLISH-BOARD: the board names itself in the manifest (signed); a
     # folder holding another board's manifest (an older board's had no name) is
     # refused
@@ -13743,6 +13760,7 @@ else:
         ("ota a3f2271 installed (was 2e8bc6e), rebooting", "ota"),
         ("ota a3f2271 booted, checking", "ota"),
         ("ota note unreadable, dropped (running 2e8bc6e)", "otax"),
+        ("ota bad mark 1793548800 OSError(28,)", "otax"),
         ("ota a3f2271 set to boot, not run yet: rebooting into it", "ota"),
         ("ota a3f2271 crashed, rolled back by the bootloader: bad (running "
          "2e8bc6e)", "ota"),
@@ -16145,22 +16163,62 @@ try:
         gl._ota_mark("stop")             # no pending note: nothing written
         no_note = os.path.exists(gl.OTA_MARK)
         _pend()
+        # the old firmware (100) back after a rollback, crashing or
+        # stopped before ota_boot: not its build's note, nothing blamed
         gl._ota_mark("crash")
+        gl._ota_mark("stop")
+        old_run = os.path.exists(gl.OTA_MARK)
+        gl._ota_mark("boot")             # its reset into the slot set
+        with open(gl.OTA_MARK) as f:
+            bk = f.read()
+        gl._rm(gl.OTA_MARK)
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        gl._ota_mark("crash")            # the pending build crashing
         with open(gl.OTA_MARK) as f:
             mk = f.read()
-        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
         gl.ota_boot()                    # the pending run starts: cleared
         src = _insp.getsource(gl.run)
-        return (out, no_note, mk, os.path.exists(gl.OTA_MARK),
+        return (out, no_note, old_run, bk, mk, os.path.exists(gl.OTA_MARK),
                 '_ota_mark("crash")' in src, '_ota_mark("stop")' in src)
     ext = _guarded(_t_ext)
     try_ = ([], (200, 1), False, False)
     bad_ = ([200], (None, 0), False, False)
     check("OTA-EXTRESET: an external reset in the pending window (hard, "
           "USB-JTAG, WDT after a Ctrl-C) is a try; a crash or a WDT while "
-          "the logger ran is bad; run() marks crash / stop",
-          ext == ([try_] * 4 + [bad_] * 3, False, "crash", False, True, True),
+          "the logger ran is bad; run() marks crash / stop, only for the "
+          "pending build running (the old firmware's crash blames nothing)",
+          ext == ([try_] * 4 + [bad_] * 3, False, False, "boot", "crash",
+                  False, True, True),
           repr(ext))
+
+    # OTA-BAD-TOKEN: one token in OTA_BAD that is no number skips only
+    # itself (the file is only appended to: the whole list was forgotten)
+    def _t_badtok():
+        _ota_reset()
+        with open(gl.OTA_BAD, "w") as f:
+            f.write("150\nx7\n160\n")
+        gl._ota_mark_bad(170)
+        return gl._ota_bad()
+    btok = _guarded(_t_badtok)
+    _ota_reset()
+    check("OTA-BAD-TOKEN: a damaged token in OTA_BAD is skipped, the other "
+          "bad builds stay bad (and new ones are added)",
+          btok == [150, 160, 170], repr(btok))
+
+    # OTA-NOT-FROZEN: a plain firmware (FW_BUILD 0) installs no image: its
+    # deployed gps_logger.mpy would shadow the new one for good
+    def _t_plain():
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 0, ""
+        _serve(_manifest(300))
+        gl._ota_check()
+        return gl.ota["state"], os.path.exists(gl.OTA_PENDING)
+    plain = _guarded(_t_plain)
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    _ota_reset()
+    check("OTA-NOT-FROZEN: a firmware without gps_frozen (FW_BUILD 0) "
+          "installs no OTA image ('not frozen')",
+          plain == ("not frozen", False), repr(plain))
 
     # OTA-CTRLC: Ctrl-C (a BaseException) after set_boot skipped the reset
     # (the old firmware then blamed the build, and the next reset booted it
@@ -22500,6 +22558,106 @@ try:
           "connection with no answer yet starts the backoff over",
           r3_5 == [gl.NTP_RETRY, 2 * gl.NTP_RETRY, (None, gl.NTP_RETRY)],
           repr(r3_5))
+
+    # RV14-6: asleep after the home link, the home AP's bar is SEEN_MIN_RSSI
+    class _R3H(object):
+        def __init__(self, rssi):
+            self.r = rssi
+        def scan(self):
+            return [(b"h", b"\x01\x02\x03\x04\x05\x06", 6, self.r, 3, False)]
+        def active(self, *a):
+            return True
+    r3_6 = []
+    for sh, rssi in ((True, -78), (False, -78), (True, -90), (False, -70)):
+        gl.wifi_reset()
+        gl.wifi.update(wlan=_R3H(rssi), state="sleep", sleep_home=sh,
+                       nets=[{"ssid": "h", "pw": "", "home": True,
+                              "hidden": False, "bssid": None, "ip": None}])
+        r3_6.append(gl.home_in_range())
+    gl.wifi_reset()
+    check("RV14-6: asleep after the home link (sleep_home) a home AP at "
+          "-78 dBm is in range, as it is connected; otherwise the scan's bar "
+          "stays ROAM_MIN_RSSI",
+          r3_6 == [True, False, False, True], repr(r3_6))
+
+    # RV14-7: a wake whose round raises is kept, the radio off again
+    class _R3R(object):
+        def __init__(self):
+            self.on = True
+        def status(self, *a):
+            return gl.network.STAT_IDLE
+        def disconnect(self):
+            pass
+        def active(self, *a):
+            if a:
+                self.on = a[0]
+            return self.on
+        def isconnected(self):
+            return False
+    _r3_br = gl._wifi_begin_round
+    try:
+        def _r3_boom(w):
+            w.active(True)
+            raise MemoryError("round")
+        gl._wifi_begin_round = _r3_boom
+        gl.wifi_reset()
+        rw = _R3R()
+        gl.wifi.update(wlan=rw, state="sleep", wake=True,
+                       nets=[{"ssid": "h", "pw": "", "home": True,
+                              "hidden": False, "bssid": None, "ip": None}])
+        try:
+            gl.wifi_tick()
+            r3_7 = "no raise"
+        except MemoryError:
+            r3_7 = (gl.wifi["wake"], gl.wifi["state"], rw.on)
+    finally:
+        gl._wifi_begin_round = _r3_br
+        gl.wifi_reset()
+    check("RV14-7: a wake's round that raises (MemoryError) keeps the wake "
+          "for the next tick and turns the radio off again",
+          r3_7 == (True, "sleep", False), repr(r3_7))
+
+    # RV14-8: CPU_MHZ under 80 is raised to 80 while the radio is used
+    _r3_cpu = (gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD, gl.PB_KEEPALIVE, gl._wifi_make)
+    r3_8 = []
+    try:
+        gl._wifi_make = lambda: None
+        for env in ({"CPU_MHZ": "40", "CPU_MHZ_UP": "20", "SSID": "h",
+                     "WPA2": "pw"},
+                    {"CPU_MHZ": "40", "CPU_MHZ_UP": "20", "KEEPALIVE": "0"},
+                    {"CPU_MHZ": "40", "KEEPALIVE": "30"}):
+            gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD = 80, 160
+            gl.wifi_reset()
+            gl.wifi_start(env)
+            r3_8.append((gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD))
+    finally:
+        (gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD, gl.PB_KEEPALIVE,
+         gl._wifi_make) = _r3_cpu
+        gl._set_freq(gl.CPU_MHZ)
+        gl.wifi_reset()
+        gl.up_reset()
+    check("RV14-8: CPU_MHZ / CPU_MHZ_UP under 80 become 80 with a network "
+          "or the keep-alive's scans; a board with the radio never on keeps "
+          "them",
+          r3_8 == [(80, 80), (40, 20), (80, 160)], repr(r3_8))
+
+    # RV14-9: the board pins the bootloader rollback; gps_boot's copies of
+    # the OTA note paths are gps_logger's
+    with builtins.open(os.path.join(ROOT, "boards", "GPS_LOGGER_S3",
+                                    "sdkconfig.board")) as f:
+        r3_sdk = f.read()
+    r3_paths = []
+    for mod in ("gps_logger.py", "gps_boot.py"):
+        with builtins.open(os.path.join(ROOT, mod)) as f:
+            src_ = f.read()
+        r3_paths.append(tuple(
+            (re.search(r'^%s = "([^"]+)"' % k, src_, re.M) or [None, None])[1]
+            for k in ("OTA_PENDING", "OTA_MARK")))
+    check("RV14-9: sdkconfig.board sets CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE; "
+          "gps_boot.py's OTA_PENDING and OTA_MARK are gps_logger.py's",
+          re.search(r"^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y$", r3_sdk, re.M)
+          is not None and r3_paths[0] == r3_paths[1]
+          and None not in r3_paths[0], repr(r3_paths))
 finally:
     gl.LOG_DIR, gl.DIAG = _r3_saved
     gl.wifi_reset()
