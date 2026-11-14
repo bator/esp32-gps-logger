@@ -130,10 +130,9 @@ text{fill:var(--m);font:600 9px Inter,sans-serif;text-anchor:middle}
 circle[class^=g],circle[class*=" g"]{fill:var(--s);stroke:var(--s);stroke-width:1.2}
 [class^=g],[class*=" g"]{--s:var(--m)}.g0{--s:var(--g0)}.g2{--s:var(--g2)}.g3{--s:var(--g3)}.g6{--s:var(--g6)}
 circle.u{fill:none;opacity:.6}
-.sg p{margin:0;display:grid;grid-template-columns:56px 1fr 1fr;gap:8px;align-items:center;height:17px;font-size:11.5px;color:var(--m)}
+.sg p{margin:0;display:grid;grid-template-columns:68px 1fr;gap:8px;align-items:center;height:17px;font-size:11.5px;color:var(--m)}
 .sg s{display:block;height:6px;border-radius:3px;background:currentColor}
-.sg .sh b{font-size:10px}
-.sg i{display:block;height:2px;border-radius:1px;background:var(--l)}
+.sg b,.legend b{color:var(--t);margin:0 3px}.legend span:empty{display:none}
 .q-strong{color:var(--ok)}.q-fair{color:var(--mid)}b.q-fair{color:var(--midt)}.q-weak{color:var(--warn)}.q-none{color:var(--bad)}
 .legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--m);margin-top:12px}
 .legend i{display:inline-block;width:8px;height:8px;border-radius:4px;background:var(--s);margin-right:5px}
@@ -210,7 +209,7 @@ summary{cursor:pointer;padding:15px 0;font-size:11px;font-weight:600;letter-spac
         <text y="-94">N</text><text x="97" y="3">E</text><text y="101">S</text><text x="-97" y="3">W</text>
         <g id="dots"></g>
       </svg><div class="sg" id="sig"></div></div><div class="note" id="sgn"></div>
-      <div class="legend"><span class="g0"><i></i>GPS</span><span class="g2"><i></i>Galileo</span><span class="g3"><i></i>BeiDou</span><span class="g6"><i></i>GLONASS</span><span class="g1"><i></i>other</span><span class="u"><i></i>not used</span></div>
+      <div class="legend"><span class="g0"><i></i>GPS</span><span class="g2"><i></i>Galileo</span><span class="g3"><i></i>BeiDou</span><span class="g6"><i></i>GLONASS</span><span class="g5" id="lgq"></span><span class="u"><i></i>not used</span><span><b>&#9733;</b>dual-band: L1 + L5</span></div>
     </section>
     <!-- the whole diag log on the board, aggregated: the summary, accuracy and the receiver link, events by kind -->
     <section><h3>Diag log <b id="evs">reading&hellip;</b></h3><div id="evk"></div><div id="evt"></div><div class="ev" id="evg"></div></section>
@@ -265,8 +264,7 @@ function hms(s) {                       // as _hms() in gps_logger.py
 function num(n) { return n == null ? "-" : esc(String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ")); }
 function gid(sv) { return GNSS[sv.system] === undefined ? 1 : GNSS[sv.system]; }
 function cls(sv) { return "g" + gid(sv) + (sv.used ? "" : " u"); }
-// C/N0 on L1 (L1/E1/B1) and L5 (L5/E5a/B2a)
-function tip(sv) { return esc(sv.name) + " L1 " + (+sv.l1 || 0) + " L5 " + (+sv.l5 || 0) + " dBHz"; }
+function tip(sv) { return esc(sv.name) + " " + esc(sv.cno || "-") + " dBHz"; }
 function fixTone(fix) { return fix.indexOf("3D") === 0 ? "ok" : fix.indexOf("fix") >= 0 ? "warn" : "bad"; }
 function mpp(lat, z) { return 156543.03 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z); }   // metres a pixel
 function wifiQ(rssi) {                 // [arcs 0-3, quality %, tone] for an RSSI in dBm
@@ -654,27 +652,27 @@ function sxLeft(kb) {
 
 // Signal: how clear each satellite's signal is (C/N0) in words: strong
 // from 35 dB-Hz, fair from 25, weak below (a weak one is easily lost); a
-// bar each satellite in use and band (L1, L5: a thin line where the band
-// has no signal), strongest first (the sky plot shows the rest); the overall
-// grade is the mean of those in use. -> [the bars, the words]
+// bar each satellite in use, strongest first, a star by one received on L5
+// too (dual-band, as Locus Map marks it); the sky plot shows the rest; the
+// overall grade is the mean of those in use. -> [the bars, the words]
 var SYS = {GPS: "GPS", Galileo: "GAL", BeiDou: "BDS", GLONASS: "GLO", QZSS: "QZS", SBAS: "SBAS"};
 function sigQ(c) { return c >= 35 ? "strong" : c >= 25 ? "fair" : c > 0 ? "weak" : "none"; }
 function sigView(svs) {
   if (!svs.length) return ['<p class="none">NO SATELLITE LIST YET</p>', ""];
   var s = svs.slice().sort(function (a, b) { return (+b.cno || 0) - (+a.cno || 0); }), bars = "";
   var used = 0, sum = 0, n = {strong: 0, fair: 0, weak: 0, none: 0}, idle = 0, on5 = 0;
-  var bar = function (c) { return c ? '<s class="q-' + sigQ(c) + '" style="width:' + Math.max(4, Math.min(c, 50) * 2) + '%"></s>' : "<i></i>"; };
   for (var i = 0; i < s.length; i++) {
     var c = +s[i].cno || 0;
     if (!s[i].used) { if (!c) idle++; continue; }
     used++; sum += c; n[sigQ(c)]++;
     if (+s[i].l5) on5++;
-    bars += "<p><span>" + esc(SYS[s[i].system] || s[i].system) + " " + esc(s[i].svid) + "</span>" + bar(+s[i].l1) + bar(+s[i].l5) + "</p>";
+    bars += "<p><span>" + esc(SYS[s[i].system] || s[i].system) + " " + esc(s[i].svid) + (+s[i].l5 ? "<b>&#9733;</b>" : "") + '</span><s class="q-' + sigQ(c) +
+      '" style="width:' + Math.max(4, Math.min(c, 50) * 2) + '%"></s></p>';
   }
   var q = used ? sigQ(sum / used) : "none", word = {strong: "Strong", fair: "Fair", weak: "Weak", none: "None"}[q];
   var heard = s.length - used - idle;   // (the rest: in the almanac's sky, no signal)
-  return ['<p class="sh"><b></b><b>L1</b><b>L5</b></p>' + bars, '<b class="q-' + q + '">' + word + " overall</b>" + MD + n.strong + " strong, " + n.fair + " fair, " +
-    n.weak + " weak" + MD + on5 + " on L5" + (heard ? MD + heard + " more heard, not in use" : "") +
+  return [bars, '<b class="q-' + q + '">' + word + " overall</b>" + MD + n.strong + " strong, " + n.fair + " fair, " +
+    n.weak + " weak" + MD + on5 + " dual-band" + (heard ? MD + heard + " more heard, not in use" : "") +
     (idle ? MD + idle + " in the sky without a signal" : "")];
 }
 
@@ -704,23 +702,25 @@ function view(d, prev) {
   v.gl = gl && gl.silent ? "GPS SILENT &middot; " + esc(hms(gl.silent).toUpperCase()) + "<em>" +
     (gl.junk ? "bytes arrive but no valid sentence: check TX/RX and the baud rate" :
       "nothing from the receiver: check its power and the TX wire") + "</em>" : "";
-  var dots = "", tbl = "<tr><td>SAT</td><td>L1</td><td>L5</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
+  var oth = "", dots = "", tbl = "<tr><td>SAT</td><td>dBHz</td><td>ELEV</td><td>AZIM</td><td>USED</td></tr>";
   for (var i = 0; i < svs.length; i++) {
     var s = svs[i], up = s.elev !== null && s.elev >= 0;
     if (s.used) used++;
+    if (gid(s) % 4 === 1) oth = esc(s.system);   // (SBAS 1, QZSS 5: grey, named only when seen)
     if (up) {
       var r = 90 - s.elev, a = s.azim * Math.PI / 180;
       dots += '<circle class="' + cls(s) + '" cx="' + Math.round(r * Math.sin(a)) + '" cy="' + Math.round(-r * Math.cos(a)) +
         '" r="' + (2.4 + Math.floor((s.cno || 0) / 14)) + '"><title>' + tip(s) + "</title></circle>";
     }
     tbl += '<tr class="' + (s.used ? "" : "u") + '"><td>' + esc(s.name) + (s.unhealthy ? " !" : "") + "</td><td>" +
-      (+s.l1 || "-") + "</td><td>" + (+s.l5 || "-") + "</td><td>" + (up ? esc(s.elev) + "&deg;" : "-") + "</td><td>" + (up ? esc(s.azim) + "&deg;" : "-") +
+      esc(s.cno || "-") + "</td><td>" + (up ? esc(s.elev) + "&deg;" : "-") + "</td><td>" + (up ? esc(s.azim) + "&deg;" : "-") +
       "</td><td>" + (s.used ? "&#9679;" : "") + "</td></tr>";
   }
   v.dots = dots;
   var sg = sigView(svs);
   v.sig = sg[0];
   v.sgn = sg[1];
+  v.lgq = oth && "<i></i>" + oth;
   v.skyh = "Sky <b>" + used + " used / " + svs.length + "</b>";
   v.svh = "All satellites &middot; " + svs.length;
   v.svt = tbl;

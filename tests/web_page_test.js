@@ -768,16 +768,16 @@ ft.wr8 = (() => {
     used: true}], rssi: "<s>X3", temp: "<t>X4"});
   return Object.keys(w).filter((k) => /<[bust]>X\d/.test(w[k]));
 })();
-// SKY-BANDS: a bar per band of each satellite in use (L1, L5; a line where
-// a band has no signal), the L5 count in the words, the table's two columns
+// SKY-BANDS: a star by each satellite in use that is received on L5 too
+// (dual-band, as Locus Map marks it), their count in the words; the grey
+// legend entry names SBAS/QZSS only when one is in the list
 ft.bands = (() => {
-  const w = c0.view({satellites: [
-    {name: "GPS 14", system: "GPS", svid: 14, cno: 37, l1: 37, l5: 27, elev: 77, azim: 11, used: true},
-    {name: "GLONASS 80", system: "GLONASS", svid: 80, cno: 39, l1: 39, l5: 0, elev: 60, azim: 50, used: true},
-    {name: "GPS 5", system: "GPS", svid: 5, cno: 20, l1: 20, l5: 0, elev: 10, azim: 200, used: false}]});
-  const rows = (h) => h.split("<p").slice(1).map((p) => [(p.match(/<s /g) || []).length, (p.match(/<i>/g) || []).length]);
-  return [rows(w.sig), /1 on L5/.test(w.sgn), /<td>37<\/td><td>27<\/td>/.test(w.svt),
-    /<td>39<\/td><td>-<\/td>/.test(w.svt)];
+  const sv = (n, sys, id, c, l5, used) => ({name: n, system: sys, svid: id, cno: c, l1: c, l5: l5, elev: 40, azim: 90, used: used});
+  const w = c0.view({satellites: [sv("GPS 14", "GPS", 14, 37, 27, true), sv("GLONASS 80", "GLONASS", 80, 39, 0, true),
+    sv("GPS 5", "GPS", 5, 20, 22, false)]});
+  const q = c0.view({satellites: [sv("QZSS 2", "QZSS", 2, 30, 25, true)]});
+  const stars = (h) => h.split("<p").slice(1).map((p) => (p.match(/&#9733;/g) || []).length);
+  return [stars(w.sig), /1 dual-band/.test(w.sgn), w.lgq, q.lgq];
 })();
 // WR-2: a 500 (a bug building status.json) shows the board's error
 ft.wr2 = (() => {

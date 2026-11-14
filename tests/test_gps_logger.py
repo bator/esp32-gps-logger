@@ -13464,7 +13464,7 @@ else:
           and v.get("coord", "").startswith("47.10000&deg; N  18.40000&deg; E")
           and "NO SATELLITE LIST" in v2.get("sig", ""), sy2[:600])
     check("PAGE: sky radar - horizon east at x 90, zenith centre, hollow unused",
-          '<circle class="g0" cx="90" cy="0" r="3.4"><title>GPS 16 L1 26 L5 21 dBHz'
+          '<circle class="g0" cx="90" cy="0" r="3.4"><title>GPS 16 26 dBHz'
           in v.get("dots", "")
           and '<circle class="g3 u" cx="0" cy="0" r="2.4">' in v.get("dots", "")
           and "SBAS 5" not in v.get("dots", "-")
@@ -13484,10 +13484,9 @@ else:
                or ("more heard, not in use" in sgn
                    and " in the sky without a signal" in sgn)
                or "2 in the sky without a signal" in sgn)
-          and sg == '<p class="sh"><b></b><b>L1</b><b>L5</b></p>'
-          '<p><span>GPS 16</span><s class="q-fair" style="width:52%"></s>'
-          '<s class="q-weak" style="width:42%"></s></p>'
-          and "1 on L5" in sgn
+          and sg == '<p><span>GPS 16<b>&#9733;</b></span><s class="q-fair" '
+          'style="width:52%"></s></p>'
+          and "1 dual-band" in sgn
           and "dB" not in sg + sgn, (sg[:400], sgn))
     check("PAGE: Logger - every JSON key labelled, escaped; a row a "
           "subsystem in its tone, the word only when not nominal, the count "
@@ -14180,11 +14179,10 @@ else:
           ft.get("wr7") == [[], True], repr(ft.get("wr7")))
     check("WEBR-8: rssi, temp, cno, elev and azim from the JSON reach the "
           "HTML coerced or escaped", ft.get("wr8") == [], repr(ft.get("wr8")))
-    check("SKY-BANDS: a bar per band (L1, L5) of each satellite in use, a "
-          "line where a band has no signal, the L5 count in the words, the "
-          "table's L1/L5 columns",
-          ft.get("bands") == [[[0, 0], [1, 1], [2, 0]], True, True, True],
-          repr(ft.get("bands")))
+    check("SKY-BANDS: a star by each satellite in use received on L5 too "
+          "(dual-band), their count in the words; the grey legend entry "
+          "named only when such a satellite is listed",
+          ft.get("bands") == [[0, 1], True, "", "<i></i>QZSS"], repr(ft.get("bands")))
     check("TELE-FROZEN: status lines that repeat a stale GPS time go on "
           "with up: a 3 min drop-out spans 3 min", ft.get("frozen") ==
           [300000, [[180000, 3]]], repr(ft.get("frozen")))
