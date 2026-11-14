@@ -13743,6 +13743,7 @@ else:
         ("tft light 0", "disp"),
         ("tft light 100", "disp"),
         ("upload err html 403 (captive portal?)", "upl"),
+        ("upload err not json 204 (captive portal?)", "upl"),
         ("upload aborted after 120 s", "upl"),
         ("upload err OSError(113)", "upl"),
         ("reboot tls memory 3", "reboot"),
@@ -22658,6 +22659,92 @@ try:
           re.search(r"^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y$", r3_sdk, re.M)
           is not None and r3_paths[0] == r3_paths[1]
           and None not in r3_paths[0], repr(r3_paths))
+
+    # RV14-10: a 2xx that is no JSON is no Dawarich answer
+    _r3_hp = gl.HTTP_POST
+    r3_10 = []
+    try:
+        gl.up_reset()
+        gl.up.update(url="https://d.example", key="k")
+        for ans in ((204, None, None), (200, None, b"text/plain"),
+                    (200, None, b"text/html; charset=utf-8"),
+                    (201, None, b"application/json; charset=utf-8"),
+                    (201, None, None)):
+            gl.HTTP_POST = lambda *a, _r=ans: _r
+            r3_10.append(gl._http_post(2)[0])
+    finally:
+        gl.HTTP_POST = _r3_hp
+        gl.up_reset()
+        diag_clear()
+    check("RV14-10: a 204, a plain-text or HTML 2xx is no Dawarich answer "
+          "(a failed POST, the batch kept); JSON or no Content-Type (a head "
+          "not read) stays a success",
+          r3_10 == [None, None, None, 201, 201], repr(r3_10))
+
+    # RV14-11: a hold that ran out goes, whichever list is due
+    gl.up_reset()
+    now = time.ticks_ms()
+    gl.up["hold"].update({"/a.trb": time.ticks_add(now, -1000),
+                          "/gone.trb": time.ticks_add(now, -5),
+                          "/b.trb": time.ticks_add(now, 60000)})
+    r3_11 = (gl._due(["/a.trb", "/b.trb", "/c.trb"], gl.up["hold"], now),
+             sorted(gl.up["hold"]))
+    gl.up_reset()
+    check("RV14-11: holds that ran out are dropped (a deleted track's too), "
+          "a running one still holds its file",
+          r3_11 == (["/a.trb", "/c.trb"], ["/b.trb"]), repr(r3_11))
+
+    # RV14-12: "GET " without a path gets no reply (not the whole page)
+    r3_12 = []
+    for rq in (b"GET ", b"GET \r\n", b"GET \r\n\r\n"):
+        c_ = RvConn(b"")
+        gl._web_reply(c_, rq)
+        r3_12.append(len(c_.sent))
+    c_ = RvConn(b"")
+    gl._web_reply(c_, b"GET /status.json\r\n")   # HTTP/0.9 still answered
+    r3_12.append(c_.sent.startswith(b"HTTP/1.") and b" 200 " in c_.sent[:20])
+    check("RV14-12: a request of only 'GET ' is cut off: no reply; "
+          "'GET /path' alone is still answered",
+          r3_12 == [0, 0, 0, True], repr(r3_12))
+
+    # RV14-13: a route day ahead of the fix's clock (a false date) is
+    # corrected; a second's step back at midnight and NTP's clock are not
+    _r3_rt = dict((k, v) for k, v in vars(hl._Rt).items()
+                  if not k.startswith("__"))
+    _r3_hc = (hl.log["clock"], hl._ntp[0])
+    r3_13 = []
+    try:
+        if hl._Rt.pts is None:
+            hl._rt_start()
+        today = 2400 * 86400 + 12 * 3600          # noon UTC
+        tday = hl._rt_day(today)
+        mid = today
+        while hl._rt_day(mid + 3600) == tday:
+            mid += 3600                  # the UTC hour local midnight is in
+        mid += 3600
+        for clk_s, rday, src in ((today, tday + 1, "gps"),
+                                 # a second before local midnight, the
+                                 # route already on the new day
+                                 (mid - 1, tday + 1, "gps"),
+                                 (today, tday + 3, "ntp")):
+            hl._rt_reset(rday)
+            hl._Rt.waiting = False
+            hl._Rt.drawn = None
+            if src == "gps":
+                hl.log["clock"], hl._ntp[0] = (clk_s, hl._stamp()), None
+            else:
+                hl.log["clock"], hl._ntp[0] = None, (clk_s, hl._stamp())
+            _clock[0] += hl.ROUTE_DRAW
+            hl._rt_tick(_clock[0])
+            r3_13.append(hl._Rt.day == hl._rt_day(clk_s))
+    finally:
+        for k, v in _r3_rt.items():
+            setattr(hl._Rt, k, v)
+        hl.log["clock"], hl._ntp[0] = _r3_hc
+    check("RV14-13: the fix's clock a day behind the route's day resets the "
+          "route to today (a false future date froze it until a reboot); a "
+          "second's step back at midnight or NTP's clock alone do not",
+          r3_13 == [True, False, False], repr(r3_13))
 finally:
     gl.LOG_DIR, gl.DIAG = _r3_saved
     gl.wifi_reset()

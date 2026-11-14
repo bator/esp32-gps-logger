@@ -1246,10 +1246,12 @@ home.
   body is the same as before.
 - Progress is a `<file>.pos` byte offset, written atomically. It advances
   only after HTTP 2xx or a durable copy to `<file>.bad`, so an interrupted
-  POST is resent (Dawarich deduplicates). A 2xx with an HTML body
-  (`Content-Type: text/html`) is a captive portal or proxy answering, not
-  Dawarich: it counts as a failed POST (`upload err html … (captive
-  portal?)` in the diagnostic log). A file that cannot be deleted after its
+  POST is resent (Dawarich deduplicates). A 2xx that is not JSON (an HTML
+  or plain-text body, or a `204 No Content`) is a captive portal or proxy
+  answering, not Dawarich: it counts as a failed POST (`upload err html …`
+  or `upload err not json … (captive portal?)` in the diagnostic log). A
+  2xx whose headers could not be read stays a success (a resend would
+  duplicate). A file that cannot be deleted after its
   last batch is parked as `.err` after 3 tries.
 - 400 / 413 / 422 quarantine the batch to `<file>.bad`. Three in a row
   without a success count as a server problem: backoff, no more quarantine

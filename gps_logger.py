@@ -5059,12 +5059,20 @@ def _http_post(size):
              "Authorization": "Bearer %s" % up["key"]},
             HTTP_TIMEOUT)
         retry = _retry_after_ms(retry)
-        if 200 <= code < 300 and ctype and b"html" in ctype.lower():
-            # an HTML 2xx is a captive portal (or a proxy) answering, not
-            # Dawarich (JSON): without CA_FILE nothing else tells, and the
-            # batch counted as sent was deleted
-            print("upload: HTML answer, not Dawarich (captive portal?)")
-            _diag_write("upload err html %d (captive portal?)" % code)
+        ct = ctype.lower() if ctype else None
+        if 200 <= code < 300 and (code == 204
+                                  or (ct is not None and b"json" not in ct)):
+            # a 2xx that is no JSON (HTML, plain text, a 204 without a
+            # body) is a captive portal or a proxy answering, not Dawarich:
+            # without CA_FILE nothing else tells, and the batch counted as
+            # sent was deleted. (A 2xx whose head could not be read, no
+            # Content-Type, stays a 2xx: resending it would duplicate.)
+            if ct is not None and b"html" in ct:
+                print("upload: HTML answer, not Dawarich (captive portal?)")
+                _diag_write("upload err html %d (captive portal?)" % code)
+            else:
+                print("upload: %d not JSON, not Dawarich (proxy?)" % code)
+                _diag_write("upload err not json %d (captive portal?)" % code)
             code = None
         up["enomem"] = 0
         up["last_err"] = None
@@ -5181,11 +5189,16 @@ def _env_bad(url, key):
     return None if ok else "GEO_URL in .env: not http(s)://host[:port][/path]"
 
 def _due(files, held, now):
-    """files without those held back (_hold_file) for now."""
+    """files without those held back (_hold_file) for now. A hold that ran
+    out goes (any, not only one of files): only a 2xx for its file removed
+    it, so a deleted or parked track's hold stayed all boot, and past a
+    ticks half-wrap it could read as held again."""
+    for p in list(held):
+        if not _waiting(now, held[p], UP_WAIT_MAX):
+            del held[p]
     due = []
     for p in files:
-        t = held.get(p)
-        if t is None or not _waiting(now, t, UP_WAIT_MAX):
+        if p not in held:
             due.append(p)
     return due
 
@@ -6739,7 +6752,9 @@ def _web_reply(c, req):
                       wifi["ip"] or "<board ip>", HOSTNAME),))
         return
     parts = req.split(None, 2)          # (HTTP/0.9: "GET /\r\n")
-    path = parts[1] if len(parts) > 1 else b"/"
+    if len(parts) < 2:
+        return                           # "GET " and no path: cut off
+    path = parts[1]
     parts = None
     if path.startswith(b"/status.json"):
         _web_status(c)
@@ -7482,6 +7497,8 @@ ROUTE_W, ROUTE_H = 83, 51                # the pixels a point can land on
 ROUTE_DRAW = 10000                       # ms between looks at the route
 ROUTE_SAVE = 300000                      # ms between saves of a changed route (and
                                          # one when a stay starts)
+ROUTE_BACK = 300                         # s the clock may be behind the route's
+                                         # day before that day counts as false
 ROUTE_FILE = "/route.bin"
 ROUTE_HEAD = "<4siiiii"                  # magic, day, cm, step, last line's s, n
 ROUTE_MAGIC = b"RTE1"
@@ -7764,8 +7781,16 @@ def _rt_tick(now):
     R.drawn = now
     c = log["clock"] or _ntp[0]
     if c is not None:
-        d = _rt_day(_utc_s(c))
-        if R.waiting or d > R.day:
+        s = _utc_s(c)
+        d = _rt_day(s)
+        # the fix's clock more than ROUTE_BACK s before R.day began: R.day
+        # came from a false date (a corrupt digit past the checksum, a
+        # wrong NTP answer). Days only went forward, so today's route was
+        # gone and every line after it dropped until a reboot. (Not NTP's
+        # clock alone, and not a second's step back at midnight.)
+        back = (d < R.day and c is log["clock"]
+                and _rt_day(s + ROUTE_BACK) < R.day)
+        if R.waiting or d > R.day or back:
             if d != R.day:
                 _rt_reset(d)
             R.waiting = False
