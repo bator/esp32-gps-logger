@@ -17,14 +17,16 @@ ENV_FILE (KEY=VALUE lines, mode 600: it holds secrets):
   DEVICE_ID    the Overland device id (default: the board's node, !xxxxxxxx-lora)
   NODES        node ids to take (!a1b2c3d4,...; default: any on the channel)
   ALLOW_DECODED  1: also take packets a gateway decoded (its MQTT encryption
-               off). Default 0: only encrypted ones, which only the channel
-               key makes (anyone who may publish to the broker could forge a
-               decoded one).
+               off). Default 0: only encrypted ones (a decoded one anyone who
+               may publish to the broker could write outright).
 
-The channel is Meshtastic's AES-CTR: unauthenticated by design (the home
-node must read it). A position is taken only with a time within MAX_AGE /
-MAX_AHEAD of now and after the last one taken from its node: a replayed or
-re-sent packet never becomes a point.
+The channel is Meshtastic's AES-CTR: encryption, no authentication (the
+stock home node must read it, so no tag can be added). Someone with a
+captured packet could flip bits of its plaintext blindly and get a wrong
+point in; a replay or a re-sent packet never becomes one: a position is
+taken only with a time within MAX_AGE behind / MAX_AHEAD ahead of now and
+after the last one taken from its node (MAX_AHEAD small, so a forged time
+holds the real ones back for 2 minutes at most).
 
 Needs python3 and paho-mqtt (Debian: apt install python3-paho-mqtt) for
 "run"; the decoding is plain Python (no protobuf or crypto library), so
@@ -42,7 +44,7 @@ CHANNEL = "GpsLog"                       # gps_lora.CHANNEL
 LORA_SALT = b"gps-logger lora channel"   # gps_logger.LORA_SALT
 PORT_POSITION = 3
 MAX_AGE = 2 * 86400                      # s a position's time may be behind now
-MAX_AHEAD = 600                          # s it may be ahead (clocks)
+MAX_AHEAD = 120                          # s it may be ahead (clocks)
 
 # --- AES (encryption only: CTR needs no more) ---------------------------------
 

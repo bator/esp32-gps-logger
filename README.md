@@ -1417,7 +1417,8 @@ Meshtastic, channel GpsLog) --MQTT--> tools/lora_bridge.py --Overland--> Dawaric
    the broker, decrypts the board's position packets (plain Python: no protobuf
    or crypto library), drops the copies other gateways and relays bring and any
    position not newer than its node's last or out of a 2-day window (the channel's
-   AES-CTR is Meshtastic's, unauthenticated: no replay becomes a point), and posts
+   AES-CTR is Meshtastic's: encrypted, not authenticated, so a replay never
+   becomes a point, a blindly bit-flipped packet could), and posts
    each as an Overland point to `GEO_URL` (device `!xxxxxxxx-lora`, or
    `DEVICE_ID`). The board's own WiFi upload later brings the full track.
 
