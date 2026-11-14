@@ -167,6 +167,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
 | `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has (with an https `GEO_URL` / `OTA_URL` it is asked on after a fix until the clock is set; a fix's clock is preferred). An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). |
+| `LORA` / `LORA_KEY` / `LORA_DBM` / `LORA_EVERY` | The [LoRa radio](#lora): `LORA=0` turns it off (default on). `LORA_KEY`: the private channel's key, base64 of 16 or 32 bytes; without it the key is derived from `OTA_KEY` (`tools/lora_bridge.py key ~/.config/gps-logger/ota.key` prints it); no key at all: no LoRa (never the public default key). `LORA_DBM` 0–22 (default 22), `LORA_EVERY` 30–3600 seconds between positions while moving (default 60). Read at boot. |
 | `TFT_LIGHT` / `TFT_IDLE` | The display's backlight: `TFT_LIGHT` 0–100 per cent while it is on (default 30; 0 keeps it dark, the USER button still lights it), `TFT_IDLE` 0–86400 seconds into a stay (the board has not moved) before it goes dark (default 300; 0: never). Read at boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
@@ -208,13 +209,13 @@ VENV=../venv ./deploy.sh         # python, pip and mpremote from another venv
 ```
 
 The script asks the board what it is (anything but the Heltec is refused:
-`Unsupported board`), compiles `gps_logger.py`, `gps_clock.py` and `gps_receiver.py` to `.mpy` when the
+`Unsupported board`), compiles `gps_logger.py`, `gps_clock.py`, `gps_receiver.py` and `gps_lora.py` to `.mpy` when the
 firmware has no frozen logger and checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
 It makes `web.html.gz` with `tools/web_min.py` (~24 KB instead of the ~80 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
 window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
-`gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy`, `main.py` and the status page, only as `web.html.gz`, as
+`gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy`, `gps_lora.mpy`, `main.py` and the status page, only as `web.html.gz`, as
 `<name>.dpl`, checks their size and SHA-256 on the board, and only then
 renames them over the old files, removing an old plain `/web.html` in the
 same step (~90 KB of flash back); a failed check (`Copy check FAILED`)
@@ -264,7 +265,7 @@ Freezing does not stop the Python heap from growing into the IDF heap
 (MicroPython's split heap stays on); it leaves so much of the 96 KB heap
 free that an allocation rarely has to.
 
-The logger, `gps_clock.py`, `gps_receiver.py`, `gps_boot.py` and the display's modules are compiled with
+The logger, `gps_clock.py`, `gps_receiver.py`, `gps_lora.py`, `gps_boot.py` and the display's modules are compiled with
 `-O3` (`opt=3` in the build's manifest, `-O3` in `deploy.sh`): their line
 numbers stay out of the bytecode, ~10 KB of the logger's ~98 KB. The cost: a
 traceback on the USB console no longer says where (each frame reads `line 1`,
@@ -282,8 +283,8 @@ second, so the board may not boot an app afterwards. The ROM download mode
 over USB is never touched: run `--flash` again, or write the backup back
 with the `esptool.py` command it prints (with the second slot running, the
 board still boots that one). Run `./deploy.sh` right after: it
-removes the old `gps_logger.mpy`, `gps_clock.mpy` and `gps_receiver.mpy` (until then they shadow the
-frozen modules and run as before) and any stray `gps_logger.py`, `gps_clock.py` or `gps_receiver.py` (`''` comes first in
+removes the old `gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy` and `gps_lora.mpy` (until then they shadow the
+frozen modules and run as before) and any stray `gps_logger.py`, `gps_clock.py`, `gps_receiver.py` or `gps_lora.py` (`''` comes first in
 `sys.path`), and clears the boot-fail counter. Right after esptool's reset
 the raw REPL may not answer for a while; if `deploy.sh` cannot reach the
 board, run it again.
@@ -292,22 +293,23 @@ The firmware also freezes `gps_clock.py`, the Clock (date maths, the one test
 of a real UTC time, Stamps and Anchors), `gps_receiver.py`, the Receiver (the
 UC6580's UART, the NMEA, the seconds it publishes in `st`; the logger imports
 both, so a plain board gets a `gps_clock.mpy` and a `gps_receiver.mpy` beside
-`gps_logger.mpy`), and `gps_boot.py`: what `main.py`
+`gps_logger.mpy`), `gps_lora.py`, the [LoRa radio](#lora) (imported only when
+LoRa is on; a plain board gets a `gps_lora.mpy` too), and `gps_boot.py`: what `main.py`
 does around the logger's start for OTA and the boot-fail retry. Frozen, its
 code is not compiled into the heap at every boot; `main.py` runs without it
 on a plain firmware. And it carries a small `gps_frozen` module with the
 commit (`-dirty` when the tree had uncommitted changes), the BUILD time and
-five SHA-256s: `SHA` of the frozen `gps_logger.py`, `TFT` of `gps_tft.py` +
+six SHA-256s: `SHA` of the frozen `gps_logger.py`, `TFT` of `gps_tft.py` +
 `gps_tft_font.py` (cat'ed in that order), `BOOT` of `gps_boot.py`, `CLOCK`
-of `gps_clock.py` and `RX` of `gps_receiver.py`. When `deploy.sh` finds it, it
+of `gps_clock.py`, `RX` of `gps_receiver.py` and `LORA` of `gps_lora.py`. When `deploy.sh` finds it, it
 copies only `main.py` and the page and removes a stray `gps_logger.mpy`,
-`gps_clock.mpy` and `gps_receiver.mpy`, but first
+`gps_clock.mpy`, `gps_receiver.mpy` and `gps_lora.mpy`, but first
 compares them with the repo's files:
 when `SHA` differs (or a firmware built before it was recorded) it stops and
 asks for `tools/build_firmware.sh --flash`, naming the file that differs
 (`gps_logger.py`, `gps_tft.py / gps_tft_font.py`, `gps_boot.py`,
-`gps_clock.py` or `gps_receiver.py`, the first in that order). A marker without
-`TFT`, `BOOT`, `CLOCK` or `RX` (`tools/firmware.py` holds what each field hashes,
+`gps_clock.py`, `gps_receiver.py` or `gps_lora.py`, the first in that order). A marker without
+`TFT`, `BOOT`, `CLOCK`, `RX` or `LORA` (`tools/firmware.py` holds what each field hashes,
 for both scripts; an older build, read as
 `-`) skips that comparison. A marker whose words are not plain
 (`A-Za-z0-9._-`) is no answer: it stops like a missing one. `FORCE=1
@@ -401,7 +403,7 @@ A refused manifest is one diagnostic line until a good one comes, and no
 unverified field goes into it (a commit with newlines wrote forged lines);
 any diag line is one line, cut at 320 bytes (`DIAG_CUT`; a status line
 runs to ~220). A `/gps_logger.mpy` or `.py`
-(or `/gps_clock.mpy`, `/gps_receiver.mpy`, `.py`) on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
+(or `/gps_clock.mpy`, `/gps_receiver.mpy`, `/gps_lora.mpy`, `.py`) on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
 (`''` comes first in `sys.path`): on a frozen firmware the install moves
 it aside as `<name>.ota-old`, the valid new firmware deletes it, and
 after a rollback `main.py` puts it back before the import. A Ctrl-C
@@ -1348,6 +1350,73 @@ home.
   (`mem`, `heap`), and `heap grew in <step>` names the upload step during
   which the heap grew.
 
+### LoRa
+
+While the board is off the home WiFi (on the train, in a bag) the SX1262
+on the board sends its position over LoRa, through the 868 MHz stick antenna on
+the LoRa socket (`gps_lora.py`, frozen like the Clock and the Receiver). It speaks
+Meshtastic, so the Meshtastic mesh carries it and a stock Meshtastic node at
+home receives it:
+
+```
+board (gps_lora) --LoRa--> [Meshtastic routers relay] --> home node (stock
+Meshtastic, channel GpsLog) --MQTT--> tools/lora_bridge.py --Overland--> Dawarich
+```
+
+- **Air**: Meshtastic EU_868, 869.525 MHz, the **MediumFast** preset (SF9,
+  250 kHz, CR 4/5, sync word 0x2B, preamble 16): the preset most Hungarian nodes
+  listen on, a quarter of LongFast's airtime (~0.2 s a packet). 22 dBm.
+- **Channel**: a private channel, `GpsLog`, AES-CTR with the board's own key
+  (`LORA_KEY`, or derived from `OTA_KEY`), as Meshtastic encrypts a channel
+  (nonce: packet id, sender, block counter). Routers relay it without reading it;
+  only a node with the key decodes it. The public default channel is never used:
+  the public MQTT broker blurs default-channel positions to ~1 km anyway, and
+  they would be public.
+- **Packets**: a broadcast `POSITION_APP` (latitude/longitude 1e-7°, altitude,
+  the fix's UTC time, speed, satellites, HDOP, `OK_TO_MQTT`), hop limit 3,
+  from node `!xxxxxxxx` (the MAC's last 4 bytes, as Meshtastic's; the diag's
+  `lora on` line names it), and every 3 h a `NODEINFO_APP` with `DEVICE_ID` as
+  its name.
+- **When**: a usable fix only (the same `_usable` as the track), not on the
+  home WiFi nor during a stay that began there (the upload has it), every
+  `LORA_EVERY` (60 s) once it moved 50 m from the last one sent, every 15 min
+  when it did not. A TX does not block the loop (it is polled each tick).
+- **Duty cycle**: the band allows 10 %; the board keeps its own airtime to 1 %
+  (a token bucket: 36 s an hour at most, ~180 packets), since every packet is
+  relayed up to 3 times on the shared mesh. A position over the budget is
+  dropped, not queued.
+- **Failure**: a radio that does not answer (BUSY stuck, 3 errors in a row) is
+  put to sleep for the run, `lora off` in the diag; an OSError there never
+  crashes the logger or rolls an OTA back. The diag gets `lora sent N fail N air
+  N ms` every 30 minutes. Between packets the SX1262 sleeps (warm start).
+
+**The home side** (needs one more LoRa board at home, e.g. a Heltec WiFi LoRa
+32 V3, 868 MHz):
+
+1. Flash stock Meshtastic on it (flasher.meshtastic.org), then with the
+   `meshtastic` CLI over USB: region `EU_868`, preset `MEDIUM_FAST`, the primary
+   channel `GpsLog` with the board's key, uplink on, WiFi, MQTT to the home
+   broker (`root msh/EU_868/HU`, encryption on or off: the bridge reads both):
+
+   ```bash
+   KEY=$(python3 tools/lora_bridge.py key ~/.config/gps-logger/ota.key)
+   meshtastic --set lora.region EU_868 --set lora.modem_preset MEDIUM_FAST \
+     --ch-set name GpsLog --ch-set psk "base64:$KEY" --ch-set uplink_enabled true --ch-index 0 \
+     --set network.wifi_enabled true --set network.wifi_ssid SSID --set network.wifi_psk PASS \
+     --set mqtt.enabled true --set mqtt.address BROKER --set mqtt.username USER \
+     --set mqtt.password PASS --set mqtt.root msh/EU_868/HU
+   ```
+
+   Put it high (an attic window): it hears the board around the town and
+   whatever the mesh relays to it.
+2. `tools/lora_bridge.py run /etc/gps-lora-bridge.env` (python3 and
+   `python3-paho-mqtt`; systemd: `tools/gps-lora-bridge.service`; the env file's
+   keys are in the script's docstring): it subscribes to
+   the broker, decrypts the board's position packets (plain Python: no protobuf
+   or crypto library), drops the copies other gateways and relays bring, and posts
+   each as an Overland point to `GEO_URL` (device `!xxxxxxxx-lora`, or
+   `DEVICE_ID`). The board's own WiFi upload later brings the full track.
+
 ### Watchdog and recovery
 
 - A 120 s hardware watchdog is fed in the main loop and inside long reads and
@@ -1526,10 +1595,10 @@ every pull request:
   neither. The suite removes every temporary directory it made when it ends
   (`KEEP_TMP=1` keeps them to look at after a failure).
 - `mpy-cross` 1.29 for `xtensawin` on every frozen module (`gps_logger.py`,
-  `gps_clock.py`, `gps_receiver.py`, `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
+  `gps_clock.py`, `gps_receiver.py`, `gps_lora.py`, `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
   itself (ESP-IDF, `boards/GPS_LOGGER_S3`) is not built in CI: a board or
   freeze-manifest breakage shows at the next local `tools/build_firmware.sh`.
-- `pyflakes` on every Python file: `gps_logger.py`, `gps_clock.py`, `gps_receiver.py`,
+- `pyflakes` on every Python file: `gps_logger.py`, `gps_clock.py`, `gps_receiver.py`, `gps_lora.py`,
   `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`, `main.py`, `tools/` and `tests/`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
 
@@ -1537,9 +1606,9 @@ The same locally:
 
 ```bash
 .venv/bin/pip install pyflakes "mpy-cross==1.29.*"
-.venv/bin/python -m pyflakes gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
+.venv/bin/python -m pyflakes gps_logger.py gps_clock.py gps_receiver.py gps_lora.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 shellcheck deploy.sh tools/build_firmware.sh
-for m in gps_logger gps_clock gps_receiver gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done
+for m in gps_logger gps_clock gps_receiver gps_lora gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done
 MICROPYTHON=/path/to/micropython MICROPYTHON_F32=/path/to/micropython-f32 \
     python3 tests/test_gps_logger.py
 ```

@@ -1,0 +1,21 @@
+# The home side of the board's LoRa positions (README, "LoRa"):
+#   install -m 755 tools/lora_bridge.py /usr/local/bin/gps-lora-bridge
+#   install -m 600 /dev/null /etc/gps-lora-bridge.env   (then fill it in)
+#   cp tools/gps-lora-bridge.service /etc/systemd/system/
+#   systemctl enable --now gps-lora-bridge
+[Unit]
+Description=GPS logger LoRa positions: Meshtastic MQTT -> Dawarich
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/gps-lora-bridge run %d/env
+Restart=always
+RestartSec=30
+DynamicUser=yes
+LoadCredential=env:/etc/gps-lora-bridge.env
+# (root-only env file, read as a credential by the dynamic user: %d/env)
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
