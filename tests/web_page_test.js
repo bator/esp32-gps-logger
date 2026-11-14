@@ -768,6 +768,17 @@ ft.wr8 = (() => {
     used: true}], rssi: "<s>X3", temp: "<t>X4"});
   return Object.keys(w).filter((k) => /<[bust]>X\d/.test(w[k]));
 })();
+// SKY-BANDS: a bar per band of each satellite in use (L1, L5; a line where
+// a band has no signal), the L5 count in the words, the table's two columns
+ft.bands = (() => {
+  const w = c0.view({satellites: [
+    {name: "GPS 14", system: "GPS", svid: 14, cno: 37, l1: 37, l5: 27, elev: 77, azim: 11, used: true},
+    {name: "GLONASS 80", system: "GLONASS", svid: 80, cno: 39, l1: 39, l5: 0, elev: 60, azim: 50, used: true},
+    {name: "GPS 5", system: "GPS", svid: 5, cno: 20, l1: 20, l5: 0, elev: 10, azim: 200, used: false}]});
+  const rows = (h) => h.split("<p").slice(1).map((p) => [(p.match(/<s /g) || []).length, (p.match(/<i>/g) || []).length]);
+  return [rows(w.sig), /1 on L5/.test(w.sgn), /<td>37<\/td><td>27<\/td>/.test(w.svt),
+    /<td>39<\/td><td>-<\/td>/.test(w.svt)];
+})();
 // WR-2: a 500 (a bug building status.json) shows the board's error
 ft.wr2 = (() => {
   const q = page(1600);

@@ -557,6 +557,11 @@ def _uc_line(p):
 _UC_GNSS = {"GP": 0, "GA": 2, "GB": 3, "GQ": 5, "GL": 6}  # (GNSS's numbers)
 _UC_SYS = {1: 0, 2: 6, 3: 2, 4: 3, 5: 5}  # GSA's system id -> gnssId
 _uc_sv = {"new": {}, "open": False, "until": None, "used": [], "gsa": None}
+# GSV's signal id (its last field) -> its band, 1 (L1/E1/B1) or 5 (L5/E5a/
+# B2a), keyed gnssId << 8 | id (UFirebird II spec, table 1-3); others none
+_UC_BAND = {0 << 8 | 1: 1, 0 << 8 | 8: 5, 2 << 8 | 7: 1, 2 << 8 | 1: 5,
+            3 << 8 | 1: 1, 3 << 8 | 3: 1, 3 << 8 | 5: 5, 5 << 8 | 1: 1,
+            5 << 8 | 8: 5, 6 << 8 | 1: 1}
 
 def _uc_gsv_skip():
     """True while a list is fresh: with a fix its GSV comes at 1 Hz whatever
@@ -594,10 +599,11 @@ def _uc_gsa(talker, f):
 
 def _uc_gsv(talker, f):
     """One GSV sentence into a round's list (the same satellite on two
-    bands: its strongest). A round starts with GPS's first sentence; the
-    next such one closes it as st["svs"]: (svid, cno, elevation, azimuth,
-    used, unhealthy, gnssId), and the next GSV_EVERY s of GSV are not even
-    decoded (_uc_gsv_skip)."""
+    bands: its strongest as its cno, and each band's on its own). A round
+    starts with GPS's first sentence; the next such one closes it as
+    st["svs"]: (svid, cno, elevation, azimuth, used, unhealthy, gnssId,
+    L1 cno, L5 cno), and the next GSV_EVERY s of GSV are not even decoded
+    (_uc_gsv_skip)."""
     g = _UC_GNSS.get(talker)
     if g is None:
         return
@@ -606,8 +612,8 @@ def _uc_gsv(talker, f):
     if first and u["open"]:
         # an empty round too: no signal at all, else the last sky stays
         used = u["used"]
-        st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8)
-                     for k, v in u["new"].items()]
+        st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8,
+                      v[3], v[4]) for k, v in u["new"].items()]
         st["svs_at"] = time.ticks_ms()
         u["new"], u["open"] = {}, False
         u["until"] = time.ticks_add(time.ticks_ms(), GSV_EVERY * 1000)
@@ -616,6 +622,8 @@ def _uc_gsv(talker, f):
         u["open"] = True
     elif not u["open"]:
         return                           # (the rest of a round begun before)
+    sig = f[-1]                          # ("B", BDS B2I, is hex: no band)
+    band = _UC_BAND.get(g << 8 | int(sig)) if sig.isdigit() else None
     for i in range(4, len(f) - 3, 4):
         n = _num(f[i], int)
         if n is None:
@@ -623,8 +631,14 @@ def _uc_gsv(talker, f):
         k = g << 8 | n
         cno = _num(f[i + 3], int) or 0
         v = u["new"].get(k)
-        if v is None or cno > v[0]:
-            u["new"][k] = (cno, _num(f[i + 1], int), _num(f[i + 2], int) or 0)
+        if v is None:
+            v = u["new"][k] = [0, None, 0, 0, 0]
+        if v[1] is None or cno > v[0]:
+            v[0], v[1], v[2] = cno, _num(f[i + 1], int), _num(f[i + 2], int) or 0
+        if band == 1 and cno > v[3]:
+            v[3] = cno
+        elif band == 5 and cno > v[4]:
+            v[4] = cno
 
 def gps_setup():
     """Ask the receiver for GPS_HZ fixes a second (_uc_setup). Not saved in
