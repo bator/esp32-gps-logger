@@ -271,12 +271,15 @@ def trb_lines(data, errors="replace"):
             st = None
 
 
-def convert(lines, name):
-    """Track lines -> GPX 1.1 text. name becomes the <trk><name>."""
+def convert(lines, name, count=None):
+    """Track lines -> GPX 1.1 text. name becomes the <trk><name>; count, a
+    list, gets the number of points appended."""
     out = [GPX_HEAD % escape(name)]
     first = True
     ext = False
+    n = 0
     for new_seg, lat, lon, ele, hdop, t, acc, speed in read_points(lines):
+        n += 1
         if new_seg and not first:
             out.append("</trkseg><trkseg>\n")
         first = False
@@ -294,6 +297,8 @@ def convert(lines, name):
         out.append('<trkpt lat="%.6f" lon="%.6f">%s</trkpt>\n'
                    % (lat, lon, tags))
     out.append(GPX_TAIL)
+    if count is not None:
+        count.append(n)
     if ext:
         out[0] = out[0].replace(
             'xmlns="http://www.topografix.com/GPX/1/1"',
@@ -312,20 +317,33 @@ def main(argv):
         return 2
     path = argv[1]
     name = path.rsplit("/", 1)[-1]
-    name = name[:name.index(".tr")]
+    # the suffix only (the longest that fits): "my.trip.trk" is "my.trip"
+    for suf in sorted(SUFFIXES, key=len, reverse=True):
+        if name.endswith(suf):
+            name = name[:-len(suf)]
+            break
+    n = []
     # (bytes that are not UTF-8 never reach the GPX: read_points keeps
     # only numbers and checked times)
     if path.endswith((".trb", ".trb.err")):
         with open(path, "rb") as f:
-            sys.stdout.write(convert(trb_lines(f.read(), "surrogateescape"),
-                                     name))
-        return 0
-    # newline="\n": a line ends only at \n, as _rd_line reads it (with
-    # universal newlines, and also with newline="", a damaged byte 0x0D
-    # splits one point line into two)
-    with open(path, encoding="utf-8", errors="surrogateescape",
-              newline="\n") as f:
-        sys.stdout.write(convert(f, name))
+            data = f.read()
+        sys.stdout.write(convert(trb_lines(data, "surrogateescape"), name, n))
+    else:
+        # newline="\n": a line ends only at \n, as _rd_line reads it (with
+        # universal newlines, and also with newline="", a damaged byte 0x0D
+        # splits one point line into two)
+        with open(path, encoding="utf-8", errors="surrogateescape",
+                  newline="\n") as f:
+            sys.stdout.write(convert(f, name, n))
+        with open(path, "rb") as f:
+            data = f.read()
+    if not n[0] and data:
+        # an empty <trkseg> said nothing: a file copied with CRLF line ends
+        # has no valid time on any line
+        sys.stderr.write("trk2gpx: no valid points in %s%s\n"
+                         % (path, " (CRLF line ends?)" if b"\r\n" in data
+                            else ""))
     return 0
 
 
