@@ -305,6 +305,8 @@ var EVK = [
   ["wback", /^wifi back /, "WiFi back", 1, "ok"],
   ["stay", /^stay left /, "Stay ended", 0, "mut"],
   ["disp", /^tft light /, "Display backlight", 0, "mut"],
+  ["lorax", /^lora off /, "LoRa off", 2, "warn"],
+  ["lora", /^lora /, "LoRa radio", 0, "mut"],
   ["grx", /^gps /, "Receiver start", 0, "mut"],
   ["other", /^/, "Other", -1, "mut"]
 ];
@@ -462,6 +464,8 @@ var EVD = {
   tback: function (d, l) { evText(d, l.replace(/^time back /, "")); return 1; },
   stay: function (d, l) { evText(d, l.replace(/^stay left /, "")); return 1; },
   disp: function (d, l) { evText(d, l.replace(/^tft light (\d+)$/, "$1 %")); return 1; },
+  lorax: function (d, l) { evText(d, l.replace(/^lora off /, "")); return 1; },
+  lora: function (d, l) { evText(d, l.replace(/^lora /, "")); return 1; },
   other: function (d, l) {              // its first two words
     evText(d, l.split(" ").slice(0, 2).join(" "));
     d.x = d.x.length > 1 && d.x[0] > d.x[1] ? [d.x[1], d.x[0]] : d.x;

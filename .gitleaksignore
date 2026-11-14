@@ -1,0 +1,2 @@
+# false positive: base64 of the bytes 0..15, a test key (LORA-ENV), not a secret
+2b28573cdaa79d2cef7e064733cd01d7cf8ada88:tests/test_gps_logger.py:generic-api-key:22586

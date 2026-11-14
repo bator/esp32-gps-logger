@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
       - run: pip install pyflakes
       # every Python file of the repo (the board's modules, tools and tests)
-      - run: python -m pyflakes gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
+      - run: python -m pyflakes gps_logger.py gps_clock.py gps_receiver.py gps_lora.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 
   shellcheck:
     name: shellcheck
@@ -53,7 +53,7 @@ jobs:
       # and main.py: a construct xtensawin bytecode cannot take fails here,
       # not at the next local build
       - run: |
-          for m in gps_logger gps_clock gps_receiver gps_boot gps_tft gps_tft_font main; do
+          for m in gps_logger gps_clock gps_receiver gps_lora gps_boot gps_tft gps_tft_font main; do
             python -m mpy_cross -O3 -march=xtensawin -o "$RUNNER_TEMP/$m.mpy" "$m.py"
           done
       - run: ls -l "$RUNNER_TEMP"/*.mpy

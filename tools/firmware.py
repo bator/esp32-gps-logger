@@ -5,7 +5,7 @@ deploy finds stale, and the OTA manifest and the string its HMAC covers (the
 board checks the same string: gps_logger._ota_signed).
 
   firmware.py marker              the marker's source lines after COMMIT/SHA/BUILD
-  firmware.py stale SHA TFT BOOT CLOCK RX
+  firmware.py stale SHA TFT BOOT CLOCK RX LORA
                                   the first frozen source that is not this one
                                   ("-" or "": not recorded, an older build), or
                                   nothing; SHA is always compared
@@ -27,6 +27,7 @@ MARKER = (
     ("BOOT", ("gps_boot.py",), "gps_boot.py"),
     ("CLOCK", ("gps_clock.py",), "gps_clock.py"),
     ("RX", ("gps_receiver.py",), "gps_receiver.py"),
+    ("LORA", ("gps_lora.py",), "gps_lora.py"),
 )
 
 

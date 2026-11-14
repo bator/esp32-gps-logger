@@ -6993,8 +6993,8 @@ def deploy_run(env_extra):
     """deploy.sh in a fresh copy of the repo files against a fake board
     that holds an older install: (rc, stdout, stderr, board dir, calls)."""
     work = tempfile.mkdtemp(dir=dp_td)
-    for n in ("deploy.sh", "gps_logger.py", "gps_clock.py", "gps_receiver.py", "main.py",
-              "web.html", "gps_boot.py", "gps_tft.py", "gps_tft_font.py"):
+    for n in ("deploy.sh", "gps_logger.py", "gps_clock.py", "gps_receiver.py", "gps_lora.py",
+              "main.py", "web.html", "gps_boot.py", "gps_tft.py", "gps_tft_font.py"):
         shutil.copy(os.path.join(ROOT, n), work)
     os.makedirs(os.path.join(work, "tools"))
     if web_min:
@@ -7030,6 +7030,8 @@ def deploy_run(env_extra):
             clock_sha = hashlib.sha256(f.read()).hexdigest()
         with open(os.path.join(work, "gps_receiver.py"), "rb") as f:
             rx_sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(work, "gps_lora.py"), "rb") as f:
+            lora_sha = hashlib.sha256(f.read()).hexdigest()
         tft_sha = hashlib.sha256()
         for n in ("gps_tft.py", "gps_tft_font.py"):
             with open(os.path.join(work, n), "rb") as f:
@@ -7040,7 +7042,7 @@ def deploy_run(env_extra):
             if fz != "old":
                 f.write('SHA = "%s"\n' % (sha if fz != "stale" else "0" * 64))
             if fz in ("full", "tft-stale", "boot-stale", "clock-stale", "rx-stale", "quote",
-                      "dirty"):                 # a marker with the
+                      "dirty", "lora-stale"):                 # a marker with the
                 f.write('TFT = "%s"\n' % (tft_sha.hexdigest()  # display's and
                                           if fz != "tft-stale" else "0" * 64))
                 f.write('BOOT = "%s"\n' % (boot_sha           # gps_boot.py's SHA
@@ -7049,6 +7051,8 @@ def deploy_run(env_extra):
                                             if fz != "clock-stale" else "0" * 64))
                 f.write('RX = "%s"\n' % (rx_sha               # and gps_receiver.py's
                                          if fz != "rx-stale" else "0" * 64))
+                f.write('LORA = "%s"\n' % (lora_sha          # and gps_lora.py's
+                                           if fz != "lora-stale" else "0" * 64))
     env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_LOGGER=os.path.join(work, "logger"),
@@ -7111,7 +7115,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and dev_file(dev, ".rtc") == b"0"
           and dev_file(dev, "gps_clock.py") is None
           and dev_file(dev, "gps_receiver.py") is None
-          and len(cps) == 5 and all(c[2].endswith(".dpl") for c in cps)
+          and len(cps) == 6 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Heltec Wireless Tracker" in out and "(xtensawin)" in out
           and "Deployed to /dev/fakeACM0" in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
@@ -7134,13 +7138,14 @@ if shutil.which("bash") and shutil.which("sha256sum"):
         with open(pl) as f:
             dp_opt.append(f.read().split("\n")[:-1])
     opt_src = {}
-    for n in ("gps_logger.py", "gps_clock.py", "gps_receiver.py", "gps_boot.py", "gps_tft.py"):
+    for n in ("gps_logger.py", "gps_clock.py", "gps_receiver.py", "gps_lora.py", "gps_boot.py",
+              "gps_tft.py"):
         with open(os.path.join(ROOT, n)) as f:
             opt_src[n] = [ln for ln in f.read().splitlines()
                           if re.match(r"\s*assert\b", ln) or "__debug__" in ln]
     check("DEPLOY-OPT3: deploy.sh compiles with -O3, plain and FORCE_MPY; no "
           "assert or __debug__ in what is compiled that way",
-          len(dp_opt) == 2 and all(len(c) == 3 and all("-O3" in x.split() for x in c)
+          len(dp_opt) == 2 and all(len(c) == 4 and all("-O3" in x.split() for x in c)
                                    for c in dp_opt)
           and not any(opt_src.values()), repr((dp_opt, opt_src)))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
@@ -7236,7 +7241,8 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [c for call in calls_c for c in call if c[0] == "cp"]
           and rc_p == 0 and dev_file(dev_p, "gps_clock.mpy") is not None
           and sorted(c[1] for call in calls_p for c in call if c[0] == "cp")
-          == ["gps_clock.mpy", "gps_logger.mpy", "gps_receiver.mpy", "main.py", "web.html.gz"],
+          == ["gps_clock.mpy", "gps_logger.mpy", "gps_lora.mpy", "gps_receiver.mpy", "main.py",
+              "web.html.gz"],
           "%r %r" % ((rc_c, err_c[-200:]), (rc_p, err_p[-200:])))
     # DEPLOY-RX: gps_receiver.py the same way: compared (RX), installed on a
     # plain board, a stale frozen one stops naming it
@@ -7247,6 +7253,15 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [c for call in calls_r for c in call if c[0] == "cp"]
           and dev_file(dev_p, "gps_receiver.mpy") is not None,
           "%r" % ((rc_r, err_r[-200:]),))
+    # DEPLOY-LORA: gps_lora.py the same way: compared (LORA), installed on a
+    # plain board, a stale frozen one stops naming it
+    rc_l, out_l, err_l, dev_l, calls_l = deploy_run({"FAKE_FROZEN": "lora-stale"})
+    check("DEPLOY-LORA: a frozen gps_lora.py not this one stops, naming it; a plain board "
+          "gets gps_lora.mpy",
+          rc_l != 0 and "gps_lora.py" in err_l
+          and not [c for call in calls_l for c in call if c[0] == "cp"]
+          and dev_file(dev_p, "gps_lora.mpy") is not None,
+          "%r" % ((rc_l, err_l[-200:]),))
     # DEPLOY-RT2 (RT2-5): the marker's words go to the shell only as words: a
     # quote in the commit is no answer (it used to be spliced into the Python
     # run on the board, a SyntaxError after the copy); a "-dirty" commit is one;
@@ -7422,6 +7437,7 @@ def build_run(args, env_extra, dirty=False):
     shutil.copy(os.path.join(ROOT, "gps_logger.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_clock.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_receiver.py"), work)
+    shutil.copy(os.path.join(ROOT, "gps_lora.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_boot.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft.py"), work)
     shutil.copy(os.path.join(ROOT, "gps_tft_font.py"), work)
@@ -7538,7 +7554,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
         [], {"BOARD_DIR": os.path.join(ROOT, "boards", "GPS_LOGGER_S3")})
     with open(os.path.join(work_s3, "firmware", "manifest.py")) as f:
         man_s3 = re.findall(man_re, f.read())
-    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_clock", "gps_receiver",
+    opt3 = [(n, ", opt=3") for n in ("gps_logger", "gps_clock", "gps_receiver", "gps_lora",
                                      "gps_boot", "gps_tft", "gps_tft_font")]
     check("BUILD-OPT3: the frozen modules with code leave the line numbers out "
           "(opt=3: ~10 KB of the logger), the display's too",
@@ -7772,6 +7788,13 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           rc6 == 0 and 'module("gps_receiver.py", base_path' in m6
           and fr6.get("RX") == hashlib.sha256(rx6).hexdigest(),
           repr({k: fr6.get(k) for k in ("COMMIT", "SHA", "RX")}))
+    with open(os.path.join(work6, "gps_lora.py"), "rb") as f:
+        lora6 = f.read()
+    check("BUILD-LORA: gps_lora.py is frozen (opt=3) and the marker carries its SHA-256 "
+          "as LORA (deploy.sh compares it)",
+          rc6 == 0 and 'module("gps_lora.py", base_path' in m6
+          and fr6.get("LORA") == hashlib.sha256(lora6).hexdigest(),
+          repr({k: fr6.get(k) for k in ("COMMIT", "SHA", "LORA")}))
     # BUILD-PUBLISH-GZ: the board keeps only the gzip page: the manifest
     # names /web.html.gz alone, made with the board's small window (it
     # inflates it for a client without gzip); an older firmware (after a
@@ -8872,6 +8895,7 @@ check("CLOCK-MOD: the logger uses gps_clock's functions, not copies; the OTA sha
       and (gl.EPOCH_DAYS, gl.FIX_S_END) == (_gc.EPOCH_DAYS, _gc.FIX_S_END)
       and "/gps_clock.mpy" in gl.OTA_SHADOW and "/gps_clock.py" in gl.OTA_SHADOW
       and "/gps_receiver.mpy" in gl.OTA_SHADOW and "/gps_receiver.py" in gl.OTA_SHADOW
+      and "/gps_lora.mpy" in gl.OTA_SHADOW and "/gps_lora.py" in gl.OTA_SHADOW
       and tuple(_gb.OTA_SHADOW) == tuple(gl.OTA_SHADOW), repr(gl.OTA_SHADOW))
 _cm_rt = all(_gc.civil(_gc.days(y, m, d)) == (y, m, d)
              for y in (2020, 2024, 2026, 2099, 2100) for m in range(1, 13)
@@ -13674,6 +13698,10 @@ else:
         ("clock ntp 2026-11-02T11:38:31Z", "other"),
         ("tft light 0", "disp"),
         ("tft light 100", "disp"),
+        ("lora on node !a1b2c3d4 869525 kHz SF9", "lora"),
+        ("lora sent 42 fail 0 air 7980 ms", "lora"),
+        ("lora sent 42 fail 1 air 7980 ms tx irq 0200", "lora"),
+        ("lora off OSError('lora busy',)", "lorax"),
         ("upload err html 403 (captive portal?)", "upl"),
         ("upload aborted after 120 s", "upl"),
         ("upload err OSError(113)", "upl"),
@@ -17365,13 +17393,13 @@ with open(os.path.join(ROOT, "gps_tft.py"), "rb") as f:
 with open(os.path.join(ROOT, "gps_tft_font.py"), "rb") as f:
     _fw_tft += f.read()
 check("FW-RECIPE: tools/firmware.py signs what the board's _ota_signed checks; its "
-      "marker holds TFT/BOOT/CLOCK/RX; stale() names the first differing source, skips "
+      "marker holds TFT/BOOT/CLOCK/RX/LORA; stale() names the first differing source, skips "
       "fields an older marker lacks, a marker without SHA is stale",
       all(a == b for a, b in _fw_sig)
       and _fw.marker_lines(ROOT)[0] == 'TFT = "%s"' % hashlib.sha256(_fw_tft).hexdigest()
-      and [x.split(" = ")[0] for x in _fw.marker_lines(ROOT)] == ["TFT", "BOOT", "CLOCK", "RX"]
+      and [x.split(" = ")[0] for x in _fw.marker_lines(ROOT)] == ["TFT", "BOOT", "CLOCK", "RX", "LORA"]
       and _fw_st == [None, "gps_logger.py", "gps_tft.py / gps_tft_font.py", "gps_boot.py",
-                     "gps_clock.py", "gps_receiver.py"]
+                     "gps_clock.py", "gps_receiver.py", "gps_lora.py"]
       and _fw_old == (None, "gps_logger.py"),
       repr((_fw_sig, _fw_st, _fw_old)))
 
@@ -22242,6 +22270,441 @@ finally:
     gl.up_reset()
     diag_clear()
     shutil.rmtree(_n2_dir, ignore_errors=True)
+
+import base64
+import struct
+# --- LoRa: gps_lora.py (the board's SX1262 and its Meshtastic packets) and
+# tools/lora_bridge.py (the home side: MQTT -> Dawarich) -----------------------
+import gps_lora as _lo
+_lb_spec = importlib.util.spec_from_file_location(
+    "lora_bridge", os.path.join(ROOT, "tools", "lora_bridge.py"))
+_lb = importlib.util.module_from_spec(_lb_spec)
+_lb_spec.loader.exec_module(_lb)
+_lo.cryptolib = types.SimpleNamespace(aes=_lb.AES)   # (the board's is in C)
+_h = bytes.fromhex
+
+# LORA-AES: the bridge's AES (and so the board's key stream in these tests)
+# is FIPS-197's: NIST's ECB examples, AES-128 and AES-256 (the same Meshtastic's
+# test_crypto checks)
+_la = [(_lb.AES(_h("2B7E151628AED2A6ABF7158809CF4F3C")).encrypt(_h("6BC1BEE22E409F96E93D7E117393172A")),
+        _h("3AD77BB40D7A3660A89ECAF32466EF97")),
+       (_lb.AES(_h("2B7E151628AED2A6ABF7158809CF4F3C")).encrypt(_h("AE2D8A571E03AC9C9EB76FAC45AF8E51")),
+        _h("F5D3D58503B9699DE785895A96FDBAAF")),
+       (_lb.AES(_h("603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4")).encrypt(
+           _h("6BC1BEE22E409F96E93D7E117393172A")), _h("F3EED1BDB5D2A03C064B5A7E3DB181F8"))]
+check("LORA-AES: the bridge's AES-128/256 gives NIST's ECB answers", all(a == b for a, b in _la),
+      repr(_la))
+# LORA-CTR: the board's and the bridge's CTR give SP 800-38A F.5.1 (CTR-AES128;
+# its counter never carries past the last 4 bytes, as Meshtastic's)
+_lc_key, _lc_iv = _h("2b7e151628aed2a6abf7158809cf4f3c"), _h("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+_lc_pt = _h("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51"
+            "30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710")
+_lc_ct = _h("874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff"
+            "5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee")
+_lc = (bytes(_lo.ctr(_lc_key, _lc_iv, bytearray(_lc_pt))), _lb.ctr(_lc_key, _lc_iv, _lc_pt),
+       bytes(_lo.ctr(_lc_key, _lc_iv, bytearray(_lc_pt[:21]))))
+check("LORA-CTR: the board's and the bridge's AES-CTR give NIST's SP 800-38A "
+      "answer (a cut last block too)",
+      _lc[0] == _lc_ct and _lc[1] == _lc_ct and _lc[2] == _lc_ct[:21], repr(_lc))
+# LORA-MESH: Meshtastic's numbers: LongFast with the default key hashes to
+# channel 8, the nonce is the id (u64 LE), the sender (u32 LE) and a zero
+# counter; 869.525 MHz as the SX1262 takes it; sync word 0x2B as RadioLib
+# writes it
+_lm_def = _h("d4f1bb3a20290759f0bcffabcf4e6901")
+check("LORA-MESH: LongFast + default key -> channel hash 8 (board and bridge); the "
+      "nonce layout; RF word for 869.525 MHz; sync 0x2B as 0x24 0xB4",
+      _lo.channel_hash("LongFast", _lm_def) == 8 == _lb.channel_hash("LongFast", _lm_def)
+      and _lo.nonce(0x11223344, 0xAABBCCDD) == _h("ddccbbaa00000000443322110000000000")[:16]
+      and _lo._FRF == round(869.525e6 * 2 ** 25 / 32e6) and _lo.FREQ == 869525000
+      and _lo.SYNC == (0x24, 0xB4) and (_lo.SF, _lo.BW, _lo.CR) == (9, 250000, 5),
+      repr((_lo.channel_hash("LongFast", _lm_def), _lo._FRF)))
+
+
+def _air_ref(n):
+    """Semtech AN1200.13's time on air (ms), in floats."""
+    ts = 2 ** _lo.SF / _lo.BW * 1000
+    pay = 8 + max(math.ceil((8 * n - 4 * _lo.SF + 28 + 16) / (4 * _lo.SF)) * _lo.CR, 0)
+    return (_lo.PREAMBLE + 4.25 + pay) * ts
+
+
+_lair = [(n, _lo.airtime_ms(n), _air_ref(n)) for n in range(1, 256)]
+check("LORA-AIRTIME: airtime_ms is Semtech's formula rounded up (SF9/250 kHz, 60 "
+      "bytes ~0.2 s)",
+      all(0 <= a - r < 1 for _n, a, r in _lair) and 150 < _lo.airtime_ms(60) < 230,
+      repr([x for x in _lair if not 0 <= x[1] - x[2] < 1][:5]))
+
+
+class _LoSx(object):
+    """The SX1262 on its SPI: each NSS-low frame recorded; GetIrqStatus
+    and ReadRegister answered from irq / regs."""
+
+    def __init__(self):
+        self.frames, self.cur, self.irq, self.regs = [], None, 0, {0x08D8: 0x00}
+
+    def nss(self, v):
+        if not v:
+            self.cur = bytearray()
+        else:
+            self.frames.append(bytes(self.cur))
+            self.cur = None
+
+    def write(self, b):
+        self.cur.extend(b)
+
+    def write_readinto(self, b, out):
+        b = bytes(b)
+        self.cur.extend(b)
+        if b[0] == 0x12:
+            out[2], out[3] = self.irq >> 8, self.irq & 0xFF
+        elif b[0] == 0x1D:
+            out[4] = self.regs.get(b[1] << 8 | b[2], 0)
+
+
+class _LoPin(object):
+    """An input pin; each read takes the clock a ms on (a BUSY polled until
+    its time is up)."""
+
+    def __init__(self, v=0):
+        self.v = v
+
+    def value(self):
+        _clock[0] += 1 if self.v else 0
+        return self.v
+
+
+def _lo_radio():
+    sx = _LoSx()
+    _lo._spi, _lo._nss, _lo._busy, _lo._dio1 = sx, sx.nss, _LoPin(0), _LoPin(0)
+    return sx
+
+
+_lo_key = bytes(range(16))
+_lo_node = 0xA1B2C3D4
+_lo_saved = (_lo.EVERY, _lo.DUTY, _lo.IDLE)
+_lsx = _lo_radio()
+_lo.start(_lo_key, _lo_node, "Dawarich-GPS", 22)
+_ls = [f for f in _lsx.frames if f]
+check("LORA-SETUP: the SX1262 set up as Meshtastic's EU_868 MediumFast: standby, TCXO "
+      "1.8 V on DIO3, DC-DC, DIO2 RF switch, LoRa, 869.525 MHz, image calibration "
+      "863-870, PA +22 dBm, sync 0x2B, the PA clamp fix, SF9/BW250/CR4-5, TX "
+      "IRQs on DIO1; then asleep (warm)",
+      _ls[0] == b"\x80\x00" and b"\x97\x02\x00\x01\x40" in _ls and b"\x96\x01" in _ls
+      and b"\x9d\x01" in _ls and b"\x8a\x01" in _ls
+      and b"\x86" + struct.pack(">I", _lo._FRF) in _ls and b"\x98\xd7\xdb" in _ls
+      and b"\x95\x04\x07\x00\x01" in _ls and b"\x8e\x16\x04" in _ls
+      and b"\x0d\x07\x40\x24\xb4" in _ls and b"\x0d\x08\xd8\x1e" in _ls
+      and b"\x8b\x09\x05\x01\x00" in _ls and b"\x08\x02\x01\x02\x01\x00\x00\x00\x00" in _ls
+      and _ls[-1] == b"\x84\x04"
+      and _ls.index(b"\x8a\x01") < _ls.index(b"\x86" + struct.pack(">I", _lo._FRF))
+      and _lo.r["on"] and _lo.r["chash"] == _lo.channel_hash("GpsLog", _lo_key),
+      repr(_ls))
+
+
+def _lo_sent(sx):
+    """The packets WriteBuffer put in the radio since the last call."""
+    out = [f[2:] for f in sx.frames if f[:2] == b"\x0e\x00"]
+    sx.frames[:] = []
+    return out
+
+
+def _lo_done(sx, ok=True):
+    """The TX ends (DIO1 up, TxDone or Timeout) and the next tick sees it."""
+    _lo._dio1.v, sx.irq = 1, (1 if ok else 0x200)
+    _clock[0] += 300
+    _lo.tick(_clock[0], lambda: None)
+    _lo._dio1.v, sx.irq = 0, 0
+
+
+def _lo_open(p):
+    """A packet off the air: (header fields, Data fields) via the bridge."""
+    to, frm, pid, flags, ch, nh, relay = struct.unpack("<IIIBBBB", p[:16])
+    d = _lb.fields(_lb.ctr(_lo_key, _lb.nonce(frm, pid), p[16:]))
+    return (to, frm, pid, flags, ch, nh, relay), d
+
+
+_lo_fix = [47.1859, 18.4221, 118.6, 1794657600, 72.0, 9, 1.3]
+_lsx.frames[:] = []
+_clock[0] += 1000
+_lo.tick(_clock[0], lambda: tuple(_lo_fix))
+_lp1 = _lo_sent(_lsx)
+_lo_done(_lsx)
+_clock[0] += _lo.CHECK
+_r_t = _lo.tick(_clock[0], lambda: tuple(_lo_fix))
+_lp2 = _lo_sent(_lsx)
+_lo_done(_lsx)
+_lh1, _ld1 = _lo_open(_lp1[0]) if _lp1 else (None, {})
+_lh2, _ld2 = _lo_open(_lp2[0]) if _lp2 else (None, {})
+_lu = _lb.fields(_lb._one(_ld1, 2, b"")) if _ld1 else {}
+_lpos = _lb.position(_lb._one(_ld2, 2, b"")) if _ld2 else None
+check("LORA-PACKET: the first fix sends the node's User (NODEINFO_APP: !id, the "
+      "DEVICE_ID, the Wireless Tracker), then the Position (POSITION_APP): to all, "
+      "from the node, hop limit and start 3, the channel's hash, relay = its last "
+      "byte, OK_TO_MQTT; the bridge reads back lat/lon (1e-7), altitude, time, "
+      "speed in m/s, satellites, HDOP",
+      len(_lp1) == 1 and len(_lp2) == 1 and _r_t == "sent"
+      and _lh1[:2] == (0xFFFFFFFF, _lo_node) and _lh1[3] == 3 | 3 << 5
+      and _lh1[4] == _lo.channel_hash("GpsLog", _lo_key) and _lh1[5:] == (0, 0xD4)
+      and _lb._one(_ld1, 1) == 4 and _lb._one(_ld1, 9) == 1
+      and _lb._one(_lu, 1) == b"!a1b2c3d4" and _lb._one(_lu, 2) == b"Dawarich-GPS"
+      and _lb._one(_lu, 5) == 48
+      and _lb._one(_ld2, 1) == 3 and _lb._one(_ld2, 9) == 1 and _lh2[2] != _lh1[2]
+      and _lpos == (47.1859, 18.4221, 119, 1794657600, 20, 9, 1.3)
+      and _lo.r["sent"] == 2 and _lo.r["air"] == sum(_lo.airtime_ms(len(p)) for p in _lp1 + _lp2),
+      repr((_lh1, _lh2, _ld1, _ld2, _lpos, _lo.r)))
+_lneg = _lb.position(_lo.position(-33.8688, -151.2093, -12, 1794657600))
+check("LORA-PACKET: a negative latitude, longitude and altitude survive (sfixed32, "
+      "int32 as a 10-byte varint)", _lneg[:4] == (-33.8688, -151.2093, -12, 1794657600),
+      repr(_lneg))
+
+# LORA-DUE: moving it sends every EVERY, standing it waits IDLE; never while a
+# TX is under way, the fix asked at most every CHECK
+_ld_asked = []
+
+
+def _ld_run(ms, step_m, done=True):
+    """ms of loop ticks (100 ms apart), the position moving step_m a CHECK:
+    the packets sent."""
+    n = 0
+    end = _clock[0] + ms
+    while _clock[0] < end:
+        _clock[0] += 100
+        if _lo.r["tx_at"] is not None and done:
+            _lo._dio1.v, _lsx.irq = 1, 1
+        _lo.tick(_clock[0], lambda: (_ld_asked.append(_clock[0]),
+                                     tuple([_lo_fix[0] + step_m * len(_ld_asked) / 111000.0]
+                                           + _lo_fix[1:]))[1])
+        _lo._dio1.v, _lsx.irq = 0, 0
+        n += len(_lo_sent(_lsx))
+    return n
+
+
+_lo.start(_lo_key, _lo_node, "x")
+_lo.r["info_at"] = _clock[0]             # (the User sent: positions only)
+_lo.r["tok"] = _lo.DUTY_CAP
+_ld_move = _ld_run(600000, 10)           # 10 m/s: 10 min
+_ld_ask = sorted(set(b - a for a, b in zip(_ld_asked, _ld_asked[1:])))
+_lo.r["tok"] = _lo.DUTY_CAP
+_ld_still = _ld_run(3600000, 0)          # an hour standing
+check("LORA-DUE: moving, a position every EVERY (10 in 10 min); standing, one "
+      "every IDLE (4 an hour); the fix looked at no more than every CHECK",
+      _ld_move == 10 and _ld_still == 4 and min(_ld_ask) >= _lo.CHECK,
+      repr((_ld_move, _ld_still, _ld_ask[:3])))
+# LORA-DUTY: the own airtime never passes what the budget saved: DUTY_CAP // 4
+# at start, 1/DUTY of the time since; tight (a 1/2000 duty) it holds them back
+_lo.start(_lo_key, _lo_node, "x")
+_lo.r["info_at"] = _clock[0]
+_lo.DUTY, _lo.EVERY = 2000, 1000
+_ldt0 = _clock[0]
+_ldt_n = _ld_run(7200000, 50)
+_ldt_air = _lo.r["air"]
+_ldt_cap = _lo.DUTY_CAP // 4 + (_clock[0] - _ldt0) // _lo.DUTY
+_lo.DUTY, _lo.EVERY = _lo_saved[1], _lo_saved[0]
+check("LORA-DUTY: with the budget tight the airtime stays within it (start budget "
+      "+ 1/DUTY of the time), positions held back, not queued",
+      0 < _ldt_air <= _ldt_cap and 30 < _ldt_n < 7200 // 1 // 10,
+      repr((_ldt_n, _ldt_air, _ldt_cap)))
+# LORA-TX: a TX that never says done counts as failed after TX_MAX (+0.5 s):
+# the radio goes to sleep, the next position may go
+_lo.start(_lo_key, _lo_node, "x")
+_lo.r["info_at"] = _clock[0]
+_lsx.frames[:] = []
+_clock[0] += 1000
+_lo.tick(_clock[0], lambda: tuple(_lo_fix))
+_lt_a = _lo.r["tx_at"] is not None
+_clock[0] += _lo.TX_MAX
+_lo.tick(_clock[0], lambda: None)
+_lt_b = _lo.r["tx_at"] is not None
+_clock[0] += 600
+_lo.tick(_clock[0], lambda: None)
+check("LORA-TX: no TxDone within TX_MAX + 0.5 s: failed, the IRQ in err, asleep",
+      _lt_a and _lt_b and _lo.r["tx_at"] is None and _lo.r["fail"] == 1
+      and _lo.r["sent"] == 0 and _lsx.frames[-1] == b"\x84\x04"
+      and _lo.r["err"] == "tx irq 0000", repr(_lo.r))
+# LORA-BUSY: BUSY stuck high raises OSError (the logger counts it), within BUSY_MAX
+_lo._busy.v = 1
+try:
+    _lo._cmd(0x80, b"\x00")
+    _lb_busy = None
+except OSError as e:
+    _lb_busy = str(e)
+_lo._busy.v = 0
+check("LORA-BUSY: a radio that stays BUSY raises OSError, not a hang",
+      _lb_busy == "lora busy", repr(_lb_busy))
+_lo.IDLE = _lo_saved[2]
+
+
+def _env_pkt(p, channel="GpsLog", decoded=None):
+    """p (off the air) as a gateway's MQTT ServiceEnvelope: the MeshPacket
+    with from, to, id and the payload encrypted (or decoded: the gateway's
+    MQTT encryption off)."""
+    to, frm, pid = struct.unpack("<III", p[:12])
+    mp = (b"\x0d" + struct.pack("<I", frm) + b"\x15" + struct.pack("<I", to)
+          + b"\x35" + struct.pack("<I", pid))
+    body = p[16:] if decoded is None else decoded
+    mp += (b"\x2a" if decoded is None else b"\x22") + bytes([len(body)]) + body
+    ch = channel.encode()
+    return (b"\x0a" + bytes([len(mp)]) + mp + b"\x12" + bytes([len(ch)]) + ch
+            + b"\x1a\x09!deadbeef")
+
+
+_lbseen = {}
+_lbt = "msh/EU_868/HU/2/e/GpsLog/!deadbeef"
+_lbn = 1794657600 + 60                   # (the bridge's now: a minute after the fix)
+_lb_dec = _env_pkt(_lp2[0], decoded=bytes(_lb.ctr(_lo_key, _lb.nonce(_lo_node, _lh2[2]),
+                                                  _lp2[0][16:])))
+_lb1 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbseen, now=_lbn)
+_lb2 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbseen, now=_lbn)          # again
+_lb3 = _lb.handle(_lbt, _env_pkt(_lp1[0]), _lo_key, {}, now=_lbn)              # the User
+_lb4 = _lb.handle(_lbt, _env_pkt(_lp2[0]), bytes(16), {}, now=_lbn)            # other key
+_lb5 = _lb.handle(_lbt.replace("/e/", "/json/"), _env_pkt(_lp2[0]), _lo_key, {}, now=_lbn)
+_lb6 = _lb.handle(_lbt, _env_pkt(_lp2[0], "LongFast"), _lo_key, {}, now=_lbn)
+_lb7 = _lb.handle(_lbt, _lb_dec, b"\0" * 16, {}, None, "trk", True, now=_lbn)
+_lb8 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, {}, {0x12345678}, now=_lbn)
+_lb9 = _lb.handle(_lbt, b"\x0a\xff\x01garbage", _lo_key, {}, now=_lbn)
+_lb10 = _lb.handle(_lbt, _lb_dec, _lo_key, {}, now=_lbn)            # decoded, not allowed
+_lb11 = [_lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, {}, now=n_)   # too old / ahead
+         for n_ in (1794657600 + _lb.MAX_AGE + 1, 1794657600 - _lb.MAX_AHEAD - 1)]
+_lbs12 = {("last", _lo_node): 1794657600}                           # not newer
+_lb12 = _lb.handle(_lbt, _env_pkt(_lp2[0]), _lo_key, _lbs12, now=_lbn)
+check("LORA-BRIDGE: the bridge turns the board's position packet into one Overland "
+      "feature (lon/lat, the fix's UTC time, altitude, m/s, accuracy from HDOP, "
+      "device !node-lora); the same packet again (another gateway), the User, "
+      "another key, a JSON topic, another channel, another node, garbage, a "
+      "gateway-decoded packet (not allowed by default), a time out of the window "
+      "and one not newer than the node's last give none; a decoded one is taken "
+      "with ALLOW_DECODED",
+      _lb1 == [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [18.4221, 47.1859]},
+                "properties": {"timestamp": "2026-11-14T12:00:00Z", "device_id": "!a1b2c3d4-lora",
+                               "altitude": 119, "speed": 20, "horizontal_accuracy": 6.5}}]
+      and _lb2 == [] and _lb3 == [] and _lb4 == [] and _lb5 == [] and _lb6 == []
+      and len(_lb7) == 1 and _lb7[0]["properties"]["device_id"] == "trk"
+      and _lb8 == [] and _lb9 == [] and _lb10 == [] and _lb11 == [[], []] and _lb12 == []
+      and _lbseen[("last", _lo_node)] == 1794657600,
+      repr((_lb1, _lb2, _lb3, _lb4, _lb5, _lb6, _lb7, _lb8, _lb9, _lb10, _lb11, _lb12)))
+_lbk = _lb.config({"OTA_KEY_FILE": os.devnull, "GEO_URL": "https://d.example/", "API_KEY": "k",
+                   "NODES": "!a1b2c3d4, 12345678", "ALLOW_DECODED": "1"})
+check("LORA-BRIDGE-KEY: the bridge derives the board's key from the OTA key as the "
+      "board does (gps_logger.lora_key); its config reads NODES and GEO_URL",
+      _lb.derived_key(b"0123456789abcdef0123") == gl.lora_key(b"0123456789abcdef0123")
+      and len(gl.lora_key(b"x" * 64)) == 16
+      and _lbk[1] == {0xA1B2C3D4, 0x12345678} and _lbk[3] == "https://d.example"
+      and _lbk[5] is True,
+      repr(_lbk))
+
+# LORA-ENV: the logger's .env: OTA_KEY gives the derived key, LORA_KEY (base64 of
+# 16/32 bytes) wins, a bad one leaves LoRa off, LORA=0 off, LORA_DBM/EVERY ranges
+_le_saved = (gl.LORA, gl.LORA_KEY, gl.LORA_DBM, gl.LORA_EVERY)
+_le = []
+for e_ in ({"OTA_KEY": " secretsecretsecret "}, {"OTA_KEY": "a", "LORA_KEY": base64.b64encode(bytes(range(16))).decode()},
+           {"LORA_KEY": "bad#"}, {"LORA": "0", "OTA_KEY": "a"}, {},
+           {"OTA_KEY": "a", "LORA_DBM": "10", "LORA_EVERY": "5"}):
+    gl.LORA, gl.LORA_KEY, gl.LORA_DBM, gl.LORA_EVERY = True, None, 22, 60
+    gl._lora_env(e_)
+    _le.append((gl.LORA, gl.LORA_KEY, gl.LORA_DBM, gl.LORA_EVERY))
+check("LORA-ENV: OTA_KEY -> its derived key; LORA_KEY base64 wins; a bad LORA_KEY or "
+      "no key -> no key (off); LORA=0 off; LORA_DBM 0-22, LORA_EVERY 30-3600 s",
+      _le[0] == (True, gl.lora_key(b"secretsecretsecret"), 22, 60)
+      and _le[1] == (True, bytes(range(16)), 22, 60) and _le[2][1] is None
+      and _le[3][0] is False and _le[4][1] is None and _le[5][2:] == (10, 60),
+      repr(_le))
+# LORA-START: on and keyed, the logger starts gps_lora with the MAC's last 4
+# bytes as the node and its DEVICE_ID, and says so in the diag; no key: never
+# imported; a radio that fails to start leaves it off, said in the diag
+_lst_saved = (gl._diag_write, getattr(gl.machine, "unique_id", None), gl._lora)
+_lst_diag = []
+gl._diag_write = _lst_diag.append
+gl.machine.unique_id = lambda: _h("246f28a1b2c3")
+gl.LORA, gl.LORA_KEY, gl._lora = True, _lo_key, None
+_lsx = _lo_radio()
+gl._lora_start()
+_lst_on = (gl._lora is _lo, _lo.r["node"], _lo.r["name"], _lo.EVERY)
+gl._lora = None
+_lo._busy.v = 1                          # (a radio that does not answer)
+gl._lora_start()
+_lst_off = gl._lora
+_lo._busy.v = 0
+gl.LORA_KEY, gl._lora = None, None
+check("LORA-START: keyed: gps_lora started, node = the MAC's last 4 bytes, name = "
+      "DEVICE_ID, EVERY from LORA_EVERY, 'lora on' in the diag; a radio that does "
+      "not answer: off, 'lora off' in the diag",
+      _lst_on == (True, 0x28A1B2C3, gl.DEVICE_ID, gl.LORA_EVERY * 1000)
+      and _lst_diag[0] == "lora on node !28a1b2c3 869525 kHz SF9"
+      and _lst_off is None and _lst_diag[1].startswith("lora off OSError"),
+      repr((_lst_on, _lst_diag)))
+# LORA-FIX: what the logger gives it: none on the home WiFi, without a valid,
+# fresh, usable fix; else the position with the fix's Unix time
+_lf_st = dict(gl.st)
+_lf_wifi = dict(gl.wifi)
+gl.st.update(valid=True, lat=47.1859, lon=18.4221, alt=118.6, speed=72.0, used=9, hdop=1.3,
+             date="2026-11-14", time="12:00:00", pos_at=_clock[0], hdop_at=_clock[0],
+             std=None, std_at=None, start=_clock[0] - 3600000)
+_lf_un = gl._rcv.unsettled
+gl._rcv.unsettled = lambda now: False
+gl.wifi.update(state="connected", home=False, sleep_home=False)
+_lf = [gl._lora_fix()]
+gl.wifi.update(home=True)
+_lf.append(gl._lora_fix())
+gl.wifi.update(state="off", home=False, sleep_home=True)
+_lf.append(gl._lora_fix())
+gl.wifi.update(sleep_home=False)
+gl.st.update(pos_at=_clock[0] - 5000)
+_lf.append(gl._lora_fix())
+gl.st.update(pos_at=_clock[0], hdop=9.0)
+_lf.append(gl._lora_fix())
+gl._rcv.unsettled = _lf_un
+gl.st.clear()
+gl.st.update(_lf_st)
+gl.wifi.clear()
+gl.wifi.update(_lf_wifi)
+check("LORA-FIX: away from home a usable fix goes with its Unix time; on the home "
+      "WiFi (or asleep in a home stay), a stale fix or a bad HDOP: nothing",
+      _lf[0] == (47.1859, 18.4221, 118.6, 1794657600, 72.0, 9, 1.3)
+      and _lf[1:] == [None, None, None, None], repr(_lf))
+# LORA-TICK: an OSError from the radio is no crash (an OTA must not roll back
+# for it): LORA_ERR_MAX in a row and it is off for the run, said in the diag;
+# its counts in the diag every LORA_DIAG
+
+
+class _LtBad(object):
+    r = {"sent": 3, "fail": 1, "air": 600, "err": "tx irq 0200"}
+    n = 0
+    stopped = False
+
+    def tick(self, now, fn):
+        _LtBad.n += 1
+        if _LtBad.n > 2:
+            raise OSError("lora busy")
+
+    def stop(self):
+        _LtBad.stopped = True
+
+
+_lst_diag[:] = []
+gl._lora = _LtBad()
+gl._lora_st.update(err=0, diag_at=None)
+for _i in range(2):
+    gl.lora_tick(_clock[0])
+    _clock[0] += gl.LORA_DIAG
+_ltk_diag = list(_lst_diag)
+for _i in range(gl.LORA_ERR_MAX):
+    gl.lora_tick(_clock[0])
+check("LORA-TICK: its counts in the diag each LORA_DIAG; LORA_ERR_MAX radio errors in "
+      "a row: stopped, off, 'lora off' in the diag, no exception",
+      _ltk_diag == ["lora sent 3 fail 1 air 600 ms tx irq 0200"]
+      and gl._lora is None and _LtBad.stopped
+      and _lst_diag[-1] == "lora off OSError('lora busy')", repr(_lst_diag))
+check("LORA-LOOP: the loop runs lora_tick guarded (a bug in it pauses it, logged), "
+      "with its own memory count",
+      '_guarded("lora", lora_tick, time.ticks_ms())' in _slurp(os.path.join(ROOT, "gps_logger.py"))
+      and "lora" in gl._guard_mem, "")
+(gl._diag_write, _uid, gl._lora) = _lst_saved
+if _uid is None:
+    del gl.machine.unique_id
+else:
+    gl.machine.unique_id = _uid
+gl.LORA, gl.LORA_KEY, gl.LORA_DBM, gl.LORA_EVERY = _le_saved
+_lo.reset()
+_lo._spi = _lo._nss = _lo._busy = _lo._dio1 = None
 
 print()
 print("%d passed, %d failed" % (passed, failed))

@@ -5436,7 +5436,8 @@ OTA_MARK = "/ota.mark"                   # what ended the pending run: crash,
                                          # reset into a slot not run yet)
 OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py",
               "/gps_clock.mpy", "/gps_clock.py",
-              "/gps_receiver.mpy", "/gps_receiver.py")  # moved aside (.ota-old)
+              "/gps_receiver.mpy", "/gps_receiver.py",
+              "/gps_lora.mpy", "/gps_lora.py")  # moved aside (.ota-old)
                                          # for a frozen logger to run
 OTA_STUCK = 86400000                     # ms an upload may have no 2xx and
                                          # still hold the update check back
@@ -7736,6 +7737,124 @@ def _tft_bad(i, e):
 
 # --- Main loop --------------------------------------------------------------
 
+# --- LoRa (gps_lora.py) --------------------------------------------------------
+# The SX1262 sends the position as a Meshtastic packet while the board is off
+# the home WiFi (README, "LoRa"): on the train the track is live through the
+# home node and tools/lora_bridge.py. On unless .env LORA=0, with a key:
+# LORA_KEY (base64, 16 or 32 bytes: the home node's channel key) or, without
+# it, one derived from OTA_KEY (tools/lora_bridge.py key prints it), so a
+# board updated over the air sends without a new .env. No key: off (never
+# the public default key: that would publish the position).
+LORA = True                              # .env LORA=0: off
+LORA_KEY = None                          # the channel key (bytes)
+LORA_SALT = b"gps-logger lora channel"   # OTA_KEY -> the derived key
+LORA_DBM = 22                            # .env LORA_DBM 0-22
+LORA_EVERY = 60                          # s, .env LORA_EVERY 30-3600: a
+                                         # position while moving
+LORA_ERR_MAX = 3                         # radio errors in a row: it is off
+LORA_DIAG = 1800000                      # ms between diag lines of its counts
+_lora = None                             # gps_lora once it runs
+_lora_st = {"err": 0, "diag_at": None}
+
+def lora_key(ota_key):
+    """The channel key derived from the OTA key: HMAC-SHA256(OTA_KEY,
+    LORA_SALT), its first 16 bytes (tools/lora_bridge.py the same)."""
+    return binascii.unhexlify(_hmac_hex(ota_key, LORA_SALT))[:16]
+
+def _lora_env(env):
+    """LORA, LORA_KEY (else OTA_KEY's), LORA_DBM, LORA_EVERY from .env."""
+    global LORA, LORA_KEY                # (LORA_DBM, LORA_EVERY: globals())
+    if _truthy(env.get("LORA")) is False:
+        LORA = False
+    k = _plain(env.get("LORA_KEY"))
+    if k:
+        try:
+            k = binascii.a2b_base64(k)
+        except Exception:
+            k = b""
+        if len(k) in (16, 32):
+            LORA_KEY = k
+        else:
+            print("LORA_KEY not base64 of 16 or 32 bytes - no LoRa")
+    else:
+        o = env.get("OTA_KEY")
+        if isinstance(o, str) and o.strip():
+            LORA_KEY = lora_key(o.strip().encode())
+    for name, lo, hi in (("LORA_DBM", 0, 22), ("LORA_EVERY", 30, 3600)):
+        v = _plain(env.get(name))
+        if v:
+            try:
+                n = int(v)
+            except ValueError:
+                n = -1
+            if lo <= n <= hi:
+                globals()[name] = n
+            else:
+                print(name, "not %d-%d, using" % (lo, hi), globals()[name])
+
+def _lora_node():
+    """The Meshtastic node number: the MAC's last 4 bytes, as Meshtastic's."""
+    m = machine.unique_id()
+    return m[-4] << 24 | m[-3] << 16 | m[-2] << 8 | m[-1]
+
+def _lora_start():
+    """The radio, when on and keyed; a failure leaves the logger without it."""
+    global _lora
+    if not LORA or LORA_KEY is None or _lora is not None:
+        return
+    try:
+        import gps_lora
+        gps_lora.EVERY = LORA_EVERY * 1000
+        node = _lora_node()
+        gps_lora.start(LORA_KEY, node, DEVICE_ID, LORA_DBM)
+        _lora = gps_lora
+        _diag_write("lora on node %s %d kHz SF%d" % (
+            "!%08x" % node, gps_lora.FREQ // 1000, gps_lora.SF))
+    except Exception as e:
+        print("lora", repr(e))
+        _diag_write("lora off %s" % repr(e)[:60])
+
+def _lora_fix():
+    """The fix for gps_lora: usable, fresh, not on the home WiFi (the upload
+    has it there), or None."""
+    now = time.ticks_ms()
+    if at_home() or not st["valid"] or st["lat"] is None:
+        return None
+    if st["pos_at"] is None or _age(now, st["pos_at"]) >= _rcv.STALE:
+        return None
+    if not _usable(now):
+        return None
+    t = _fix_s()
+    return (st["lat"], st["lon"], st["alt"],
+            None if t is None else t + EPOCH_DAYS * 86400,
+            st["speed"], st["used"], st["hdop"])
+
+def lora_tick(now):
+    """The radio's turn: a TX polled, a position sent when due. A radio that
+    fails LORA_ERR_MAX times in a row is put to sleep for the run (an OSError
+    is the hardware, no bug of the build: it must not roll an OTA back)."""
+    global _lora
+    if _lora is None:
+        return
+    try:
+        _lora.tick(now, _lora_fix)
+        _lora_st["err"] = 0
+    except OSError as e:
+        _lora_st["err"] += 1
+        if _lora_st["err"] >= LORA_ERR_MAX:
+            _diag_write("lora off %s" % repr(e)[:60])
+            _lora.stop()
+            _lora = None
+            return
+    a = _lora_st["diag_at"]
+    if a is None:
+        _lora_st["diag_at"] = now
+    elif time.ticks_diff(now, a) >= LORA_DIAG:
+        _lora_st["diag_at"] = now
+        r = _lora.r
+        _diag_write("lora sent %d fail %d air %d ms%s" % (
+            r["sent"], r["fail"], r["air"], " " + r["err"] if r["err"] else ""))
+
 def run():
     """Log, and upload when possible, showing the state on the TFT."""
     global _wdt, _running, _boot_ok_done
@@ -7762,8 +7881,10 @@ def run():
         _diag_boot()
         ota_boot()
         _rcv.gps_setup()
+        _lora_env(env)
         wifi_start(env)                  # (the one read of .env)
         env = None
+        _lora_start()                    # (DEVICE_ID: wifi_start)
         _running = True
         _loop()
     except KeyboardInterrupt:
@@ -7816,7 +7937,7 @@ GUARD_PEND_MAX = 5                       # with an OTA image pending: this many
 _guard_mem = {"wifi": [0, None], "upload": [0, None],   # name -> [count, Stamp
               "ota": [0, None], "web": [0, None],       # of the last one]:
               "ntp": [0, None], "status": [0, None],    # made here, not under
-              "diag": [0, None]}                        # a MemoryError
+              "diag": [0, None], "lora": [0, None]}     # a MemoryError
 
 def _guarded(name, fn, arg=None):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
@@ -7903,6 +8024,7 @@ def _loop():
         _guarded("web", web_tick)
         _guarded("ota", ota_tick, time.ticks_ms())
         _guarded("ntp", ntp_tick, time.ticks_ms())
+        _guarded("lora", lora_tick, time.ticks_ms())
         now = time.ticks_ms()
         tft_tick(now)
         if (not _boot_ok_done

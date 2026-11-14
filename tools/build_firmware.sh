@@ -57,7 +57,8 @@
 # before the build.
 # firmware/gps_frozen.py records the SHA-256 of the frozen gps_logger.py
 # (SHA), of gps_tft.py + gps_tft_font.py (TFT), of gps_boot.py (BOOT) and
-# of gps_clock.py (CLOCK) and of gps_receiver.py (RX; deploy.sh stops when
+# of gps_clock.py (CLOCK), of gps_receiver.py (RX) and of gps_lora.py
+# (LORA; deploy.sh stops when
 # any differs from the repo's), the commit, "-dirty"
 # when the tree had uncommitted changes, and BUILD, which the board's OTA
 # compares: the commit time; for --flash and a dirty tree the build time,
@@ -102,12 +103,13 @@ if [ "$MODE" = --publish ] && [ -n "${OTA_DEST:-}" ]; then
 fi
 
 mkdir -p "$OUT"
-# the frozen files: the logger, its Clock (gps_clock.py) and Receiver
-# (gps_receiver.py), main.py's boot helpers (gps_boot.py: OTA and the boot-fail
+# the frozen files: the logger, its Clock (gps_clock.py), Receiver
+# (gps_receiver.py) and LoRa radio (gps_lora.py), main.py's boot helpers (gps_boot.py: OTA and the boot-fail
 # retry, out of the heap) and a marker deploy.sh looks for
 cp gps_logger.py "$OUT/gps_logger.py"
 cp gps_clock.py "$OUT/gps_clock.py"
 cp gps_receiver.py "$OUT/gps_receiver.py"
+cp gps_lora.py "$OUT/gps_lora.py"
 cp gps_boot.py "$OUT/gps_boot.py"
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD=$(git log -1 --format=%ct 2>/dev/null || echo 0)
@@ -131,14 +133,16 @@ freeze("\$(PORT_DIR)/modules")
 module("gps_logger.py", base_path="$OUT", opt=3)
 module("gps_clock.py", base_path="$OUT", opt=3)
 module("gps_receiver.py", base_path="$OUT", opt=3)
+module("gps_lora.py", base_path="$OUT", opt=3)
 module("gps_frozen.py", base_path="$OUT")
 module("gps_boot.py", base_path="$OUT", opt=3)
 module("gps_tft.py", base_path="$OUT", opt=3)
 module("gps_tft_font.py", base_path="$OUT", opt=3)
 EOF
-# the display's code, gps_boot.py, gps_clock.py and gps_receiver.py, in the
-# marker too (tools/firmware.py: what each field hashes; deploy.sh compares
-# them with it; an older marker without TFT, BOOT, CLOCK or RX still passes)
+# the display's code, gps_boot.py, gps_clock.py, gps_receiver.py and
+# gps_lora.py in the marker too (tools/firmware.py: what each field hashes;
+# deploy.sh compares them with it; an older marker without TFT, BOOT, CLOCK,
+# RX or LORA still passes)
 python3 tools/firmware.py marker >> "$OUT/gps_frozen.py"
 cp gps_tft.py gps_tft_font.py "$OUT/"
 
