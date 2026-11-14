@@ -6403,7 +6403,7 @@ def _web_json_parts(rows, svs):
             yield sep + json.dumps({
                 "name": "%s %d" % (_rcv.GNSS.get(v[6], "SV"), v[0]), "system": _rcv.GNSS.get(v[6]), "svid": v[0],
                 "cno": v[1], "elev": v[2], "azim": v[3], "used": v[4],
-                "unhealthy": v[5]})
+                "unhealthy": v[5], "l1": v[7], "l5": v[8]})
             sep = ","
         at = st["svs_at"]
         age = json.dumps(None if at is None

@@ -6277,7 +6277,7 @@ try:
     check("SATS: status.json's row of a satellite",
           jd["satellites"][1] == {"name": "GPS 12", "system": "GPS", "svid": 12,
                                   "cno": 38, "elev": 54, "azim": 10, "used": True,
-                                  "unhealthy": False},
+                                  "unhealthy": False, "l1": 38, "l5": 0},
           repr(jd["satellites"][1]))
     check("SATS: seen counts the satellites with a signal, used those in the fix",
           gl._rcv.sv_seen() == 4 and gl._rcv.sv_used() == 4,
@@ -8939,7 +8939,7 @@ check("GPS-22: a GSV skip window 7 days old is over and cleared, a fresh one ski
 # GPS: used from the satellite list (GGA stops at 12), a banner across reads
 gl._rcv.reset()
 gl.st["used"] = 12
-gl.st["svs"] = [(k, 30, 40, 100, True, False, 0) for k in range(1, 17)]
+gl.st["svs"] = [(k, 30, 40, 100, True, False, 0, 30, 0) for k in range(1, 17)]
 gl.st["svs_at"] = _clock[0]
 used_list = gl._rcv.sv_used()
 gl.st["svs_at"] = _clock[0] - 3 * gl._rcv.SV_POLL
@@ -13292,7 +13292,7 @@ try:
     for _ in range(2 * gl._rcv.GPS_FLAP_RESTARTS - 1):   # a storm + 4 restarts
         _clock[0] += 3000
         gl._rcv.handle(banner)
-    gl.st.update(svs=[(k, 30, 40, 100, True, False, 0) for k in range(9)],
+    gl.st.update(svs=[(k, 30, 40, 100, True, False, 0, 30, 0) for k in range(9)],
                  svs_at=_clock[0], used=7)
     base = _clock[0]
     loops0 = gl.st["loops"]
@@ -13317,9 +13317,9 @@ gl.up_reset()
 gl.wifi_reset()
 gl.st.update(rx=_clock[0], pos_at=_clock[0], valid=True, fixtype=3, quality=1,
              hdop=0.88199996, lat=47.1, lon=18.4)
-gl.st["svs"] = [(16, 26, 0, 90, True, False, 0),
-                (11, 12, 90, 250, False, False, 3),
-                (5, 0, None, 0, False, False, 1)]
+gl.st["svs"] = [(16, 26, 0, 90, True, False, 0, 26, 21),
+                (11, 12, 90, 250, False, False, 3, 12, 0),
+                (5, 0, None, 0, False, False, 1, 0, 0)]
 gl.st["svs_at"] = _clock[0]
 gl.up["left"] = 120
 gl.wifi.update(state="connected", ssid="<x>", rssi=-75)
@@ -13484,7 +13484,9 @@ else:
                or ("more heard, not in use" in sgn
                    and " in the sky without a signal" in sgn)
                or "2 in the sky without a signal" in sgn)
-          and sg == '<p><span>GPS 16</span><s class="q-fair" style="width:52%"></s></p>'
+          and sg == '<p><span>GPS 16<b>&#9733;</b></span><s class="q-fair" '
+          'style="width:52%"></s></p>'
+          and "1 dual-band" in sgn
           and "dB" not in sg + sgn, (sg[:400], sgn))
     check("PAGE: Logger - every JSON key labelled, escaped; a row a "
           "subsystem in its tone, the word only when not nominal, the count "
@@ -14177,6 +14179,10 @@ else:
           ft.get("wr7") == [[], True], repr(ft.get("wr7")))
     check("WEBR-8: rssi, temp, cno, elev and azim from the JSON reach the "
           "HTML coerced or escaped", ft.get("wr8") == [], repr(ft.get("wr8")))
+    check("SKY-BANDS: a star by each satellite in use received on L5 too "
+          "(dual-band), their count in the words; the grey legend entry "
+          "named only when such a satellite is listed",
+          ft.get("bands") == [[0, 1], True, "", "<i></i>QZSS"], repr(ft.get("bands")))
     check("TELE-FROZEN: status lines that repeat a stale GPS time go on "
           "with up: a 3 min drop-out spans 3 min", ft.get("frozen") ==
           [300000, [[180000, 3]]], repr(ft.get("frozen")))
@@ -18453,12 +18459,33 @@ _again = [v[1] for v in hl.st["svs"]] == [50]
 check("UC-GSV: one list from a round: a satellite once with its strongest band, "
       "used from GSA, with its system's id; GSV is no sentence the "
       "setup turned off",
-      _svs.get((0, 14)) == (14, 44, 77, 11, True, False, 0)
-      and _svs.get((0, 17)) == (17, 35, 56, 319, True, False, 0)
-      and _svs.get((0, 30)) == (30, 0, 36, 201, False, False, 0)
-      and _svs.get((3, 25)) == (25, 38, 75, 249, True, False, 3)
-      and _svs.get((2, 13)) == (13, 0, 42, 203, False, False, 2)
+      _svs.get((0, 14)) == (14, 44, 77, 11, True, False, 0, 40, 44)
+      and _svs.get((0, 17)) == (17, 35, 56, 319, True, False, 0, 35, 0)
+      and _svs.get((0, 30)) == (30, 0, 36, 201, False, False, 0, 0, 0)
+      and _svs.get((3, 25)) == (25, 38, 75, 249, True, False, 3, 38, 0)
+      and _svs.get((2, 13)) == (13, 0, 42, 203, False, False, 2, 0, 0)
       and _e1 == 0 and hl.st["extra"] == 0, repr((_svs, _e1, hl.st["extra"])))
+# each band's C/N0 on its own: L1/E1/B1I and L5/E5a/B2a by GSV's signal id
+# (UFirebird II table 1-3: Galileo E5a is 1, E1 is 7); a hex id (BDS B2I "B")
+# is no band and no broken sentence
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_eb = hl.st["err"]
+_uc_feed(hl, _nmea("GPGSV,1,1,01,14,77,011,37,1"),
+         _nmea("GPGSV,1,1,01,14,77,011,27,8"),
+         _nmea("GAGSV,1,1,01,31,40,100,32,7"),
+         _nmea("GAGSV,1,1,01,31,40,100,22,1"),
+         _nmea("GBGSV,1,1,01,24,30,200,23,5"),
+         _nmea("GBGSV,1,1,01,24,30,200,36,1"),
+         _nmea("GBGSV,1,1,01,24,30,200,41,B"),
+         _nmea("GLGSV,1,1,01,80,60,50,39,1"))
+_clock[0] += 200
+_uc_feed(hl, _nmea("GPGSV,1,1,00,1"))
+_bands = {(v[6], v[0]): (v[1], v[7], v[8]) for v in (hl.st["svs"] or [])}
+check("UC-GSV-BANDS: a satellite's L1 and L5 C/N0 each from its signal id, "
+      "its cno the strongest of all; a hex signal id counts in cno only",
+      _bands == {(0, 14): (37, 37, 27), (2, 31): (32, 32, 22),
+                 (3, 24): (41, 36, 23), (6, 80): (39, 39, 0)}
+      and hl.st["err"] == _eb, repr((_bands, hl.st["err"] - _eb)))
 check("UC-GSV-SKIP: GSV_EVERY s of GSV not decoded after a list (1 Hz with a "
       "fix); then not from a round's middle, a whole round again",
       _skip and _mid and _again, repr((_skip, _mid, _again, hl.st["svs"])))

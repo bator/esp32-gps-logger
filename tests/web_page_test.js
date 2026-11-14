@@ -768,6 +768,17 @@ ft.wr8 = (() => {
     used: true}], rssi: "<s>X3", temp: "<t>X4"});
   return Object.keys(w).filter((k) => /<[bust]>X\d/.test(w[k]));
 })();
+// SKY-BANDS: a star by each satellite in use that is received on L5 too
+// (dual-band, as Locus Map marks it), their count in the words; the grey
+// legend entry names SBAS/QZSS only when one is in the list
+ft.bands = (() => {
+  const sv = (n, sys, id, c, l5, used) => ({name: n, system: sys, svid: id, cno: c, l1: c, l5: l5, elev: 40, azim: 90, used: used});
+  const w = c0.view({satellites: [sv("GPS 14", "GPS", 14, 37, 27, true), sv("GLONASS 80", "GLONASS", 80, 39, 0, true),
+    sv("GPS 5", "GPS", 5, 20, 22, false)]});
+  const q = c0.view({satellites: [sv("QZSS 2", "QZSS", 2, 30, 25, true)]});
+  const stars = (h) => h.split("<p").slice(1).map((p) => (p.match(/&#9733;/g) || []).length);
+  return [stars(w.sig), /1 dual-band/.test(w.sgn), w.lgq, q.lgq];
+})();
 // WR-2: a 500 (a bug building status.json) shows the board's error
 ft.wr2 = (() => {
   const q = page(1600);
