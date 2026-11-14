@@ -104,9 +104,14 @@ firmware R6.0.0.0Build3700.
   It refuses SBAS (`$CFGSYS` bit 20: `$FAIL`).
 - **`GPS_SYS`** in `.env`: its `$CFGSYS` mask in hex, set once a boot when the
   receiver has another (it restarts it); without it the receiver's own stays.
-- **L5:** every system and band is on by default (`$CFGSYS` `H35155`), but
-  the board's antenna is L1 only, per Heltec's FAQ; an external one takes a
-  moved resistor.
+- **L5:** every system and band is on by default (`$CFGSYS` `H35155`), and
+  the board's own antenna does pass the L5 band. Heltec's FAQ says it is L1
+  only, but GSV per signal (measured 2026-11-14) showed GPS L5, Galileo E5a
+  and BeiDou B2a, 8-13 dB below L1. Outdoors, 20-28 dB-Hz against 31-45 dB-Hz
+  on L1, with 3-5 satellites per system on L5. In one outdoor A/B/A test,
+  12 min per mask, L5 gave no gain: RMS around the phase mean was 1.23 and
+  2.03 m with L5, 0.79 m with `GPS_SYS=31111` (L1 only). An external
+  antenna on the IPEX socket takes a moved resistor.
 
 ## Setup
 
