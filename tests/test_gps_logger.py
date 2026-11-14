@@ -18849,26 +18849,52 @@ hl._rcv._usb_in = None
 check("USB-DRAIN: every gps_check reads stdin on the Heltec, without a list per pass "
       "(ipoll); no MemoryError leaves it", _ip_ok, repr(_ipolls))
 
-# GSA: a burst is one round, wherever the second's clock falls in it
+# GSA: a round is the GSAs of one receiver second (the last time sentence's),
+# wherever the uptime's second falls in it and however the reading paused
 hl._rcv.reset()
 hl._rcv.uart = _UcUart()
 _clock[0] += 1000
+hl._rcv._sec[0] = "120000"
 _uc_feed(hl, _nmea("GNGSA,A,3,14,17,,,,,,,,,,,1.2,0.8,0.9,1"))
 hl.st["gsa_at"] = _clock[0] - 1000       # the next one a second after the first
+_clock[0] += 400                         # a loop pass in the burst (a POST)
 _uc_feed(hl, _nmea("GNGSA,A,3,25,,,,,,,,,,,,1.2,0.8,0.9,4"))
 _u1 = sorted(hl._rcv._uc_sv["used"])
-_clock[0] += 200
+hl._rcv._sec[0] = "120005"               # the next round, read in the same ms
 _uc_feed(hl, _nmea("GNGSA,A,3,30,,,,,,,,,,,,1.2,0.8,0.9,1"))
-check("UC-GSA: the satellites in use of one burst stay together past a second's "
-      "boundary; a pause starts the next round's",
-      _u1 == sorted([14, 17, 3 << 8 | 25]) and hl._rcv._uc_sv["used"] == [30],
-      repr((_u1, hl._rcv._uc_sv["used"])))
+_u2 = list(hl._rcv._uc_sv["used"])
+hl._rcv._sec[0] = None                   # no time sentence yet: the pause
+_clock[0] += 200
+_uc_feed(hl, _nmea("GNGSA,A,3,31,,,,,,,,,,,,1.2,0.8,0.9,1"))
+_u3 = list(hl._rcv._uc_sv["used"])
+hl._rcv._sec[0] = "120005"
+check("UC-GSA: the satellites in use of one receiver second's burst stay together "
+      "past an uptime second's boundary and a long loop pass; the next one's start the next "
+      "round's, read at once or not; before any time sentence a pause does",
+      _u1 == sorted([14, 17, 3 << 8 | 25]) and _u2 == [30] and _u3 == [31],
+      repr((_u1, _u2, _u3)))
 _e0 = hl.st["err"]
 _uc_feed(hl, _nmea("GNGSA,A,2,30,,,,,,,,,,,,1.2,0.8,0.9"))
 check("UC-GSA-OLD: a GSA without a system id (NMEA before 4.10, VDOP last) is a "
       "good sentence: its fix type taken, the list of used satellites left alone",
-      hl.st["err"] == _e0 and hl.st["fixtype"] == 2 and hl._rcv._uc_sv["used"] == [30],
+      hl.st["err"] == _e0 and hl.st["fixtype"] == 2 and hl._rcv._uc_sv["used"] == [31],
       repr((hl.st["err"] - _e0, hl.st["fixtype"], hl._rcv._uc_sv["used"])))
+# the GSA rate by the receiver's second: two rounds (5 s apart) read in one
+# uptime second are no lost rate; GSA_MAX + 1 in one receiver second are
+hl._rcv.reset()
+hl.st["setup_at"] = _clock[0] - 5000
+for _sx in ("120000", "120005"):
+    hl._rcv._sec[0] = _sx
+    for _i in range(5):
+        _uc_feed(hl, _nmea("GNGSA,A,3,14,,,,,,,,,,,,1.2,0.8,0.9,%d" % (_i + 1)))
+_gx0 = hl.st["extra"]
+hl._rcv._sec[0] = "120010"
+for _i in range(hl._rcv.GSA_MAX + 1):
+    _uc_feed(hl, _nmea("GNGSA,A,3,14,,,,,,,,,,,,1.2,0.8,0.9,1"))
+_gx1 = hl.st["extra"]
+check("UC-GSA-RATE: GSAs counted per receiver second: two rounds read together "
+      "after a blocked loop are no lost rate; GSA_MAX + 1 in one second are",
+      (_gx0, _gx1) == (0, 1), repr((_gx0, _gx1)))
 
 # the display: the fonts, the values, what goes to the panel
 import gps_tft as _ft
@@ -20873,7 +20899,7 @@ for _tk, _bd in (("GP", "GPGSA,A,3,01,02,03,,,,,,,,,,1.5,0.9,1.2"),
                  ("GL", "GLGSA,A,3,65,66,,,,,,,,,,,1.5,0.9,1.2"),
                  ("GN", "GNGSA,A,3,01,02,,,,,,,,,,,1.5,0.9,1.2"),
                  ("GN", "GNGSA,A,3,07,08,,,,,,,,,,,1.5,0.9,1.2,3")):
-    hl._rcv._uc_sv["gsa"] = None
+    hl._rcv._uc_sv["gsa"] = hl._rcv._uc_sv["gt"] = None   # a new round each
     _uc_feed(hl, _nmea(_bd))
     _rg_u2.append(list(hl._rcv._uc_sv["used"]))
 check("RG-7: a GSA before NMEA 4.10 (no system id) counts for its talker's system, a GN one "
@@ -22745,6 +22771,32 @@ try:
           "route to today (a false future date froze it until a reboot); a "
           "second's step back at midnight or NTP's clock alone do not",
           r3_13 == [True, False, False], repr(r3_13))
+
+    # RV14-14: trk2gpx says when a file gives no point, and names a track
+    # by cutting the suffix only
+    _r3_t = os.path.join(_r3_dir, "my.trip.trk")
+    with builtins.open(_r3_t, "wb") as f:
+        f.write(HEADER.encode().replace(b"\n", b"\r\n")
+                + trk_line(47.5, 19.0, "2026-10-18T08:00:00Z").encode()
+                .replace(b"\n", b"\r\n"))
+    _r3_ok = os.path.join(_r3_dir, "2026.track1.trk")
+    with builtins.open(_r3_ok, "wb") as f:
+        f.write(HEADER.encode()
+                + trk_line(47.5, 19.0, "2026-10-18T08:00:00Z").encode())
+    r3_14 = []
+    for p_ in (_r3_t, _r3_ok):
+        r_ = subprocess.run([sys.executable,
+                             os.path.join(ROOT, "tools", "trk2gpx.py"), p_],
+                            capture_output=True, text=True)
+        r3_14.append((r_.returncode, "no valid points" in r_.stderr,
+                      "CRLF" in r_.stderr,
+                      re.search(r"<name>([^<]*)</name>", r_.stdout).group(1),
+                      r_.stdout.count("<trkpt")))
+    check("RV14-14: trk2gpx warns on stderr when a non-empty file gives no "
+          "point (CRLF line ends named); the track's name loses only the "
+          "suffix",
+          r3_14 == [(0, True, True, "my.trip", 0),
+                    (0, False, False, "2026.track1", 1)], repr(r3_14))
 finally:
     gl.LOG_DIR, gl.DIAG = _r3_saved
     gl.wifi_reset()

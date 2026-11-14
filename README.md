@@ -161,7 +161,7 @@ HOSTNAME=Dawarich-GPS-tracker
 |-----|---------|
 | `SSID`, `WPA2` / `SSID2`, `WPA2_2` / `SSID3`, `WPA2_3` | Networks #1–#3 |
 | `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` | `1`/`0` (or `true`/`false`): treat as home. #1 is home by default, #2 and #3 are not. |
-| `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried in every round although the scan never lists it. Set it for every hidden network: without it a hidden SSID is tried only in the first round after a link loss, a wake or an arrival, and then every 4th round (up to ~40 minutes apart). |
+| `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried although the scan never lists it by name: in every round whose scan shows an AP with an empty SSID (a hidden network still beacons), and in the first round after a link loss, a wake or an arrival and every 4th round otherwise. Set it for every hidden network: without it a hidden SSID is tried only in those first and 4th rounds (up to ~40 minutes apart). |
 | `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a console message. |
 | `GEO_URL` | Dawarich origin. Use `https://`; see [Upload](#upload). |
 | `API_KEY` | Dawarich API key, sent as `Authorization: Bearer <key>` |
@@ -171,7 +171,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. WiFi needs 80 or more: 20/40 are raised to 80 whenever the radio is used (a network set, or `KEEPALIVE` on). |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has (with an https `GEO_URL` / `OTA_URL` it is asked on after a fix until the clock is set; a fix's clock is preferred). An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has. Once a fix has told the time it is not asked any more: that fix's clock (run on by the uptime) sets the board clock instead. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). |
 | `TFT_LIGHT` / `TFT_IDLE` | The display's backlight: `TFT_LIGHT` 0–100 per cent while it is on (default 30; 0 keeps it dark, the USER button still lights it), `TFT_IDLE` 0–86400 seconds into a stay (the board has not moved) before it goes dark (default 300; 0: never). Read at boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
@@ -936,7 +936,7 @@ console line.
   hotspot can take up to a minute) thins it evenly instead of dropping
   its start, so the track keeps 8 points spread over the whole block
   rather than a gap (`q_thin` in `/status.json` counts the thinned ones).
-  A point is recorded when it is more than 3 m from the last one.
+  A point is recorded when it is more than 1 m (`MIN_MOVE`) from the last one.
 - **Filter.** Skipped: fresh HDOP above 5, or a GST estimate above 20 m (the
   larger of latitude and longitude, 1σ). A cold start can show a good HDOP
   while the position walks in from far away (measured: 230 m, over 65 s); GST
@@ -1025,7 +1025,7 @@ console line.
 
 Indoors the GPS wanders tens of metres with a good HDOP and reports 5–20 km/h
 while lying still (measured on the board: speed p50 5.4 km/h, drift p90 46 m,
-one-minute centroids up to 72 m apart). Neither the 3 m rule nor speed can
+one-minute centroids up to 72 m apart). Neither the 1 m rule nor speed can
 tell a stay from a drive, so the stay filter works on positions.
 
 - **Entering.** Two consecutive one-minute centroids within 50 m make a
@@ -1084,8 +1084,8 @@ tell a stay from a drive, so the stay filter works on positions.
   more than 50 m from the anchor; otherwise the recent fixes are the stay's
   drift. Before, a train ride home without a fix kept
   writing the old anchor every 5 minutes until home. Where no access point
-  is around while learning, or with no scans (keep-alive `gpio`/`radio` or
-  off, the radio connected), only a fix ends the stay, or:
+  is around while learning, or with no scans (keep-alive off, the radio
+  connected), only a fix ends the stay, or:
 - **Home without a fix.** An away stay ends once the home WiFi is up and no
   usable fix came for 30 s (`stay end: home without a fix`), counted from
   the fix that began the stay at the earliest: the home WiFi connecting
@@ -1106,8 +1106,10 @@ tell a stay from a drive, so the stay filter works on positions.
   trip. A walk turning back within ~80 m still can: indoor drift looks the
   same. A fix back after 5 minutes more than 150 m away writes
   what was held to the old track before it closes.
-- **Leaving home** is accepted only once the home network is out of range
-  (below −75 dBm: the RSSI when connected, else a ~2 s scan). While it is in
+- **Leaving home** is accepted only once the home network is out of range:
+  below −85 dBm (`SEEN_MIN_RSSI`) on the home link or in a ~2 s scan while
+  the radio sleeps after it, below −75 dBm (`ROAM_MIN_RSSI`) in a scan
+  otherwise. While it is in
   range the departure is a GPS jump (measured: a 194 m jump at a desk) and
   further departures wait 60 s.
 - **After a fix gap** (over 30 s): fixes more than 150 m from the open window
@@ -1127,9 +1129,10 @@ tell a stay from a drive, so the stay filter works on positions.
 1. Scan once, keep the strongest BSSID per SSID.
 2. Try a home AP at ≥ −75 dBm first, then other visible known APs, strongest
    first, then configured networks the scan missed, in config order: hidden
-   ones every round, the others in the first round (at boot, and again after
-   a link loss, a wake from sleep or a new stay) and every 4th
-   (`UNLISTED_EVERY`), since each costs a 12 s try with the radio on. A
+   ones in every round whose scan shows an empty-SSID AP, all of them in the
+   first round (at boot, and again after a link loss, a wake from sleep or a
+   new stay) and every 4th (`UNLISTED_EVERY`), since each costs a 12 s try
+   with the radio on. A
    hidden home is preferred when the scan shows a strong empty-SSID AP. If
    the scan fails, every network is tried in config order.
 3. Each try is polled from the main loop (~12 s deadline), so GPS sampling
@@ -1159,8 +1162,8 @@ tell a stay from a drive, so the stay filter works on positions.
 - If no network is found and there is something to upload, it retries with
   backoff (15 s doubling to 10 minutes) until one connects, the radio off in
   between; with nothing to upload it sleeps. With `WEB` on and no keep-alive
-  scan that could see home come back (`gpio`, `radio` or off, or a hidden
-  home whose BSSIDs are not learned yet), it searches on with that backoff
+  scan that could see home come back (`KEEPALIVE=0`, or a hidden home whose
+  BSSIDs are not learned yet), it searches on with that backoff
   for 30 minutes (`WEB_SEARCH`) after the link went down, so the page comes
   back after a router restart (or a router booting slower than the board)
   instead of an hour later.
@@ -1435,9 +1438,9 @@ Constants at the top of `gps_logger.py`; most never need changing.
 | `PB_KEEPALIVE` | 5 s | Keep-alive pulse interval while the radio sleeps (`.env` `KEEPALIVE`) |
 | `WIFI_OFF_WAIT` | 60 s | An upload backoff at least this long turns the radio off until it is due |
 | `ROAM_CHECK` / `ROAM_BACKOFF_MAX` | 5 min / 60 min | Home-roam scans on another network, and their backoff cap |
-| `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference and home range) |
-| `SEEN_MIN_RSSI` | −85 dBm | With `WEB`, a home a keep-alive scan sees at least this strong starts a round while the radio sleeps |
-| `UNLISTED_EVERY` | 4 | A network a good scan did not list is tried every Nth round (hidden ones always) |
+| `ROAM_MIN_RSSI` | −75 dBm | Minimum home RSSI for a switch (also boot preference, and home range in a scan away from the home link) |
+| `SEEN_MIN_RSSI` | −85 dBm | With `WEB`, a home a keep-alive scan sees at least this strong starts a round while the radio sleeps; also home range on the home link and in the scan while the radio sleeps after it |
+| `UNLISTED_EVERY` | 4 | A network a good scan did not list is tried every Nth round (hidden ones also whenever the scan shows an empty-SSID AP) |
 | `WEB_SEARCH` | 30 min | With `WEB` and no keep-alive scan that can see home (none, or a hidden home not learned yet), failed rounds keep searching this long before sleeping |
 | `BLANK_BAD_HOLD` / `HOME_AP_MAX` / `LEARN_RSSI` | 1 h / 4 / 8 dB | Hidden home: a blank AP whose try failed is skipped; learned BSSIDs kept; RSSI match for learning |
 | `HOME_AP_MISS` / `HOME_APS_FILE` | 5 / `/home_aps` | Hidden-home connects through other BSSIDs before an unseen learned one is dropped; the file that keeps them across reboots |

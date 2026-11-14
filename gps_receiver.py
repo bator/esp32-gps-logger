@@ -98,7 +98,7 @@ def reset():
               loop_at=time.ticks_ms(), boot_t=[],
               storm_at=None, boot_at=None, boot_last=None, boot_gap=0,
               svs=None, svs_at=None,
-              gps_ver=None, gsa_at=None, gsa_n=0, uc_ok=0, uc_fail=0, uc_sys=None,
+              gps_ver=None, gsa_at=None, gsa_n=0, gsa_t=None, uc_ok=0, uc_fail=0, uc_sys=None,
               uc_sys_sent=False, fix_first=None, settled=False, gst_said=None,
               ack_n=0, rate_nak=False, checked=True,
               hz1=0, hz5=0,
@@ -345,11 +345,20 @@ def gga(talker, f):
 def gsa(talker, f):
     """Fix type. One per system and round on a multi-GNSS receiver; more
     than GSA_MAX in a second means the GSA rate of the setup was lost:
-    gps_check sets it up again."""
+    gps_check sets it up again. The receiver's second (the last time
+    sentence's), not the uptime's: after a loop blocked by a POST, two
+    rounds 5 s apart on the wire were read within one uptime second and
+    counted as a lost rate (a needless setup). Before any time sentence,
+    the uptime's."""
     st["fixtype"] = _num(f[2], int)
-    now = time.ticks_ms()
-    if not _recent(now, st["gsa_at"], 1000):
-        st["gsa_at"], st["gsa_n"] = now, 0
+    t = _sec[0]
+    if t is not None:
+        if t != st["gsa_t"]:
+            st["gsa_t"], st["gsa_n"] = t, 0
+    else:
+        now = time.ticks_ms()
+        if not _recent(now, st["gsa_at"], 1000):
+            st["gsa_at"], st["gsa_n"] = now, 0
     st["gsa_n"] += 1
     if st["gsa_n"] == GSA_MAX + 1:
         _extra(talker, f)
@@ -401,7 +410,7 @@ def _gps_restarted():
     st.update(svs=None, svs_at=None, gps_ver=None, fix_first=None,
               settled=False)
     _ep_new(None)
-    _uc_sv.update(new={}, open=False, until=None, used=[], gsa=None)
+    _uc_sv.update(new={}, open=False, until=None, used=[], gsa=None, gt=None)
 
 def _gps_flap(now):
     """A receiver that restarts every few seconds but sends NMEA in between
@@ -556,7 +565,8 @@ def _uc_line(p):
 
 _UC_GNSS = {"GP": 0, "GA": 2, "GB": 3, "GQ": 5, "GL": 6}  # (GNSS's numbers)
 _UC_SYS = {1: 0, 2: 6, 3: 2, 4: 3, 5: 5}  # GSA's system id -> gnssId
-_uc_sv = {"new": {}, "open": False, "until": None, "used": [], "gsa": None}
+_uc_sv = {"new": {}, "open": False, "until": None, "used": [], "gsa": None,
+          "gt": None}
 # GSV's signal id (its last field) -> its band, 1 (L1/E1/B1) or 5 (L5/E5a/
 # B2a), keyed gnssId << 8 | id (UFirebird II spec, table 1-3); others none
 _UC_BAND = {0 << 8 | 1: 1, 0 << 8 | 8: 5, 2 << 8 | 7: 1, 2 << 8 | 1: 5,
@@ -576,17 +586,27 @@ def _uc_gsv_skip():
     return False
 
 def _uc_gsa(talker, f):
-    """One GSA: the satellites of its system in the fix. A pause before it
-    starts a new list: the sentences of a round come in one burst, and a
-    round every second by the clock cut one in two (11 seen, 6 in use).
-    The system is the last field (NMEA 4.10); before it (18 fields) the
-    talker's, and none for GN (mixed): that one adds nothing."""
+    """One GSA: the satellites of its system in the fix. A new receiver
+    second (HHMMSS of the last time sentence; rounds come every GSA_EVERY
+    s, at most every second) starts a new list: the sentences of a round
+    come in one burst after their epoch's time, and a round every second by
+    the uptime cut one in two (11 seen, 6 in use). Told by a pause in the
+    reading before (UC_GSA_GAP, still so until a time sentence came), a
+    loop pass of over 150 ms in a burst split it, and two rounds read in
+    one go were one. The system is the last field (NMEA 4.10);
+    before it (18 fields) the talker's, and none for GN (mixed): that one
+    adds nothing."""
     n = len(f)
     if n < 18:
         return
     u = _uc_sv
     now = time.ticks_ms()
-    if not _recent(now, u["gsa"], UC_GSA_GAP):
+    e = _sec[0]
+    if e is not None:
+        if e != u["gt"]:
+            u["used"] = []
+            u["gt"] = e
+    elif not _recent(now, u["gsa"], UC_GSA_GAP):
         u["used"] = []
     u["gsa"] = now
     g = _UC_SYS.get(_num(f[-1], int)) if n > 18 else _UC_GNSS.get(talker)
