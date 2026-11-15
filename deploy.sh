@@ -28,7 +28,13 @@
 # raw REPL; left stopped, the WDT reset the board: a boot failure, and an
 # aborted OTA).
 #
-# Usage: ./deploy.sh            (PORT=/dev/ttyUSB1 ./deploy.sh to override;
+# Everything made here (the .mpy files, web.html.gz) is made first, in a
+# temporary directory, before the first session: a local failure (mpy-cross,
+# tools/web_min.py) used to come after the logger was stopped, and its exit
+# reset a healthy board for nothing.
+#
+# Usage: ./deploy.sh            (the board's USB Serial/JTAG, /dev/ttyACM0;
+#                                PORT=/dev/ttyACM1 ./deploy.sh to override;
 #                                VENV=path for a venv other than ./.venv,
 #                                relative to where you run it)
 set -euo pipefail
@@ -39,16 +45,40 @@ case "${VENV:-.venv}" in
 esac
 cd "$(dirname "$0")"
 
-PORT=${PORT:-/dev/ttyUSB0}
-VENV=${VENV:-.venv}                      # python, pip and mpremote come from it
+PORT=${PORT:-/dev/ttyACM0}               # the Heltec's USB Serial/JTAG
+VENV=${VENV:-$PWD/.venv}                 # python, pip and mpremote come from it
 PY=$VENV/bin/python
 MPREMOTE=$VENV/bin/mpremote
 FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy main.py web.html.gz"
+ARCH=xtensawin                           # the Heltec's ESP32-S3 (checked below)
+
+# A device path that is not there: say so, before anything else (mpremote's
+# own error, and the restart below, said less)
+case "$PORT" in
+    /*) if [ ! -e "$PORT" ]; then
+            echo "No such port: $PORT (the board's USB Serial/JTAG is usually /dev/ttyACM0; PORT=... to choose)" >&2
+            exit 1
+        fi ;;
+esac
 
 # mpy-cross must match the firmware's .mpy version (MicroPython 1.29)
 if ! "$PY" -c "import mpy_cross" 2>/dev/null; then
     "$VENV/bin/pip" install -q "mpy-cross==1.29.*"
 fi
+
+# What goes up, made here before the board is asked anything: the logger's
+# modules (sent unless the firmware has them frozen in) and main.py, and the
+# status page only gzipped: sent as is to browsers (Accept-Encoding: gzip),
+# inflated on the board for other clients (curl). tools/web_min.py strips
+# it and makes the gzip, with the firmware's WEB_GZ_WBITS window (see
+# there); web.html itself keeps its comments.
+BUILD=$(mktemp -d "${TMPDIR:-/tmp}/deploy.XXXXXX")
+trap 'rm -rf "$BUILD"' EXIT
+for m in gps_logger gps_clock gps_receiver; do
+    "$PY" -m mpy_cross -O3 -march="$ARCH" -o "$BUILD/$m.mpy" "$m.py"
+done
+cp main.py "$BUILD/main.py"
+"$PY" tools/web_min.py web.html "$BUILD/web.html.gz"
 
 # The logger stopped by the sessions below runs again on every exit (the
 # last step's own reset clears this). Unknown whether an OTA is pending:
@@ -62,6 +92,7 @@ restart_logger() {
         "$MPREMOTE" connect "$PORT" exec --no-follow \
             "import gps_logger; gps_logger.run()" >/dev/null 2>&1 || true
     fi
+    rm -rf "$BUILD"
     exit "$rc"
 }
 trap restart_logger EXIT
@@ -88,7 +119,7 @@ if [ "$OTAPEND" != False ]; then
 fi
 MACHINE=$(tail -n 1 <<< "$BOARD")
 case "$MACHINE" in
-    *Heltec*) ARCH=xtensawin ;;
+    *Heltec*) ;;
     *) echo "Unsupported board: $MACHINE" >&2; exit 1 ;;
 esac
 echo "Board: $MACHINE ($ARCH)"
@@ -117,9 +148,6 @@ case "$FROZEN" in
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
             echo "WARNING: it shadows the frozen one and takes ~100 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
-            "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
-            "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_clock.mpy gps_clock.py
-            "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_receiver.mpy gps_receiver.py
         else
             # (the display's code, gps_boot.py, gps_clock.py and
             # gps_receiver.py on the board that has them in the marker: an older
@@ -138,18 +166,10 @@ case "$FROZEN" in
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
         fi ;;
-    plain) "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_logger.mpy gps_logger.py
-           "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_clock.mpy gps_clock.py
-           "$PY" -m mpy_cross -O3 -march="$ARCH" -o gps_receiver.mpy gps_receiver.py ;;
+    plain) ;;
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
-# The status page goes up only gzipped: sent as is to browsers
-# (Accept-Encoding: gzip), inflated on the board for other clients (curl).
-# tools/web_min.py strips it and makes the gzip, with the firmware's
-# WEB_GZ_WBITS window (see there); web.html itself keeps its comments.
-"$PY" tools/web_min.py web.html web.html.gz
-
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
 # of metadata, while the old one still exists
@@ -166,7 +186,7 @@ case "${BSIZE:-x}${BFREE:-x}" in
 esac
 NEED=0
 for f in $FILES; do
-    NEED=$(( NEED + ($(wc -c < "$f") + BSIZE - 1) / BSIZE + 1 ))
+    NEED=$(( NEED + ($(wc -c < "$BUILD/$f") + BSIZE - 1) / BSIZE + 1 ))
 done
 echo "Flash: $(( BFREE * BSIZE / 1024 )) KB free, $(( NEED * BSIZE / 1024 )) KB needed"
 if [ "$BFREE" -lt "$NEED" ]; then
@@ -179,9 +199,10 @@ CP=()
 EXPECT=""
 for f in $FILES; do
     CP+=(cp "$f" ":$f.dpl" +)
-    EXPECT+="$f $(( $(wc -c < "$f") )) $(sha256sum "$f" | cut -d' ' -f1)"$'\n'
+    EXPECT+="$f $(( $(wc -c < "$BUILD/$f") )) $(sha256sum "$BUILD/$f" | cut -d' ' -f1)"$'\n'
 done
-GOT=$("$MPREMOTE" connect "$PORT" "${CP[@]}" exec "
+# (from the build directory: the board's names are the files' own)
+GOT=$(cd "$BUILD" && "$MPREMOTE" connect "$PORT" "${CP[@]}" exec "
 import os, hashlib, binascii
 b = bytearray(512)
 for n in '$FILES'.split():

@@ -11,7 +11,11 @@ statement) and so do the spaces around JS operators (taking those out needs a
 real parser: an earlier attempt broke a regex). The JS and the CSS are scanned
 token by token, so a "//" or "/*" in a string or a regex is left alone; what
 it cannot read (a string or a regex cut short, a template literal) stops the
-build rather than ship a broken page.
+build rather than ship a broken page, and so does markup whose white space
+shows (<pre>, <textarea>) or a <script>/<style> without an end tag it reads.
+A JS line (and a // comment) ends at \n, \r, U+2028 or U+2029; an HTML
+comment is out before the page is split, so a "<style>" named in one starts
+no block, and a "<!--" in a script's string is no comment.
 
 The gzip: zlib level 9, no name or mtime (the same page gives the same bytes),
 the window gps_logger.py's WEB_GZ_WBITS says. Not gzip -9: its 32 KB window is
@@ -28,6 +32,9 @@ _JS_KEYWORDS = ("return", "typeof", "case", "in", "of", "delete", "void", "throw
                 "new", "else", "do", "instanceof", "yield", "await")
 _PAREN_HEADS = ("if", "while", "for", "with")
 _WORD = re.compile(r"[\w$\u0080-￿]+")
+# what ends a JS line (and a // comment): not only \n
+_JS_NL = "\n\r\u2028\u2029"
+_JS_WS = " \t\f\v" + _JS_NL
 
 
 class MinifyError(ValueError):
@@ -37,7 +44,7 @@ class MinifyError(ValueError):
 def _space(out, ws):
     """A run of white space: a newline when it holds one (none twice, none at
     the start, no space before it), else one space."""
-    if "\n" in ws or "\r" in ws:
+    if any(c in ws for c in _JS_NL):
         while out and out[-1] == " ":
             out.pop()
         if out and out[-1] != "\n":
@@ -92,21 +99,26 @@ def minify_js(src):
     regex_ok, parens, word = True, [], ""
     while i < n:
         c = src[i]
-        if c in " \t\r\n\f\v":
+        if c in _JS_WS:
             j = i
-            while j < n and src[j] in " \t\r\n\f\v":
+            while j < n and src[j] in _JS_WS:
                 j += 1
             _space(out, src[i:j])
             i = j
         elif src.startswith("//", i):
-            j = src.find("\n", i)
-            i = n if j < 0 else j
+            # (up to any line terminator: one ending only at \n dropped the
+            # code after a \r or a U+2028 with the comment)
+            j = i + 2
+            while j < n and src[j] not in _JS_NL:
+                j += 1
+            i = j
         elif src.startswith("/*", i):
             j = src.find("*/", i + 2)
             if j < 0:
                 raise MinifyError("a comment cut short: %r" % src[i:i + 60])
-            # (one with a newline ends a statement as the newline would)
-            _space(out, "\n" if "\n" in src[i:j] else " ")
+            # (one with a line terminator, a lone \r too, ends a statement
+            # as the newline would)
+            _space(out, src[i:j])
             i = j + 2
         elif c in "\"'":
             j = _string(src, i)
@@ -187,24 +199,42 @@ def minify_css(src):
     return "".join(out).strip()
 
 
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
+# markup this cannot strip: white space that shows (<pre>, <textarea>), and a
+# <script> or <style> _BLOCK did not take (no end tag it reads)
+_KEEP = re.compile(r"<(pre|textarea|script|style)\b", re.I)
+
+
 def minify_html(src):
     """Markup (no <script> or <style>): no comments, indentation or blank lines."""
-    src = re.sub(r"<!--.*?-->", "", src, flags=re.S)
+    src = _COMMENT.sub("", src)
+    m = _KEEP.search(src)
+    if m:
+        raise MinifyError("markup web_min cannot strip: %r" % src[m.start():m.start() + 60])
     return re.sub(r"[ \t\r]*\n[ \t\r\n]*", "\n", src)
 
 
-_BLOCK = re.compile(r"(<(style|script)\b[^>]*>)(.*?)(</\2>)", re.S | re.I)
+# an HTML comment or a whole <style>/<script> block, whichever starts first:
+# a "<style>" named in a comment starts none, a "<!--" in a script's string
+# is no comment
+_BLOCK = re.compile(r"<!--.*?-->|(<(style|script)\b[^>]*>)(.*?)(</\2\s*>)",
+                    re.S | re.I)
 
 
 def minify(page):
     """The page's text, stripped; the same rendering, the same script."""
-    out, pos = [], 0
+    out, markup, pos = [], [], 0
     for m in _BLOCK.finditer(page):
-        fn = minify_js if m.group(2).lower() == "script" else minify_css
-        out.append(minify_html(page[pos:m.start()]))
-        out.append(m.group(1) + "\n" + fn(m.group(3)) + "\n" + m.group(4))
+        markup.append(page[pos:m.start()])
         pos = m.end()
-    out.append(minify_html(page[pos:]))
+        if not m.group(1):
+            continue                     # a comment: gone, the markup goes on
+        fn = minify_js if m.group(2).lower() == "script" else minify_css
+        out.append(minify_html("".join(markup)))
+        markup = []
+        out.append(m.group(1) + "\n" + fn(m.group(3)) + "\n" + m.group(4))
+    markup.append(page[pos:])
+    out.append(minify_html("".join(markup)))
     return "".join(out).strip() + "\n"
 
 

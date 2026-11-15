@@ -714,6 +714,12 @@ _EPOCH_S = gl.EPOCH_DAYS * 86400         # 1970 -> the firmware's 2020
 passed = 0
 failed = 0
 failures = []
+skips = []
+# With CI=true (GitHub Actions) a check that cannot run is a FAIL, not a
+# SKIP: the workflow installs all the suite needs (node, the MicroPython
+# builds, Pillow, the font), so a skip there means a check silently stopped
+# running. Only these may skip in CI:
+CI_SKIP_OK = ()
 
 
 def check(name, cond, detail=""):
@@ -726,6 +732,73 @@ def check(name, cond, detail=""):
         msg = "FAIL  %s%s" % (name, (" - " + str(detail)) if detail else "")
         print(msg)
         failures.append(msg)
+
+
+def skip_check(name, why):
+    """A check that cannot run here (a tool missing): counted and listed in
+    the summary; a FAIL under CI=true unless name is in CI_SKIP_OK."""
+    if os.environ.get("CI") == "true" and name not in CI_SKIP_OK:
+        check("%s: runs in CI, never skips" % name, False, why)
+        return
+    msg = "SKIP  %s: %s" % (name, why)
+    print(msg)
+    skips.append(msg)
+
+
+_summary_done = []
+
+
+@atexit.register
+def _summary():
+    """The totals and the failures, also when the run dies on the way (an
+    uncaught exception in a check's cleanup ended it without them)."""
+    if _summary_done:
+        return
+    _summary_done.append(1)
+    print()
+    print("%d passed, %d failed, %d skipped" % (passed, failed, len(skips)))
+    if skips:
+        print("skipped:")
+        for s_ in skips:
+            print(" ", s_)
+    if failures:
+        print("failures:")
+        for f_ in failures:
+            print(" ", f_)
+    if not _run_ended:
+        print("RUN ENDED EARLY: an uncaught exception above stopped the suite "
+              "(the checks after it did not run)")
+
+
+_run_ended = []
+
+
+class _LoopLimit(BaseException):
+    """Ends a main loop a test started by mistake (no Exception: run() and
+    _boot_start catch those)."""
+
+
+def _loop_limit(fn, passes=200):
+    """fn() with gps_logger's main loop held to passes passes: a
+    _boot_start regression that starts the logger ends instead of hanging
+    the run. -> True when the limit ended it (the loop ran)."""
+    m = sys.modules.get("gps_logger") or gl
+    real, n = m.log_tick, [0]
+
+    def tick(*a, **k):
+        n[0] += 1
+        if n[0] > passes:
+            raise _LoopLimit()
+        return real(*a, **k)
+
+    m.log_tick = tick
+    try:
+        fn()
+    except _LoopLimit:
+        return True
+    finally:
+        m.log_tick = real
+    return False
 
 
 HEADER = "#TRK1\n"
@@ -1648,7 +1721,7 @@ try:
             drain_wifi()
             tries.append([c[0] for c in WLAN.connects])
         return tries
-    every = getattr(gl, "UNLISTED_EVERY", 4)
+    every = gl.UNLISTED_EVERY
     tries = wr_rounds(triple, every)
     hid = wr_rounds(env_hid_home, 2, (("unrelated", -40), ("", -80)))
     hid_none = wr_rounds(env_hid_home, 2)
@@ -1831,8 +1904,10 @@ try:
     setattr(gl, rl_name, boom_line)
     try:
         gl.up_reset()
+        # (it asserted nothing: the read must have failed, and been caught)
         check("B2: count_points/up_reset catch MemoryError (no reset)",
-              True)
+              memerr and gl.up["left"] == 0,
+              "memerr=%s left=%s" % (memerr, gl.up["left"]))
     except MemoryError:
         check("B2: count_points/up_reset catch MemoryError (it escaped)", False)
     finally:
@@ -2364,15 +2439,17 @@ try:
     else:
         __builtins__.print = cap
     try:
-        boot_ns["_boot_start"]()
+        # (bounded: a regression that starts the logger here ran the real
+        # loop for ever, the suite hung)
+        k2_ran = _loop_limit(boot_ns["_boot_start"])
     finally:
         if isinstance(__builtins__, dict):
             __builtins__["print"] = real_print
         else:
             __builtins__.print = real_print
     check("K2: at BOOT_FAIL_MAX the logger is not started (REPL)",
-          any("REPL" in line for line in printed),
-          repr(printed))
+          any("REPL" in line for line in printed) and not k2_ran,
+          repr((k2_ran, printed[-5:])))
 
     # --- K3: delayed CONNECTING does not block GPS sampling ----------------
     reset_wlan()
@@ -4069,7 +4146,7 @@ try:
     _clock[0] += 1000
     epoch("120132.00")
     held = (gl.st["std"], gl._usable(_clock[0]))
-    _clock[0] += getattr(gl, "GST_HOLD", 6000) + 1000
+    _clock[0] += gl.GST_HOLD + 1000
     epoch("120133.00")
     _clock[0] += 1000
     epoch("120134.00")
@@ -4890,7 +4967,7 @@ try:
         pass
     check("TIME-BACK: a false future time lets go after TIME_BACK_N fixes "
           "an hour behind it: the walk goes on in a new segment",
-          len(tb_after) >= 89 - getattr(gl, "TIME_BACK_N", 10) - 2
+          len(tb_after) >= 89 - gl.TIME_BACK_N - 2
           and not any(x[9:11] == "11" for x in tb_t)
           and "\n-\n" in tb_txt and len(tb_d) == 1,
           "after=%d glitch=%s diag=%r" % (
@@ -5105,8 +5182,8 @@ try:
             hb_fix(0, 0, nofix=True, speed=0.0)
         return ok, len(sv_lines())
 
-    gap_stay = getattr(gl, "STILL_GAP_STAY", 60000)    # (getattr: the
-    gap_jump = getattr(gl, "STILL_GAP_JUMP", 1000)     # old code runs too)
+    gap_stay = gl.STILL_GAP_STAY
+    gap_jump = gl.STILL_GAP_JUMP
     ok0, n0 = g_gap()
     states = []
     first = None
@@ -5905,7 +5982,7 @@ try:
           away_no_web == "sleep", away_no_web)
 
     # WEB server: GET / and /status.json answered from the main loop
-    inf_wbits = getattr(gl, "WEB_GZ_WBITS", 12)
+    inf_wbits = gl.WEB_GZ_WBITS
 
     class FakeConn:
         def __init__(self, req, fail=False):
@@ -6014,7 +6091,7 @@ try:
         gz_file = gzip.compress(page_file)
         with open(os.path.join(gz_td, "web.html.gz"), "wb") as f:
             f.write(gz_file)
-        saved_gz = getattr(gl, "WEB_PAGE_GZ", None)
+        saved_gz = gl.WEB_PAGE_GZ
         gl.WEB_PAGE_GZ = os.path.join(gz_td, "web.html.gz")
         gz_reqs = [
             FakeConn(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n"
@@ -6148,8 +6225,8 @@ try:
           in oh, repr(oh[:200]))
     check("WEB-GZ-WBITS: the page's window is 2**9..2**12 bytes (the RAM "
           "the inflate takes: ~15 KB of heap is free; gzip -9's 32 KB is "
-          "not)", 9 <= getattr(gl, "WEB_GZ_WBITS", 15) <= 12,
-          getattr(gl, "WEB_GZ_WBITS", None))
+          "not)", 9 <= gl.WEB_GZ_WBITS <= 12,
+          gl.WEB_GZ_WBITS)
     check("WEB: no web.html on the board -> 404 naming deploy.sh and the JSON",
           nopage.sent.startswith(b"HTTP/1.0 404") and b"deploy.sh" in
           nopage.sent and b"/status.json" in nopage.sent,
@@ -6466,7 +6543,7 @@ try:
         _clock[0] += 60000
         gl._set_freq(80)                 # within the hold: left alone
         held = _freqs[-1] == 160000000
-        _clock[0] += getattr(gl, "FREQ_RETRY", 1800000)
+        _clock[0] += gl.FREQ_RETRY
         gl._set_freq(80)
         back = _freqs[-1] == 80000000 and 80 not in gl._freq_bad
     finally:
@@ -6847,7 +6924,7 @@ if mpy_bin:
               + out.decode(errors="replace")[-400:])
 
 else:
-    print("SKIP  mpy-unix (no micropython binary)")
+    skip_check("mpy-unix", "no micropython binary")
 
 # Optional: a single-precision unix build, floats as on the board (ESP32:
 # MICROPY_FLOAT_IMPL_FLOAT). The smoke's departure ring checks then see what
@@ -6875,7 +6952,7 @@ if mpy_f32:
         check("mpy-unix-f32: gps_logger smoke", False, repr(e) + " "
               + out.decode(errors="replace")[-400:])
 else:
-    print("SKIP  mpy-unix-f32 (MICROPYTHON_F32 not set)")
+    skip_check("mpy-unix-f32", "MICROPYTHON_F32 not set")
 
 # The same smoke under CPython (keeps the script itself working)
 import subprocess
@@ -6901,10 +6978,10 @@ lb_plain = os.path.join(lb_td, "web.min.html")
 with open(lb_plain, "wb") as f:
     f.write(_page_min(lb_page))
 with open(lb_gz, "wb") as f:              # (as deploy.sh makes it)
-    f.write(_gz_small(_page_min(lb_page), getattr(gl, "WEB_GZ_WBITS", 12)))
+    f.write(_gz_small(_page_min(lb_page), gl.WEB_GZ_WBITS))
 for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
     if not interp:
-        print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
+        skip_check("WEB-LOOPBACK on " + tag, "no binary")
         continue
     try:
         out = subprocess.check_output(
@@ -7072,7 +7149,12 @@ def deploy_run(env_extra):
                                             if fz != "clock-stale" else "0" * 64))
                 f.write('RX = "%s"\n' % (rx_sha               # and gps_receiver.py's
                                          if fz != "rx-stale" else "0" * 64))
-    env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
+    if env_extra.get("FAKE_BAD_PAGE"):           # tools/web_min.py fails on it
+        with open(os.path.join(work, "web.html"), "w") as f:
+            f.write('<script>\nvar a = "cut;\n</script>\n')
+    port = os.path.join(work, "ttyACM0")        # (deploy.sh checks it is there)
+    open(port, "w").close()
+    env = dict(os.environ, PORT=port, FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_LOGGER=os.path.join(work, "logger"),
                FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
@@ -7136,9 +7218,9 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and dev_file(dev, "gps_receiver.py") is None
           and len(cps) == 5 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Heltec Wireless Tracker" in out and "(xtensawin)" in out
-          and "Deployed to /dev/fakeACM0" in out,
+          and "Deployed to %s/ttyACM0" % os.path.dirname(dev) in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
-    dp_w = getattr(gl, "WEB_GZ_WBITS", 12)
+    dp_w = gl.WEB_GZ_WBITS
     check("DEPLOY-GZIP: only web.html.gz goes up, stripped (tools/web_min.py), "
           "made with the board's small window (WEB_GZ_WBITS: it inflates it for "
           "curl), no mtime; the old plain web.html is removed in the same swap",
@@ -7187,7 +7269,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and _gunzip_w(dev_file(dev, "web.html.gz") or b"", dp_w) == new_page
           and sorted(c[1] for c in cps) == ["main.py", "web.html.gz"]
           and "frozen in (abc1234)" in out
-          and "Deployed to /dev/fakeACM0" in out,
+          and "Deployed to %s/ttyACM0" % os.path.dirname(dev) in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
     # DEPLOY-OTA: an OTA install still being validated (/ota.pending): the
     # deploy's reset would abort the pending image (the bootloader rolls back
@@ -7376,8 +7458,40 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY-FORCE-SPLIT: FORCE=1 does not get past a pending OTA, "
           "FORCE_PENDING=1 does not get past a stale frozen logger",
           split and split2, "%r %r rc=%d %r" % (split, split2, rc, err[-300:]))
+    # DEPLOY-PORT: the default port was /dev/ttyUSB0 (the Heltec is USB
+    # Serial/JTAG: /dev/ttyACM0), and a port that is not there got
+    # mpremote's error and the exit's restart; now "No such port" before
+    # anything. DEPLOY-LOCAL-FIRST: the .mpy files and web.html.gz were made
+    # after the logger was stopped, and a local failure then reset a healthy
+    # board: now they are made before the first session
+    with open(os.path.join(ROOT, "deploy.sh")) as f:
+        dp_src = f.read()
+    pl = os.path.join(tempfile.mkdtemp(dir=dp_td), "py.log")
+    rc, out, err, dev, calls = deploy_run({"PORT": "/dev/nonexistent-ttyACM9",
+                                           "FAKE_PY_LOG": pl})
+    dp_port = (rc, "No such port: /dev/nonexistent-ttyACM9" in err, calls,
+               dev_logger(dev), os.path.exists(pl))
+    rc, out, err, dev, calls = deploy_run({"FAKE_BAD_PAGE": "1"})
+    dp_local = (rc, "cut short" in err, calls, dev_logger(dev),
+                dev_file(dev, "main.py"))
+    pl = os.path.join(tempfile.mkdtemp(dir=dp_td), "py.log")
+    rc, out, err, dev, calls = deploy_run({"FAKE_PY_LOG": pl})
+    with open(pl) as f:
+        dp_first = f.read().count("-O3")
+    check("DEPLOY-PORT: the default port is /dev/ttyACM0; a port that is not "
+          "there stops with 'No such port' before anything (no build, no "
+          "session, the logger left running)",
+          "PORT=${PORT:-/dev/ttyACM0}" in dp_src and "ttyUSB0" not in dp_src
+          and dp_port[0] == 1 and dp_port[1:] == (True, [], [], False),
+          repr(dp_port + (err[-200:],)))
+    check("DEPLOY-LOCAL-FIRST: the .mpy files and web.html.gz are made before "
+          "the first session: a page tools/web_min.py refuses stops the deploy "
+          "with the board untouched (no session, no reset)",
+          dp_local[0] != 0 and dp_local[1:] == (True, [], [], b"old main")
+          and rc == 0 and dp_first == 3,
+          repr(dp_local + (rc, dp_first)))
 else:
-    print("SKIP  DEPLOY: no bash/sha256sum")
+    skip_check("DEPLOY", "no bash/sha256sum")
 
 # BUILD: tools/build_firmware.sh with a fake ESP-IDF, MicroPython tree,
 # esptool and mpremote: the marker module records the SHA-256 of the frozen
@@ -7832,7 +7946,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           == ["/web.html.gz"]
           and named == ["micropython-%s.bin" % man.get("commit"),
                         "web-%s.html.gz" % man.get("commit")]
-          and _gunzip_w(pub_gz, getattr(gl, "WEB_GZ_WBITS", 12)) == pub_page
+          and _gunzip_w(pub_gz, gl.WEB_GZ_WBITS) == pub_page
           and not os.path.exists(os.path.join(
               dest, "web-%s.html" % man.get("commit"))) and old_ok,
           repr((man.get("files"), sorted(os.listdir(dest)), old_ok)))
@@ -7871,7 +7985,8 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     # repo root, and neither was ignored; it uses ~/.config/gps-logger now
     ign = subprocess.run(
         ["git", "-C", ROOT, "check-ignore", "--no-index", "env.backup",
-         "hist/20261101.trk", "x.env", ".env.new", "env.bak"],
+         "hist/20261101.trk", "x.env", ".env.new", "env.bak", "env",
+         "ota.key", "ota.key.old", "sign.key", ".claude/settings.json"],
         capture_output=True, text=True).stdout.split()
     tracked_ign = subprocess.run(
         ["git", "-C", ROOT, "ls-files", "-ci", "--exclude-standard"],
@@ -7879,15 +7994,16 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     with open(os.path.join(ROOT, "README.md")) as f:
         rd = f.read()
     mig = rd[rd.index("**Once, over USB:**"):rd.index("**Then:**")]
-    check("SECRETS-IGNORE: env.backup, hist/ and *.env* are ignored (no "
+    check("SECRETS-IGNORE: env.backup, hist/, *.env*, env (the backup's "
+          "/.env copy), *.key, ota.key* and .claude/ are ignored (no "
           "tracked file is); the migration recipe keeps them in "
           "~/.config/gps-logger, mode 600",
-          len(ign) == 5 and tracked_ign == []
+          len(ign) == 10 and tracked_ign == []
           and "~/.config/gps-logger" in mig and "chmod 600" in mig
           and "env.backup +" not in mig and "cp -r :/hist . " not in mig,
           repr((ign, tracked_ign, mig[:400])))
 else:
-    print("SKIP  BUILD: no bash/sha256sum/git/make")
+    skip_check("BUILD", "no bash/sha256sum/git/make")
 shutil.rmtree(dp_td, ignore_errors=True)
 
 
@@ -9659,6 +9775,31 @@ check("TRK2: trk2gpx reads TRK2 lines (acc and speed as extensions)",
 check("TRK2: trk2gpx output of TRK1 lines unchanged (no extension namespace)",
       "xmlns:esp" not in trk2gpx.convert(
           ["47.5,19.0,10.0,0.9,20261031T120002Z\n"], "x"))
+# T2G-DAMAGE: a .trb's delta record end scan ran to the end of a 0xFF run
+# for each of its bytes (16 KB took ~12 s, 256 KB ~2 h); a keyframe "=#END"
+# ended the track (the logger's _rd_footer takes the raw footer only); a
+# binary .trb with no point got the "(CRLF line ends?)" hint
+_t2g_kf = b"=47.500000,19.000000,120.0,0.9,20261101T100000Z\n"
+_t2g_t0 = time.perf_counter()
+_t2g_ff = len(list(trk2gpx.read_points(trk2gpx.trb_lines(
+    b"#TRKB\n" + _t2g_kf + b"\xff" * 16384 + b"\n" * 40 + _t2g_kf + bytes([0x80]) + b"#END\n"))))
+_t2g_dt = time.perf_counter() - _t2g_t0
+_t2g_end = len(list(trk2gpx.read_points(trk2gpx.trb_lines(
+    b"#TRKB\n" + _t2g_kf + b"=#END\n" + _t2g_kf.replace(b"100000Z", b"100005Z")
+    + b"#END\n"))))
+_t2g_td = tempfile.mkdtemp(prefix="t2g-")
+_t2g_p = os.path.join(_t2g_td, "x.trb")
+with builtins.open(_t2g_p, "wb") as f:
+    f.write(b"#TRKB\n=bad\n" + bytes([0x86, 0x0D, 0x0A]) + b"#END\n")
+_t2g_r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"),
+                         _t2g_p], capture_output=True, text=True)
+shutil.rmtree(_t2g_td, True)
+check("T2G-DAMAGE: trk2gpx reads past a 16 KB 0xFF run in well under 1.5 s "
+      "(both keyframes and the delta kept); a keyframe \"=#END\" is no footer; a "
+      "binary .trb without points gets no CRLF hint",
+      _t2g_ff == 3 and _t2g_dt < 1.5 and _t2g_end == 2
+      and "no valid points" in _t2g_r.stderr and "CRLF" not in _t2g_r.stderr,
+      repr((_t2g_ff, round(_t2g_dt, 2), _t2g_end, _t2g_r.stderr[-200:])))
 
 # RING-LINE: the way out rebuilt from the departure ring is the line
 # _sample_line writes (single precision: mpy_unix_logger)
@@ -10443,7 +10584,7 @@ try:
     gl.wifi.update(blank_rssi=-50, blank_bssid=b"\x12" * 6, roaming=True)
     gl._mark_failed("home", "test")
     held = not gl._blank_home_ok()
-    _clock[0] += getattr(gl, "BLANK_BAD_HOLD", 3600000)
+    _clock[0] += gl.BLANK_BAD_HOLD
     expired = gl._blank_home_ok()
     gl.wifi["roaming"] = True
     gl._mark_failed("home", "test")
@@ -10873,7 +11014,7 @@ try:
                {"ssid": "hot", "pw": "y", "home": False, "hidden": False,
                 "bssid": None, "ip": None}]
         aps, miss = [R2_NEIGH], {}
-        n_miss = getattr(gl, "HOME_AP_MISS", 5)
+        n_miss = gl.HOME_AP_MISS
         hist = []
         for _ in range(n_miss):
             rv_connect(["home"], [("", -50, R2_OURS)],
@@ -11483,7 +11624,9 @@ check("U-10: an unreadable track is held, the next uploads, then .err",
       len(_posts) >= 1 and not os.path.exists(ok_p)
       and os.path.exists(bad_p + ".err") and not os.path.exists(bad_p),
       "posts=%d %r" % (len(_posts), os.listdir(up_td)))
-os.remove(bad_p + ".err")
+for p_ in (bad_p, bad_p + ".err"):      # (a failed check leaves either: a
+    if os.path.exists(p_):              # bare remove ended the whole run)
+        os.remove(p_)
 
 # UPL-7: the points of a track parked as .err leave up["left"] (counted at
 # boot, they were never sent: 'left' stayed above 0 and held the OTA)
@@ -11507,7 +11650,9 @@ check("UPL-7: a track parked as .err after read errors leaves 'left'",
       u7_left0 == 8 and os.path.exists(bad_p + ".err")
       and not os.path.exists(ok_p) and gl.up["left"] == 0,
       repr((u7_left0, gl.up["left"], os.listdir(up_td))))
-os.remove(bad_p + ".err")
+for p_ in (bad_p, bad_p + ".err"):
+    if os.path.exists(p_):
+        os.remove(p_)
 # ... and one parked because it cannot be deleted after its last batch
 make_trk(ok_p, 3)
 gl.up["left"] = gl.count_points()
@@ -11524,7 +11669,9 @@ finally:
 check("UPL-7: a track parked as .err after failed deletes leaves 'left'",
       os.path.exists(ok_p + ".err") and gl.up["left"] == gl.count_points()
       == 0, repr((gl.up["left"], os.listdir(up_td))))
-os.remove(ok_p + ".err")
+for p_ in (ok_p, ok_p + ".err"):
+    if os.path.exists(p_):
+        os.remove(p_)
 
 # UPL-4: a 5xx or another answer that is no payload error (404, 403, 3xx)
 # for the same batch SRV_ERR_MAX times in a row holds that track, so the
@@ -11537,7 +11684,7 @@ for code_ in (500, 404):
     make_trk(bad_p, 3)
     make_trk(ok_p, 4)
     _post_code[0] = code_
-    for _ in range(getattr(gl, "SRV_ERR_MAX", 3)):
+    for _ in range(gl.SRV_ERR_MAX):
         pump()
         _clock[0] += 1000
     held4 = bad_p in (gl.up.get("hold") or {})
@@ -12718,7 +12865,7 @@ check("TLS-CA-OOM: ValueError making the context counts as out of memory "
 ca_td = tempfile.mkdtemp(prefix="ca-")
 ca_p = os.path.join(ca_td, "ca.der")
 with open(ca_p, "wb") as f:
-    f.write(b"\x30\x82" + b"x" * getattr(gl, "CA_MAX", 200000))
+    f.write(b"\x30\x82" + b"x" * gl.CA_MAX)
 ca_reads = []
 
 
@@ -13107,9 +13254,12 @@ saved_log_dir, saved_log_file = gl.LOG_DIR, gl.log["file"]
 gl.LOG_DIR = fc_td
 gl.log["file"] = fc_td + "/20261001_120000.trk"   # being written
 gl._fc[2] = None
+# (the day history's own 30 s listing is not this one's: it ran or not as an
+# earlier check left gl._hd; now it runs in r1, and only LOG_DIR's count)
+gl._hd[1] = None
 listings = []
 real_listdir = os.listdir
-os.listdir = lambda p: listings.append(p) or real_listdir(p)
+os.listdir = lambda p: (p == fc_td and listings.append(p)) or real_listdir(p)
 try:
     r1 = dict(gl._web_rows())
     r2 = dict(gl._web_rows())
@@ -13346,13 +13496,13 @@ finally:
     gl.wifi["home"] = False
 check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home too at first",
       away == (0, "low idf", 0)
-      and home == (0, 0, "low idf", getattr(gl, "LOWIDF_RETRY", -1)),
+      and home == (0, 0, "low idf", gl.LOWIDF_RETRY),
       "%r %r" % (away, home))
 
 # LOWIDF-WAIT: at home the reboot comes only after LOWIDF_WAIT of low idf
 # with tracks waiting, and it tells the next boot (LOWIDF_MARK)
-wait_ms = getattr(gl, "LOWIDF_WAIT", 300000)
-mark = getattr(gl, "LOWIDF_MARK", os.path.join(diag_dir, "lowidf"))
+wait_ms = gl.LOWIDF_WAIT
+mark = gl.LOWIDF_MARK
 if os.path.exists(mark):
     os.remove(mark)
 online(up_td)
@@ -13382,7 +13532,7 @@ check("LOWIDF-WAIT: at home a reboot only after LOWIDF_WAIT of low idf",
 online(up_td)                            # up_reset at boot takes the mark
 gl.up["url"], gl.up["key"] = "https://d.example", "k"
 make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
-gap_ms = getattr(gl, "LOWIDF_REBOOT_GAP", 1800000)
+gap_ms = gl.LOWIDF_REBOOT_GAP
 took = (gl.up.get("lowidf_boot"), os.path.exists(mark))
 saved_up = list(_gck._up)
 _gck._up[:] = [0, _clock[0], 0]           # just booted
@@ -13391,7 +13541,7 @@ gl.wifi["home"] = True
 _resets[:] = []
 t_boot = _clock[0]
 t_reboot = None
-retry_ms = getattr(gl, "LOWIDF_RETRY", 30000)
+retry_ms = gl.LOWIDF_RETRY
 try:
     while _clock[0] - t_boot < gap_ms + 4 * retry_ms:
         try:
@@ -13587,7 +13737,7 @@ try:
 finally:
     del sys.modules["gps_frozen"]
 check("LOWPY-FROZEN: TLS_MIN_PY_KB is 8 on frozen firmware, 12 otherwise",
-      fz_ == (True, 8) and (getattr(gl, "FROZEN", None), gl.TLS_MIN_PY_KB)
+      fz_ == (True, 8) and (gl.FROZEN, gl.TLS_MIN_PY_KB)
       == (False, 12), "%r %r" % (fz_, gl.TLS_MIN_PY_KB))
 
 # HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
@@ -13858,7 +14008,7 @@ try:
     base = _clock[0]
     loops0 = gl.st["loops"]
     for dt in (gl._rcv.GPS_FLAP_WINDOW + 10000,
-               getattr(gl, "TICKS_CAP", 86400000) + 10000):
+               gl._rcv.TICKS_CAP + 10000):
         _clock[0] = base + dt
         gl._rcv.gps_check(_clock[0])
     _clock[0] = base + TPW + 5000            # all would read 5-30 s old
@@ -13919,11 +14069,8 @@ import re
 import shutil
 import subprocess
 node = shutil.which("node")
-if node is None and os.environ.get("CI") == "true":
-    check("PAGE: node is installed (CI runs the page checks, never skips)",
-          False)
-elif node is None:
-    print("SKIP  PAGE: node not installed")
+if node is None:
+    skip_check("PAGE", "node not installed")
 else:
     here = os.path.dirname(os.path.abspath(__file__))
     out, raws = [], []
@@ -14907,6 +15054,33 @@ check("WEB-MIN-FAIL: what it cannot read (a string, regex or comment cut short, 
       "literal) stops the build, nothing written",
       web_min and not _wm_bad and _wm_r.returncode == 1 and "cut short" in _wm_r.stderr
       and not os.path.exists(os.path.join(_wm_td, "o.gz")), repr((_wm_bad, _wm_r.stderr[-200:])))
+# WEB-MIN-EDGE: a // comment ended only at \n (the code after a \r or a
+# U+2028 went with it), a /* */ holding a lone \r became a space, "</script >"
+# was no end tag (the script went through the markup's comment regex), a
+# "<style>" named in an HTML comment started a block, <pre> lost its
+# indentation
+_wm_edge = []
+if web_min:
+    _wm_edge = [
+        web_min.minify_js("a = 1 // c\rb = 2") == "a = 1\nb = 2",
+        web_min.minify_js("a = 1 // c\u2028b = 2; // d\u2029c = 3") == "a = 1\nb = 2;\nc = 3",
+        web_min.minify_js("return /*\r*/ x") == "return\nx",
+        web_min.minify('<script>\nvar s = "<!-- x -->"; // c\n</script >')
+        == '<script>\nvar s = "<!-- x -->";\n</script >\n',
+        web_min.minify('<!-- see <style> -->\n<p>50 /* about */ km</p>\n<style>\na{b:c}\n</style>\n')
+        == '<p>50 /* about */ km</p>\n<style>\na{b:c}\n</style>\n']
+    for src_ in ("<pre>\n  a\n</pre>", "<p>x</p><TEXTAREA>\n  a</TEXTAREA>",
+                 "<script>\nf()\n", "<style>a{b:c}"):
+        try:
+            web_min.minify(src_)
+            _wm_edge.append(src_)
+        except web_min.MinifyError:
+            _wm_edge.append(True)
+check("WEB-MIN-EDGE: a // comment ends at \\r, U+2028 and U+2029 too, a /* */ with "
+      "a lone \\r ends the line; \"</script >\" ends a script (its \"<!--\" string "
+      "kept); a \"<style>\" in an HTML comment starts no block; <pre>, <textarea> "
+      "and a <script>/<style> without an end tag stop the build",
+      web_min and _wm_edge == [True] * 9, repr(_wm_edge))
 _wm_page = web_min.minify(page_src) if web_min else page_src
 _wm_css = lambda t_: re.sub(r"\s+", " ", re.sub(r"/\*.*?\*/", " ", t_[t_.index("<style>"):t_.index("</style>")],
                                                 flags=re.S)).replace(" }", "}").strip()
@@ -14919,7 +15093,7 @@ _wm_data = b""
 if os.path.exists(_wm_gz):
     with open(_wm_gz, "rb") as f:
         _wm_data = f.read()
-_wm_w = getattr(gl, "WEB_GZ_WBITS", 12)
+_wm_w = gl.WEB_GZ_WBITS
 check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
       "mtime, not over 25 KB (35.7, then 28.5 before A+C); the CSS and the markup only lose comments and "
       "white space; stripping again changes nothing; web.html itself keeps its comments",
@@ -14968,7 +15142,7 @@ if node is not None:
     _wm_r = subprocess.run([node, "--expose-internals", "-e", _wm_ast, os.path.join(ROOT, "web.html"), _wm_min],
                            capture_output=True, text=True)
     if "Cannot find module" in _wm_r.stderr or "bad option" in _wm_r.stderr:
-        print("SKIP  WEB-MIN-AST: this node has no acorn to reach")
+        skip_check("WEB-MIN-AST", "this node has no acorn to reach")
     else:
         try:
             _wm_j = json.loads(_wm_r.stdout)
@@ -15017,11 +15191,11 @@ check("PAGE: polls status.json at the board's refresh_s, no reload; Atlas "
 # status.json with long values, offline (the top bar's longest state): no
 # horizontal scrolling, the top bar's items inside the screen and not over
 # each other. Runs wherever google-chrome or chromium is on the PATH, else
-# SKIP; the CI workflow installs neither, so there it runs only if the runner
-# image has one.
+# SKIP; the CI workflow installs neither: the ubuntu-24.04 runner image has
+# google-chrome (and CI=true makes a skip a FAIL).
 chrome = shutil.which("google-chrome") or shutil.which("chromium")
 if chrome is None:
-    print("SKIP  PAGE-LAYOUT: google-chrome not installed")
+    skip_check("PAGE-LAYOUT", "google-chrome not installed")
 else:
     import functools
     import http.server
@@ -15330,7 +15504,7 @@ def _bad_open(name, mode="r", *a, **k):
     return _open3(name, mode, *a, **k)
 builtins.open = _bad_open
 try:
-    for r in range(getattr(gl, "WFAIL_SWITCH", 3)):
+    for r in range(gl.WFAIL_SWITCH):
         gl.log["batch"].append(trk_line(47.2, 18.4,
                                         "2026-11-01T10:05:%02dZ" % r))
         gl.flush()
@@ -15886,7 +16060,7 @@ _ota_dir = tempfile.mkdtemp()
 _ota_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
               gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
               gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES)
-_ota_saved2 = (getattr(gl, "OTA_MARK", None), getattr(gl, "OTA_SHADOW", None))
+_ota_saved2 = (gl.OTA_MARK, gl.OTA_SHADOW)
 gl.esp32 = _FakeEsp32
 gl.OTA_PENDING = os.path.join(_ota_dir, "ota.pending")
 gl.OTA_BAD = os.path.join(_ota_dir, "ota.bad")
@@ -15941,7 +16115,7 @@ def _ota_reset():
         sl.mem[:] = b"\0" * len(sl.mem)
         sl.boot = False
     for f in (gl.OTA_PENDING, gl.OTA_BAD, gl.OTA_TRIES,
-              getattr(gl, "OTA_MARK", None) or os.path.join(_ota_dir, "-"),
+              gl.OTA_MARK or os.path.join(_ota_dir, "-"),
               os.path.join(_ota_dir, "web.html.gz"),
               os.path.join(_ota_dir, "web.html.gz.new")):
         try:
@@ -17110,7 +17284,8 @@ try:
             del _ota_log[:]
             RTC.mem = b"%d" % (ns["BOOT_FAIL_MAX"] - (how == "error"))
             if how == "start":
-                ns["_boot_start"]()
+                if _loop_limit(ns["_boot_start"]):
+                    out.append("the logger started")
             else:
                 out.append(ns["_boot_handle_error"]())
             t = [x for x in _timers if x.callback]
@@ -21408,7 +21583,8 @@ with open(_mf_path, encoding="utf-8") as f:
     _mf_src = f.read()
 _mf = {}
 if "def crop(" in _mf_src and '__name__ == "__main__"' in _mf_src:
-    exec(compile(_mf_src, _mf_path, "exec"), {"__name__": "make_tft_font"}, _mf)
+    exec(compile(_mf_src, _mf_path, "exec"),
+         {"__name__": "make_tft_font", "__file__": _mf_path}, _mf)
 _crop = _mf.get("crop")
 _row0 = b"\x00"
 _tiny = (_row0 + b"\x10" + b"\x20" + _row0                 # width 2: a byte a row
@@ -21425,10 +21601,18 @@ check("TFT-FONT-TOOL: crop keeps the rows from the first to the last with ink in
       and _crop(b"\x02", b"\x00\x10\x00\x20", 4, 2) == (b"\x00\x00", b"\x10\x00\x20", 3, 1)
       and _crop(b"\x02", b"\x00" * 3, 3, 2) == (b"\x00\x00", b"\x00", 1, 2)
       and _crop_err == "refused" and "main" in _mf, repr(_mf.keys()))
-# what the tool writes is what is committed (needs Pillow and the Space Grotesk TTFs)
-_mf_can = importlib.util.find_spec("PIL") is not None and bool(_mf) and os.path.exists(_mf["D"] % "Bold")
-if not _mf_can:
-    print("SKIP  TFT-FONT-REGEN: Pillow or the Space Grotesk TTFs are missing")
+# what the tool writes is what is committed (needs Pillow 11.0.0, which wrote
+# it: another one's FreeType anti-aliases a few pixels differently; the font
+# is in tools/fonts; CI installs that Pillow)
+try:
+    import PIL as _mf_pil
+    _mf_pv = _mf_pil.__version__
+except ImportError:
+    _mf_pv = None
+_mf_font = bool(_mf) and os.path.exists(_mf["D"] % "Bold")
+if _mf_pv != "11.0.0" or not _mf_font:
+    skip_check("TFT-FONT-REGEN", "Pillow %s (not 11.0.0) or no font: %s"
+               % (_mf_pv, _mf_font))
 else:
     _mf_td = tempfile.mkdtemp(prefix="font-")
     _mf_r = subprocess.run([sys.executable, _mf_path], cwd=_mf_td, capture_output=True, text=True)
@@ -22100,13 +22284,16 @@ def _rb_loop(n=5):
         k[0] += 1
         if k[0] >= n:
             raise KeyboardInterrupt
+    # (ntp_tick too: the real one asked NTP once due, and what these
+    # checks saw depended on how far the clock had got)
     saved = (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
              gl.log_tick, gl._rcv.gps_check, gl.keepalive_tick, gl.tft_tick,
-             gl._boot_ok, gl._rcv.read_uart)
+             gl._boot_ok, gl._rcv.read_uart, gl.ntp_tick)
     gl.time.sleep_ms = _sl
     gl.wifi_tick = gl.upload_tick = gl.log_tick = lambda: None
     gl._boot_ok = gl._rcv.read_uart = lambda: None
     gl.ota_tick = gl._rcv.gps_check = gl.keepalive_tick = gl.tft_tick = lambda now: None
+    gl.ntp_tick = lambda now: None
     gl._wdt = None
     try:
         gl._loop()
@@ -22118,7 +22305,7 @@ def _rb_loop(n=5):
     finally:
         (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
          gl.log_tick, gl._rcv.gps_check, gl.keepalive_tick, gl.tft_tick,
-         gl._boot_ok, gl._rcv.read_uart) = saved
+         gl._boot_ok, gl._rcv.read_uart, gl.ntp_tick) = saved
 
 
 def _rb_oom(*a):
@@ -23902,10 +24089,6 @@ finally:
     diag_clear()
     shutil.rmtree(_r3_dir, ignore_errors=True)
 
-print()
-print("%d passed, %d failed" % (passed, failed))
-if failures:
-    print("failures:")
-    for f in failures:
-        print(" ", f)
+_run_ended.append(1)
+_summary()
 sys.exit(1 if failed else 0)
