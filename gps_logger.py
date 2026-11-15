@@ -88,6 +88,10 @@ VBAT_DIV = 4.9                           # (390k + 100k) / 100k
 VBAT_N = 32                              # reads a measurement
 VBAT_SWING = 0.5                         # V of 10th-90th percentile spread
                                          # above which there is no battery
+VBAT_EVERY = 60                          # s between samples of the time left
+VBAT_HIST = 31                           # samples kept: 30 min
+VBAT_SPAN = 600                          # s of samples before a time left
+VBAT_DROP = 2                            # %-points the fit must fall over them
 VBAT_OCV = (4.19, 4.05, 3.99, 3.89, 3.80, 3.72, 3.63, 3.53, 3.42, 3.30, 3.10)
 # V of a 1S LiPo at 100, 90 ... 0 % (Meshtastic's default OCV_ARRAY,
 # src/Power.h), linear between; on USB the charger lifts it (up to 4.2 V)
@@ -6738,6 +6742,7 @@ def _web_rows():
     heap = py_heap()
     still = log["still"]
     vb, vw = _vbat()
+    vl = _vbat_left()
     return [
         ("fix", status()),
         ("sats", "%d / %s" % (view, _rcv.sv_used())),
@@ -6780,7 +6785,8 @@ def _web_rows():
         ("vbat_swing", vw),
         ("vbat_pct", None if vw is None or vw > VBAT_SWING
          else _vbat_pct(vb)),
-        ("battery", _battery(vb, vw)),
+        ("vbat_left_s", vl),             # (about, from the last 30 min)
+        ("battery", _battery(vb, vw, vl)),
         ("mhz", machine.freq() // 1000000),
         ("mem", heap[0]),
         ("heap_kb", heap[1]),
@@ -6834,12 +6840,59 @@ def _vbat_pct(v):
             return round(100 - 10 * (i - (v - o[i]) / (o[i - 1] - o[i])))
     return 0
 
-def _battery(v, w):
-    """The page's text: "76 % (3.95 V)", "none, on USB" (the charger's
-    swing without a battery), None without a measurement."""
+_vb_hist = []                            # [(uptime s, %)] on the battery
+
+def vbat_tick(now):
+    """Every VBAT_EVERY s a sample of what is left for _vbat_left. No
+    battery, or one put on the charger (up VBAT_DROP + 1 points since the
+    last sample), starts the history again."""
+    if (_vb_hist and uptime_s(now) - _vb_hist[-1][0] < VBAT_EVERY):
+        return
+    v, w = _vbat()
+    if v is None or w > VBAT_SWING:
+        del _vb_hist[:]
+        return
+    p = _vbat_pct(v)
+    if _vb_hist and p > _vb_hist[-1][1] + VBAT_DROP:
+        del _vb_hist[:]
+    _vb_hist.append((uptime_s(now), p))
+    if len(_vb_hist) > VBAT_HIST:
+        del _vb_hist[0]
+
+def _vbat_left():
+    """About how long the battery lasts, s: the least-squares slope of the
+    samples (VBAT_HIST, the last 30 min) carried down to 0 %. None until
+    they span VBAT_SPAN and the fit falls VBAT_DROP points over them (on
+    the charger, or too short to tell)."""
+    h = _vb_hist
+    n = len(h)
+    if n < 2 or h[-1][0] - h[0][0] < VBAT_SPAN:
+        return None
+    mt = sum(t for t, _ in h) / n
+    mp = sum(p for _, p in h) / n
+    sxx = sum((t - mt) ** 2 for t, _ in h)
+    k = sum((t - mt) * (p - mp) for t, p in h) / sxx   # %/s
+    if -k * (h[-1][0] - h[0][0]) < VBAT_DROP:
+        return None
+    return int(max(0, mp + k * (h[-1][0] - mt)) / -k)
+
+def _left_text(secs):
+    """'~45 min', '~2 h 10 min' (to 10 min from an hour), no-break spaces
+    (a phone broke the line inside it)."""
+    m = (secs + 30) // 60
+    if m < 60:
+        return "~%d\u00a0min" % m
+    m = (m + 5) // 10 * 10
+    return "~%d\u00a0h\u00a0%02d\u00a0min" % (m // 60, m % 60)
+
+def _battery(v, w, left=None):
+    """The page's text: "76 % (3.95 V)", with the time left "76 % (3.95
+    V), ~2 h 10 min left", "none, on USB" (the charger's swing without a
+    battery), None without a measurement."""
     return None if v is None or w is None else (
         "none, on USB" if w > VBAT_SWING
-        else "%d %% (%.2f V)" % (_vbat_pct(v), v))
+        else "%d %% (%.2f V)%s" % (_vbat_pct(v), v, "" if left is None
+                                   else ", %s left" % _left_text(left)))
 
 _fl = [None, None]                       # (KB, Stamp) of the last statvfs
 
@@ -8533,4 +8586,5 @@ def _loop():
         if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
             _guarded("diag", _diag, now)
             diag_at = now
+        _guarded("vbat", vbat_tick, now)
         time.sleep_ms(20)

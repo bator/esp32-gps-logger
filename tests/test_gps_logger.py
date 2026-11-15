@@ -8916,6 +8916,60 @@ try:
     gl._diag(_clock[0])
 finally:
     gl._diag_write = _vb_dw
+
+# VBAT-LEFT: about how long the battery lasts, from the samples vbat_tick
+# takes once a minute (the last 30 min): the least-squares slope carried down
+# to 0 %. Nothing before 10 min of samples, on a flat or rising (charging)
+# line, or without a battery; put on the charger, the history starts again.
+gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]  # 0.5 %/min
+vl_fit = gl._vbat_left()
+vl_txt = [gl._left_text(x) for x in (vl_fit, 2700, 59 * 60 + 40, 3 * 3600 + 4 * 60)]
+gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 541, 60)]
+vl_short = gl._vbat_left()
+gl._vb_hist[:] = [(t, 80) for t in range(0, 1801, 60)]
+vl_flat = gl._vbat_left()
+gl._vb_hist[:] = [(t, 60 + t / 300.0) for t in range(0, 1801, 60)]
+vl_up = gl._vbat_left()
+vl_bat = gl._battery(3.95, 0.01, vl_fit)
+_vb_m.ADC = _VbAdc
+try:
+    gl._vb_hist[:] = []
+    gl._vb[:] = [None, None, None, None]
+    vl_seen = []
+    for k_ in range(14):                 # 3.95 V down 10 mV a minute
+        _VbAdc.uv = [int((3.95 - 0.01 * k_) / 4.9 * 1e6)]
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        gl.vbat_tick(_clock[0] + 20)     # (the next loop: no second sample)
+        vl_seen.append(len(gl._vb_hist))
+    vl_rows = dict(gl._web_rows())
+    _VbAdc.uv = [int(4.05 / 4.9 * 1e6)]  # on the charger: up 10 points
+    _clock[0] += 60000
+    gl.vbat_tick(_clock[0])
+    vl_charge = list(gl._vb_hist)
+    _VbAdc.uv = [618000, 841000]         # no battery: the charger's swing
+    _clock[0] += 60000
+    gl.vbat_tick(_clock[0])
+    vl_none = list(gl._vb_hist)
+finally:
+    del _vb_m.ADC
+    gl._vb_hist[:] = []
+    gl._vb[:] = [None, None, None, None]
+check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min; none under 10 min, flat "
+      "or charging; one sample a minute, the page's text with it; on the "
+      "charger and without a battery the history starts again",
+      vl_fit == 7800 and [x.replace("\u00a0", " ") for x in vl_txt]
+      == ["~2 h 10 min", "~45 min", "~1 h 00 min", "~3 h 00 min"]
+      and " " not in "".join(vl_txt)
+      and vl_short is None and vl_flat is None and vl_up is None
+      and vl_bat == "76 % (3.95 V), ~2\u00a0h\u00a010\u00a0min left"
+      and vl_seen == list(range(1, 15))
+      and vl_rows["vbat_left_s"] is not None and 0 < vl_rows["vbat_left_s"] < 6 * 3600
+      and vl_rows["battery"].endswith(" left")
+      and len(vl_charge) == 1 and vl_none == [],
+      "%r %r %r %r %r %r %r %r %r %r" % (vl_fit, vl_txt, vl_short, vl_flat, vl_up, vl_bat,
+                                         vl_seen, [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
+                                         vl_charge, vl_none))
 gl._vb[:] = [None, None, None, None]
 check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 76 % (Meshtastic's LiPo curve); "
       "the charger's swing 'none, on USB'; no ADC None, diag line unchanged",

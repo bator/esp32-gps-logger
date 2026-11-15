@@ -727,7 +727,12 @@ cause, the build (`fw`, `fw_build`), chip temperature, the battery
 percentile spread; `vbat_pct`: what is left, 0-100 %, from a 1S LiPo
 curve, Meshtastic's `OCV_ARRAY`: 4.19 V 100 %, 3.80 V 60 %, 3.10 V 0 %,
 linear between; on USB the charger lifts the voltage, so it reads high
-while charging; `battery`: the page's text, `76 % (3.95 V)`, or `none, on USB`
+while charging; `vbat_left_s`: about how long the battery lasts, from a
+sample a minute (`VBAT_EVERY`) over the last 30 min: the least-squares slope
+carried down to 0 %, `null` until the samples span 10 min and fall at least
+2 points (on the charger, or too short to tell); a battery put on the charger
+starts the samples again; `battery`: the page's text, `76 % (3.95 V), ~2 h
+10 min left`, or `none, on USB`
 when the spread is over `VBAT_SWING` 0.5 V: without a battery the
 charger's output swings, measured 0.84-0.94 V on USB), free Python heap
 and flash,
