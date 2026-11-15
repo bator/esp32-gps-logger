@@ -539,7 +539,8 @@ ft.backToday = !p.c.hist.past && p.c.hist.end === Infinity;
 // DAY-BUTTONS (Bator: "the buttons work badly"): the chips run oldest
 // first, today last, so < (older) moves the picked chip one to the left and
 // > one to the right; a day being read says so, not "no trip"; a failed read
-// says "no trip" at once
+// is no day either: "Reading" till its retry (busy off, err on), which then
+// reads it
 ft.dayDir = (() => {
   const q = page(1600), out = {};
   q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null, days: ["20261103", "20261104"]});
@@ -560,6 +561,11 @@ ft.dayDir = (() => {
   const open = q.xhrs.filter((r) => r.url.indexOf("/hist?") === 0 && !r.done), x = open[open.length - 1];
   if (x) { x.done = true; x.onerror(); }   // (the shown day's own request)
   out.failed = q.doc.getElementById("tline").innerHTML;
+  out.failedFlags = [q.c.hist.busy, q.c.hist.err];
+  q.c.hist.at -= 60000;                    // its retry is due
+  if (q.c.histDue()) q.c.histLoad();
+  answer(q, null, "");
+  out.retried = q.doc.getElementById("tline").innerHTML;
   return out;
 })();
 // REV-4: at 00:30 local on Nov 2 in Budapest (23:30 UTC on Nov 1) today

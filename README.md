@@ -232,7 +232,7 @@ compiles `gps_logger.py`, `gps_clock.py` and `gps_receiver.py` to `.mpy`
 what it is (anything but the Heltec is refused: `Unsupported board`) and
 checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
-It makes `web.html.gz` with `tools/web_min.py` (~24 KB instead of the ~80 KB
+It makes `web.html.gz` with `tools/web_min.py` (~25 KB instead of the ~88 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
 window, `WEB_GZ_WBITS`: see the [status page](#status-page)) and copies
 `gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy`, `main.py` and the status page, only as `web.html.gz`, as
@@ -449,7 +449,8 @@ between `set_boot` and the reset no longer skips the reset (left there,
 the next reset booted the new slot with no pending note, valid without a
 health check); a boot slot that is set but not the running one at boot
 (no reset since) is booted once. The new firmware runs pending:
-2 minutes with WiFi connected (`OTA_VALID_AFTER`), and the manifest read
+2 minutes (`OTA_VALID_AFTER`), WiFi connected at that point (not only
+once before: a build that breaks the reconnect is not confirmed), and the manifest read
 once more (HTTP 200, the fields and the HMAC as above, every minute until
 it is: `OTA_PROBE`; a build whose update path is broken would otherwise
 only get the next one over USB, and a manifest signed with another key no
@@ -712,7 +713,8 @@ GGA stops at 12) and the satellite list with its age (none once it is
 2 min old, two `SV_POLL`, so a silent receiver's last sky is not shown as
 live; system and number,
 e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`; signal in
-dBHz, elevation, azimuth, used), HDOP, GPS time,
+dBHz, elevation, azimuth, used), HDOP, GPS time (`null` once the receiver
+has been silent over `NO_DATA`, as the position),
 position (`position` to 5 decimals, `pos6` to the track line's 6; both
 `null` once the last second is over 3 s old, `NO_DATA`, so a silent
 receiver's last fix is not shown as live), NMEA
@@ -858,7 +860,7 @@ JetBrains Mono) load from the internet when the phone is online; without
 it the page shows an empty map and the system font (the font sheet loads
 without blocking the first paint, so an offline phone does not wait for it).
 The page is a file on the
-board, kept only gzipped (`/web.html.gz`, ~24 KB instead of the ~80 KB
+board, kept only gzipped (`/web.html.gz`, ~25 KB instead of the ~88 KB
 `web.html`, whose comments and indentation `tools/web_min.py` takes out at build
 time; copied by `deploy.sh` or an OTA) and loads once: a browser
 (`Accept-Encoding: gzip`, in a bare-LF request too; a `gzip;q=0` token
@@ -871,7 +873,8 @@ inflating takes a buffer of the window's size, and the Python heap has
 ~15 KB free (the 4 KB window and its state take ~7 KB while a page goes
 out, measured on the unix port). It costs ~10% (zlib level 9 on
 the stripped page: 24.3 KB with `gzip -9`, 35.8 / 31.3 / 28.5 / 26.8 KB with a
-0.5 / 1 / 2 / 4 KB window). A board deployed before this still has the
+0.5 / 1 / 2 / 4 KB window, measured then; 25.3 KB with the 4 KB window on
+2026-11-15). A board deployed before this still has the
 plain `/web.html` (its `.gz` may have the 32 KB window, too wide to
 inflate here): it goes to clients without gzip until the next deploy or
 OTA removes it. When you change the page by hand, make the gzip the way
@@ -891,7 +894,7 @@ the JSON keeps the receiver's value.
 **Day history on the map.** The page draws today's track (since local
 midnight, the phone's time zone) on the map, with `TODAY x.xx KM` in the
 header (a day stepped to in *Track*: that local day, read once, with its date
-in the header; it is drawn also without a fix), and zooms out (17 down to 13) until the track fits around the
+in the header; it is drawn also without a fix), and zooms out (17 down to 6) until the track fits around the
 position. A gap of over 5 minutes breaks the line. Every point goes to
 `/hist/YYYYMMDD.trb` (its UTC date), a binary track like the track files
 (see *Binary tracks*): the header, then each append the records a flush
@@ -909,7 +912,9 @@ uploaded after a newer one (held back, retried) lands later in the day
 file; the page puts the points in time order again. The newest 7 days are
 kept (`HIST_DAYS`; a day written both as text and as `.trb` is one day). The
 history yields to the tracks: under 1 MB
-free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
+free (`HIST_RESERVE`) the oldest days go first (today's stays: by the clock's
+UTC day, not the newest name; a day more than one after the clock's, from a
+time that leapt ahead, gets no file and goes first), also before a
 batch would be dropped on a full flash, and nothing is added under
 2 × `MIN_FREE`. A failed write (or a bug in the copy) costs only the
 drawing: it is counted (`hist_errs` in `/status.json`) and in the
@@ -1046,7 +1051,7 @@ console line.
   larger of latitude and longitude, 1σ). A cold start can show a good HDOP
   while the position walks in from far away (measured: 230 m, over 65 s); GST
   catches it. The UC6580's does not (0.3 m while 4 m off), so its first minute after
-  a start counts only above 15 km/h (`UC_SETTLE`). 2D fixes omit
+  a start counts only above 15 km/h (`UC_SETTLE_KMH`). 2D fixes omit
   altitude. A fix dated before 2020 or from 2088
   on is not used at all: a receiver past a GPS week rollover reports 1999
   (read as 2099) or 2000. An NMEA fix is a GGA quality of 1–5
@@ -1124,7 +1129,13 @@ console line.
   minutes is closed so it can upload; driving offline stays one file, and
   parking does not open empty files.
 - **Flash.** 32 kB are kept free. Logging stops when full and resumes when
-  space is freed.
+  space is freed, with the present second: the seconds that came while it
+  was full are dropped, as after a fix loss (kept, they began the new file
+  an hour back with a point every 6-11 minutes). A track file is never
+  created over an existing one of the same name (a time that went back over
+  a track not uploaded yet): the new name goes on a second at a time. A
+  piece of a batch that runs out of memory is no failing file: the batch
+  waits for the next flush in the same file.
 
 ### Stays
 
@@ -1408,7 +1419,18 @@ home.
 - **Own HTTP client:** a minimal HTTP/1.0 POST over the `tls` module. The
   body goes out in 1 KB pieces and the wait for the answer (up to 30 s,
   `HTTP_WAIT`) polls, both reading the UART meanwhile, so a slow server
-  costs no NMEA (the 4 KB UART buffer holds ~5 s). The upload line on the
+  costs no NMEA (the UART buffer holds ~6 s: measured full at 8192 B in a
+  6.7 s connect). A connect or a TLS handshake that blocks is read through
+  too: the POST guard's timer (once a second, running inside blocking
+  socket calls: 13 times in that connect) reads the UART, never inside a
+  read already. The name lookup cannot be (lwIP: 7 s without an answer,
+  nothing else runs): after a lookup that failed slowly (over 2 s,
+  `DNS_SLOW`; a fast "no such name" is only that) the network is not asked
+  again for 10 min (`DNS_RETRY`) or until it gives a new IP: the address
+  that same network resolved before is used, or the POST fails at once.
+  Another network's address is never used (a LAN address would take the
+  API key to a stranger's device on a LAN of the same range). NTP goes before the upload in the loop, so the first
+  verified POST without a fix has the board clock set. The upload line on the
   console ends with the POST time. Answer lines are read 256 bytes at a
   time (`HTTP_LINE`); once the status line is in, an error while reading
   the headers (reset, timeout, the guard closing the socket) keeps the
@@ -1440,7 +1462,8 @@ home.
   first POST it could grow the Python heap and keep that area), and reused.
   Only a missing `/ca.der` means no verification: one that cannot be read,
   is empty or is not a valid certificate stops the POSTs (state `ca err`,
-  `upload ca err …` in the diagnostic log, retried every 30 s), never a
+  `upload ca err …` in the diagnostic log, retried on the doubling backoff,
+  the radio asleep in between), never a
   silent fall back. A `/ca.der` added, removed or replaced by one of another
   size is picked up at the next POST; one of the same size takes a reboot.
   mbedTLS checks the certificate's dates and the board clock starts at

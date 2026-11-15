@@ -1449,6 +1449,7 @@ def _net_hidden(ssid):
 
 def _wifi_got_ip(w):
     wifi["state"] = "connected"
+    _dns_bad.clear()                     # (a new IP: its resolver asked again)
     try:
         wifi["ip"] = w.ifconfig()[0]
     except WLAN_ERR:
@@ -1617,7 +1618,8 @@ def _upload_wait(now):
     state = str(up["state"] or "")
     d = time.ticks_diff(up["next_at"], now)
     wait = d if 0 < d <= UP_WAIT_MAX else 0
-    if state.startswith("err") or state in ("fs err", "low mem", "low idf"):
+    if state.startswith("err") or state in ("fs err", "low mem", "low idf",
+                                            "ca err"):
         return wait
     # "bad full": the rejected track is held (BACKOFF_MAX), its 15 s
     # next_at is no reason to keep the radio on: the holds below decide
@@ -1816,13 +1818,14 @@ def _keepalive_env(env):
 
 def _pb_pulse_radio(w):
     """Radio on, one scan (it holds ~100 mA ~2 s, and watches the stay's access
-    points and the home network: _stay_scan, _home_seen), off again."""
+    points and the home network: _stay_scan, _home_seen), off again. Only
+    the scan's errors are a failed pulse: what the scan leads to (a stay's
+    end writes the track) runs after it, its errors a diag line (they
+    were swallowed as a failed scan, the stay never ended)."""
+    aps = None
     try:
         w.active(True)
         aps = w.scan()
-        if not _scan_empty(aps, "pb_empty"):
-            _stay_scan(aps)
-            _home_seen(aps)
     except SCAN_ERR:
         pass
     finally:
@@ -1830,6 +1833,17 @@ def _pb_pulse_radio(w):
             w.active(False)
         except WLAN_ERR:
             pass
+    if aps is not None and not _scan_empty(aps, "pb_empty"):
+        # (its own errors: said once a kind, not a failed pulse, and not
+        # raised either: a guarded tick's TICK_PAUSE stretched the pulses
+        # past what a power bank counts as a load)
+        try:
+            _stay_scan(aps)
+            _home_seen(aps)
+        except MemoryError:
+            raise
+        except Exception as e:
+            _bug_once("bug keepalive %s" % repr(e)[:60], ("keepalive", type(e)))
 
 def keepalive_tick(now):
     """Power bank keep-alive. With the radio asleep the board draws less
@@ -2448,6 +2462,16 @@ def start_file(stamp=None, fx=None):
     except OSError:
         pass                             # already exists
     name = stamp or _tcn(_tc(fx))
+    # a file of that name already there (a time that went back over a track
+    # not uploaded yet) is not overwritten: the first write is "wb"; the
+    # name goes on a second at a time
+    for _ in range(60):
+        if _file_size(LOG_DIR + "/" + name + TRB) is None:
+            break
+        s = _kb_time((name[:8] + "T" + name[9:15] + "Z").encode(), 0)
+        if s is None:
+            break
+        name = _tcn(_stamp_s(s + 1)[1])
     # (wfail: a write that failed on the previous file must not keep the
     # next one from closing: log_tick)
     log.update(file=LOG_DIR + "/" + name + TRB,
@@ -2549,6 +2573,7 @@ def flush(hold=None, fx=None):
         last = batch[k - 1][-17:-1]
         while nq < len(q) and q[nq] is not None and q[nq] <= last:
             nq += 1
+    mem = False                          # (a later chunk out of memory)
     try:
         pts = 0
         if creating:
@@ -2582,7 +2607,10 @@ def flush(hold=None, fx=None):
         wrote = True
     except (OSError, MemoryError) as e:
         body = None
-        _werr("write", e)
+        mem = isinstance(e, MemoryError)
+        if mem:
+            gc.collect()
+        _werr("encode" if mem else "write", e)
     if f is not None:
         try:
             f.close()
@@ -2615,8 +2643,11 @@ def flush(hold=None, fx=None):
             # keeps failing goes on under another name too (one second
             # on when that is the same: the name itself may be what
             # fails); all it held is in the batch.
-            log["wfails"] = log["wfails"] + 1
-            if log["wfails"] >= WFAIL_SWITCH and batch:
+            # (a chunk out of memory is no failing file: three in a row
+            # left a good file for a new one, the track split, "failing")
+            if not mem:
+                log["wfails"] = log["wfails"] + 1
+            if not mem and log["wfails"] >= WFAIL_SWITCH and batch:
                 tc = batch[0][-17:-1]
                 name = _tcn(tc)
                 if creating:
@@ -2801,6 +2832,9 @@ def _hist_close(hf, ok=True):
         try:                             # the days beyond the newest
             ns = _hist_names()           # HIST_DAYS go (a day written as
             ds = sorted(set(n[:8] for n in ns))  # .trk and .trb is one)
+            t = _hist_today()
+            if t is not None:
+                ds = [d for d in ds if d <= t]
             if len(ds) > HIST_DAYS:
                 cut = ds[-HIST_DAYS]
                 for n in ns:
@@ -2831,6 +2865,15 @@ def _tail_nl(path, size):
             except OSError:
                 pass
 
+def _hist_today():
+    """The last UTC day the history takes, YYYYMMDD: the clock's (GPS, else
+    NTP) and one more (a clock a second behind, a flipped date digit, an
+    NTP-only clock), or None. A line's time that leapt further ahead (a
+    digit flipped past the checksum) must not make its day the newest: it
+    would stay while today went under pressure."""
+    c = log["clock"] or _ntp[0]
+    return None if c is None else _stamp_s(_utc_s(c) + 86400)[1][:8]
+
 def _hist_names():
     """The day history's files, the oldest first: YYYYMMDD.trb, and .trk
     from older firmware. OSError without HIST_DIR."""
@@ -2847,6 +2890,12 @@ def _hist_trim(want):
         days = _hist_names()
     except OSError:
         return room
+    t = _hist_today()
+    if t is not None and room is not None and room < want:
+        for n in [n for n in days if n[:8] > t]:   # (after the clock's day
+            _rm(HIST_DIR + "/" + n)                # first: a time that leapt)
+        days = [n for n in days if n[:8] <= t]
+        room = free()
     while room is not None and room < want and days and days[0][:8] != days[-1][:8]:
         d = days[0][:8]
         while days[0][:8] == d:
@@ -3648,6 +3697,11 @@ def log_tick():
             and _age_s(log["last_flush"]) >= FLUSH // 1000):
         _close_file()
     if log["full"]:
+        # nothing is recorded: the queued seconds go as after a fix loss
+        # (kept, thinned to its 8, they were written when space came back:
+        # an hour old first, then a point every 6-11 min, straight lines)
+        _rcv.drop_queue()
+        log["seq"] = st.get("seq", log["seq"])
         if log["fix"] and not has_fix(now):
             # nothing is recorded, but NEW_FILE_GAP counts from the loss,
             # not from when space returns
@@ -4698,7 +4752,12 @@ def _hist_put(hf, a, b):
         if not 48 <= c <= 57:
             return                       # (no date: not in a day's file)
         _hd8[k] = c
-    _hist_begin(hf, bytes(_hd8).decode())
+    day = bytes(_hd8).decode()
+    t = _hist_today()
+    if t is not None and day > t:        # (after the clock's day: a time that
+        _hd8[0] = 0                      # leapt; no file for it, and no
+        return                           # match for the next line either)
+    _hist_begin(hf, day)
     _hist_line(hf, _rbuf, a, b)
 
 def _append_bad(path, off, new_off, key=None):
@@ -4934,7 +4993,9 @@ def _tls_ready(now):
             up["last_err"] = err
             _diag_write("upload ca err %s" % err)
         gc.collect()
-        _schedule(now, LOWIDF_RETRY)
+        # a bad CA file stays bad: the doubling backoff (and _upload_wait
+        # lets the radio sleep in it); 30 s each kept a hotspot on for good
+        _schedule(now, LOWIDF_RETRY if oom else None)
         if oom:
             _tls_reboot()
         return False
@@ -5062,6 +5123,13 @@ def _guard_cb(timer):
         return
     if time.ticks_diff(time.ticks_ms(), until) < 0:
         feed()
+        # the NMEA too: a connect blocks up to HTTP_TIMEOUT, the UART holds
+        # ~6 s (measured: full at 8192 B in a 6.7 s connect, this callback
+        # ran 13 times in it); read_uart is not re-entered
+        try:
+            _rcv.read_uart()
+        except Exception:
+            pass
         return
     s = _guard["sock"]
     _guard["until"] = _guard["sock"] = None
@@ -5092,6 +5160,51 @@ def _guard_stop():
 _post_phase = [None]                     # "connect", "tls", "http" in a POST,
                                          # "ctx" while the SSLContext is made
 
+DNS_RETRY = 600                          # s a network whose resolver did not
+                                         # answer is not asked again (_resolve)
+DNS_SLOW = 2000                          # ms: a failed lookup this long is no
+                                         # answer (a fast one: no such name)
+DNS_KEEP = 8                             # addresses kept (host, port, kind, SSID)
+_dns = {}                                # key -> the last address on that net
+_dns_bad = {}                            # key -> Stamp of a slow failure
+
+def _resolve(host, port, kind=None):
+    """getaddrinfo's first answer. A lookup that failed slowly (DNS_SLOW: a
+    resolver that does not answer; measured 7 s, nothing else runs, the
+    UART fills, no socket yet for the guard) is not asked again on that
+    network for DNS_RETRY or until it gives a new IP: the address that
+    network resolved before is used, or it fails at once. A fast failure
+    (no such name) is only that. Addresses are kept per network: another
+    network's (a LAN address reached by the API key on a stranger's LAN of
+    the same range) is never used."""
+    if kind is None:
+        kind = socket.SOCK_STREAM
+    key = (host, port, kind, wifi["ssid"])
+    bad = _dns_bad.get(key)
+    if bad is not None and _recent_s(bad, DNS_RETRY):
+        ai = _dns.get(key)
+        if ai is None:
+            raise OSError(-202)          # (lwIP's own "no answer")
+        return ai
+    feed()
+    t0 = time.ticks_ms()
+    try:
+        ai = socket.getaddrinfo(host, port, 0, kind)[0]
+    except OSError:
+        feed()
+        if time.ticks_diff(time.ticks_ms(), t0) >= DNS_SLOW:
+            _dns_bad[key] = _stamp()
+            ai = _dns.get(key)
+            if ai is not None:
+                return ai
+        raise
+    feed()
+    if len(_dns) >= DNS_KEEP and key not in _dns:
+        _dns.clear()                     # (a few networks: no growth)
+    _dns[key] = ai
+    _dns_bad.pop(key, None)
+    return ai
+
 def _http_open(method, url):
     """The start of an HTTP/1.0 request, no redirects: a socket for url's
     host. -> (socket, its address, https?, host, the request's first lines).
@@ -5105,12 +5218,7 @@ def _http_open(method, url):
         port = int(p)
     head = "%s /%s HTTP/1.0\r\nHost: %s\r\n" % (
         method, path, host if port == dflt else "%s:%d" % (host, port))
-    # (lwIP resolves for as long as its own retries take, ~30 s a server: no
-    # socket yet for a timeout or the guard to close, so only the WDT, fed
-    # before and after, bounds it)
-    feed()
-    ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]
-    feed()
+    ai = _resolve(host, port)
     return (socket.socket(ai[0], socket.SOCK_STREAM, ai[2]), ai[-1],
             proto == "https", host, head)
 
@@ -5591,7 +5699,9 @@ def upload_tick():
         # ever; at home, low for LOWIDF_WAIT, it reboots as low idf does
         if not _low_stop(now, "low mem", "mem %d B", pf, "lowpy_at",
                          "lowpy_seen"):
-            _schedule(now, LOWIDF_RETRY)
+            # (away the doubling backoff, as low idf: there is no reboot
+            # there, and 30 s, under WIFI_OFF_WAIT, kept the radio on)
+            _schedule(now, LOWIDF_RETRY if at_home() else None)
         return
     up["lowpy_at"] = None
     if tls:
@@ -6314,6 +6424,10 @@ def _ota_check():
             _ota_file(f)
             paths.append(f["path"])
         why = "note err"
+        # a mark left over (a confirmation that failed before its health
+        # reset, a power cut in _ota_done) must not speak for this build:
+        # "valid" confirmed it at its first boot without a health check
+        _rm(OTA_MARK)
         with open(OTA_PENDING, "w") as f:
             f.write("%d %s\n%s" % (build, m["commit"], "\n".join(paths)))
         if FW_BUILD:
@@ -6386,6 +6500,7 @@ def ota_boot():
     staged page was dropped and a good image reset as a try."""
     p = _ota_pending()
     if p is None:
+        _rm(OTA_MARK)                    # (no pending run it could be about)
         _ota_wait_tried()
         if esp32 is not None:
             _ota_valid()
@@ -6508,7 +6623,7 @@ def _ota_probe(now):
 
 def _ota_health(now):
     """The pending firmware: valid after OTA_VALID_AFTER with WiFi connected
-    and the manifest read (without OTA_URL WiFi only; then the staged page
+    then (not only once before) and the manifest read (without OTA_URL WiFi only; then the staged page
     goes up); neither in OTA_HEALTH and it resets, the bootloader then
     boots the old image (a try: _ota_try). OTA_MARK "valid" goes first: a
     power cut between the confirmation and the note's removal booted a
@@ -6517,13 +6632,15 @@ def _ota_health(now):
     diag line), and is tried again each tick until the OTA_HEALTH reset:
     the steps ran over an unconfirmed image, "ota ok" in the diag, and the
     next reset rolled it back."""
-    if wifi["state"] == "connected":
+    up = wifi["state"] == "connected"
+    if up:
         ota["wifi_seen"] = True
         if OTA_URL and not ota.get("probed"):
             _ota_probe(now)
     age = _age(now, ota["pend_at"])
-    if ota.get("valid") or (ota["wifi_seen"]
-                            and (ota.get("probed") or not OTA_URL)
+    # (WiFi now, not once: connected once and lost by a build that breaks
+    # the reconnect was confirmed at OTA_VALID_AFTER without a link)
+    if ota.get("valid") or (up and (ota.get("probed") or not OTA_URL)
                             and age >= OTA_VALID_AFTER):
         if not ota.get("valid"):
             _ota_mark("valid")
@@ -6549,6 +6666,8 @@ def _ota_health(now):
         # the note first: a power cut between the two then loses the try;
         # the other way round the old firmware found it and counted again
         _rm(OTA_PENDING)
+        _rm(OTA_MARK)                    # ("valid" of a failed confirmation:
+                                         # it spoke for the next build)
         n = _ota_try(build)
         _diag_final()
         what = "wifi"
@@ -6753,7 +6872,10 @@ def _web_rows():
         ("sats", "%d / %s" % (view, _rcv.sv_used())),
         ("hdop", st["hdop"]),
         ("std", st.get("std")),          # (GST: the receiver's own error, m)
-        ("utc", None if t is None else _stamp_s(t)[0]),
+        # (as the position: a silent receiver's last second is not shown
+        # as live: "GPS time 10:00:00 UTC" under the GPS SILENT banner)
+        ("utc", None if t is None or st["rx"] is None
+         or _age(now, st["rx"]) > _rcv.NO_DATA else _stamp_s(t)[0]),
         ("position", pos),
         ("pos6", pos6),
         ("nmea", "%d / %d" % (st["ok"], st["err"])),
@@ -7843,11 +7965,10 @@ def _utc_hours(y, m, day, h):
 # asked until that clock is set, even after a fix (which _rtc_sync prefers).
 NTP_SERVER = "pool.ntp.org"              # .env NTP_SERVER; empty: never asked
 NTP_WAIT = 1000                          # ms the answer may take. The name lookup
-                                         # is not bound by it (MicroPython's
-                                         # getaddrinfo has no timeout: lwIP's
-                                         # own, tens of s), feed() around it; the
-                                         # UART buffer holds 3.5 s of NMEA, so a
-                                         # slow DNS loses some (no fix yet then)
+                                         # is not bound by it (lwIP's own, 7 s
+                                         # measured without an answer): _resolve
+                                         # asks a failed network again only
+                                         # after DNS_RETRY
 NTP_ERA = 252460800                      # s (8 years): the next era (2036-02-07 on)
                                          # is believed only for a build this young
 NTP_RETRY = 60000                        # ms after a failed try, doubling to ...
@@ -7873,9 +7994,7 @@ def _ntp_ask():
     (a server saying 1900-1951 is not 2036-2088)."""
     s = None
     try:
-        feed()
-        ai = socket.getaddrinfo(NTP_SERVER, 123, 0, socket.SOCK_DGRAM)[0]
-        feed()
+        ai = _resolve(NTP_SERVER, 123, socket.SOCK_DGRAM)
         s = socket.socket(ai[0], socket.SOCK_DGRAM, ai[2])
         s.settimeout(NTP_WAIT / 1000)
         q = bytearray(48)
@@ -8345,7 +8464,10 @@ def _rt_tick(now):
                 and _rt_day(s + ROUTE_BACK) < R.day)
         if R.waiting or d > R.day or back:
             if d != R.day:
-                _rt_reset(d)
+                # back from a false day: today's route is still the saved
+                # one (a reset writes nothing until there is something new)
+                if not (back and _rt_load() and R.day == d):
+                    _rt_reset(d)
             R.waiting = False
             R.moved = True
     if R.day < 0:
@@ -8528,7 +8650,8 @@ GUARD_PEND_MAX = 5                       # with an OTA image pending: this many
 _guard_mem = {"wifi": [0, None], "upload": [0, None],   # name -> [count, Stamp
               "ota": [0, None], "web": [0, None],       # of the last one]:
               "ntp": [0, None], "status": [0, None],    # made here, not under
-              "diag": [0, None], "vbat": [0, None]}     # a MemoryError
+              "diag": [0, None], "vbat": [0, None],     # a MemoryError
+              "keepalive": [0, None]}
 
 def _guarded(name, fn, arg=None):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged
@@ -8614,12 +8737,15 @@ def _loop():
         _rcv.gps_check(time.ticks_ms())
         log_tick()
         _guarded("wifi", wifi_tick)
-        keepalive_tick(time.ticks_ms())
+        _guarded("keepalive", keepalive_tick, time.ticks_ms())
         feed()
+        # NTP before the upload: on the first connect without a fix the
+        # board clock is unset, and a verified POST checked the certificate
+        # against 2000-01-01 ("future": a handshake, an error, the backoff)
+        _guarded("ntp", ntp_tick, time.ticks_ms())
         _guarded("upload", upload_tick)
         _guarded("web", web_tick)
         _guarded("ota", ota_tick, time.ticks_ms())
-        _guarded("ntp", ntp_tick, time.ticks_ms())
         now = time.ticks_ms()
         tft_tick(now)
         if (not _boot_ok_done
