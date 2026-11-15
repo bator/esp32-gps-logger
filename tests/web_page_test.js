@@ -25,7 +25,8 @@ v.unlabeled = Object.keys(d).filter((k) => !labeled.has(k));
 const wp = ctx.wpx(47.1, 18.4, 17);
 v.tile = {x: Math.floor(wp[0] / 256), y: Math.floor(wp[1] / 256), mpp: ctx.mpp(47.1, 17)};
 v.wq = [-40, -60, -63, -67, -68, -80, -81, -100, -110, null].map((r) => ctx.wifiQ(r));
-v.bdl = [{battery: "none, on USB", vbat_pct: null}, {battery: "15 % (3.36 V)", vbat_pct: 15}].map((x) => (ctx.view(x).dl.match(/<div class="[^"]*"><small>Battery<\/small>.*?<\/div>/) || [""])[0]);
+v.bdl = [{battery: "none, on USB", vbat_pct: null}, {battery: "15 % (3.36 V)", vbat: 3.36, vbat_pct: 15, vbat_left_s: 2700},
+  {battery: "5 % (3.20 V)", vbat: 3.2, vbat_pct: 5}].map((x) => (ctx.view(x).sys.match(/<div class="[^"]*"><i><\/i><b>Battery<\/b>.*?<\/div>/) || [""])[0]);
 v.bq = [100, 76, 21, 20, 11, 10, 0].map((p) => ctx.batIcon(p).match(/bi (\w+)".*width="([\d.]+)" height="7"/).slice(1).join(" "));
 v.esc = ctx.esc("<a href=\"x\" title='y'>&</a>");
 v.coordSW = ctx.view({position: "-33.85678, -151.21530", hdop: 1}).coord;

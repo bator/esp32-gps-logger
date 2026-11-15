@@ -6783,8 +6783,7 @@ def _web_rows():
         ("temp", _temp()),
         ("vbat", vb),                    # (V; the charger's without one)
         ("vbat_swing", vw),
-        ("vbat_pct", None if vw is None or vw > VBAT_SWING
-         else _vbat_pct(vb)),
+        ("vbat_pct", _vbat_now()),
         ("vbat_left_s", vl),             # (about, from the last 30 min)
         ("battery", _battery(vb, vw, vl)),
         ("mhz", machine.freq() // 1000000),
@@ -6884,6 +6883,11 @@ def _left_text(secs):
         return "~%d\u00a0min" % m
     m = (m + 5) // 10 * 10
     return "~%d\u00a0h\u00a0%02d\u00a0min" % (m // 60, m % 60)
+
+def _vbat_now():
+    """What is left of the battery, %, or None without one (or an ADC)."""
+    v, w = _vbat()
+    return None if w is None or w > VBAT_SWING else _vbat_pct(v)
 
 def _battery(v, w, left=None):
     """The page's text: "76 % (3.95 V)", with the time left "76 % (3.95
@@ -8334,7 +8338,7 @@ def _tft_state(now):
     else:
         text = "kész" if up["url"] else " "
     return (_Rt.view, _Rt.km, fix, _rcv.sv_used() or 0, _local_hm(), level, _gps_quality(fix),
-            text, bool(left), _store_state(now))
+            text, bool(left), _store_state(now), _vbat_now())
 
 def tft_tick(now):
     """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors

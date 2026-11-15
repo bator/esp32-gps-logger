@@ -75,7 +75,9 @@ firmware R6.0.0.0Build3700.
   anchor points and the drift a stay drops add nothing, so the km are those of the
   track, up to a minute late. "Today" is the Hungarian day. On the right the clock
   (Hungarian time), a satellite icon with the satellites in the fix (red without a
-  fix), the four WiFi bars and what waits for upload. Below, how good the GPS is (a
+  fix), left of it the battery when there is one (an outline filled to its charge
+  and the per cent, amber to 20 %, red to 10 %), the four WiFi bars and what waits
+  for upload. Below, how good the GPS is (a
   tile in its colour with a word) and how full the flash is with how long it still
   logs (a gauge, amber from 70%, red from 90%; the time assumes moving at 1 Hz,
   standing costs next to nothing). The speed is on the status page and in
@@ -703,7 +705,8 @@ the *Event log* below; `/status.json?diag` carries the last 15 lines,
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
 `http://192.168.1.60/`) and the same data as JSON at
-`/status.json`: fix, satellites seen/used ("used" from the satellite list:
+`/status.json` (the page's Logger card has a Battery row: icon, per cent, the
+time left, the voltage, amber to 20 %, red to 10 %): fix, satellites seen/used ("used" from the satellite list:
 GGA stops at 12) and the satellite list with its age (none once it is
 2 min old, two `SV_POLL`, so a silent receiver's last sky is not shown as
 live; system and number,

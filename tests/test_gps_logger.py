@@ -14674,15 +14674,19 @@ else:
            % time.strftime("%Y-%m-%d %H:%M", time.localtime(1793548800)))
     check("PAGE-BOOT: the device strip shows the uptime with the boot's local "
           "time, the cause and the previous run up to when; Firmware the build "
-          "date and 'up to date', the commit in the top bar; the battery with its icon (amber to 20 %, red to 10 %)",
+          "date and 'up to date', the commit in the top bar; the battery a Logger row with its icon (amber to 20 %, red to 10 %)",
           any(b_ in dlb for b_ in boots) and fwl in syb
-          and '<div class=""><small>Battery</small><b><svg class="bi ok" viewBox="0 0 26 13">' in dlb
-          and 'width="12.9" height="7" rx="1"/></svg>76 % (3.95 V)</b></div>' in dlb
+          and "Battery" not in dlb
+          and '<div class=""><i></i><b>Battery</b><span><svg class="bi ok" viewBox="0 0 26 13">' in syb
+          and 'width="12.9" height="7" rx="1"/></svg>76 % &middot; 3.95 V</span></div>' in syb
           and rbj.get("bq") == ["ok 17.0", "ok 12.9", "ok 3.6", "warn 3.4", "warn 2.0",
                                 "bad 2.0", "bad 2.0"]
           and rbj.get("bdl", [""])[0]
-          == '<div class=""><small>Battery</small><b>none, on USB</b></div>'
-          and rbj["bdl"][1].startswith('<div class="warn"><small>Battery</small><b><svg class="bi warn"')
+          == '<div class=""><i></i><b>Battery</b><span>none &middot; on USB</span></div>'
+          and rbj["bdl"][1].startswith('<div class="warn"><i></i><b>Battery</b><span><svg class="bi warn"')
+          and rbj["bdl"][1].endswith('</svg>15 % &middot; ~45 min left &middot; 3.36 V</span><em>Warn</em></div>')
+          and rbj["bdl"][2].startswith('<div class="bad"><i></i><b>Battery</b><span><svg class="bi bad"')
+          and rbj["bdl"][2].endswith("<em>Error</em></div>")
           and upb.endswith("&middot; FW 86fb9c8")
           and rbj.get("unlabeled") == [],
           repr((dlb[:900], rbj.get("bq"), rbj.get("bdl"), syb[syb.find("Firmware") - 40:])))
@@ -21593,6 +21597,38 @@ check("TFT-COLUMN: the clock's baseline 14 and the upload's 62, both ending at x
       and _rule[0] == _PAPER_C and set(_rule[1:]) == {_INK_C}
       and set(_px(x, 46) for x in range(96, 160)) == {_PAPER_C},
       repr((_clk_base, _clk_end, _up_base, _up_end)))
+
+# TFT-BAT: the battery left of the satellites: an ink outline with its nub,
+# the charge inside as wide as its per cent (ink; amber to 20, red to 10), the
+# per cent beside it; nothing there without a battery, and the satellites'
+# icon and count untouched (a 3-digit per cent ends before the icon)
+
+
+def _bat_frame(bat):
+    _ft.set_state(*(_STD + (bat,)))
+    _ft.frame()
+    return {(x, y): _px(x, y) for x in range(90, 160) for y in range(16, 32)}
+
+
+_bf_none, _bf76, _bf15, _bf5, _bf100 = [_bat_frame(b) for b in (None, 76, 15, 5, 100)]
+_bf_out = [(96, 21), (106, 21), (96, 27), (106, 27), (107, 23), (107, 25)]
+_bf_fill = lambda f: [x for x in range(98, 105) if f[(x, 24)] != _PAPER_C]
+_bf_txt = lambda f: [x for x in range(108, 130) for y in range(18, 29) if f[(x, y)] != _PAPER_C]
+_bf_sats = lambda f: [(k, v) for k, v in f.items() if k[0] >= 129]
+check("TFT-BAT: outline and nub in ink, the charge 76 % of 7 px wide in ink, 15 % amber, "
+      "5 % red; the per cent beside it, 100 before the satellite icon; none without a battery",
+      all(_bf76[k] == _INK_C for k in _bf_out)
+      and _bf_fill(_bf76) == list(range(98, 103)) and _bf76[(98, 24)] == _INK_C
+      and _bf15[(98, 24)] == _AMB_C and _bf5[(98, 24)] == _RED_C
+      and len(_bf_fill(_bf5)) == 1 and len(_bf_fill(_bf100)) == 7
+      and _bf_txt(_bf76) and max(_bf_txt(_bf100)) < 129
+      and _amb15 in [_bf15[(x, y)] for x in range(108, 130) for y in range(18, 29)]
+      and all(v == _PAPER_C for k, v in _bf_none.items() if k[0] < 128)
+      and _bf_sats(_bf100) == _bf_sats(_bf_none) == _bf_sats(_bf76),
+      repr((_bf_fill(_bf76), _bf_fill(_bf5), _bf_fill(_bf100), max(_bf_txt(_bf100) or [0]),
+            [_bf76[k] for k in _bf_out])))
+_ft.set_state(*_STD)
+_ft.frame()
 
 # the satellites: an icon left of the count, on its baseline, in its colour
 _SAT = ("...#####...", "....###....", "###..#..###", "###.###.###", "###.###.###", "###########",

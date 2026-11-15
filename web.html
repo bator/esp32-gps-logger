@@ -162,7 +162,7 @@ circle.u{fill:none;opacity:.6}
 .t-bad{color:var(--bad)}.t-warn{color:var(--warn)}.t-ok{color:var(--ok)}.t-boot{color:var(--t)}.t-mut{color:var(--m)}
 .none{font-size:12px;color:var(--m)}
 /* the device in one strip; every satellite in a table */
-.strip{display:grid;grid-template-columns:repeat(5,auto);justify-content:space-between;gap:12px 24px;padding:18px 0;border-bottom:1px solid var(--l)}
+.strip{display:grid;grid-template-columns:repeat(4,auto);justify-content:space-between;gap:12px 24px;padding:18px 0;border-bottom:1px solid var(--l)}
 .strip small{display:block;font-size:12px;color:var(--m);margin-bottom:3px}.strip b{font-weight:400;font-size:13px}
 .strip .warn b{color:var(--warn)}
 details{padding:4px 0 16px}
@@ -763,6 +763,10 @@ function view(d, prev) {
       (d.good_age_s === null ? "no frame yet" : "frame " + hms(d.good_age_s) + " ago") +
       (d.gps_boots > 0 ? MD + num(d.gps_boots) + " restarts" : "") + MD + bytes(d.rx_bytes) + " read" + MD +
       pct.toFixed(2) + " % broken", gl.tone || (pct > 1 ? "warn" : "")]);
+  if (d.battery)                        // (none: no ADC, or a firmware before it)
+    subs.push(["Battery", d.vbat_pct == null ? "none" + MD + "on USB" : batIcon(d.vbat_pct) + d.vbat_pct + " %" +
+      (d.vbat_left_s ? MD + "~" + hms(d.vbat_left_s).replace(/ \d+ s$/, "") + " left" : "") + MD + esc(d.vbat) + " V",
+      d.vbat_pct == null ? "" : d.vbat_pct <= 10 ? "bad" : d.vbat_pct <= 20 ? "warn" : ""]);
   if (d.fw !== undefined)
     subs.push(["Firmware", (d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw)) + MD +
       esc(OTA[d.ota] || (d.ota == null ? "-" : "ota " + d.ota)), /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : ""]);
@@ -788,7 +792,6 @@ function view(d, prev) {
       (typeof d.uptime === "number" ? MD + when(Date.now() - d.uptime * 1000) : ""), d.boot_cause === 3 ? "warn" : "") +
     (pr ? dl("Previous run", esc(prevText(d)), /crash/.test(pr) ? "warn" : "") : "") +
     dl("Chip", esc(d.temp) + " &deg;C" + MD + esc(d.mhz) + " MHz") +
-    (d.battery ? dl("Battery", (d.vbat_pct == null ? "" : batIcon(d.vbat_pct)) + esc(d.battery), d.vbat_pct != null && d.vbat_pct <= 20 ? "warn" : "") : "") +
     (d.utc ? dl("GPS time", esc(String(d.utc).slice(11, 19)) + " UTC") : "");
   return v;
 }

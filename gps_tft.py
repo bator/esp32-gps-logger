@@ -5,7 +5,8 @@
 # Ink on paper. Top zone, left: today's route, a line of 2x2 dots over a faint grid,
 # the latest trip red, a round dot where the day began and one where it is now. Right:
 # the clock, the satellites in the fix (an icon and the count), today's km and WiFi in
-# four rising bars, a rule, what waits for upload. Low zone: the GPS's quality, a tile
+# four rising bars, a rule, what waits for upload; left of the satellites the battery
+# (an outline filled to its charge, the per cent beside it) when there is one. Low zone: the GPS's quality, a tile
 # in its colour with a word, and how full the flash is with how long it still logs
 # over a gauge, amber from 70%, red from 90%. The speed is on the status page.
 #
@@ -34,6 +35,10 @@ RULE_X, RULE_Y = 96, 47
 TILE_W = 62                              # the GPS tile (from LOW_Y down)
 STORE_X, STORE_Y, STORE_W, STORE_H = 66, 75, 92, 3   # the flash's gauge
 STORE_WARN, STORE_BAD = 70, 90           # per cent: amber, red
+BAT_X, BAT_Y = 96, 21                    # the battery: its outline's top left,
+BAT_W, BAT_H = 11, 7                     # on the satellites' row, left; the
+BAT_TX = 110                             # per cent from here (no %: the room
+BAT_WARN, BAT_BAD = 20, 10               # ends at the satellite icon); amber, red
 
 def _c(t):
     c = (t[0] & 0xF8) << 8 | (t[1] & 0xFC) << 3 | t[2] >> 3
@@ -257,7 +262,18 @@ def _route(fb, top, route):
     _round(fb, xy[0] + ROUTE_X - 2, (xy[1] & 127) + ROUTE_Y - 2 - top, ink)
     _round(fb, xy[2 * v] + ROUTE_X - 2, (xy[2 * v + 1] & 127) + ROUTE_Y - 2 - top, lit)
 
-def _draw_top(route, km, fix, used, clock, level, up):
+def _battery(fb, top, bat):
+    """The battery: an outline with its nub, the charge bat % wide inside, the
+    per cent beside it; amber to BAT_WARN, red to BAT_BAD."""
+    tone = RED if bat <= BAT_BAD else AMBER if bat <= BAT_WARN else INK
+    c, y = _COL[tone], BAT_Y - top
+    for r in ((0, 0, BAT_W, 1), (0, BAT_H - 1, BAT_W, 1), (0, 0, 1, BAT_H),
+              (BAT_W - 1, 0, 1, BAT_H), (BAT_W, 2, 1, BAT_H - 4)):
+        fb.fill_rect(BAT_X + r[0], y + r[1], r[2], r[3], _COL[INK])
+    fb.fill_rect(BAT_X + 2, y + 2, max(1, (BAT_W - 4) * bat // 100), BAT_H - 4, c)
+    _text(fb, _SMALL, str(bat), BAT_TX, BAT_Y + BAT_H - top, tone)
+
+def _draw_top(route, km, fix, used, clock, level, up, bat=None):
     fb = _D.fb
     tone = INK if fix else RED
     used = str(used)
@@ -278,6 +294,8 @@ def _draw_top(route, km, fix, used, clock, level, up):
         fb.fill_rect(RULE_X, RULE_Y - top, W - RULE_X, 1, _COL[INK])
         if up.strip():
             _right(fb, _UP, up, RIGHT, 62 - top, INK)
+        if bat is not None and top < BAT_Y + BAT_H and top + BAND_H > BAT_Y:
+            _battery(fb, top, bat)
         _send(top, min(BAND_H, LOW_Y - top))
 
 def _draw_low(quality, store):
@@ -301,23 +319,24 @@ def _draw_low(quality, store):
                          _COL[tone])
         _send(top, min(BAND_H, H - top))
 
-def set_state(route, km, fix, used, clock, level, quality, up, up_on, store=None):
+def set_state(route, km, fix, used, clock, level, quality, up, up_on, store=None,
+              bat=None):
     """route: (pixels, points, the latest trip's first point, a version) or None, the
     day not known yet: see _route, a new one only when it changed; km: text;
     fix: a usable fix; used: satellites in it; clock: text; level: WiFi 0-3 or None;
     quality: see QUALITY; up: text (" ": no upload set up); up_on: points wait (not
     shown apart from up's text); store: (per cent of the flash taken, how long it
-    still logs: text) or None."""
-    _D.state = (route, km, fix, used, clock, level, quality, up, up_on, store)
+    still logs: text) or None; bat: the battery's per cent, None without one."""
+    _D.state = (route, km, fix, used, clock, level, quality, up, up_on, store, bat)
 
 def frame():
     s = _D.state
     if s is None:
         return
-    route, km, fix, used, clock, level, quality, up, _on, store = s
-    top = (route, km, fix, used, clock, level, up)
+    route, km, fix, used, clock, level, quality, up, _on, store, bat = s
+    top = (route, km, fix, used, clock, level, up, bat)
     if top != _D.top:
-        _draw_top(route, km, fix, used, clock, level, up)
+        _draw_top(route, km, fix, used, clock, level, up, bat)
         _D.top = top
     low = (quality, store)
     if low != _D.low:
