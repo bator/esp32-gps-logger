@@ -8917,19 +8917,21 @@ try:
 finally:
     gl._diag_write = _vb_dw
 gl._vb[:] = [None, None, None, None]
-check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V; "
+check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 76 % (Meshtastic's LiPo curve); "
       "the charger's swing 'none, on USB'; no ADC None, diag line unchanged",
       _vb_ctl and _vb_ctl[0][1] == 1
       and vb_made == (gl.HELTEC_VBAT, _VbAdc.ATTN_2_5DB)
       and vb_steady == (3.95, 0.01) and vb_cached == vb_steady
-      and (vb_rows["vbat"], vb_rows["vbat_swing"], vb_rows["battery"])
-      == (3.95, 0.01, "3.95 V")
+      and (vb_rows["vbat"], vb_rows["vbat_swing"], vb_rows["battery"],
+           vb_rows["vbat_pct"]) == (3.95, 0.01, "76 % (3.95 V)", 76)
+      and [gl._vbat_pct(x) for x in (4.25, 4.19, 4.12, 3.80, 3.36, 3.10, 2.9)]
+      == [100, 100, 95, 60, 15, 0, 0]
       and len(vb_said) == 1 and vb_said[0].endswith(" vbat 3.95/0.01")
       and vb_swing[1] > gl.VBAT_SWING and vb_swing_bat == "none, on USB"
       and vb_none == (None, None) and gl._battery(*vb_none) is None
       and len(vb_said0) == 1 and " vbat " not in vb_said0[0],
       "%r %r %r %r %r %r %r %r" % (_vb_ctl[:1], vb_made, vb_steady, vb_cached,
-                                   [vb_rows.get(k) for k in ("vbat", "vbat_swing", "battery")],
+                                   [vb_rows.get(k) for k in ("vbat", "vbat_swing", "battery", "vbat_pct")],
                                    vb_said, vb_swing, vb_said0))
 
 # NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
@@ -14592,7 +14594,7 @@ else:
                   prev_end=time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                          time.gmtime(now_ - 10492 - 30)),
                   fw="86fb9c8", fw_build=1793548800, ota="current",
-                  battery="3.95 V", vbat=3.95, vbat_swing=0.01)
+                  battery="76 % (3.95 V)", vbat=3.95, vbat_swing=0.01, vbat_pct=76)
         rb_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
                               os.path.join(here, "..", "web.html")],
                              input=json.dumps(jb), capture_output=True,
@@ -14620,7 +14622,7 @@ else:
           "time, the cause and the previous run up to when; Firmware the build "
           "date and 'up to date', the commit in the top bar; the battery",
           any(b_ in dlb for b_ in boots) and fwl in syb
-          and '<div class=""><small>Battery</small><b>3.95 V</b></div>' in dlb
+          and '<div class=""><small>Battery</small><b>76 % (3.95 V)</b></div>' in dlb
           and upb.endswith("&middot; FW 86fb9c8")
           and rbj.get("unlabeled") == [],
           repr((dlb[:400], syb[syb.find("Firmware") - 40:])))

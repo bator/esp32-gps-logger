@@ -724,7 +724,10 @@ last accepted batch, `null` for none since boot), the day history's
 14 s`; seconds in the JSON, `prev_end` the time of its last line), boot
 cause, the build (`fw`, `fw_build`), chip temperature, the battery
 (`vbat`: median of 32 reads in V, `vbat_swing`: their 10th-90th
-percentile spread; `battery`: the page's text, `3.95 V`, or `none, on USB`
+percentile spread; `vbat_pct`: what is left, 0-100 %, from a 1S LiPo
+curve, Meshtastic's `OCV_ARRAY`: 4.19 V 100 %, 3.80 V 60 %, 3.10 V 0 %,
+linear between; on USB the charger lifts the voltage, so it reads high
+while charging; `battery`: the page's text, `76 % (3.95 V)`, or `none, on USB`
 when the spread is over `VBAT_SWING` 0.5 V: without a battery the
 charger's output swings, measured 0.84-0.94 V on USB), free Python heap
 and flash,

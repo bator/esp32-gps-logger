@@ -88,6 +88,9 @@ VBAT_DIV = 4.9                           # (390k + 100k) / 100k
 VBAT_N = 32                              # reads a measurement
 VBAT_SWING = 0.5                         # V of 10th-90th percentile spread
                                          # above which there is no battery
+VBAT_OCV = (4.19, 4.05, 3.99, 3.89, 3.80, 3.72, 3.63, 3.53, 3.42, 3.30, 3.10)
+# V of a 1S LiPo at 100, 90 ... 0 % (Meshtastic's default OCV_ARRAY,
+# src/Power.h), linear between; on USB the charger lifts it (up to 4.2 V)
 Pin(HELTEC_VBAT_CTL, Pin.OUT, value=1)
 
 # The receiver (gps_receiver.py): its UART, the NMEA, the seconds it publishes
@@ -6775,6 +6778,8 @@ def _web_rows():
         ("temp", _temp()),
         ("vbat", vb),                    # (V; the charger's without one)
         ("vbat_swing", vw),
+        ("vbat_pct", None if vw is None or vw > VBAT_SWING
+         else _vbat_pct(vb)),
         ("battery", _battery(vb, vw)),
         ("mhz", machine.freq() // 1000000),
         ("mem", heap[0]),
@@ -6819,11 +6824,22 @@ def _vbat():
     _vb[0], _vb[1], _vb[2] = v, w, _stamp()
     return v, w
 
+def _vbat_pct(v):
+    """What is left of the battery at v V, 0-100 % (VBAT_OCV)."""
+    o = VBAT_OCV
+    if v >= o[0]:
+        return 100
+    for i in range(1, len(o)):
+        if v >= o[i]:
+            return round(100 - 10 * (i - (v - o[i]) / (o[i - 1] - o[i])))
+    return 0
+
 def _battery(v, w):
-    """The page's text: "3.95 V", "none, on USB" (the charger's swing
-    without a battery), None without a measurement."""
+    """The page's text: "76 % (3.95 V)", "none, on USB" (the charger's
+    swing without a battery), None without a measurement."""
     return None if v is None or w is None else (
-        "none, on USB" if w > VBAT_SWING else "%.2f V" % v)
+        "none, on USB" if w > VBAT_SWING
+        else "%d %% (%.2f V)" % (_vbat_pct(v), v))
 
 _fl = [None, None]                       # (KB, Stamp) of the last statvfs
 
