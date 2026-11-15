@@ -5,9 +5,8 @@
 # Ink on paper. Top zone, left: today's route, a line of 2x2 dots over a faint grid,
 # the latest trip red, a round dot where the day began and one where it is now. Right:
 # the clock, the satellites in the fix (an icon and the count), today's km and WiFi in
-# four rising bars, a rule, what waits for upload; left of the satellites the battery
-# (an outline filled to its charge, the per cent beside it) when there is one, and
-# left of the upload's about how long it lasts. Low zone: the GPS's quality, a tile
+# four rising bars, a rule, what waits for upload. Under the route the battery when
+# there is one: an outline filled to its charge, the per cent, about how long it lasts. Low zone: the GPS's quality, a tile
 # in its colour with a word, and how full the flash is with how long it still logs
 # over a gauge, amber from 70%, red from 90%. The speed is on the status page.
 #
@@ -36,11 +35,11 @@ RULE_X, RULE_Y = 96, 47
 TILE_W = 62                              # the GPS tile (from LOW_Y down)
 STORE_X, STORE_Y, STORE_W, STORE_H = 66, 75, 92, 3   # the flash's gauge
 STORE_WARN, STORE_BAD = 70, 90           # per cent: amber, red
-BAT_X, BAT_Y = 96, 21                    # the battery: its outline's top left,
-BAT_W, BAT_H = 11, 7                     # on the satellites' row, left; the
-BAT_TX = 110                             # per cent from here (no %: the room
-BAT_WARN, BAT_BAD = 20, 10               # ends at the satellite icon); amber, red
-BAT_GAP = 4                              # px from the time left to the upload's
+BAT_X, BAT_Y = 4, 56                     # the battery: its outline's top left,
+BAT_W, BAT_H = 11, 7                     # under the route (its grid's last row is
+BAT_TX = 18                              # 52-53), the per cent from here, the
+BAT_SEP = 6                              # time left this far after it
+BAT_WARN, BAT_BAD = 20, 10               # per cent: amber, red
 
 def _c(t):
     c = (t[0] & 0xF8) << 8 | (t[1] & 0xFC) << 3 | t[2] >> 3
@@ -267,26 +266,26 @@ def _route(fb, top, route):
 def _bat_tone(bat):
     return RED if bat <= BAT_BAD else AMBER if bat <= BAT_WARN else INK
 
-def _battery(fb, top, bat):
+def _battery(fb, top, bat, left):
     """The battery: an outline with its nub, the charge bat % wide inside, the
-    per cent beside it; amber to BAT_WARN, red to BAT_BAD."""
+    per cent beside it, then about how long it lasts (left, or None); amber
+    to BAT_WARN, red to BAT_BAD."""
     tone = _bat_tone(bat)
-    c, y = _COL[tone], BAT_Y - top
+    c, y, base = _COL[tone], BAT_Y - top, BAT_Y + BAT_H - top
     for r in ((0, 0, BAT_W, 1), (0, BAT_H - 1, BAT_W, 1), (0, 0, 1, BAT_H),
               (BAT_W - 1, 0, 1, BAT_H), (BAT_W, 2, 1, BAT_H - 4)):
         fb.fill_rect(BAT_X + r[0], y + r[1], r[2], r[3], _COL[INK])
     fb.fill_rect(BAT_X + 2, y + 2, max(1, (BAT_W - 4) * bat // 100), BAT_H - 4, c)
-    _text(fb, _SMALL, str(bat), BAT_TX, BAT_Y + BAT_H - top, tone)
+    pc = "%d%%" % bat
+    _text(fb, _SMALL, pc, BAT_TX, base, tone)
+    if left:
+        _text(fb, _SMALL, left, BAT_TX + width(_SMALL, pc) + BAT_SEP, base, tone)
 
 def _draw_top(route, km, fix, used, clock, level, up, bat=None):
     fb = _D.fb
     tone = INK if fix else RED
     used = str(used)
     x = RIGHT - width(_SATS, used)
-    pct, left = bat or (None, None)
-    if left and BAT_X + width(_SMALL, left) + BAT_GAP > (
-            RIGHT - width(_UP, up) if up.strip() else RIGHT):
-        left = None                      # (no room left of the upload's)
     for top in range(0, LOW_Y, BAND_H):
         fb.fill(_COL[PAPER])
         _route(fb, top, route)
@@ -303,10 +302,8 @@ def _draw_top(route, km, fix, used, clock, level, up, bat=None):
         fb.fill_rect(RULE_X, RULE_Y - top, W - RULE_X, 1, _COL[INK])
         if up.strip():
             _right(fb, _UP, up, RIGHT, 62 - top, INK)
-        if pct is not None and top < BAT_Y + BAT_H and top + BAND_H > BAT_Y:
-            _battery(fb, top, pct)
-        if left and top + BAND_H > 62 - 8:
-            _text(fb, _SMALL, left, BAT_X, 62 - top, _bat_tone(pct))
+        if bat is not None and top < BAT_Y + BAT_H and top + BAND_H > BAT_Y:
+            _battery(fb, top, bat[0], bat[1])
         _send(top, min(BAND_H, LOW_Y - top))
 
 def _draw_low(quality, store):

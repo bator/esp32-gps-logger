@@ -8014,7 +8014,8 @@ ROUTE_STEP_MAX = 1 << 24                 # m: past any way a day holds (and the 
                                          # field: trip starts add points without one)
 ROUTE_SPAN = 4497                        # the field's width shows at least 500 m
                                          # (6 m a pixel), in millionths of a degree
-ROUTE_W, ROUTE_H = 83, 51                # the pixels a point can land on
+ROUTE_W, ROUTE_H = 83, 45                # the pixels a point can land on (the
+                                         # display's battery line is below)
 ROUTE_DRAW = 10000                       # ms between looks at the route
 ROUTE_SAVE = 300000                      # ms between saves of a changed route (and
                                          # one when a stay starts)

@@ -21613,49 +21613,44 @@ check("TFT-COLUMN: the clock's baseline 14 and the upload's 62, both ending at x
       and set(_px(x, 46) for x in range(96, 160)) == {_PAPER_C},
       repr((_clk_base, _clk_end, _up_base, _up_end)))
 
-# TFT-BAT: the battery left of the satellites: an ink outline with its nub,
-# the charge inside as wide as its per cent (ink; amber to 20, red to 10), the
-# per cent beside it; nothing there without a battery, and the satellites'
-# icon and count untouched (a 3-digit per cent ends before the icon)
+# TFT-BAT: the battery under the route (its grid's last row is 52-53, a route
+# point lands on rows 4-49): an ink outline with its nub, the charge inside as
+# wide as its per cent (ink; amber to 20, red to 10), the per cent, then about
+# how long it lasts, in the same tone; nothing there without a battery, and
+# the right column untouched
 
 
-def _bat_frame(bat, left=None, up="kész"):
-    st_ = list(_STD)
-    st_[7] = up
-    _ft.set_state(*(tuple(st_) + (None if bat is None else (bat, left),)))
+def _bat_frame(bat, left=None):
+    _ft.set_state(*(_STD + (None if bat is None else (bat, left),)))
     _ft.frame()
-    return {(x, y): _px(x, y) for x in range(90, 160) for y in range(16, 63)}
+    return {(x, y): _px(x, y) for x in range(0, 160) for y in range(0, 64)}
 
 
 _bf_none, _bf76, _bf15, _bf5, _bf100 = [_bat_frame(b) for b in (None, 76, 15, 5, 100)]
 _bf_l = _bat_frame(76, "2 óra")
 _bf_l15 = _bat_frame(15, "45 p")
-_bf_lfull = _bat_frame(76, "12 óra", "1234")   # (no room left of the upload's)
-_bf_low = lambda f: [x for x in range(96, 126) for y in range(54, 62) if f[(x, y)] != _PAPER_C]
-_bf_out = [(96, 21), (106, 21), (96, 27), (106, 27), (107, 23), (107, 25)]
-_bf_fill = lambda f: [x for x in range(98, 105) if f[(x, 24)] != _PAPER_C]
-_bf_txt = lambda f: [x for x in range(108, 130) for y in range(18, 29) if f[(x, y)] != _PAPER_C]
-_bf_sats = lambda f: [(k, v) for k, v in f.items() if k[0] >= 129]
-check("TFT-BAT: outline and nub in ink, the charge 76 % of 7 px wide in ink, 15 % amber, "
-      "5 % red; the per cent beside it, 100 before the satellite icon; none without a battery; "
-      "the time left at the upload's baseline, left of it, in the battery's tone, left out "
-      "where it does not fit",
+_bf_wide = _bat_frame(100, "12 óra")
+_bf_out = [(4, 56), (14, 56), (4, 62), (14, 62), (15, 58), (15, 60)]
+_bf_fill = lambda f: [x for x in range(6, 13) if f[(x, 59)] != _PAPER_C]
+_bf_ink = lambda f, x0: [x for x in range(x0, 94) for y in range(54, 64) if f[(x, y)] != _PAPER_C]
+_bf_right = lambda f: {k: v for k, v in f.items() if k[0] >= 94}
+_bf_tx = 18 + _ft.width(_ft._SMALL, "76%") + _ft.BAT_SEP
+check("TFT-BAT: under the route: outline and nub in ink, the charge 76 % of 7 px wide in ink, "
+      "15 % amber, 5 % red; the per cent, then the time left in the battery's tone, the widest "
+      "short of the right column; nothing without a battery; the right column untouched",
       all(_bf76[k] == _INK_C for k in _bf_out)
-      and _bf_fill(_bf76) == list(range(98, 103)) and _bf76[(98, 24)] == _INK_C
-      and _bf15[(98, 24)] == _AMB_C and _bf5[(98, 24)] == _RED_C
+      and _bf_fill(_bf76) == list(range(6, 11)) and _bf76[(6, 59)] == _INK_C
+      and _bf15[(6, 59)] == _AMB_C and _bf5[(6, 59)] == _RED_C
       and len(_bf_fill(_bf5)) == 1 and len(_bf_fill(_bf100)) == 7
-      and _bf_txt(_bf76) and max(_bf_txt(_bf100)) < 129
-      and _amb15 in [_bf15[(x, y)] for x in range(108, 130) for y in range(18, 29)]
-      and all(v == _PAPER_C for k, v in _bf_none.items() if k[0] < 128 and k[1] < 32)
-      and _bf_sats(_bf100) == _bf_sats(_bf_none) == _bf_sats(_bf76)
-      and not _bf_low(_bf76) and _bf_low(_bf_l) and min(_bf_low(_bf_l)) >= 96
-      and max(_bf_low(_bf_l)) < 158 - _ft.width(_ft._UP, "kész") - 2
-      and _ink15 in [_bf_l[(x, y)] for x in range(96, 126) for y in range(54, 62)]
-      and _amb15 in [_bf_l15[(x, y)] for x in range(96, 126) for y in range(54, 62)]
-      and not [x for x in range(96, 120) for y in range(54, 62) if _bf_lfull[(x, y)] != _PAPER_C]
-      and {k: v for k, v in _bf_l.items() if k[0] >= 126} == {k: v for k, v in _bf76.items() if k[0] >= 126},
-      repr((_bf_fill(_bf76), _bf_fill(_bf5), _bf_fill(_bf100), max(_bf_txt(_bf100) or [0]),
-            [_bf76[k] for k in _bf_out], _bf_low(_bf_l)[-3:])))
+      and _bf_ink(_bf76, 18) and not _bf_ink(_bf76, _bf_tx)
+      and _bf_ink(_bf_l, _bf_tx) and max(_bf_ink(_bf_wide, 0)) < 92
+      and _ink15 in [_bf_l[(x, y)] for x in range(_bf_tx, 92) for y in range(54, 64)]
+      and _amb15 in [_bf_l15[(x, y)] for x in range(_bf_tx, 92) for y in range(54, 64)]
+      and not _bf_ink(_bf_none, 0)
+      and min(y for x in range(0, 90) for y in range(0, 64) if _bf_l[(x, y)] not in (_PAPER_C, _ft.DIM)) >= 54
+      and _bf_right(_bf_l) == _bf_right(_bf_none) == _bf_right(_bf100),
+      repr((_bf_fill(_bf76), _bf_fill(_bf5), _bf_fill(_bf100), [_bf76[k] for k in _bf_out],
+            max(_bf_ink(_bf_wide, 0) or [0]), _bf_tx)))
 _ft.set_state(*_STD)
 _ft.frame()
 
@@ -22692,7 +22687,7 @@ check("ROUTE-DRAW: north up, 2x2 dots: the earlier trip ink, the latest red, no 
       "them; 6x6 round dots: ink at the day's start, red at the current position",
       _ink_part and _no_chord and _red_part and _thin
       and _start == (_PAPER_C, _INK_C, _INK_C, _PAPER_C, _INK_C, _INK_C)
-      and _end == (87, _ft.DIM, _RED_C, _RED_C, _PAPER_C, _RED_C, _RED_C)     # (a grid dot's in that corner)
+      and _end == (87, _PAPER_C, _RED_C, _RED_C, _PAPER_C, _RED_C, _RED_C)
       and _field_ok and _v[2] == 2, repr((_ink_part, _no_chord, _red_part, _thin, _start, _end, _v[:1] and list(_v[0][:8]), _v[1:3])))
 # north is up, in a band's split too: a line across all the bands
 _rfresh()
@@ -22702,11 +22697,11 @@ _show(route=_v, km=_Rt.km)
 _x = 4 + _v[0][0]
 _col = [y for y in range(0, 63) if _px(_x + 3, y) == _RED_C or _px(_x, y) == _RED_C]
 _ys = (_v[0][1] & 127, _v[0][3] & 127)
-_full = all(_px(_x, y) == _RED_C for y in range(10, 50))
+_full = all(_px(_x, y) == _RED_C for y in range(10, hl.ROUTE_H))
 _start_low = _px(_x, 4 + _ys[0] + 3) == _INK_C and _px(_x, 4 + _ys[1]) == _RED_C
 check("ROUTE-NORTH: a walk due north runs from the ink dot at the bottom to the red one at "
       "the top, unbroken across the bands",
-      _ys == (51, 0) and _full and _start_low, repr((_ys, _full, _start_low)))
+      _ys == (hl.ROUTE_H, 0) and _full and _start_low, repr((_ys, _full, _start_low)))
 _rfresh()
 _rfeed(_rat(0, 0, _DAY), _rat(100, 0, _DAY + 60))
 _v = _rview(_DAY + 70)

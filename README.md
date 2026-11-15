@@ -75,10 +75,10 @@ firmware R6.0.0.0Build3700.
   anchor points and the drift a stay drops add nothing, so the km are those of the
   track, up to a minute late. "Today" is the Hungarian day. On the right the clock
   (Hungarian time), a satellite icon with the satellites in the fix (red without a
-  fix), left of it the battery when there is one (an outline filled to its charge
-  and the per cent, amber to 20 %, red to 10 %), the four WiFi bars and what waits
-  for upload, left of it about how long the battery lasts (`2 óra`, `45 p`; once
-  `vbat_left_s` is known, left out where it does not fit). Below, how good the GPS is (a
+  fix), the four WiFi bars and what waits for upload. Under the route the battery
+  when there is one: an outline filled to its charge, the per cent and about how long
+  it lasts (`2 óra`, `45 p`, once `vbat_left_s` is known), amber to 20 %, red to
+  10 %. Below, how good the GPS is (a
   tile in its colour with a word) and how full the flash is with how long it still
   logs (a gauge, amber from 70%, red from 90%; the time assumes moving at 1 Hz,
   standing costs next to nothing). The speed is on the status page and in
