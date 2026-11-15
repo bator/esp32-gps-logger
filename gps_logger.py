@@ -6605,8 +6605,8 @@ def ota_tick(now):
     ota["last_err"] = None
 
 # --- Status page ------------------------------------------------------------
-# A small HTTP page on the LAN while the radio is connected (at home, or
-# everywhere with WEB_AWAY, it stays connected for it, see wifi_tick):
+# A small HTTP page on the LAN while the radio is connected at home, or on
+# any network with WEB_AWAY (it stays connected for it, see wifi_tick):
 # http://<ip>/ and /status.json.
 # Served from the main loop, one client at a time: each recv/send waits at
 # most WEB_TIMEOUT s and the whole request at most WEB_DEADLINE s (a slow
@@ -6833,33 +6833,44 @@ def _file_counts():
     return n, bad
 
 def _sv_list():
-    """The satellite list for the page, used first, then by signal."""
-    if st["svs"] is None:
+    """The satellite list for the page, used first, then by signal; none
+    once it is two SV_POLL old (as sv_used: a silent receiver's last list
+    showed as live)."""
+    at = st["svs_at"]
+    if (st["svs"] is None or at is None
+            or _age(time.ticks_ms(), at) >= 2 * _rcv.SV_POLL):
         return []
     return sorted(st["svs"], key=lambda v: (not v[4], -v[1], v[6] or 0,
                                             v[0]))
 
-def _web_json_parts(rows, svs):
+def _web_json_parts(rows, svs, diag=False):
     """The JSON in small pieces (no 8 KB string and its encoded copy).
     rows, svs: _web_rows() and _sv_list(), built by _web_status before
     the 200 (a bug in one is a 500, not a cut JSON); the rows go first
-    and are let go before the diag lines are read."""
+    and are let go before the diag lines are read. The last WEB_DIAG diag
+    lines only with diag (/status.json?diag): the page reads the whole
+    log from /diag, and every poll read the tail for nothing."""
     yield '{"device":' + json.dumps(DEVICE_ID) + ',"refresh_s":%d' % (
         WEB_REFRESH)
     for key, v in rows:
         yield ",%s:%s" % (json.dumps(key), json.dumps(v))
     rows = None
     # after the 200: an error ends the list instead of the JSON (a cut one
-    # was OFFLINE on the page), counted as a web bug
-    yield ',"diag":['
-    sep = ""
-    try:
-        for line in _web_diag():         # one piece a line (no ~3 KB string)
-            yield sep + json.dumps(line)
-            sep = ","
-    except Exception as e:
-        _web_bug(e)
-    yield '],"satellites":['
+    # was OFFLINE on the page), counted as a web bug; no RAM is no bug
+    # (web_tick: the client dropped)
+    if diag:
+        yield ',"diag":['
+        sep = ""
+        try:
+            for line in _web_diag():     # one piece a line (no ~3 KB string)
+                yield sep + json.dumps(line)
+                sep = ","
+        except MemoryError:
+            raise
+        except Exception as e:
+            _web_bug(e)
+        yield ']'
+    yield ',"satellites":['
     sep = ""
     try:
         for v in svs:
@@ -6871,6 +6882,8 @@ def _web_json_parts(rows, svs):
         at = st["svs_at"]
         age = json.dumps(None if at is None
                          else _age(time.ticks_ms(), at) // 1000)
+    except MemoryError:
+        raise
     except Exception as e:
         _web_bug(e)
         age = "null"
@@ -7108,7 +7121,7 @@ def _web_reply(c, req):
     path = parts[1]
     parts = None
     if path.startswith(b"/status.json"):
-        _web_status(c)
+        _web_status(c, path.startswith(b"/status.json?diag"))
     elif path.startswith(b"/hist?"):
         _web_hist(c, path)
     elif path.startswith(b"/diag?"):
@@ -7118,12 +7131,15 @@ def _web_reply(c, req):
     else:
         _web_send(c, "404 Not Found", "text/plain", ("not found",))
 
-def _web_status(c):
+def _web_status(c, diag=False):
     """status.json: its rows and satellite list built before the 200: a
     bug in one is a 500 with the error (it was a 200 with a cut JSON, and
-    the page said OFFLINE)."""
+    the page said OFFLINE). No RAM for them is no bug (it was "Caught bug"
+    on the page for a day): web_tick drops the client."""
     try:
-        parts = _web_json_parts(_web_rows(), _sv_list())
+        parts = _web_json_parts(_web_rows(), _sv_list(), diag)
+    except MemoryError:
+        raise
     except Exception as e:
         _web_bug(e)
         _web_send(c, "500 Internal Server Error", "text/plain", (repr(e),))
@@ -7219,8 +7235,10 @@ def _web_diag_file(c, path):
     or DIAG_OLD (f=1), from byte N, HIST_REPLY bytes at most (the page
     reads both files in pieces, then DIAG_FILE from where it got to once a
     minute), X-Diag-Size the file's size (smaller than where the page got
-    to: it rotated, the page reads both again). A missing file, a bad f
-    or o is a 404."""
+    to: it rotated, the page reads both again); with f=0 X-Diag-Old
+    DIAG_OLD's size (0: none), so a rotation the page missed (DIAG_FILE
+    grown past where it got to again) is seen too. A missing file, a bad
+    f or o is a 404."""
     name, o = None, -1
     try:
         for kv in path[6:].decode().split("&"):
@@ -7243,7 +7261,10 @@ def _web_diag_file(c, path):
         return
     try:
         size = os.stat(name)[6]
-        _web_bytes(c, f, o, size, "X-Diag-Size: %d\r\n" % size)
+        extra = "X-Diag-Size: %d\r\n" % size
+        if name == DIAG_FILE:
+            extra += "X-Diag-Old: %d\r\n" % (_file_size(DIAG_OLD) or 0)
+        _web_bytes(c, f, o, size, extra)
     finally:
         f.close()
 
@@ -7484,10 +7505,12 @@ def _web_bug(e):
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
-    within WEB_DEADLINE. On any network: WEB_AWAY keeps the radio on for the
-    page off home (wifi_tick), without it the page is up as long as the radio
-    is, for the uploads (README, status page)."""
-    if not WEB or wifi["state"] != "connected":
+    within WEB_DEADLINE. Off home only with WEB_AWAY (which also keeps the
+    radio on for it there, wifi_tick): the page has no password, and a
+    hotspot or a friend's network got the live position, the 7-day track
+    and the diag log's SSIDs while the radio was up for the uploads."""
+    if not WEB or wifi["state"] != "connected" or not (
+            wifi["home"] or WEB_AWAY):
         _web_close()
         return
     if _web_sock is None:
