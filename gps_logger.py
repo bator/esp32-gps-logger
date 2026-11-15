@@ -76,6 +76,26 @@ HELTEC_VEXT = 3                          # high: the rail of the UC6580
 HELTEC_TFT_BL = 21                       # the TFT's backlight (given to gps_tft.start)
 Pin(HELTEC_VEXT, Pin.OUT, value=1)
 Pin(HELTEC_TFT_BL, Pin.OUT, value=0)
+# The battery (SH1.25-2; the board charges it and switches between USB and
+# it): VBAT through 390k/100k to GPIO1 (ADC1_CH0), GPIO2 high switches the
+# divider on (left on: 8.6 uA at 4.2 V). Measured on USB without a battery
+# (2026-11-15, 12 rounds): the charger's output swings, 32 reads 3.01-4.29 V,
+# median 3.50-3.60 V, 10th-90th percentile spread 0.84-0.94 V, so a wide
+# spread is no battery, not its voltage (_vbat). A round takes ~5 ms.
+HELTEC_VBAT = 1                          # ADC1_CH0: VBAT / VBAT_DIV
+HELTEC_VBAT_CTL = 2                      # high: the divider on
+VBAT_DIV = 4.9                           # (390k + 100k) / 100k
+VBAT_N = 32                              # reads a measurement
+VBAT_SWING = 0.5                         # V of 10th-90th percentile spread
+                                         # above which there is no battery
+VBAT_EVERY = 60                          # s between samples of the time left
+VBAT_HIST = 31                           # samples kept: 30 min
+VBAT_SPAN = 600                          # s of samples before a time left
+VBAT_DROP = 2                            # %-points the fit must fall over them
+VBAT_OCV = (4.19, 4.05, 3.99, 3.89, 3.80, 3.72, 3.63, 3.53, 3.42, 3.30, 3.10)
+# V of a 1S LiPo at 100, 90 ... 0 % (Meshtastic's default OCV_ARRAY,
+# src/Power.h), linear between; on USB the charger lifts it (up to 4.2 V)
+Pin(HELTEC_VBAT_CTL, Pin.OUT, value=1)
 
 # The receiver (gps_receiver.py): its UART, the NMEA, the seconds it publishes
 # in st. It writes diag lines and feeds the watchdog through what is bound here.
@@ -588,14 +608,17 @@ def _heap_note(phase):
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
-    then _words; with a guarded tick's bug since boot "bugs upload:12" (the
+    then _words, the battery "vbat 3.95/0.04" (median/spread V); with a
+    guarded tick's bug since boot "bugs upload:12" (the
     count each, _tick_bugs) and with a failed diag write "diag_errs 3"."""
     b = _tick_bugs(",", False)
+    vb, vw = _vbat()
     _diag_write(
-        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s%s%s" % (
+        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s%s%s%s" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
             st["loops"], _rcv.sv_seen(), _rcv.sv_used(), status().replace(" ", "_"),
-            _words(), "" if b is None else " bugs " + b,
+            _words(), "" if vb is None else " vbat %.2f/%.2f" % (vb, vw),
+            "" if b is None else " bugs " + b,
             " diag_errs %d" % _diag_errs[0] if _diag_errs[0] else ""))
 
 def _diag_final():
@@ -6718,6 +6741,8 @@ def _web_rows():
     files, bad = _file_counts()
     heap = py_heap()
     still = log["still"]
+    vb, vw = _vbat()
+    vl = _vbat_left()
     return [
         ("fix", status()),
         ("sats", "%d / %s" % (view, _rcv.sv_used())),
@@ -6756,6 +6781,11 @@ def _web_rows():
          else prev_run["end"].replace(" ", "T")),
         ("boot_cause", cause),
         ("temp", _temp()),
+        ("vbat", vb),                    # (V; the charger's without one)
+        ("vbat_swing", vw),
+        ("vbat_pct", _vbat_now()),
+        ("vbat_left_s", vl),             # (about, from the last 30 min)
+        ("battery", _battery(vb, vw, vl)),
         ("mhz", machine.freq() // 1000000),
         ("mem", heap[0]),
         ("heap_kb", heap[1]),
@@ -6775,6 +6805,110 @@ def _web_rows():
         ("write_errs", log["err"]),    # MAX_BATCH, time back), track
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
     ]                                    # while the loop was blocked
+
+_vb = [None, None, None, None]           # (V, spread V, Stamp, ADC)
+
+def _vbat():
+    """The battery: (median V, 10th-90th percentile spread V) of VBAT_N
+    reads, at most every 30 s (the page asks every WEB_REFRESH, the diag
+    line every DIAG). (None, None) where there is no ADC."""
+    if _recent_s(_vb[2], 30):
+        return _vb[0], _vb[1]
+    v = w = None
+    try:
+        if _vb[3] is None:
+            _vb[3] = machine.ADC(Pin(HELTEC_VBAT), atten=machine.ADC.ATTN_2_5DB)
+        r = sorted(_vb[3].read_uv() for _ in range(VBAT_N))
+        k = VBAT_N // 10
+        v = round(r[VBAT_N // 2] * VBAT_DIV / 1e6, 2)
+        w = round((r[-1 - k] - r[k]) * VBAT_DIV / 1e6, 2)
+    except MemoryError:
+        raise
+    except Exception:
+        pass
+    _vb[0], _vb[1], _vb[2] = v, w, _stamp()
+    return v, w
+
+def _vbat_pct(v):
+    """What is left of the battery at v V, 0-100 % (VBAT_OCV)."""
+    o = VBAT_OCV
+    if v >= o[0]:
+        return 100
+    for i in range(1, len(o)):
+        if v >= o[i]:
+            return round(100 - 10 * (i - (v - o[i]) / (o[i - 1] - o[i])))
+    return 0
+
+_vb_hist = []                            # [(uptime s, %)] on the battery
+
+def vbat_tick(now):
+    """Every VBAT_EVERY s a sample of what is left for _vbat_left. No
+    battery, or one put on the charger (up VBAT_DROP + 1 points since the
+    last sample), starts the history again."""
+    if (_vb_hist and uptime_s(now) - _vb_hist[-1][0] < VBAT_EVERY):
+        return
+    v, w = _vbat()
+    if v is None or w > VBAT_SWING:
+        del _vb_hist[:]
+        return
+    p = _vbat_pct(v)
+    if _vb_hist and p > _vb_hist[-1][1] + VBAT_DROP:
+        del _vb_hist[:]
+    _vb_hist.append((uptime_s(now), p))
+    if len(_vb_hist) > VBAT_HIST:
+        del _vb_hist[0]
+
+def _vbat_left():
+    """About how long the battery lasts, s: the least-squares slope of the
+    samples (VBAT_HIST, the last 30 min) carried down to 0 %. None until
+    they span VBAT_SPAN and the fit falls VBAT_DROP points over them (on
+    the charger, or too short to tell)."""
+    h = _vb_hist
+    n = len(h)
+    if n < 2 or h[-1][0] - h[0][0] < VBAT_SPAN:
+        return None
+    mt = sum(t for t, _ in h) / n
+    mp = sum(p for _, p in h) / n
+    sxx = sum((t - mt) ** 2 for t, _ in h)
+    k = sum((t - mt) * (p - mp) for t, p in h) / sxx   # %/s
+    if -k * (h[-1][0] - h[0][0]) < VBAT_DROP:
+        return None
+    return int(max(0, mp + k * (h[-1][0] - mt)) / -k)
+
+def _left_text(secs):
+    """'~45 min', '~2 h 10 min' (to 10 min from an hour), no-break spaces
+    (a phone broke the line inside it)."""
+    m = (secs + 30) // 60
+    if m < 60:
+        return "~%d\u00a0min" % m
+    m = (m + 5) // 10 * 10
+    return "~%d\u00a0h\u00a0%02d\u00a0min" % (m // 60, m % 60)
+
+def _vbat_now():
+    """What is left of the battery, %, or None without one (or an ADC)."""
+    v, w = _vbat()
+    return None if w is None or w > VBAT_SWING else _vbat_pct(v)
+
+def _tft_bat():
+    """The display's battery: (per cent, about how long it lasts: "2 óra"
+    (rounded), "45 p" under an hour, None until _vbat_left knows), or None
+    without one."""
+    p = _vbat_now()
+    if p is None:
+        return None
+    s = _vbat_left()
+    if s is not None:
+        s = "%d óra" % ((s + 1800) // 3600) if s >= 3570 else "%d p" % max(1, (s + 30) // 60)
+    return p, s
+
+def _battery(v, w, left=None):
+    """The page's text: "76 % (3.95 V)", with the time left "76 % (3.95
+    V), ~2 h 10 min left", "none, on USB" (the charger's swing without a
+    battery), None without a measurement."""
+    return None if v is None or w is None else (
+        "none, on USB" if w > VBAT_SWING
+        else "%d %% (%.2f V)%s" % (_vbat_pct(v), v, "" if left is None
+                                   else ", %s left" % _left_text(left)))
 
 _fl = [None, None]                       # (KB, Stamp) of the last statvfs
 
@@ -7880,7 +8014,8 @@ ROUTE_STEP_MAX = 1 << 24                 # m: past any way a day holds (and the 
                                          # field: trip starts add points without one)
 ROUTE_SPAN = 4497                        # the field's width shows at least 500 m
                                          # (6 m a pixel), in millionths of a degree
-ROUTE_W, ROUTE_H = 83, 51                # the pixels a point can land on
+ROUTE_W, ROUTE_H = 83, 45                # the pixels a point can land on (the
+                                         # display's battery line is below)
 ROUTE_DRAW = 10000                       # ms between looks at the route
 ROUTE_SAVE = 300000                      # ms between saves of a changed route (and
                                          # one when a stay starts)
@@ -8216,7 +8351,7 @@ def _tft_state(now):
     else:
         text = "kész" if up["url"] else " "
     return (_Rt.view, _Rt.km, fix, _rcv.sv_used() or 0, _local_hm(), level, _gps_quality(fix),
-            text, bool(left), _store_state(now))
+            text, bool(left), _store_state(now), _tft_bat())
 
 def tft_tick(now):
     """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors
@@ -8468,4 +8603,5 @@ def _loop():
         if DIAG and time.ticks_diff(now, diag_at) >= DIAG:
             _guarded("diag", _diag, now)
             diag_at = now
+        _guarded("vbat", vbat_tick, now)
         time.sleep_ms(20)

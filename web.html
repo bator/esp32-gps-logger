@@ -121,6 +121,7 @@ h3 b{letter-spacing:.04em;color:var(--t)}
 .kv em{font-style:normal;font-weight:600;font-size:12px}.kv .warn em{color:var(--warn)}.kv .bad em{color:var(--bad)}
 .wi{width:16px;height:12px;margin-right:6px;vertical-align:-1px;color:var(--t);fill:none;stroke-width:2.4;stroke-linecap:round}
 .wi path{stroke:var(--l)}.wi .on{stroke:currentColor}.wi circle{fill:currentColor;stroke:none}
+.bi{width:24px;height:12px;margin-right:6px;vertical-align:-1px;fill:none;stroke:var(--m);stroke-width:1.5}.bi .f{fill:currentColor;stroke:none}
 /* sky: the plot (elevation rings, a dot a satellite: its system's colour,
    bigger = clearer, hollow when not in use) and the ones in use as bars */
 .skg{display:grid;grid-template-columns:170px 1fr;gap:16px;align-items:center}
@@ -278,6 +279,10 @@ function wifiIcon(n) {                  // a dot and three arcs, n lit
   var h = '<svg class="wi" viewBox="0 0 24 18"><circle cx="12" cy="15.5" r="2"/>';
   for (var i = 0; i < 3; i++) h += '<path' + (i < n ? ' class="on"' : "") + ' d="' + ARCS[i] + '"/>';
   return h + "</svg>";
+}
+function batIcon(p) {                  // outline, nub, the charge p % wide (2 at least; red to 10, amber to 20)
+  return '<svg class="bi ' + (p > 20 ? "ok" : p > 10 ? "warn" : "bad") + '" viewBox="0 0 26 13"><rect x="1" y="1" width="21" height="11" rx="2"/>' +
+    '<path d="M24 4.5v4" stroke-width="2"/><rect class="f" x="3" y="3" width="' + Math.max(2, 17 * p / 100).toFixed(1) + '" height="7" rx="1"/></svg>';
 }
 // Event log: the whole diag log on the board (DIAG_OLD, then DIAG_FILE, read
 // with /diag; ~26 h), aggregated as it is read: status lines (one a minute)
@@ -443,7 +448,7 @@ var EVD = {
   },
   gloop: function (d, l) {
     var m = /(\d+) restarts in (\d+) s/.exec(l), w = /(\d+) more windows/.exec(l);
-    if (m) { d.r = +m[1]; d.lo = Math.min(d.lo === undefined ? 1e9 : d.lo, +m[2]); d.hi = Math.max(d.hi || 0, +m[2]); }
+    if (m) { d.r = +m[1]; d.lo = d.lo < +m[2] ? d.lo : +m[2]; d.hi = Math.max(d.hi || 0, +m[2]); }
     return w ? +w[1] : 1;
   },
   gsil: function (d, l) {               // an episode a "silent" (or a "back" whose start rotated out)
@@ -645,7 +650,7 @@ function gpsLink(d, prev) {
 // the word only when it is not nominal (colour and word); an item's words
 // stay on one line (a phone broke "-63 / dBm"), only " · " breaks
 function lgRow(r) {
-  var t = r[1].split(" &middot; ").map(function (x) { return x.replace(/ (?![^<]*>)/g, "&nbsp;"); }).join(" &middot; ");
+  var t = r[1].split(MD).map(function (x) { return x.replace(/ (?![^<]*>)/g, "&nbsp;"); }).join(MD);
   return '<div class="' + r[2] + '"><i></i><b>' + r[0] + "</b><span>" + t + "</span>" +
     (r[2] ? "<em>" + (r[2] === "bad" ? "Error" : "Warn") + "</em>" : "") + "</div>";
 }
@@ -758,6 +763,10 @@ function view(d, prev) {
       (d.good_age_s === null ? "no frame yet" : "frame " + hms(d.good_age_s) + " ago") +
       (d.gps_boots > 0 ? MD + num(d.gps_boots) + " restarts" : "") + MD + bytes(d.rx_bytes) + " read" + MD +
       pct.toFixed(2) + " % broken", gl.tone || (pct > 1 ? "warn" : "")]);
+  if (d.battery)                        // (none: no ADC, or a firmware before it)
+    subs.push(["Battery", d.vbat_pct == null ? "none" + MD + "on USB" : batIcon(d.vbat_pct) + d.vbat_pct + " %" +
+      (d.vbat_left_s ? MD + "~" + hms(d.vbat_left_s).replace(/ \d+ s$/, "") + " left" : "") + MD + esc(d.vbat) + " V",
+      d.vbat_pct == null ? "" : d.vbat_pct <= 10 ? "bad" : d.vbat_pct <= 20 ? "warn" : ""]);
   if (d.fw !== undefined)
     subs.push(["Firmware", (d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw)) + MD +
       esc(OTA[d.ota] || (d.ota == null ? "-" : "ota " + d.ota)), /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : ""]);
@@ -1000,10 +1009,10 @@ function timeline(trips, on, past, names, busy) {
     var t = trips[k], ms = t.t1 - t.t0, v = ms > 0 ? t.km * 3600000 / ms : 0, n = names && names[k] || [];
     h += '<div class="tr go' + (n[0] ? " pl" : "") + (k === on ? " on" : "") + '" role="button" tabindex="0" aria-pressed="' + (k === on) +
       '" data-k="' + k + '" onclick="hlTrip(' + k + ')" onkeydown="trKey(event,' + k + ')"><time>' + hm(t.t0) + "</time><i></i><span>" +
-      pl(n[0], "<b>" + t.km.toFixed(2) + " km</b> &middot; " + dur(ms) + " &middot; " + v.toFixed(0) + " km/h") + "</span></div>";
+      pl(n[0], "<b>" + t.km.toFixed(2) + " km</b>" + MD + dur(ms) + MD + v.toFixed(0) + " km/h") + "</span></div>";
     var nx = trips[k + 1], gap = nx && nx.m0 > GAP_M;
     h += '<div class="tr ' + (nx ? (gap ? "st gap" : "st") : "end") + (n[1] ? " pl" : "") + '"><time>' + hm(t.t1) + "</time><i></i><span>" +
-      pl(n[1], !nx ? "" : gap ? "no signal " + dur(nx.t0 - t.t1) + " &middot; " + (nx.m0 / 1000).toFixed(1) + " km apart" :
+      pl(n[1], !nx ? "" : gap ? "no signal " + dur(nx.t0 - t.t1) + MD + (nx.m0 / 1000).toFixed(1) + " km apart" :
         "stop " + dur(nx.t0 - t.t1)) + "</span></div>";
   }
   return h;

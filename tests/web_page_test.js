@@ -16,15 +16,18 @@ const v = ctx.view(d);
 // every status.json key: the page shows it, or it is for the raw JSON only
 const SHOWN = ("fix sats hdop utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days day_span stay uptime prev_run " +
-  "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
+  "boot_cause temp battery mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs", "tick_bugs", "diag_errs",
-  "track_drop", "write_errs", "q_thin", "pos6", "err_files", "tls", "hist_errs"];
+  "vbat", "vbat_swing", "vbat_pct", "vbat_left_s", "track_drop", "write_errs", "q_thin", "pos6", "err_files", "tls", "hist_errs"];
 const labeled = new Set(OTHER);
 for (const k of SHOWN) labeled.add(k);
 v.unlabeled = Object.keys(d).filter((k) => !labeled.has(k));
 const wp = ctx.wpx(47.1, 18.4, 17);
 v.tile = {x: Math.floor(wp[0] / 256), y: Math.floor(wp[1] / 256), mpp: ctx.mpp(47.1, 17)};
 v.wq = [-40, -60, -63, -67, -68, -80, -81, -100, -110, null].map((r) => ctx.wifiQ(r));
+v.bdl = [{battery: "none, on USB", vbat_pct: null}, {battery: "15 % (3.36 V)", vbat: 3.36, vbat_pct: 15, vbat_left_s: 2700},
+  {battery: "5 % (3.20 V)", vbat: 3.2, vbat_pct: 5}].map((x) => (ctx.view(x).sys.match(/<div class="[^"]*"><i><\/i><b>Battery<\/b>.*?<\/div>/) || [""])[0]);
+v.bq = [100, 76, 21, 20, 11, 10, 0].map((p) => ctx.batIcon(p).match(/bi (\w+)".*width="([\d.]+)" height="7"/).slice(1).join(" "));
 v.esc = ctx.esc("<a href=\"x\" title='y'>&</a>");
 v.coordSW = ctx.view({position: "-33.85678, -151.21530", hdop: 1}).coord;
 v.coordNE = ctx.view({position: "47.10000, 18.40000"}).coord;

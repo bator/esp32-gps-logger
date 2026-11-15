@@ -8861,6 +8861,148 @@ check("FIX-DIM: after a no-fix GSA round a valid RMC keeps 3D/2D; RMC V waits",
       (fd3, fd2, fdv) == ("3D fix", "2D fix", "Waiting fix"),
       "%r %r %r" % (fd3, fd2, fdv))
 
+# VBAT: the battery through the 390k/100k divider on GPIO1 (x4.9), the
+# divider switched on by GPIO2 at import. A steady read is a battery (the
+# median, in status.json and the diag line); the charger's swing without a
+# battery (measured on USB: 3.03-4.12 V in 32 reads) is "none, on USB"; no ADC is None,
+# and the diag line stays as it was.
+
+
+class _VbAdc(object):
+    ATTN_2_5DB = 1
+    uv = []
+    made = []
+
+    def __init__(self, pin, atten=None):
+        _VbAdc.made.append((pin.n, atten))
+        self._i = 0
+
+    def read_uv(self):
+        v = _VbAdc.uv[self._i % len(_VbAdc.uv)]
+        self._i += 1
+        return v
+
+
+def _vb_read(uvs):
+    _VbAdc.uv = uvs
+    gl._vb[:] = [None, None, None, None]
+    return gl._vbat()
+
+
+_vb_m = sys.modules["machine"]
+_vb_ctl = [lv for lv in _pin_levels if lv[0] == gl.HELTEC_VBAT_CTL]
+_vb_m.ADC = _VbAdc
+try:
+    vb_steady = _vb_read([806000 + (i % 3) * 1000 for i in range(32)])
+    vb_rows = dict(gl._web_rows())
+    vb_said = []
+    _vb_dw = gl._diag_write
+    gl._diag_write = vb_said.append
+    try:
+        gl._diag(_clock[0])
+    finally:
+        gl._diag_write = _vb_dw
+    vb_cached = (_VbAdc.uv.__setitem__(0, 1), gl._vbat())[1]
+    vb_swing = _vb_read([618000 + (i * 7187) % 223000 for i in range(32)])
+    vb_swing_bat = gl._battery(*vb_swing)
+    vb_made = _VbAdc.made[0]
+finally:
+    del _vb_m.ADC
+vb_none = _vb_read([1])
+vb_said0 = []
+_vb_dw = gl._diag_write
+gl._diag_write = vb_said0.append
+try:
+    gl._diag(_clock[0])
+finally:
+    gl._diag_write = _vb_dw
+
+# VBAT-LEFT: about how long the battery lasts, from the samples vbat_tick
+# takes once a minute (the last 30 min): the least-squares slope carried down
+# to 0 %. Nothing before 10 min of samples, on a flat or rising (charging)
+# line, or without a battery; put on the charger, the history starts again.
+gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]  # 0.5 %/min
+vl_fit = gl._vbat_left()
+vl_txt = [gl._left_text(x) for x in (vl_fit, 2700, 59 * 60 + 40, 3 * 3600 + 4 * 60)]
+gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 541, 60)]
+vl_short = gl._vbat_left()
+gl._vb_hist[:] = [(t, 80) for t in range(0, 1801, 60)]
+vl_flat = gl._vbat_left()
+gl._vb_hist[:] = [(t, 60 + t / 300.0) for t in range(0, 1801, 60)]
+vl_up = gl._vbat_left()
+vl_bat = gl._battery(3.95, 0.01, vl_fit)
+_vl_now = gl._vbat_now
+_vl_left = gl._vbat_left
+try:
+    gl._vbat_now = lambda: 65
+    vl_tft = []
+    for x_ in (7800, 3600, 3569, 2700, 20, None):
+        gl._vbat_left = lambda x_=x_: x_
+        vl_tft.append(gl._tft_bat())
+    gl._vbat_now = lambda: None
+    vl_tft.append(gl._tft_bat())
+finally:
+    gl._vbat_now, gl._vbat_left = _vl_now, _vl_left
+_vb_m.ADC = _VbAdc
+try:
+    gl._vb_hist[:] = []
+    gl._vb[:] = [None, None, None, None]
+    vl_seen = []
+    for k_ in range(14):                 # 3.95 V down 10 mV a minute
+        _VbAdc.uv = [int((3.95 - 0.01 * k_) / 4.9 * 1e6)]
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        gl.vbat_tick(_clock[0] + 20)     # (the next loop: no second sample)
+        vl_seen.append(len(gl._vb_hist))
+    vl_rows = dict(gl._web_rows())
+    _VbAdc.uv = [int(4.05 / 4.9 * 1e6)]  # on the charger: up 10 points
+    _clock[0] += 60000
+    gl.vbat_tick(_clock[0])
+    vl_charge = list(gl._vb_hist)
+    _VbAdc.uv = [618000, 841000]         # no battery: the charger's swing
+    _clock[0] += 60000
+    gl.vbat_tick(_clock[0])
+    vl_none = list(gl._vb_hist)
+finally:
+    del _vb_m.ADC
+    gl._vb_hist[:] = []
+    gl._vb[:] = [None, None, None, None]
+check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min; none under 10 min, flat "
+      "or charging; one sample a minute, the page's text with it, the display's "
+      "'2 óra' / '45 p'; on the "
+      "charger and without a battery the history starts again",
+      vl_fit == 7800 and [x.replace("\u00a0", " ") for x in vl_txt]
+      == ["~2 h 10 min", "~45 min", "~1 h 00 min", "~3 h 00 min"]
+      and " " not in "".join(vl_txt)
+      and vl_short is None and vl_flat is None and vl_up is None
+      and vl_bat == "76 % (3.95 V), ~2\u00a0h\u00a010\u00a0min left"
+      and vl_tft == [(65, "2 óra"), (65, "1 óra"), (65, "59 p"), (65, "45 p"), (65, "1 p"),
+                     (65, None), None]
+      and vl_seen == list(range(1, 15))
+      and vl_rows["vbat_left_s"] is not None and 0 < vl_rows["vbat_left_s"] < 6 * 3600
+      and vl_rows["battery"].endswith(" left")
+      and len(vl_charge) == 1 and vl_none == [],
+      "%r %r %r %r %r %r %r %r %r %r %r" % (vl_tft, vl_fit, vl_txt, vl_short, vl_flat, vl_up, vl_bat,
+                                         vl_seen, [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
+                                         vl_charge, vl_none))
+gl._vb[:] = [None, None, None, None]
+check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 76 % (Meshtastic's LiPo curve); "
+      "the charger's swing 'none, on USB'; no ADC None, diag line unchanged",
+      _vb_ctl and _vb_ctl[0][1] == 1
+      and vb_made == (gl.HELTEC_VBAT, _VbAdc.ATTN_2_5DB)
+      and vb_steady == (3.95, 0.01) and vb_cached == vb_steady
+      and (vb_rows["vbat"], vb_rows["vbat_swing"], vb_rows["battery"],
+           vb_rows["vbat_pct"]) == (3.95, 0.01, "76 % (3.95 V)", 76)
+      and [gl._vbat_pct(x) for x in (4.25, 4.19, 4.12, 3.80, 3.36, 3.10, 2.9)]
+      == [100, 100, 95, 60, 15, 0, 0]
+      and len(vb_said) == 1 and vb_said[0].endswith(" vbat 3.95/0.01")
+      and vb_swing[1] > gl.VBAT_SWING and vb_swing_bat == "none, on USB"
+      and vb_none == (None, None) and gl._battery(*vb_none) is None
+      and len(vb_said0) == 1 and " vbat " not in vb_said0[0],
+      "%r %r %r %r %r %r %r %r" % (_vb_ctl[:1], vb_made, vb_steady, vb_cached,
+                                   [vb_rows.get(k) for k in ("vbat", "vbat_swing", "battery", "vbat_pct")],
+                                   vb_said, vb_swing, vb_said0))
+
 # NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
 # bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
 # line "20A6-10-29T12:00:01Z" went into the track and became last_t, which no
@@ -14520,7 +14662,8 @@ else:
                   prev_run="2 min 30 s (last line x)",
                   prev_end=time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                          time.gmtime(now_ - 10492 - 30)),
-                  fw="86fb9c8", fw_build=1793548800, ota="current")
+                  fw="86fb9c8", fw_build=1793548800, ota="current",
+                  battery="76 % (3.95 V)", vbat=3.95, vbat_swing=0.01, vbat_pct=76)
         rb_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
                               os.path.join(here, "..", "web.html")],
                              input=json.dumps(jb), capture_output=True,
@@ -14546,11 +14689,22 @@ else:
            % time.strftime("%Y-%m-%d %H:%M", time.localtime(1793548800)))
     check("PAGE-BOOT: the device strip shows the uptime with the boot's local "
           "time, the cause and the previous run up to when; Firmware the build "
-          "date and 'up to date', the commit in the top bar",
+          "date and 'up to date', the commit in the top bar; the battery a Logger row with its icon (amber to 20 %, red to 10 %)",
           any(b_ in dlb for b_ in boots) and fwl in syb
+          and "Battery" not in dlb
+          and '<div class=""><i></i><b>Battery</b><span><svg class="bi ok" viewBox="0 0 26 13">' in syb
+          and 'width="12.9" height="7" rx="1"/></svg>76 % &middot; 3.95 V</span></div>' in syb
+          and rbj.get("bq") == ["ok 17.0", "ok 12.9", "ok 3.6", "warn 3.4", "warn 2.0",
+                                "bad 2.0", "bad 2.0"]
+          and rbj.get("bdl", [""])[0]
+          == '<div class=""><i></i><b>Battery</b><span>none &middot; on USB</span></div>'
+          and rbj["bdl"][1].startswith('<div class="warn"><i></i><b>Battery</b><span><svg class="bi warn"')
+          and rbj["bdl"][1].endswith('</svg>15 % &middot; ~45 min left &middot; 3.36 V</span><em>Warn</em></div>')
+          and rbj["bdl"][2].startswith('<div class="bad"><i></i><b>Battery</b><span><svg class="bi bad"')
+          and rbj["bdl"][2].endswith("<em>Error</em></div>")
           and upb.endswith("&middot; FW 86fb9c8")
           and rbj.get("unlabeled") == [],
-          repr((dlb[:400], syb[syb.find("Firmware") - 40:])))
+          repr((dlb[:900], rbj.get("bq"), rbj.get("bdl"), syb[syb.find("Firmware") - 40:])))
     check("PAGE: the Logger labels every row, no UBX or fix source",
           v3.get("unlabeled") == [] and " ubx" not in sy3
           and "NAV-PVT" not in sy3, sy3[:1500])
@@ -15548,11 +15702,11 @@ if os.path.exists(_wm_gz):
         _wm_data = f.read()
 _wm_w = gl.WEB_GZ_WBITS
 check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
-      "mtime, not over 25 KB (35.7, then 28.5 before A+C); the CSS and the markup only lose comments and "
+      "mtime, not over 25400 B (35.7 KB, then 28.5 before A+C; 25000 until the battery icon); the CSS and the markup only lose comments and "
       "white space; stripping again changes nothing; web.html itself keeps its comments",
       web_min and _wm_r.returncode == 0
       and _gunzip_w(_wm_data, _wm_w) == _wm_page.encode("utf-8") and _wm_data[4:8] == b"\0\0\0\0"
-      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25000
+      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25400
       and web_min.minify(_wm_page) == _wm_page and "<!--" not in _wm_page
       and "/*" not in _wm_page[_wm_page.index("<style>"):_wm_page.index("</style>")]
       and _wm_css(_wm_page) == _wm_css(page_src) and _wm_html(_wm_page) == _wm_html(page_src)
@@ -21459,6 +21613,47 @@ check("TFT-COLUMN: the clock's baseline 14 and the upload's 62, both ending at x
       and set(_px(x, 46) for x in range(96, 160)) == {_PAPER_C},
       repr((_clk_base, _clk_end, _up_base, _up_end)))
 
+# TFT-BAT: the battery under the route (its grid's last row is 52-53, a route
+# point lands on rows 4-49): an ink outline with its nub, the charge inside as
+# wide as its per cent (ink; amber to 20, red to 10), the per cent, then about
+# how long it lasts, in the same tone; nothing there without a battery, and
+# the right column untouched
+
+
+def _bat_frame(bat, left=None):
+    _ft.set_state(*(_STD + (None if bat is None else (bat, left),)))
+    _ft.frame()
+    return {(x, y): _px(x, y) for x in range(0, 160) for y in range(0, 64)}
+
+
+_bf_none, _bf76, _bf15, _bf5, _bf100 = [_bat_frame(b) for b in (None, 76, 15, 5, 100)]
+_bf_l = _bat_frame(76, "2 óra")
+_bf_l15 = _bat_frame(15, "45 p")
+_bf_wide = _bat_frame(100, "12 óra")
+_bf_out = [(4, 56), (14, 56), (4, 62), (14, 62), (15, 58), (15, 60)]
+_bf_fill = lambda f: [x for x in range(6, 13) if f[(x, 59)] != _PAPER_C]
+_bf_ink = lambda f, x0: [x for x in range(x0, 94) for y in range(54, 64) if f[(x, y)] != _PAPER_C]
+_bf_right = lambda f: {k: v for k, v in f.items() if k[0] >= 94}
+_bf_tx = 18 + _ft.width(_ft._SMALL, "76%") + _ft.BAT_SEP
+check("TFT-BAT: under the route: outline and nub in ink, the charge 76 % of 7 px wide in ink, "
+      "15 % amber, 5 % red; the per cent, then the time left in the battery's tone, the widest "
+      "short of the right column; nothing without a battery; the right column untouched",
+      all(_bf76[k] == _INK_C for k in _bf_out)
+      and _bf_fill(_bf76) == list(range(6, 11)) and _bf76[(6, 59)] == _INK_C
+      and _bf15[(6, 59)] == _AMB_C and _bf5[(6, 59)] == _RED_C
+      and len(_bf_fill(_bf5)) == 1 and len(_bf_fill(_bf100)) == 7
+      and _bf_ink(_bf76, 18) and not _bf_ink(_bf76, _bf_tx)
+      and _bf_ink(_bf_l, _bf_tx) and max(_bf_ink(_bf_wide, 0)) < 92
+      and _ink15 in [_bf_l[(x, y)] for x in range(_bf_tx, 92) for y in range(54, 64)]
+      and _amb15 in [_bf_l15[(x, y)] for x in range(_bf_tx, 92) for y in range(54, 64)]
+      and not _bf_ink(_bf_none, 0)
+      and min(y for x in range(0, 90) for y in range(0, 64) if _bf_l[(x, y)] not in (_PAPER_C, _ft.DIM)) >= 54
+      and _bf_right(_bf_l) == _bf_right(_bf_none) == _bf_right(_bf100),
+      repr((_bf_fill(_bf76), _bf_fill(_bf5), _bf_fill(_bf100), [_bf76[k] for k in _bf_out],
+            max(_bf_ink(_bf_wide, 0) or [0]), _bf_tx)))
+_ft.set_state(*_STD)
+_ft.frame()
+
 # the satellites: an icon left of the count, on its baseline, in its colour
 _SAT = ("...#####...", "....###....", "###..#..###", "###.###.###", "###.###.###", "###########",
         "###.###.###", "###.###.###", "###..#..###", "###..#..###", "....###....")
@@ -22492,7 +22687,7 @@ check("ROUTE-DRAW: north up, 2x2 dots: the earlier trip ink, the latest red, no 
       "them; 6x6 round dots: ink at the day's start, red at the current position",
       _ink_part and _no_chord and _red_part and _thin
       and _start == (_PAPER_C, _INK_C, _INK_C, _PAPER_C, _INK_C, _INK_C)
-      and _end == (87, _ft.DIM, _RED_C, _RED_C, _PAPER_C, _RED_C, _RED_C)     # (a grid dot's in that corner)
+      and _end == (87, _PAPER_C, _RED_C, _RED_C, _PAPER_C, _RED_C, _RED_C)
       and _field_ok and _v[2] == 2, repr((_ink_part, _no_chord, _red_part, _thin, _start, _end, _v[:1] and list(_v[0][:8]), _v[1:3])))
 # north is up, in a band's split too: a line across all the bands
 _rfresh()
@@ -22502,11 +22697,11 @@ _show(route=_v, km=_Rt.km)
 _x = 4 + _v[0][0]
 _col = [y for y in range(0, 63) if _px(_x + 3, y) == _RED_C or _px(_x, y) == _RED_C]
 _ys = (_v[0][1] & 127, _v[0][3] & 127)
-_full = all(_px(_x, y) == _RED_C for y in range(10, 50))
+_full = all(_px(_x, y) == _RED_C for y in range(10, hl.ROUTE_H))
 _start_low = _px(_x, 4 + _ys[0] + 3) == _INK_C and _px(_x, 4 + _ys[1]) == _RED_C
 check("ROUTE-NORTH: a walk due north runs from the ink dot at the bottom to the red one at "
       "the top, unbroken across the bands",
-      _ys == (51, 0) and _full and _start_low, repr((_ys, _full, _start_low)))
+      _ys == (hl.ROUTE_H, 0) and _full and _start_low, repr((_ys, _full, _start_low)))
 _rfresh()
 _rfeed(_rat(0, 0, _DAY), _rat(100, 0, _DAY + 60))
 _v = _rview(_DAY + 70)
