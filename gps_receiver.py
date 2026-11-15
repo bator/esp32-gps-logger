@@ -373,7 +373,7 @@ def gga(talker, f):
         if alt is not None:
             ep["alt"][0] += alt
             ep["alt"][1] += 1
-        if hd is not None:
+        if hd is not None and hd > 0:   # (0 or below: no HDOP, not perfect)
             ep["hdop"][0] += hd
             ep["hdop"][1] += 1
 
@@ -389,7 +389,8 @@ def gsa(talker, f):
     valid again showed "Fix" for up to 5 s (measured indoors: 14 of 201
     rounds). The last dimension stands until the next 2D/3D round."""
     ft = _num(f[2], int)
-    if ft in (2, 3):
+    _uc_gsa(talker, f)                   # (first: a field that fails there
+    if ft in (2, 3):                     # leaves no fix type, no count)
         st["fixtype"] = ft
     t = _sec[0]
     if t is not None:
@@ -402,7 +403,6 @@ def gsa(talker, f):
     st["gsa_n"] += 1
     if st["gsa_n"] == GSA_MAX + 1:
         _extra(talker, f)
-    _uc_gsa(talker, f)
 
 def _extra(talker, f):
     """A sentence gps_setup turns off: the receiver did not take it."""
@@ -413,8 +413,9 @@ def _extra(talker, f):
 def gsv(talker, f):
     _uc_gsv(talker, f)                   # (its GSV stays on: not _extra)
     n = _num(f[3], int)
-    if n is not None:
+    if n is not None and talker in _UC_GNSS:
         st["view"][talker] = n          # per constellation, summed on display
+                                        # (a talker of no system: not summed)
 
 def gst(talker, f):
     """The receiver's own error estimate (1-sigma, metres) of the second's
@@ -423,7 +424,7 @@ def gst(talker, f):
     sl, sn = _num(f[6]), _num(f[7])      # (read first: _num)
     timed = _second(f[1])
     st["gst_at"] = time.ticks_ms()       # it comes (_setup_check)
-    if timed and sl is not None and sn is not None:
+    if timed and sl is not None and sn is not None and sl > 0 and sn > 0:
         ep["std"] = sl if sl > sn else sn
 
 def _gps_restarted():
@@ -438,6 +439,10 @@ def _gps_restarted():
     last = st["boot_last"]               # the gap sets the storm's quiet
     st["boot_gap"] = 0 if last is None else _age(now, last)
     st["boot_last"] = now
+    # its date is gone with it: one kept from before (a silence of a day
+    # and more) stamped the next fix with the old day, its time new
+    st["date"] = None
+    _day[0] = _day[1] = None
     print("gps restarted")
     _gps_flap(now)                       # first: the restart that makes
     storm = (st["storm_at"] is not None  # it a storm waits too

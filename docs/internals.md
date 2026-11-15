@@ -56,7 +56,13 @@
   (`HHMMSS`) and a fix's date (`DDMMYY`) digits. Anything else makes the whole sentence bad
   (counted in `nmea` good / bad), none of it used. (One such date in a track
   line became a "last time" no real time ever came after: no line and no anchor
-  point until a reboot.)
+  point until a reboot.) The minutes start with a digit (`float()` took `+5.5`). A time that does
+  not exist (hour 24, minute 60, second 61) or an empty time is no second of its
+  own (no bad sentence: the checksum held), and its position, speed and GST go
+  nowhere. A `GSA` whose later field fails leaves no fix type; an HDOP of 0 or
+  below and a negative `GST` are not taken; a `GSV` of a talker of no system is
+  not counted as seen. A receiver restart forgets its date (kept, after a day of
+  silence the next fix had the old day).
 - **Midnight.** Only `RMC` carries the date, and only with a fix (before one the
   UC6580's `RMC` carries a made-up date). A second that runs back past midnight
   without its own `RMC` has no date, so it is not a fix rather than a day off.

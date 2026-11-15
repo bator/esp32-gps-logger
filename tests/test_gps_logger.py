@@ -8621,6 +8621,29 @@ check("RCV-FIELDS: minutes start with a digit; a time that does not exist is no 
       and _rf_bounds == "120000" and _rf_rmc == (True, None) and _rf_gst is None,
       repr((_rf, _rf_25, _rf_empty, _rf_bounds, _rf_rmc, _rf_gst)))
 
+# RCV-PARTIAL (NMEA fuzz): a GSA whose later field fails set the fix type
+# and counted it before (a bad sentence that still changed state); a GSV of
+# a talker of no system went into the satellites seen for good; an HDOP of
+# 0 or below and a negative GST were taken; a receiver restart kept its old
+# date (after a day and more of silence the next fix had the old day)
+gl._rcv.reset()
+_rp_ft = gl.st["fixtype"]
+gl._rcv.handle(_rf_nm("GNGSA,A,2,01,02,,,,,,,,,,,1.5,0.9,1.2,X"))
+_rp_gsa = (gl.st["fixtype"] == _rp_ft, gl.st["err"])
+gl._rcv.handle(_rf_nm("XXGSV,1,1,07,01,40,083,46,1"))
+_rp_view = dict(gl.st["view"])
+gl._rcv.handle(_rf_nm("GNGGA,120000.00,4711.12279,N,01825.61582,E,1,12,-1.0,100.0,M,40.0,M,,"))
+gl._rcv.handle(_rf_nm("GNGST,120000.00,1.0,,,,-2.0,-3.0,9.9"))
+_rp_ep = (gl._rcv.ep["hdop"][1], gl._rcv.ep.get("std"))
+gl.st["date"] = "2026-11-14"
+gl._rcv._gps_restarted()
+_rp_date = gl.st["date"]
+gl._rcv.reset()
+check("RCV-PARTIAL: a GSA that fails leaves no fix type; a GSV of no system is not seen; "
+      "HDOP 0 or below and a negative GST are not taken; a restart forgets the date",
+      _rp_gsa == (True, 1) and "XX" not in _rp_view and _rp_ep == (0, None)
+      and _rp_date is None, repr((_rp_gsa, _rp_view, _rp_ep, _rp_date)))
+
 saved_diag = (gl.DIAG, gl.DIAG_MAX)
 try:
     vals = []
