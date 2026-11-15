@@ -852,6 +852,7 @@ function histLoad() {
     if (hist.days.indexOf(utcDay(now)) < 0) hist.days.push(utcDay(now));
   }
   hist.busy = true;
+  hist.err = false;
   histNext(0);
 }
 function histNext(i) {
@@ -886,7 +887,8 @@ function histNext(i) {
     if (t) h.off[day] = o + t.length;
     histNext(t.length >= HIST_REPLY && !past ? i : i + 1);
   };
-  x.onerror = x.ontimeout = function () { if (h === hist) { h.busy = false; h.at = Date.now(); trackPaint(); } };
+  // (err: what came is not the whole day, "Reading" stays till the retry)
+  x.onerror = x.ontimeout = function () { if (h === hist) { h.busy = false; h.err = true; h.at = Date.now(); trackPaint(); } };
   x.send();
 }
 function histDue() { return !hist.busy && !hist.done && Date.now() - hist.at >= 60000; }
@@ -1251,7 +1253,7 @@ function histPath(t, z, i0, i1) {       // SVG path in the tile layer's pixels
 var tpKey = "";
 function trackPaint() {
   // (read once at least, or not: no "no trip" before the day is in)
-  var busy = hist.busy || !hist.at;
+  var busy = hist.busy || !hist.at || hist.err;
   if (hist.trips === undefined || hist.tn !== hist.pts.length) { hist.trips = tripsOf(hist.pts); hist.tn = hist.pts.length; }
   // the last trip open (a point in the last 5 min) in the key: once it
   // closes its end place is asked (the panel was not drawn again: no end
@@ -1479,7 +1481,7 @@ function tick() {
       if (histDue()) histLoad();
       if (diagDue()) diagLoad();
     } catch (e) {
-      $("live").innerHTML = "LIVE &middot; PAGE ERROR " + esc(String(e && e.message || e)).slice(0, 60);
+      $("live").innerHTML = "LIVE &middot; PAGE ERROR " + esc(String(e && e.message || e).slice(0, 60));
     }
     setTimeout(tick, every * 1000);
   };

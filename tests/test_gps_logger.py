@@ -8082,12 +8082,22 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     rc_k0, out_k0, err_k0, _w, calls_k0 = build_run(
         ["--publish"], {"OTA_KEY_FILE": k640, "OTA_DEST": "fakehost:" + dest_k})
     bad_dests = {}
-    for d_ in ("~/ota", "/srv/my ota", "/srv/$x", "/srv/a;b", "/srv/a'b"):
+    for d_ in ("~/ota", "/srv/my ota", "/srv/$x", "/srv/a;b", "/srv/a'b", "-x/ota"):
         bad_dests[d_] = build_run(["--publish"], {"OTA_KEY_FILE": key_file,
                                                   "OTA_DEST": "fakehost:" + d_})
     bad_dests["-oProxyCommand=x:/d"] = build_run(
         ["--publish"], {"OTA_KEY_FILE": key_file,
                         "OTA_DEST": "-oProxyCommand=x:/d"})
+    # another board directory: its manifest's "board" is not the firmware's
+    # OTA_BOARD, every board would refuse it ("bad manifest" for good)
+    _ob = os.path.join(tempfile.mkdtemp(dir=dp_td), "OTHER_BOARD")
+    shutil.copytree(os.path.join(ROOT, "boards", "GPS_LOGGER_S3"), _ob)
+    _ob_r = build_run(["--publish"], {"OTA_KEY_FILE": key_file,
+                                      "OTA_DEST": "fakehost:" + dest_k, "BOARD_DIR": _ob})
+    check("BUILD-PUBLISH-BOARDDIR: a board directory whose name is not the firmware's OTA_BOARD "
+          "is refused before the build and any scp or ssh",
+          _ob_r[0] != 0 and "OTA_BOARD" in _ob_r[2] and "Built" not in _ob_r[1]
+          and not [c for c in _ob_r[4] if c[0] in ("scp", "ssh")], repr((_ob_r[0], _ob_r[2][-200:])))
     check("BUILD-PUBLISH-RT2: a key file readable by everyone (644) is refused "
           "before any upload, one readable by its group (640) is published "
           "with a warning, the key itself never printed; an OTA_DEST "
@@ -8514,6 +8524,50 @@ check("GPS-SILENT: no bytes for GPS_SILENT is one diag line, their return "
 diag_clear()
 gl._rcv.reset()
 
+# GPS-SILENT-LONG: the length comes from Stamps, not ticks (they wrap: a
+# silence over 6.2 days read as 536870 s)
+gl.st["start"] = _clock[0]
+_clock[0] += gl._rcv.GPS_SILENT
+gl._rcv.gps_check(_clock[0])
+gl.st["mute_s"] = gl._stamp() - 7 * 86400   # (as if it began a week ago)
+gl.st["rx"] = _clock[0]
+gl._rcv.gps_check(_clock[0])
+_gs_long = [l for l in diag_lines() if "gps back" in l]
+check("GPS-SILENT-LONG: a week of silence is said as a week (from Stamps)",
+      len(_gs_long) == 1 and _gs_long[0] == "gps back after %d s" % (7 * 86400),
+      repr(_gs_long))
+diag_clear()
+gl._rcv.reset()
+
+# RCV-FIELDS: float() took "+5.5" and " 5.5" as minutes; an hour, minute or
+# second that does not exist ("250001") became the clock (02:00 shown, the
+# next good second's date dropped); a GGA or RMC with an empty time put its
+# position into the second that was open
+def _rf_nm(body):
+    c_ = 0
+    for ch_ in body.encode():
+        c_ ^= ch_
+    return ("$%s*%02X" % (body, c_)).encode()
+
+
+_rf = []
+for v_ in ("47+5.5", "47 5.5", "4705.5"):
+    try:
+        _rf.append(round(gl._rcv._deg(v_, "N", "NS"), 4))
+    except ValueError:
+        _rf.append("bad")
+gl._rcv.reset()
+gl._rcv.handle(_rf_nm("GNGGA,120000.00,4711.12279,N,01825.61582,E,1,12,0.9,100.0,M,40.0,M,,"))
+_rf_err0, _rf_t0 = gl.st["err"], gl.st.get("time")
+gl._rcv.handle(_rf_nm("GNGGA,250001.00,4711.12279,N,01825.61582,E,1,12,0.9,100.0,M,40.0,M,,"))
+_rf_25 = (gl.st["err"] - _rf_err0, gl._rcv._sec[0], gl._rcv.ep["g"][4])
+gl._rcv.handle(_rf_nm("GNGGA,,4711.12279,N,01825.61582,E,1,12,0.9,100.0,M,40.0,M,,"))
+_rf_empty = gl._rcv.ep["g"][4]
+gl._rcv.reset()
+check("RCV-FIELDS: minutes start with a digit; a time that does not exist is no second "
+      "(no bad sentence, the clock as it was); an empty time adds no position",
+      _rf == ["bad", "bad", 47.0917] and _rf_25 == (0, "120000", 1) and _rf_empty == 1,
+      repr((_rf, _rf_25, _rf_empty)))
 
 saved_diag = (gl.DIAG, gl.DIAG_MAX)
 try:
@@ -11003,6 +11057,38 @@ finally:
     shutil.rmtree(_hd, ignore_errors=True)
     gl._rcv.reset()
 
+# HIST-FUTURE: the day history's "today" is the clock's UTC day, not the
+# newest name: a line whose time leapt ahead (a digit flipped past the
+# checksum) gets no day file, and under flash pressure a day after the
+# clock's goes first while today's stays (it was the other way round).
+_hf_dir = tempfile.mkdtemp()
+_hf_saved = (gl.HIST_DIR, gl.log["clock"], gl.free)
+gl.HIST_DIR = os.path.join(_hf_dir, "hist")
+os.mkdir(gl.HIST_DIR)
+try:
+    gl.log["clock"] = (gl._kb_time(b"20261115T120000Z", 0), gl._stamp())
+    hf_today = gl._hist_today()
+    hf_ = [None, False, False, None]
+    for ln_ in (b"47.500000,19.000000,10.0,,20261125T120000Z\n",
+                b"47.500000,19.000000,10.0,,20261115T115900Z\n"):
+        gl._rbuf[0:len(ln_)] = ln_
+        gl._hist_put(hf_, 0, len(ln_))
+    gl._hist_close(hf_)
+    hf_put = sorted(os.listdir(gl.HIST_DIR))
+    for n_ in ("20261113.trb", "20261125.trb"):
+        with builtins.open(os.path.join(gl.HIST_DIR, n_), "wb") as f:
+            f.write(b"x")
+    gl.free = lambda: 0                  # never enough: as far as it goes
+    gl._hist_trim(10 ** 6)
+    hf_trim = sorted(os.listdir(gl.HIST_DIR))
+finally:
+    gl.HIST_DIR, gl.log["clock"], gl.free = _hf_saved
+    shutil.rmtree(_hf_dir, ignore_errors=True)
+check("HIST-FUTURE: no day file for a line after the clock's day; under pressure a day "
+      "after it goes first and today's stays",
+      hf_today == "20261115" and hf_put == ["20261115.trb"] and hf_trim == ["20261115.trb"],
+      repr((hf_today, hf_put, hf_trim)))
+
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
 rv_td = tempfile.mkdtemp(prefix="rev29-")
 
@@ -13441,9 +13527,9 @@ finally:
     shutil.rmtree(ca_td, ignore_errors=True)
 ca_diag = [l for l in diag_lines() if l.startswith("upload ca err")]
 diag_clear()
-check("TLS-CA: unreadable or empty CA_FILE -> no POST, 'ca err', retry after "
-      "LOWIDF_RETRY, no unverified context",
-      ca_r1 == (0, "ca err", gl.LOWIDF_RETRY, None)
+check("TLS-CA: unreadable or empty CA_FILE -> no POST, 'ca err', retry on the doubling "
+      "backoff (a bad file stays bad: 30 s each kept the radio on), no unverified context",
+      ca_r1 == (0, "ca err", gl.BACKOFF_START, None)
       and ca_r2 == (0, "ca err", None) and len(ca_diag) == 2,
       "%r %r %r" % (ca_r1, ca_r2, ca_diag))
 check("TLS-CA-NEW: a readable CA_FILE verifies; replaced or removed it is "
@@ -14279,6 +14365,16 @@ try:
     for _ in range(2):
         pump()
         lp_waits.append(gl.up["next_at"] - _clock[0])
+    lp_wait_away = gl._upload_wait(_clock[0])
+    _lp_home = gl.at_home
+    gl.at_home = lambda: True
+    try:
+        lp_home = []
+        for _ in range(3):
+            pump()
+            lp_home.append(gl.up["next_at"] - _clock[0])
+    finally:
+        gl.at_home = _lp_home
     gl.gc.mem_free = lambda: 126 * 1024 + 20000
     pump()
     ok_ = (len(_posts), os.path.exists(lp_p))
@@ -14296,8 +14392,12 @@ check("LOWPY: below TLS_MIN_PY_KB free Python heap the POST waits, then goes",
       low == (0, "low mem", True) and ok_ == (1, False)
       and lp_diag == ["upload low mem 8000 B"], "%r %r %r" % (low, ok_,
                                                                lp_diag))
-check("LOWPY-RETRY: low mem retries after LOWIDF_RETRY each time (no "
-      "doubling backoff)", lp_waits == [gl.LOWIDF_RETRY] * 3, repr(lp_waits))
+check("LOWPY-RETRY: low mem at home retries after LOWIDF_RETRY each time (no doubling); "
+      "away (no reboot there) on the doubling backoff, and the radio waits it out",
+      lp_home == [gl.LOWIDF_RETRY] * 3
+      and lp_waits[0] == gl.BACKOFF_START and lp_waits[1] == 2 * lp_waits[0]
+      and lp_waits[2] == 2 * lp_waits[1] and lp_wait_away > 0,
+      repr((lp_waits, lp_home, lp_wait_away)))
 
 # LOWPY-REBOOT: the Python heap low at home for LOWIDF_WAIT with tracks
 # waiting reboots cleanly as a low IDF heap does (LOWIDF_MARK, at most one
@@ -15371,7 +15471,7 @@ else:
     _days_css = re.search(r"\.days\{([^}]*)\}", _wp)
     check("DAY-BUTTONS: the chips oldest first, today last, so < moves the "
           "picked chip one left and > one right; wrapped, none cut off at the "
-          "edge; a day being read says so, a read or a failed one says no trip; "
+          "edge; a day being read, or whose read failed, says it is being read, a read one says no trip; "
           "the buttons answer hover, press and the keyboard",
           # (east of UTC the file 20261104 also offers the 5th)
           (_dd.get("labels") or [""])[:2] == ["Tue 3", "Wed 4"] and _dd["labels"][-1] == "Today"
@@ -15384,9 +15484,9 @@ else:
               r'<p class="hint">No trip yet today\.</p><button class="btn" onclick="pick\(\'2026110\d\'\)">'
               r'&lsaquo; (\w{3} \d+)</button>$', _dd.get("today") or ""))
           and _dd.get("busy") == '<p class="hint">Reading the day&hellip;</p>'
-          and (lambda m_: m_ is not None and m_.group(1) in _dd["labels"][:-1])(re.match(
-              r'<p class="hint">No trip this day\.</p><button class="btn" onclick="pick\(\'2026110\d\'\)">'
-              r'&lsaquo; (\w{3} \d+)</button>$', _dd.get("failed") or ""))
+          # (a failed read is not the day: "Reading" till its retry, not
+          # "No trip", over a day half read or not read at all)
+          and _dd.get("failed") == '<p class="hint">Reading the day&hellip;</p>'
           and ft.get("pickBusy") == '<p class="hint">Reading the day&hellip;</p>'
           and _days_css is not None and "flex-wrap:wrap" in _days_css.group(1)
           and "overflow" not in _days_css.group(1)
@@ -16441,6 +16541,115 @@ gl.LOG_DIR = _rev_dir
 gl.log_reset()
 diag_clear()
 shutil.rmtree(_r7, ignore_errors=True)
+
+# FULL-QUEUE: while the flash is full nothing is recorded, and the queued
+# seconds go as after a fix loss. Kept (thinned to its 8), they were written
+# when space came back: the new file began an hour back, then a point every
+# 6-11 min, straight lines on the map.
+_fq_dir = tempfile.mkdtemp()
+gl.LOG_DIR = _fq_dir
+gl._rcv.reset()
+gl.log_reset()
+gl.up_reset()
+gl.wifi.update(state="offline")
+settled()
+_fq_s = [0]
+
+
+def _fq_pub(north):
+    _clock[0] += 1000
+    s_ = _fq_s[0]
+    _fq_s[0] += 1
+    gl.st.update(valid=True, date="2026-10-18",
+                 time="%02d:%02d:%02d" % (8 + s_ // 3600, (s_ // 60) % 60, s_ % 60),
+                 lat=47.5 + north * 9e-6, lon=19.0, alt=100.0, hdop=1.0, hdop_at=_clock[0],
+                 status="A", quality=1, fixtype=3, speed=20.0, std=None, std_at=None, epochs=5)
+    gl._rcv._published(_clock[0])
+    gl.log_tick()
+
+
+_fq_free = gl.free
+try:
+    for i in range(90):
+        _fq_pub(i * 15)
+    _fq_room = [10 ** 7]
+    gl.free = lambda: _fq_room[0]
+    _fq_room[0] = 1000                   # full
+    for i in range(1200):                # 20 min of driving while full
+        _fq_pub(1350 + i * 15)
+    _fq_room[0] = 10 ** 7
+    gl.log["full_check"] = None
+    gl.log_tick()
+    for i in range(5):
+        _fq_pub(1350 + (1200 + i) * 15)
+    fq_times = [ln.strip()[-16:] for ln in gl.log["batch"]]
+finally:
+    gl.free = _fq_free
+fq_ok = (fq_times and fq_times[0] >= "20261018T082130Z"
+         and all(b_ > a_ for a_, b_ in zip(fq_times, fq_times[1:])))
+check("FULL-QUEUE: after a full flash the new points start at the present second, none "
+      "of the seconds queued while it was full", fq_ok, repr(fq_times[:6]))
+gl.log_reset()
+shutil.rmtree(_fq_dir, ignore_errors=True)
+
+# WFAIL-MEM: a later chunk out of memory is no failing file. It was counted as
+# a write failure: three in a row left a good file for a new one ("track file
+# failing"), the track split.
+_wm_dir = tempfile.mkdtemp()
+gl.LOG_DIR = _wm_dir
+gl.log_reset()
+diag_clear()
+gl.start_file("20261115_120000")
+for i in range(60):
+    gl.log["batch"].append(trk_line(47.5 + i * 1e-4, 19.0, "20261115T1200%02dZ" % i))
+gl.flush()
+_wm_part = gl._kb_part
+_wm_f = gl.log["file"]
+try:
+    for rnd in range(3):
+        for i in range(150):
+            s_ = 60 + 150 * rnd + i
+            gl.log["batch"].append(trk_line(47.6 + s_ * 1e-4, 19.0,
+                                            "20261115T12%02d%02dZ" % (s_ // 60, s_ % 60)))
+        _wm_calls = [0]
+
+        def _wm_p(lines, k, seg):
+            _wm_calls[0] += 1
+            if _wm_calls[0] == 2:
+                raise MemoryError("heap")
+            return _wm_part(lines, k, seg)
+        gl._kb_part = _wm_p
+        gl.flush()
+finally:
+    gl._kb_part = _wm_part
+wm_state = (gl.log["wfails"], gl.log["file"] == _wm_f,
+            [ln for ln in diag_lines() if "failing" in ln])
+gl.flush()                               # memory back: it all lands in that file
+wm_after = (gl.log["batch"], gl.log["file"] == _wm_f, sorted(os.listdir(_wm_dir)))
+check("WFAIL-MEM: a chunk out of memory is not a failing file: no count, no new file, no "
+      "'failing' line; the batch lands in the same file once memory is back",
+      wm_state == (0, True, []) and wm_after == ([], True, ["20261115_120000.trb"]),
+      repr((wm_state, wm_after)))
+gl.log_reset()
+diag_clear()
+shutil.rmtree(_wm_dir, ignore_errors=True)
+
+# START-EXISTS: a file of the new file's name already there (the time went
+# back over a track not uploaded yet) is not overwritten: a second on
+_se_dir = tempfile.mkdtemp()
+gl.LOG_DIR = _se_dir
+with builtins.open(os.path.join(_se_dir, "20261115_130000.trb"), "wb") as f:
+    f.write(b"old track")
+gl.log_reset()
+gl.start_file("20261115_130000")
+se_name = gl.log["file"][-19:]
+with builtins.open(os.path.join(_se_dir, "20261115_130000.trb"), "rb") as f:
+    se_old = f.read()
+check("START-EXISTS: a new file does not take an existing file's name (20261115_130001)",
+      se_name == "20261115_130001.trb" and se_old == b"old track", repr((se_name, se_old)))
+gl.log_reset()
+shutil.rmtree(_se_dir, ignore_errors=True)
+gl.LOG_DIR = _rev_dir
 
 # WERR-DIAG: track write errors (log["err"]) are in the diag log, the
 # first at once, then one per WERR_EVERY (10 min): the count was shown
@@ -18184,6 +18393,66 @@ try:
           vc == ((["valid"], True), "ok", None, [("valid",)], False, None,
                  _page, (None, 0)), repr(vc))
 
+    # OTA-STALE-MARK: a "valid" mark left over (a confirmation that failed
+    # before its health reset, a power cut in _ota_done) confirmed the next
+    # build at its first boot, without WiFi, the manifest or the 2 min. The
+    # boot without a pending note drops it, and so does every install
+    def _t_stale():
+        out = []
+        _ota_reset()
+        _set_mark("valid")
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        gl.ota_boot()                    # no note: the old firmware's boot
+        out.append(gl._ota_mark_get())
+        _set_mark("valid")
+        _serve(_manifest(200))
+        gl._ota_check()                  # installed: the mark gone first
+        out.append(gl._ota_mark_get())
+        del _ota_log[:]
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        _reset_cause[0] = 2
+        gl.ota_boot()
+        gl.wifi_reset()
+        gl.wifi["state"] = "not found"
+        gl.ota_tick(_clock[0])
+        out += [gl.ota["state"], gl.ota["pend"], list(_ota_log)]
+        gl.wifi_reset()
+        return out
+    sm = _guarded(_t_stale)
+    check("OTA-STALE-MARK: a left-over 'valid' mark is dropped at a boot without a note and "
+          "before an install; the next build boots pending, not confirmed without WiFi",
+          sm == [None, None, "pending", 200, []], repr(sm))
+
+    # OTA-VALID-LINK: WiFi connected once (and the manifest read) and lost
+    # was enough at OTA_VALID_AFTER: a build that breaks the reconnect got
+    # confirmed without a link. It must be connected at that point
+    def _t_link():
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        _serve(_manifest(200))
+        gl._ota_check()
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        _reset_cause[0] = 2
+        gl.ota_boot()
+        del _ota_log[:]
+        gl.wifi_reset()
+        gl.wifi["state"] = "connected"
+        gl._ota_health(_clock[0])        # seen, the manifest read
+        probed = gl.ota.get("probed")
+        gl.wifi["state"] = "lost"
+        _clock[0] += gl.OTA_VALID_AFTER + 1000
+        gl._ota_health(_clock[0])
+        lost = (gl.ota["pend"], list(_ota_log))
+        gl.wifi["state"] = "connected"
+        gl._ota_health(_clock[0])
+        back = (gl.ota["pend"], list(_ota_log))
+        gl.wifi_reset()
+        return probed, lost, back
+    vl = _guarded(_t_link)
+    check("OTA-VALID-LINK: not confirmed at OTA_VALID_AFTER while the WiFi is lost; "
+          "confirmed once it is back",
+          vl == (True, (200, []), (None, [("valid",)])), repr(vl))
+
     # OTA-VALID-FAIL: a confirmation that failed (OSError) was swallowed:
     # the page went up, the notes went, "ota ok", over an image the next
     # reset rolled back. It keeps the pending state now, one diag line,
@@ -19196,15 +19465,16 @@ finally:
 
 def _lw_pass(t):
     return ["read_uart", ("gps_check", t), "log_tick", "wifi_tick",
-            ("keepalive_tick", t), "upload_tick", "web_tick", ("ota_tick", t),
-            ("ntp_tick", t), ("tft_tick", t)]
+            ("keepalive_tick", t), ("ntp_tick", t), "upload_tick", "web_tick",
+            ("ota_tick", t), ("tft_tick", t)]
 
 
 _lw_want = (_lw_pass(_lw_t0) + ["sleep"] + _lw_pass(_lw_t0 + 20)
             + ["_status", ("_set_freq", gl.CPU_MHZ), ("_diag", _lw_t0 + 20),
                "sleep"])
 check("LOOP-WIRING: a _loop pass calls the UART read, gps_check, log, WiFi, "
-      "keep-alive, upload, page, OTA, NTP and display ticks in order (with "
+      "keep-alive, NTP (before the upload: the board clock for TLS), upload, page, OTA "
+      "and display ticks in order (with "
       "this pass's ticks), then the due status line, the CPU clock and the "
       "diag line",
       _lw_ev == _lw_want, repr(_lw_ev))
@@ -22478,7 +22748,160 @@ _n_bad = [_nask(x) for x in (b"", _nreply(_DAY, size=47), _nreply(_DAY, first=0x
                              _nreply(_DAY, stratum=16), _nreply(_DAY - 86400 * 31),
                              _nreply(-hl._NTP_2020), OSError(110))]
 _n_closed = len(_NtpMod.closed) == 10
-_n_nodns = [_nask(_nreply(_DAY), OSError(-2)), _nask(_nreply(_DAY), []) ]
+hl._dns.clear()                          # (no address from before: none to fall back on)
+hl._dns_bad.clear()
+_n_nodns = [_nask(_nreply(_DAY), OSError(-2))]
+hl._dns_bad.clear()
+_n_nodns.append(_nask(_nreply(_DAY), []))
+hl._dns.clear()
+hl._dns_bad.clear()
+
+# DNS-CACHE: lwIP resolves for 7 s without an answer (measured), nothing else
+# runs, the UART fills. A network whose resolver failed is not asked again
+# for DNS_RETRY: the address resolved before is used, or it fails at once;
+# another network, or after DNS_RETRY, is asked again
+_dc_ssid = hl.wifi["ssid"]
+hl.wifi["ssid"] = "home"
+del _NtpMod.asked[:]
+_dc = [_nask(_nreply(_DAY))]             # resolved: kept
+_dc.append(_nask(_nreply(_DAY), OSError(-202)))   # fails: the old address
+_dc.append(_nask(_nreply(_DAY), OSError(-202)))   # not asked again
+_dc_asked = len(_NtpMod.asked)
+hl._dns.clear()
+_dc.append(_nask(_nreply(_DAY)))         # no old address: fails at once
+_dc_asked2 = len(_NtpMod.asked)
+hl.wifi["ssid"] = "phone"
+_dc.append(_nask(_nreply(_DAY)))         # another network: asked
+_dc_asked3 = len(_NtpMod.asked)
+hl.wifi["ssid"] = "home"
+_clock[0] += hl.DNS_RETRY * 1000 + 1000
+hl._dns_bad[("pool.ntp.org", 123, 2)] = ("home", hl._stamp() - hl.DNS_RETRY - 1)
+_dc.append(_nask(_nreply(_DAY)))         # after DNS_RETRY: asked again
+_dc_asked4 = len(_NtpMod.asked)
+hl.wifi["ssid"] = _dc_ssid
+hl._dns.clear()
+hl._dns_bad.clear()
+check("DNS-CACHE: a failed lookup uses the address from before and the network is not "
+      "asked again for DNS_RETRY (none from before: fails at once); another network and "
+      "after DNS_RETRY it is asked",
+      _dc == [_DAY, _DAY, _DAY, None, _DAY, _DAY]
+      and (_dc_asked, _dc_asked2, _dc_asked3, _dc_asked4) == (2, 2, 3, 4),
+      repr((_dc, _dc_asked, _dc_asked2, _dc_asked3, _dc_asked4)))
+# UPL-AWAY-HTML: away, a 400/413/422 that is no JSON is a portal or a proxy
+# refusing, not Dawarich: no quarantine (it sent two batches to .bad and held
+# the third track past the next network). JSON away, and anything at home
+# (the own proxy's HTML 413), still quarantine
+_ah_dir = tempfile.mkdtemp()
+_ah = []
+for home_, ct_ in ((False, "text/html"), (True, "text/html"),
+                   (False, "application/json")):
+    online(_ah_dir)
+    _ah_p = os.path.join(_ah_dir, "20261005_160000.trk")
+    make_trk(_ah_p, 10)
+    gl.wifi["home"] = home_
+    _post_code[0] = 400
+    _post_headers[0] = {"Content-Type": ct_}
+    pump()
+    _ah.append(os.path.exists(_ah_p + ".bad"))
+_ah_state = gl.up["state"]
+online(_ah_dir)
+gl.wifi["home"] = False
+shutil.rmtree(_ah_dir, ignore_errors=True)
+# a bad CA file: the radio waits out the backoff (it stayed on, 30 s retries)
+gl.up["state"] = "ca err"
+gl.up["next_at"] = _clock[0] + gl.BACKOFF_START
+_ah_wait = gl._upload_wait(_clock[0])
+gl.up["state"] = "idle"
+check("UPL-AWAY-HTML: away a non-JSON 400 quarantines nothing; at home and JSON it does; "
+      "'ca err' waits out its backoff with the radio off",
+      _ah == [False, True, True] and _ah_wait == gl.BACKOFF_START,
+      repr((_ah, _ah_state, _ah_wait)))
+
+# PB-PULSE: only the scan's errors are a failed pulse; what it leads to (a
+# stay's end writes the track) raises on to the guarded tick (an OSError of
+# that write was swallowed as a scan error, the stay never ended; anything
+# else reset the board through run()'s crash path)
+
+
+class _PbW(object):
+    def __init__(self, fail=None):
+        self.fail, self.on = fail, []
+
+    def active(self, v=None):
+        self.on.append(v)
+
+    def scan(self):
+        if self.fail:
+            raise self.fail
+        return [(b"ap", b"\x00" * 6, 1, -60, 3, 0)]
+
+
+_pb_saved = (gl._stay_scan, gl._home_seen, gl._scan_empty)
+_pb = []
+try:
+    gl._scan_empty = lambda aps, k: False
+    gl._home_seen = lambda aps: None
+    w_ = _PbW(OSError(5))                # the scan fails: no error out
+    gl._pb_pulse_radio(w_)
+    _pb.append(w_.on)
+
+    def _pb_boom(aps):
+        raise OSError(28)                # the stay's write: ENOSPC
+    gl._stay_scan = _pb_boom
+    w_ = _PbW()
+    try:
+        gl._pb_pulse_radio(w_)
+        _pb.append("swallowed")
+    except OSError as e_:
+        _pb.append(("raised", e_.args[0], w_.on))
+finally:
+    gl._stay_scan, gl._home_seen, gl._scan_empty = _pb_saved
+_pb_src = inspect.getsource(gl._loop) if hasattr(inspect, "getsource") else ""
+check("PB-PULSE: a failed scan is swallowed, the radio off; an error of what the scan led "
+      "to raises (radio off first); keepalive_tick runs guarded",
+      _pb == [[True, False], ("raised", 28, [True, False])]
+      and '_guarded("keepalive", keepalive_tick' in _pb_src
+      and gl._guard_mem.get("keepalive") == [0, None],
+      repr(_pb))
+
+# WEB-UTC-SILENT: the GPS time goes as the position does: a silent
+# receiver's last second was shown as live ("GPS time 10:00:00 UTC" under the
+# GPS SILENT banner)
+_wu_saved = (hl.st["rx"], hl.st.get("date"), hl.st.get("time"))
+hl.st.update(date="2026-11-15", time="10:00:00")
+hl.st["rx"] = _clock[0]
+_wu_live = dict(hl._web_rows())["utc"]
+hl.st["rx"] = _clock[0] - hl._rcv.NO_DATA - 1000
+_wu_silent = dict(hl._web_rows())["utc"]
+hl.st["rx"], hl.st["date"], hl.st["time"] = _wu_saved
+check("WEB-UTC-SILENT: the GPS time while the receiver talks, null once it is silent",
+      _wu_live is not None and _wu_silent is None, repr((_wu_live, _wu_silent)))
+
+# GUARD-UART: the POST guard's timer runs during a blocking connect (measured:
+# 13 times in a 6.7 s connect, the UART full at 8192 B meanwhile): it reads
+# the UART too; read_uart is not re-entered (a call the timer lands in)
+_gu_real = hl._rcv._read_uart
+_gu_n = [0]
+hl._rcv._read_uart = lambda: _gu_n.__setitem__(0, _gu_n[0] + 1)
+try:
+    hl._guard["until"] = hl.time.ticks_add(hl.time.ticks_ms(), 5000)
+    hl._guard_cb(None)                   # armed: reads
+    _gu_armed = _gu_n[0]
+    hl._rcv._reading[0] = True           # inside a read already: left alone
+    hl._guard_cb(None)
+    hl._rcv.read_uart()
+    _gu_inside = _gu_n[0]
+    hl._rcv._reading[0] = False
+    hl._guard["until"] = None
+    hl._guard_cb(None)                   # not armed: nothing
+    _gu_idle = _gu_n[0]
+finally:
+    hl._rcv._read_uart = _gu_real
+    hl._rcv._reading[0] = False
+    hl._guard["until"] = hl._guard["sock"] = None
+check("GUARD-UART: the armed POST guard reads the UART each tick; not inside a read, not "
+      "when idle", (_gu_armed, _gu_inside, _gu_idle) == (1, 1, 1),
+      repr((_gu_armed, _gu_inside, _gu_idle)))
 check("NTP-ASK: a good answer in seconds since 2020; short, not a server's, unsynchronised, "
       "stratum 0 or 16, before this build, an empty time, a timeout or no DNS: None; "
       "the socket always closed",
@@ -25461,6 +25884,44 @@ try:
           "route to today (a false future date froze it until a reboot); a "
           "second's step back at midnight or NTP's clock alone do not",
           r3_13 == [True, False, False], repr(r3_13))
+
+    # RV-RELOAD: a false date a day ahead empties the route (a new day); the
+    # clock back on today brings today's route back from the file the reset
+    # did not write over (it was empty until the next save)
+    _rr_rt = dict((k, v) for k, v in vars(hl._Rt).items() if not k.startswith("__"))
+    _rr_saved = (hl.log["clock"], hl._ntp[0], hl.ROUTE_FILE, hl.free)
+    _rr_dir = tempfile.mkdtemp()
+    rr = []
+    try:
+        hl.ROUTE_FILE = os.path.join(_rr_dir, "route.bin")
+        hl.free = lambda: 10 ** 7
+        if hl._Rt.pts is None:
+            hl._rt_start()
+        today = 2400 * 86400 + 12 * 3600
+        tday = hl._rt_day(today)
+        hl._rt_reset(tday)
+        for i_, (la_, lo_) in enumerate(((47500000, 19000000), (47501000, 19001000),
+                                         (47502000, 19002000))):
+            hl._Rt.pts[2 * i_] = (la_ << 1) | (1 if i_ == 0 else 0)
+            hl._Rt.pts[2 * i_ + 1] = lo_
+        hl._Rt.n, hl._Rt.cm = 3, 123400
+        hl._rt_save(_clock[0])
+        hl._Rt.waiting = False
+        hl._ntp[0] = None
+        for clk_ in (today + 86400, today):
+            hl.log["clock"] = (clk_, hl._stamp())
+            hl._Rt.drawn = None
+            _clock[0] += hl.ROUTE_DRAW
+            hl._rt_tick(_clock[0])
+            rr.append((hl._Rt.day - tday, hl._Rt.n, hl._Rt.cm))
+    finally:
+        for k, v in _rr_rt.items():
+            setattr(hl._Rt, k, v)
+        hl.log["clock"], hl._ntp[0], hl.ROUTE_FILE, hl.free = _rr_saved
+        shutil.rmtree(_rr_dir, ignore_errors=True)
+    check("RV-RELOAD: a false date a day ahead empties the route; back on today it comes "
+          "back from the saved file (3 points, 1,2 km)",
+          rr == [(1, 0, 0), (0, 3, 123400)], repr(rr))
 
     # RV14-14: trk2gpx says when a file gives no point, and names a track
     # by cutting the suffix only

@@ -110,7 +110,7 @@ def reset():
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, used=None, view={},
               hdop=None, ttff=None, pos_at=None, hdop_at=None,
-              seq=0, epochs=0, extra=0, setup_at=None, mute_at=None,
+              seq=0, epochs=0, extra=0, setup_at=None, mute_at=None, mute_s=None,
               q_thin=0,
               setup_wait=GPS_RETRY, setup_ok=None, std=None, std_at=None,
               gps_boots=0, q=[], loops=0,
@@ -164,7 +164,9 @@ def _deg(v, hemi, ax):
         raise ValueError(v)
     a, mm = v[:d], v[d:]
     m = float(mm)                        # (0 <= m < 60 also ends nan/inf)
-    if not a.isdigit() or not 0 <= m < 60 or "e" in mm or "E" in mm:
+    # (float() takes "+5.5" and " 5.5": the minutes start with a digit)
+    if (not a.isdigit() or not mm[:1].isdigit() or not 0 <= m < 60
+            or "e" in mm or "E" in mm):
         raise ValueError(v)
     deg = int(a) + m / 60
     if deg > (90 if ax == "NS" else 180):
@@ -194,21 +196,31 @@ _day = [None, None]                      # DDMMYY last seen, its YYYY-MM-DD
 def _second(s):
     """Start the sentence's UTC second (HHMMSS.ss, the fraction ignored);
     a new second publishes the one before. Its "HH:MM:SS" is made once a
-    second, not for each sentence of each epoch (5 allocations each)."""
+    second, not for each sentence of each epoch (5 allocations each).
+    False for an empty time: the sentence's position is then no second's
+    (it went into the open one)."""
     if len(s) < 6:
-        return
+        return False
     c = _sec
     if c[0] is None or not s.startswith(c[0]):
         h = s[0:6]
         if not h.isdigit():              # a corrupt digit (see _num): the
             raise ValueError(s)          # sentence is bad; one such time in
-        c[0] = h                         # a line stopped the track for good
+                                         # a line stopped the track for good
+        if h[0:2] > "23" or h[2:4] > "59" or h[4:6] > "60":
+            # no such time (digits flipped past the checksum: no bad
+            # sentence, RG-2): no second of its own, as an empty time.
+            # Taken, "25:00:01" made the clock 02:00 and dropped the date
+            # of the next good second
+            return False
+        c[0] = h
         c[1] = "%s:%s:%s" % (h[0:2], h[2:4], h[4:6])
     t = c[1]
     if t != ep["t"]:
         if ep["t"] is not None:
             _publish()
         _ep_new(t)
+    return True
 
 def _publish():
     """Make the finished second the current fix: the mean of its valid GGA
@@ -340,8 +352,10 @@ def rmc(talker, f):
                 raise ValueError(d)
             c[0], c[1] = d, "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
         date = c[1]
-    _second(f[1])
+    timed = _second(f[1])
     st["speed"] = None if kn is None else kn * 1.852
+    if not timed:
+        return
     if kn is not None and (ep["spd"] is None or st["speed"] > ep["spd"]):
         ep["spd"] = st["speed"]          # the second's top speed
     if date is not None:
@@ -352,9 +366,9 @@ def rmc(talker, f):
 def gga(talker, f):
     q, n, pos = _num(f[6], int), _num(f[7], int), _position(f, 2)
     alt, hd = _num(f[9]), _num(f[8])     # (all read first: _num)
-    _second(f[1])
+    timed = _second(f[1])
     st["quality"], st["used"] = q, n
-    if 0 < (q or 0) <= GGA_FIX_MAX and pos:
+    if timed and 0 < (q or 0) <= GGA_FIX_MAX and pos:
         _acc("g", pos)
         if alt is not None:
             ep["alt"][0] += alt
@@ -827,18 +841,24 @@ def _stamps_old(now):
 def _gps_mute(now):
     """No byte from the receiver for GPS_SILENT: one diag line when it starts,
     one when bytes come again, with how long it lasted. mute_at: the last
-    byte (the boot when none came)."""
+    byte (the boot when none came); mute_s: its Stamp, for the length (the
+    ticks wrap: a silence over 6.2 days read as 536870 s)."""
     rx = st["rx"]
     at = st["start"] if rx is None else rx
     m = st["mute_at"]
     if m is None:
         if _age(now, at) >= GPS_SILENT:
             st["mute_at"] = at
-            _diag_write("gps silent %d s, no bytes from the receiver"
-                        % (_age(now, at) // 1000))
+            a = _age(now, at) // 1000
+            st["mute_s"] = _stamp() - a
+            _diag_write("gps silent %d s, no bytes from the receiver" % a)
     elif _recent(now, rx, GPS_SILENT):
         st["mute_at"] = None
-        _diag_write("gps back after %d s" % (_age(rx, m) // 1000))
+        ms = st.get("mute_s")
+        n = (_age(rx, m) // 1000 if ms is None
+             else max(0, _stamp() - ms - _age(now, rx) // 1000))
+        st["mute_s"] = None
+        _diag_write("gps back after %d s" % n)
 
 _usb_in = None
 
@@ -1040,7 +1060,21 @@ def _rx_type(b, s, e):
     except Exception:
         return "-"
 
+_reading = [False]                       # read_uart is running
+
 def read_uart():
+    """_read_uart, not re-entered: the POST guard's timer reads the UART
+    during a blocking connect or TLS handshake too (its 8 KB were full
+    after ~6 s, NMEA lost), and a call it lands in is left alone."""
+    if _reading[0]:
+        return
+    _reading[0] = True
+    try:
+        _read_uart()
+    finally:
+        _reading[0] = False
+
+def _read_uart():
     """What the UART has: lines to handle(), in place. An error in one (a
     MemoryError while publishing a second) counts it bad (st["err"]), any
     other is a bug (st["bug"], a diag line once a type), and the rest is

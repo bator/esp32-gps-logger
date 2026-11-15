@@ -99,11 +99,20 @@ if [ "$MODE" = --publish ]; then
         -*|"") echo "OTA_DEST: the host part must not be empty or start with a dash: '$OTA_DEST'" >&2; exit 1 ;;
     esac
     case "$_ddir" in
-        "~"*|*[!A-Za-z0-9_./-]*)
+        "~"*|-*|*[!A-Za-z0-9_./-]*)
             echo "OTA_DEST: the directory '$_ddir' must be a plain path (letters, digits, _ . / -; no ~," >&2
+            echo "no leading dash: mv and rm on the server would take it for an option," >&2
             echo "spaces or shell specials: scp and the ssh rename would read it differently)" >&2
             exit 1 ;;
     esac
+    # the manifest's board is the board directory's name; the firmware takes
+    # only its own OTA_BOARD: from another directory every manifest was
+    # "bad manifest" for good, the board never updated over the air
+    _ota_board=$(sed -n 's/^OTA_BOARD = "\([^"]*\)".*/\1/p' gps_logger.py)
+    if [ "$BOARD" != "$_ota_board" ]; then
+        echo "BOARD_DIR is $BOARD, the firmware's OTA_BOARD is '$_ota_board': its boards would refuse the manifest" >&2
+        exit 1
+    fi
     KEY_FILE=${OTA_KEY_FILE:-$HOME/.config/gps-logger/ota.key}
     if [ ! -r "$KEY_FILE" ]; then
         echo "No OTA key in $KEY_FILE (the board's .env OTA_KEY)" >&2
