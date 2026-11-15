@@ -1065,8 +1065,11 @@ tell a stay from a drive, so the stay filter works on positions.
   it lasts, and an excursion that turns back does not count. The way out is
   written from near the anchor, from the last 90 samples, in time order
   (kept in preallocated arrays, 28 bytes a sample: as line tuples they took
-  ~20 kB of the heap and broke uploads). Each line is rebuilt exactly as it
-  would have been written then, the board's single-precision rounding
+  ~20 kB of the heap and broke uploads). It begins at the last sample within
+  5 m of the anchor, or within 50 m after 30 s without a sample kept: a home
+  stay in calm reception wrote up to 90 samples hours old before the way
+  out, the new track named after the first. Each line is rebuilt exactly as
+  it would have been written then, the board's single-precision rounding
   included.
 - **Leaving after a fix gap** (over 30 s; a metro or a garage, then sitting
   still elsewhere): beyond 150 m the stay ends without waiting for the fixes

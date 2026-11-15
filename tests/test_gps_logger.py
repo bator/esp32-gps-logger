@@ -4498,8 +4498,9 @@ try:
           and got == want and got[0].endswith("20880119T090010Z\n"),
           "err=%r first=%r" % (err, got[:1]))
     # the way out is the whole ring: _ring_add starts it over at a sample
-    # that falls back, so the walk back for the receding run (removed)
-    # always reached its start
+    # that falls back, or one within STILL_TOL of the anchor (at the place),
+    # so the walk back for the receding run (removed) always reached its
+    # start
     frnd = random.Random(23)
     bad = 0
     for _ in range(200):
@@ -4517,7 +4518,8 @@ try:
             ref.append((k, dd))
         ref = ref[-gl.STILL_DEP_MAX:]
         i = len(ref) - 1
-        while i > 0 and ref[i - 1][1] <= ref[i][1] + gl.STILL_TOL:
+        while (i > 0 and ref[i][1] > gl.STILL_TOL
+               and ref[i - 1][1] <= ref[i][1] + gl.STILL_TOL):
             i -= 1
         gl._still_leave()
         tcs = [l.split(",")[4] for l in gl.log["batch"]]
@@ -4785,6 +4787,36 @@ try:
           bool(new) and gl.log["file"].endswith(
               new[0].strip().split(",")[4].replace("T", "_")[:15] + gl.TRB),
           "file=%s first=%r" % (gl.log["file"], new[0] if new else None))
+    # RING-CALM: a home stay in calm reception (the jitter rarely moves
+    # STILL_DEP_STEP and never falls back STILL_TOL) kept filling the
+    # departure ring for hours, and a home stay writes no anchor point to
+    # cut it: the way out began with STILL_DEP_MAX samples of the stay, the
+    # oldest 1-2 h before the drive, and the new track was named after it
+    rc_sec0 = rv_sec[0]
+    crnd = random.Random(1116)
+    sv_reset(home=True)
+    rv_sec[0] = 0
+    for i in range(60):
+        sv_fix(-14.0 * (60 - i), 0, 50.0)
+    x = y = 0.0
+    for i in range(3600):
+        x = max(-1.5, min(1.5, x + crnd.uniform(-0.4, 0.4)))
+        y = max(-1.5, min(1.5, y + crnd.uniform(-0.4, 0.4)))
+        sv_fix(x, y, 1.0)
+    rc_home = sv_active() and gl.log["still"]["home"]
+    rc_dep = rv_sec[0]
+    for i in range(1, 41):
+        sv_fix(i * 14.0, 0, 50.0)
+    gl.flush()
+    with open(gl.log["file"]) as f:
+        rc_new = [l for l in f if l.count(",") == 4]
+    rc_old = [l for l in rc_new if ws_secs(l, 0) < rc_dep]
+    check("RING-CALM: leaving a calm home stay the way out begins at the "
+          "departure, not with the stay's samples (the track named after it)",
+          rc_home and not sv_active() and bool(rc_new) and len(rc_old) <= 2
+          and rc_dep - ws_secs(rc_new[0], 0) <= 5,
+          repr((rc_home, sv_active(), len(rc_old), rc_new[:1], gl.log["file"])))
+    rv_sec[0] = rc_sec0
 
     # driving past the home network without stopping is all recorded
     sv_reset(home=True)

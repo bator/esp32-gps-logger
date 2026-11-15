@@ -3361,7 +3361,13 @@ def _ring_add(sl, now, pos, d, fx=None):
     """Keep a usable sample of the stay in the departure ring (see _RT),
     the oldest overwritten when it is full. A sample that falls back from
     the one before by more than STILL_TOL starts it over: the ring is
-    always a run that kept receding, the way out (_still_leave). One
+    always a run that kept receding, the way out (_still_leave). So does
+    one within STILL_TOL of the anchor (at the place: the way out begins at
+    the last one), and one within STILL_NEAR over STILL_GAP after the one
+    before: in calm reception the stay's jitter rarely moved STILL_DEP_STEP
+    or fell back, and a home stay (no anchor points: nothing to cut it)
+    wrote up to STILL_DEP_MAX samples hours old before the way out, the
+    new track named after the first. One
     within STILL_DEP_STEP of the one before is left out: at walking pace
     the way out to STILL_EXIT and the samples that prove it took ~120 s,
     and the ring kept the last STILL_DEP_MAX (lost: the first ~30 m)."""
@@ -3371,8 +3377,11 @@ def _ring_add(sl, now, pos, d, fx=None):
     cap = len(_RT)
     n, i = sl["rn"], sl["ri"]
     if n:
-        k = 3 * ((i + n - 1) % cap)
-        if d + STILL_TOL < _RF[k + 2]:
+        j = (i + n - 1) % cap
+        k = 3 * j
+        if (d + STILL_TOL < _RF[k + 2] or d <= STILL_TOL
+                or (d <= STILL_NEAR
+                    and s - sl["rt0"] - _RT[j] > STILL_GAP // 1000)):
             n = 0
         elif _dist(_RF[k], _RF[k + 1], pos[0], pos[1]) <= STILL_DEP_STEP:
             return
