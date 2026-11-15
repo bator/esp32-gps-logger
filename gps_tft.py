@@ -6,7 +6,8 @@
 # the latest trip red, a round dot where the day began and one where it is now. Right:
 # the clock, the satellites in the fix (an icon and the count), today's km and WiFi in
 # four rising bars, a rule, what waits for upload; left of the satellites the battery
-# (an outline filled to its charge, the per cent beside it) when there is one. Low zone: the GPS's quality, a tile
+# (an outline filled to its charge, the per cent beside it) when there is one, and
+# left of the upload's about how long it lasts. Low zone: the GPS's quality, a tile
 # in its colour with a word, and how full the flash is with how long it still logs
 # over a gauge, amber from 70%, red from 90%. The speed is on the status page.
 #
@@ -39,6 +40,7 @@ BAT_X, BAT_Y = 96, 21                    # the battery: its outline's top left,
 BAT_W, BAT_H = 11, 7                     # on the satellites' row, left; the
 BAT_TX = 110                             # per cent from here (no %: the room
 BAT_WARN, BAT_BAD = 20, 10               # ends at the satellite icon); amber, red
+BAT_GAP = 4                              # px from the time left to the upload's
 
 def _c(t):
     c = (t[0] & 0xF8) << 8 | (t[1] & 0xFC) << 3 | t[2] >> 3
@@ -262,10 +264,13 @@ def _route(fb, top, route):
     _round(fb, xy[0] + ROUTE_X - 2, (xy[1] & 127) + ROUTE_Y - 2 - top, ink)
     _round(fb, xy[2 * v] + ROUTE_X - 2, (xy[2 * v + 1] & 127) + ROUTE_Y - 2 - top, lit)
 
+def _bat_tone(bat):
+    return RED if bat <= BAT_BAD else AMBER if bat <= BAT_WARN else INK
+
 def _battery(fb, top, bat):
     """The battery: an outline with its nub, the charge bat % wide inside, the
     per cent beside it; amber to BAT_WARN, red to BAT_BAD."""
-    tone = RED if bat <= BAT_BAD else AMBER if bat <= BAT_WARN else INK
+    tone = _bat_tone(bat)
     c, y = _COL[tone], BAT_Y - top
     for r in ((0, 0, BAT_W, 1), (0, BAT_H - 1, BAT_W, 1), (0, 0, 1, BAT_H),
               (BAT_W - 1, 0, 1, BAT_H), (BAT_W, 2, 1, BAT_H - 4)):
@@ -278,6 +283,10 @@ def _draw_top(route, km, fix, used, clock, level, up, bat=None):
     tone = INK if fix else RED
     used = str(used)
     x = RIGHT - width(_SATS, used)
+    pct, left = bat or (None, None)
+    if left and BAT_X + width(_SMALL, left) + BAT_GAP > (
+            RIGHT - width(_UP, up) if up.strip() else RIGHT):
+        left = None                      # (no room left of the upload's)
     for top in range(0, LOW_Y, BAND_H):
         fb.fill(_COL[PAPER])
         _route(fb, top, route)
@@ -294,8 +303,10 @@ def _draw_top(route, km, fix, used, clock, level, up, bat=None):
         fb.fill_rect(RULE_X, RULE_Y - top, W - RULE_X, 1, _COL[INK])
         if up.strip():
             _right(fb, _UP, up, RIGHT, 62 - top, INK)
-        if bat is not None and top < BAT_Y + BAT_H and top + BAND_H > BAT_Y:
-            _battery(fb, top, bat)
+        if pct is not None and top < BAT_Y + BAT_H and top + BAND_H > BAT_Y:
+            _battery(fb, top, pct)
+        if left and top + BAND_H > 62 - 8:
+            _text(fb, _SMALL, left, BAT_X, 62 - top, _bat_tone(pct))
         _send(top, min(BAND_H, LOW_Y - top))
 
 def _draw_low(quality, store):
@@ -326,7 +337,8 @@ def set_state(route, km, fix, used, clock, level, quality, up, up_on, store=None
     fix: a usable fix; used: satellites in it; clock: text; level: WiFi 0-3 or None;
     quality: see QUALITY; up: text (" ": no upload set up); up_on: points wait (not
     shown apart from up's text); store: (per cent of the flash taken, how long it
-    still logs: text) or None; bat: the battery's per cent, None without one."""
+    still logs: text) or None; bat: (the battery's per cent, about how long it
+    lasts: text or None) or None without one."""
     _D.state = (route, km, fix, used, clock, level, quality, up, up_on, store, bat)
 
 def frame():

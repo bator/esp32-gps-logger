@@ -8931,6 +8931,18 @@ vl_flat = gl._vbat_left()
 gl._vb_hist[:] = [(t, 60 + t / 300.0) for t in range(0, 1801, 60)]
 vl_up = gl._vbat_left()
 vl_bat = gl._battery(3.95, 0.01, vl_fit)
+_vl_now = gl._vbat_now
+_vl_left = gl._vbat_left
+try:
+    gl._vbat_now = lambda: 65
+    vl_tft = []
+    for x_ in (7800, 3600, 3569, 2700, 20, None):
+        gl._vbat_left = lambda x_=x_: x_
+        vl_tft.append(gl._tft_bat())
+    gl._vbat_now = lambda: None
+    vl_tft.append(gl._tft_bat())
+finally:
+    gl._vbat_now, gl._vbat_left = _vl_now, _vl_left
 _vb_m.ADC = _VbAdc
 try:
     gl._vb_hist[:] = []
@@ -8956,18 +8968,21 @@ finally:
     gl._vb_hist[:] = []
     gl._vb[:] = [None, None, None, None]
 check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min; none under 10 min, flat "
-      "or charging; one sample a minute, the page's text with it; on the "
+      "or charging; one sample a minute, the page's text with it, the display's "
+      "'2 óra' / '45 p'; on the "
       "charger and without a battery the history starts again",
       vl_fit == 7800 and [x.replace("\u00a0", " ") for x in vl_txt]
       == ["~2 h 10 min", "~45 min", "~1 h 00 min", "~3 h 00 min"]
       and " " not in "".join(vl_txt)
       and vl_short is None and vl_flat is None and vl_up is None
       and vl_bat == "76 % (3.95 V), ~2\u00a0h\u00a010\u00a0min left"
+      and vl_tft == [(65, "2 óra"), (65, "1 óra"), (65, "59 p"), (65, "45 p"), (65, "1 p"),
+                     (65, None), None]
       and vl_seen == list(range(1, 15))
       and vl_rows["vbat_left_s"] is not None and 0 < vl_rows["vbat_left_s"] < 6 * 3600
       and vl_rows["battery"].endswith(" left")
       and len(vl_charge) == 1 and vl_none == [],
-      "%r %r %r %r %r %r %r %r %r %r" % (vl_fit, vl_txt, vl_short, vl_flat, vl_up, vl_bat,
+      "%r %r %r %r %r %r %r %r %r %r %r" % (vl_tft, vl_fit, vl_txt, vl_short, vl_flat, vl_up, vl_bat,
                                          vl_seen, [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
                                          vl_charge, vl_none))
 gl._vb[:] = [None, None, None, None]
@@ -21604,29 +21619,43 @@ check("TFT-COLUMN: the clock's baseline 14 and the upload's 62, both ending at x
 # icon and count untouched (a 3-digit per cent ends before the icon)
 
 
-def _bat_frame(bat):
-    _ft.set_state(*(_STD + (bat,)))
+def _bat_frame(bat, left=None, up="kész"):
+    st_ = list(_STD)
+    st_[7] = up
+    _ft.set_state(*(tuple(st_) + (None if bat is None else (bat, left),)))
     _ft.frame()
-    return {(x, y): _px(x, y) for x in range(90, 160) for y in range(16, 32)}
+    return {(x, y): _px(x, y) for x in range(90, 160) for y in range(16, 63)}
 
 
 _bf_none, _bf76, _bf15, _bf5, _bf100 = [_bat_frame(b) for b in (None, 76, 15, 5, 100)]
+_bf_l = _bat_frame(76, "2 óra")
+_bf_l15 = _bat_frame(15, "45 p")
+_bf_lfull = _bat_frame(76, "12 óra", "1234")   # (no room left of the upload's)
+_bf_low = lambda f: [x for x in range(96, 126) for y in range(54, 62) if f[(x, y)] != _PAPER_C]
 _bf_out = [(96, 21), (106, 21), (96, 27), (106, 27), (107, 23), (107, 25)]
 _bf_fill = lambda f: [x for x in range(98, 105) if f[(x, 24)] != _PAPER_C]
 _bf_txt = lambda f: [x for x in range(108, 130) for y in range(18, 29) if f[(x, y)] != _PAPER_C]
 _bf_sats = lambda f: [(k, v) for k, v in f.items() if k[0] >= 129]
 check("TFT-BAT: outline and nub in ink, the charge 76 % of 7 px wide in ink, 15 % amber, "
-      "5 % red; the per cent beside it, 100 before the satellite icon; none without a battery",
+      "5 % red; the per cent beside it, 100 before the satellite icon; none without a battery; "
+      "the time left at the upload's baseline, left of it, in the battery's tone, left out "
+      "where it does not fit",
       all(_bf76[k] == _INK_C for k in _bf_out)
       and _bf_fill(_bf76) == list(range(98, 103)) and _bf76[(98, 24)] == _INK_C
       and _bf15[(98, 24)] == _AMB_C and _bf5[(98, 24)] == _RED_C
       and len(_bf_fill(_bf5)) == 1 and len(_bf_fill(_bf100)) == 7
       and _bf_txt(_bf76) and max(_bf_txt(_bf100)) < 129
       and _amb15 in [_bf15[(x, y)] for x in range(108, 130) for y in range(18, 29)]
-      and all(v == _PAPER_C for k, v in _bf_none.items() if k[0] < 128)
-      and _bf_sats(_bf100) == _bf_sats(_bf_none) == _bf_sats(_bf76),
+      and all(v == _PAPER_C for k, v in _bf_none.items() if k[0] < 128 and k[1] < 32)
+      and _bf_sats(_bf100) == _bf_sats(_bf_none) == _bf_sats(_bf76)
+      and not _bf_low(_bf76) and _bf_low(_bf_l) and min(_bf_low(_bf_l)) >= 96
+      and max(_bf_low(_bf_l)) < 158 - _ft.width(_ft._UP, "kész") - 2
+      and _ink15 in [_bf_l[(x, y)] for x in range(96, 126) for y in range(54, 62)]
+      and _amb15 in [_bf_l15[(x, y)] for x in range(96, 126) for y in range(54, 62)]
+      and not [x for x in range(96, 120) for y in range(54, 62) if _bf_lfull[(x, y)] != _PAPER_C]
+      and {k: v for k, v in _bf_l.items() if k[0] >= 126} == {k: v for k, v in _bf76.items() if k[0] >= 126},
       repr((_bf_fill(_bf76), _bf_fill(_bf5), _bf_fill(_bf100), max(_bf_txt(_bf100) or [0]),
-            [_bf76[k] for k in _bf_out])))
+            [_bf76[k] for k in _bf_out], _bf_low(_bf_l)[-3:])))
 _ft.set_state(*_STD)
 _ft.frame()
 

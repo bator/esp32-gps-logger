@@ -6889,6 +6889,18 @@ def _vbat_now():
     v, w = _vbat()
     return None if w is None or w > VBAT_SWING else _vbat_pct(v)
 
+def _tft_bat():
+    """The display's battery: (per cent, about how long it lasts: "2 óra"
+    (rounded), "45 p" under an hour, None until _vbat_left knows), or None
+    without one."""
+    p = _vbat_now()
+    if p is None:
+        return None
+    s = _vbat_left()
+    if s is not None:
+        s = "%d óra" % ((s + 1800) // 3600) if s >= 3570 else "%d p" % max(1, (s + 30) // 60)
+    return p, s
+
 def _battery(v, w, left=None):
     """The page's text: "76 % (3.95 V)", with the time left "76 % (3.95
     V), ~2 h 10 min left", "none, on USB" (the charger's swing without a
@@ -8338,7 +8350,7 @@ def _tft_state(now):
     else:
         text = "kész" if up["url"] else " "
     return (_Rt.view, _Rt.km, fix, _rcv.sv_used() or 0, _local_hm(), level, _gps_quality(fix),
-            text, bool(left), _store_state(now), _vbat_now())
+            text, bool(left), _store_state(now), _tft_bat())
 
 def tft_tick(now):
     """New values every TFT_STATE, a frame every TFT_FRAME; TFT_MAX_ERR errors
