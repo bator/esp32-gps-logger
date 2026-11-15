@@ -4598,8 +4598,9 @@ try:
           and got == want and got[0].endswith("20880119T090010Z\n"),
           "err=%r first=%r" % (err, got[:1]))
     # the way out is the whole ring: _ring_add starts it over at a sample
-    # that falls back, so the walk back for the receding run (removed)
-    # always reached its start
+    # that falls back, or one within STILL_TOL of the anchor (at the place),
+    # so the walk back for the receding run (removed) always reached its
+    # start
     frnd = random.Random(23)
     bad = 0
     for _ in range(200):
@@ -4617,7 +4618,8 @@ try:
             ref.append((k, dd))
         ref = ref[-gl.STILL_DEP_MAX:]
         i = len(ref) - 1
-        while i > 0 and ref[i - 1][1] <= ref[i][1] + gl.STILL_TOL:
+        while (i > 0 and ref[i][1] > gl.STILL_TOL
+               and ref[i - 1][1] <= ref[i][1] + gl.STILL_TOL):
             i -= 1
         gl._still_leave()
         tcs = [l.split(",")[4] for l in gl.log["batch"]]
@@ -4658,6 +4660,30 @@ try:
     check("MINMOVE: 3 m kept a point every ~2-3 s; standing adds none",
           walk3 < 0.5 * walk_pts and still_new == 0,
           "3m=%d 1m=%d still=%d" % (walk3, walk_pts, still_new))
+    # ... and the way out rebuilt from the departure ring the same (its
+    # samples are STILL_DEP_STEP apart): MIN_MOVE 10, a walk out of a stay
+    mrnd, mm_sec0 = random.Random(1119), rv_sec[0]
+    saved_mm = gl.MIN_MOVE
+    try:
+        gl.MIN_MOVE = 10
+        sv_reset()
+        for i in range(150):
+            sv_fix(mrnd.uniform(-0.3, 0.3), mrnd.uniform(-0.3, 0.3), 1.0)
+        mm_stay = sv_active()
+        for i in range(1, 160):
+            sv_fix(i * 1.4, 0, 5.0)
+        gl.flush()
+        mm_way = [l for l in sv_lines() if l.split(",")[2] != ""][-80:]
+        mm_gap = [gl._dist(*(list(map(float, a.split(",")[:2]))
+                             + list(map(float, b.split(",")[:2]))))
+                  for a, b in zip(mm_way, mm_way[1:])]
+    finally:
+        gl.MIN_MOVE = saved_mm
+    check("MINMOVE: the way out from the departure ring is thinned as the "
+          "track (MIN_MOVE 10: no two of its points closer)",
+          mm_stay and not sv_active() and bool(mm_gap) and min(mm_gap) > 10,
+          repr((mm_stay, sv_active(), min(mm_gap) if mm_gap else None)))
+    rv_sec[0] = mm_sec0
 
     # walking slowly away from a stay (1 m/s) leaves past STILL_EXIT
     sv_reset()
@@ -4788,6 +4814,69 @@ try:
     check("STAY-WALK: walking in to a stop and on, at most a few seconds of "
           "the walk are lost on either side", ws_bad == [], repr(ws_bad))
     rv_sec[0] = ws_sec0
+    # STOP-DRIVE: a car stopped 90-150 s and driving off (1.5 m/s² to 14
+    # m/s): the later window's centroid lay at the stop with the drive off
+    # already in it, the pair proved a stay, and the drive off (over 10 m a
+    # line) was dropped as drift: 15-26 s, 150-290 m of it. UTURN-PARK: 240
+    # m past the place, a U-turn and back to park there: the stay dropped
+    # the whole loop in some window alignments. (Own random numbers and
+    # times, as above.)
+    sd_sec0 = rv_sec[0]
+    srnd = random.Random(1115)
+    sd_bad = []
+    for stop, pre in ((90, 200), (90, 255), (110, 235), (110, 240),
+                      (150, 205), (150, 210)):
+        sv_reset()
+        rv_sec[0] = 0
+        e = 0.0
+        for i in range(pre):
+            e += 14.0
+            sv_fix(e, 0, 50.0)
+        e0, v, off = e, 0.0, {}
+        for i in range(stop):
+            sv_fix(e0 + srnd.uniform(-0.5, 0.5), srnd.uniform(-0.5, 0.5), 1.0)
+        for i in range(120):
+            v = min(14.0, v + 1.5)
+            e += v
+            off[rv_sec[0]] = e - e0
+            sv_fix(e, 0, v * 3.6)
+        gl.flush()
+        have = set(ws_secs(l, 0) for l in sv_lines())
+        far = max([m for t, m in off.items() if t not in have] or [0])
+        if far > gl.STILL_NEAR:
+            sd_bad.append((stop, pre, round(far)))
+    check("STOP-DRIVE: a car stopped 90-150 s and off again keeps its drive "
+          "off (nothing farther than STILL_NEAR from the stop dropped)",
+          sd_bad == [], repr(sd_bad))
+    sd_bad = []
+    for over, pre in ((240, 200), (240, 205), (240, 210), (360, 200)):
+        sv_reset()
+        rv_sec[0] = 0
+        e, loop = 0.0, {}
+        for i in range(pre):
+            e += 12.0
+            sv_fix(e, 0, 43.0)
+        dest = e
+        for i in range(over // 12):
+            e += 12.0
+            loop[rv_sec[0]] = e - dest
+            sv_fix(e, 0, 43.0)
+        for i in range(over // 12):
+            e -= 12.0
+            loop[rv_sec[0]] = e - dest
+            sv_fix(e, 4.0, 43.0)
+        for i in range(400):
+            sv_fix(e + srnd.uniform(-0.5, 0.5), 4.0 + srnd.uniform(-0.5, 0.5),
+                   1.0)
+        gl.flush()
+        have = set(ws_secs(l, 0) for l in sv_lines())
+        far = max([abs(m) for t, m in loop.items() if t not in have] or [0])
+        if far > gl.STILL_NEAR:
+            sd_bad.append((over, pre, round(far)))
+    check("UTURN-PARK: 240-360 m past the place, a U-turn and back to park "
+          "there keeps the loop (nothing farther than STILL_NEAR dropped)",
+          sd_bad == [], repr(sd_bad))
+    rv_sec[0] = sd_sec0
 
     # home network: arrive, stay, leave
     sv_reset(home=True)
@@ -4822,6 +4911,36 @@ try:
           bool(new) and gl.log["file"].endswith(
               new[0].strip().split(",")[4].replace("T", "_")[:15] + gl.TRB),
           "file=%s first=%r" % (gl.log["file"], new[0] if new else None))
+    # RING-CALM: a home stay in calm reception (the jitter rarely moves
+    # STILL_DEP_STEP and never falls back STILL_TOL) kept filling the
+    # departure ring for hours, and a home stay writes no anchor point to
+    # cut it: the way out began with STILL_DEP_MAX samples of the stay, the
+    # oldest 1-2 h before the drive, and the new track was named after it
+    rc_sec0 = rv_sec[0]
+    crnd = random.Random(1116)
+    sv_reset(home=True)
+    rv_sec[0] = 0
+    for i in range(60):
+        sv_fix(-14.0 * (60 - i), 0, 50.0)
+    x = y = 0.0
+    for i in range(3600):
+        x = max(-1.5, min(1.5, x + crnd.uniform(-0.4, 0.4)))
+        y = max(-1.5, min(1.5, y + crnd.uniform(-0.4, 0.4)))
+        sv_fix(x, y, 1.0)
+    rc_home = sv_active() and gl.log["still"]["home"]
+    rc_dep = rv_sec[0]
+    for i in range(1, 41):
+        sv_fix(i * 14.0, 0, 50.0)
+    gl.flush()
+    with open(gl.log["file"]) as f:
+        rc_new = [l for l in f if l.count(",") == 4]
+    rc_old = [l for l in rc_new if ws_secs(l, 0) < rc_dep]
+    check("RING-CALM: leaving a calm home stay the way out begins at the "
+          "departure, not with the stay's samples (the track named after it)",
+          rc_home and not sv_active() and bool(rc_new) and len(rc_old) <= 2
+          and rc_dep - ws_secs(rc_new[0], 0) <= 5,
+          repr((rc_home, sv_active(), len(rc_old), rc_new[:1], gl.log["file"])))
+    rv_sec[0] = rc_sec0
 
     # driving past the home network without stopping is all recorded
     sv_reset(home=True)
@@ -5355,6 +5474,29 @@ try:
           sv_active() is True and wait is not None
           and wait <= gl.STILL_HEARTBEAT // 1000 + 2, repr(wait))
 
+    # BEATOUT: home WiFi lost while the board is out past STILL_NEAR (at the
+    # car, 80 m out): the anchor points begin, but none stamped out there
+    # (a home stay had none, so nothing else held this one back)
+    bo_rs, bo_sec0 = rnd.getstate(), rv_sec[0]
+    sv_reset(home=True)
+    sv_drift(150, box=10.0, step=3.0)
+    bo_home = sv_active() and gl.log["still"]["home"]
+    for i in range(1, 58):
+        sv_fix(i * 1.4, 0, 5.0)
+    for i in range(20):
+        sv_fix(80.0, (i % 3) * 0.5, 1.0)
+    gl.wifi.update(state="offline", home=False)
+    n1 = len(sv_lines())
+    for i in range(60):
+        sv_fix(80.0, (i % 3) * 0.5, 1.0)
+    beats = [l for l in sv_lines()[n1:] if l.split(",")[2] == ""]
+    check("BEATOUT: home WiFi lost while out past STILL_NEAR: the stay goes "
+          "on away, no anchor point stamped out there",
+          bo_home and sv_active() and not gl.log["still"]["home"]
+          and beats == [], repr((bo_home, sv_active(), beats)))
+    rnd.setstate(bo_rs)
+    rv_sec[0] = bo_sec0
+
     # EXIT: a frozen multipath jump is not a departure; a slow walk still is
     sv_reset()
     sv_drift(150, box=15.0, step=5.0)
@@ -5380,6 +5522,33 @@ try:
     check("EXIT: a car (6 m/s) leaves after STILL_EXIT_N gaining samples",
           sv_active() is False and len([l for l in sv_lines()
                                         if sv_m(l) > 150]) >= 25)
+
+    # EXIT-BACK: out past STILL_EXIT a sample that falls back more than
+    # STILL_TOL starts the departure count over: a jump bouncing 160-195 m
+    # out never makes STILL_EXIT_SLOW samples that gained STILL_SLOW_GAIN.
+    # After a fix gap too (_still_recede then counts every sample). Without
+    # one a sample that falls back counts as one at the place: STILL_MOVE_HITS
+    # window pairs out there move the anchor there.
+    eb_rs, eb_sec0 = rnd.getstate(), rv_sec[0]
+    eb = []
+    for gap in (True, False):
+        sv_reset()
+        sv_drift(150, box=10.0, step=3.0)
+        a0 = gl.log["still"]["anchor"]
+        ok = sv_active()
+        if gap:
+            for _ in range(gl.STILL_GAP // 1000 + 5):
+                hb_fix(0, 0, nofix=True)
+        for k in range(12 if gap else 360):
+            sv_fix((160.0, 190.0, 165.0, 195.0)[k % 4], 0, 1.0)
+            ok = ok and sv_active()
+        a = gl.log["still"]["anchor"] or a0     # (None: the stay ended)
+        eb.append((ok, round(gl._dist(a0[0], a0[1], a[0], a[1]))))
+    check("EXIT-BACK: samples bouncing 160-195 m out, after a fix gap or "
+          "not, keep the stay; without a gap the anchor moves out there",
+          eb[0][0] and eb[1][0] and eb[1][1] > gl.STILL_EXIT, repr(eb))
+    rnd.setstate(eb_rs)
+    rv_sec[0] = eb_sec0
 
     # ARRIVE: entering a stay closes the arrival track on any network; the
     # anchor file rotates every STILL_FILE while connected
@@ -5603,6 +5772,46 @@ try:
           and gl.log["batch"] == [] and len(sv_lines()) >= 200,
           "held=%d ram=%d lines=%d" % (held0, len(gl.log["batch"]),
                                        len(sv_lines())))
+
+    # HOLD-FAR: a calm minute, then driving on: once the open window is
+    # STILL_EXIT from the calm one, that one can pair with nothing, and a
+    # flush writes it with the drive (held to the open window's end before)
+    hrnd, hr_sec0 = random.Random(1118), rv_sec[0]
+    sv_reset()
+    for i in range(65):
+        sv_fix(hrnd.uniform(-1, 1), hrnd.uniform(-1, 1), 1.0)
+    for i in range(1, 36):
+        sv_fix(i * 10.0, 0, 36.0)
+    gl.flush(gl._still_hold())
+    hf = (len(sv_lines()), len(gl.log["batch"]))
+    check("HOLD-FAR: a calm minute and a drive on STILL_EXIT from it: a "
+          "flush writes the minute and the drive",
+          not sv_active() and hf[0] > 60 and hf[1] == 0, repr(hf))
+    # HOLD-GAP: drift, a fix gap, the first fix back 60 m off (the window
+    # starts over and holds on from where the first began), drift at the
+    # place again: the stay drops the drift from before the gap too
+    sv_reset()
+    for i in range(200):
+        sv_fix(-600.0 + i * 10.0, 0, 36.0)        # until a window closes
+        if i > 50 and gl.log["still"]["win_at"] is None:
+            break
+    hg_first = set()
+    for i in range(40):
+        sv_fix(hrnd.uniform(-3, 3), hrnd.uniform(-3, 3), 1.0)
+        hg_first.add(gl.log["batch"][-1])
+    for _ in range(gl.STILL_GAP // 1000 + 5):
+        hb_fix(0, 0, nofix=True)
+    sv_fix(60.0, 0, 1.0)
+    for i in range(200):
+        sv_fix(hrnd.uniform(-3, 3), hrnd.uniform(-3, 3), 1.0)
+    gl.flush()
+    hg_left = [l for l in sv_lines() if l in hg_first]
+    # (the way in may keep the first few: the arrival)
+    check("HOLD-GAP: a stay proven across a fix gap (back 60 m off first) "
+          "drops the drift from before the gap too",
+          sv_active() and len(hg_first) > 20 and len(hg_left) <= 3,
+          repr((sv_active(), len(hg_first), len(hg_left))))
+    rv_sec[0] = hr_sec0
 
     # MIDNIGHT: a GGA past midnight whose RMC was lost is not dated a day back
     gl._rcv.reset()
@@ -5835,6 +6044,55 @@ try:
           and all(l in trip_body for l in before) and not later,
           "held=%d in trip=%d in later files=%d" % (
               len(before), sum(l in trip_body for l in before), len(later)))
+    # ... and with seconds queued as the fix comes back (the loop blocked),
+    # the oldest 400 m off (a cold start), the latest at the place: judged
+    # again from the oldest (_sample, last_at unchanged), the gap released
+    # the drift held for the stay to the next flush
+    fq_rs, fq_sec0 = rnd.getstate(), rv_sec[0]
+    qrnd = random.Random(1117)
+
+    def fq_pub(east, north, tick=True):
+        _clock[0] += gl.SAMPLE
+        sec = rv_sec[0]
+        rv_sec[0] += 1
+        gl.st.update(valid=True, date="2026-10-18",
+                     time="%02d:%02d:%02d" % (8 + sec // 3600,
+                                              (sec // 60) % 60, sec % 60),
+                     lat=47.5 + north * M_LAT, lon=19.0 + east * M_LON,
+                     alt=100.0, hdop=1.0, hdop_at=_clock[0], status="A",
+                     quality=1, fixtype=3, speed=1.0, std=None, std_at=None,
+                     epochs=5)
+        gl._rcv._published(_clock[0])
+        if tick:
+            gl.log_tick()
+    sv_reset()
+    gl.wifi.update(state="offline")
+    for i in range(200):
+        fq_pub(-600.0 + i * 10.0, 0)              # until a window closes
+        if i > 50 and gl.log["still"]["win_at"] is None:
+            break
+    fq_held = set()
+    for i in range(80):
+        fq_pub(qrnd.uniform(-3, 3), qrnd.uniform(-3, 3))
+        fq_held.add(gl.log["batch"][-1])
+    for _ in range(gl.NEW_FILE_GAP + 10):
+        hb_fix(0, 0, nofix=True)
+    for e in (400.0, 200.0, 0.0):
+        fq_pub(e, 0, tick=False)
+    gl.log_tick()
+    for i in range(150):
+        fq_pub(qrnd.uniform(-3, 3), qrnd.uniform(-3, 3))
+    gl.flush()
+    fq_out = [l for n in sorted(os.listdir(rv_dir))
+              if n.endswith((".trk", ".trb"))
+              for l in open(os.path.join(rv_dir, n)) if l in fq_held]
+    check("FIXGAP: ... with seconds queued, the oldest 400 m off: the drift "
+          "held for the stay is not written",
+          sv_active() and bool(fq_held) and fq_out == [],
+          repr((sv_active(), len(fq_held), len(fq_out))))
+    sv_reset()                           # (sv_fix: no queued seconds)
+    rnd.setstate(fq_rs)
+    rv_sec[0] = fq_sec0
     # a fix back elsewhere right after a flush: the drive held by its open
     # window kept the batch non-empty, so the new trip went into the old
     # file after a "-"; a loss over NEW_FILE_GAP is a new file
@@ -14394,6 +14652,7 @@ else:
          "track"),
         ("track create failing 20261102_100000.trk new x.trk", "track"),
         ("track write error 3 OSError(28) 20261102_100000.trk", "track"),
+        ("track hist error 2 OSError(28) close", "track"),
         ("time back 20261102T100500Z 20261102T100400Z", "tback"),
         ("stay left wifi aps 3 scans 6", "stay"),
         ("track full 20261102T1000-20261102T1005 drop 3", "full"),
@@ -18192,6 +18451,32 @@ check("LOOP-WRAP: a tick that raised 3 s before the wrap sits out "
       _lp["ntp"][:2] == [0, gl.TICK_PAUSE] and _lp["settled"] == [6000]
       and _lp_first("gsv", False) == 4000 and _lp_until("gsv", True, 4000),
       repr((_lp["ntp"][:2], _lp["settled"], _lp_first("gsv", False))))
+# HIST-ERR: a day history write error (log["herr"]) goes to the diag log, the
+# first at once, then one per WERR_EVERY, and status.json has the count: it
+# was shown nowhere, and a bug in the copy (it takes any error) only printed
+gl.log_reset()
+diag_clear()
+gi_saved = (gl._track_lines, gl.HIST_DAYS)
+gl.HIST_DAYS = 7
+gl._track_lines = lambda *a: (_ for _ in ()).throw(TypeError("hist bug"))
+gi_n = []
+try:
+    for r in range(3):
+        if r == 2:
+            _clock[0] += gl.WERR_EVERY
+        gl._hist_batch(gi_tr, 0, 1, 0)
+        gi_n.append(len([x for x in diag_lines()
+                         if x.startswith("track hist error")]))
+finally:
+    gl._track_lines, gl.HIST_DAYS = gi_saved
+gi_rows = dict(gl._web_rows())
+check("HIST-ERR: the first day history write error goes to the diag log with "
+      "the error, then one per 10 min; status.json has hist_errs",
+      gi_n == [1, 1, 2] and gl.log["herr"] == 3 and gi_rows.get("hist_errs") == 3
+      and any("hist bug" in x for x in diag_lines()),
+      repr((gi_n, gl.log["herr"], gi_rows.get("hist_errs"), diag_lines()[-2:])))
+gl.log_reset()
+diag_clear()
 # WEB-JSON-TAIL: an error after the 200 (reading the diag tail, a
 # satellite) still cut the JSON (the page: OFFLINE). The parts after the
 # rows end the JSON instead, the error counted
@@ -18441,7 +18726,30 @@ check("RX-DRAIN: seconds 2-4 sampled in order as their own Fix at their ticks, s
       and all(x[2] == 4 and x[3] == _rd_q[3][_rd.F_LAT] for x in _rd_seen)
       and [x[4] for x in _rd_seen] == [q[_rd.F_LAT] for q in _rd_q[1:]]
       and _rd_left == ([], 4), repr((_rd_seen, _rd_left)))
+# a second published while one is sampled (read_uart() under _sample: the WiFi
+# scan of _home_veto) is sampled on the next pass: log["seq"] went to st["seq"]
+# after the loop and marked it seen
+gl.st["q"] = list(_rd_q[:2])
+gl.st["seq"], gl.log["seq"] = 2, 0
+_rd_seen = []
+def _rd_pub(now, fx=None):
+    _rd_seen.append(fx[_rd.F_SEQ])
+    if fx[_rd.F_SEQ] == 1:
+        gl.st["q"] = gl.st["q"] + [_rd_q[2]]
+        gl.st["seq"] = 3
+gl._sample = _rd_pub
+try:
+    gl._drain_q()
+    _rd_mid = list(_rd_seen)
+    gl._drain_q()
+finally:
+    gl._sample = _rd_saved
+check("RX-DRAIN: a second published while an earlier one is sampled is sampled on the "
+      "next pass, not marked seen",
+      _rd_mid == [1, 2] and _rd_seen == [1, 2, 3] and gl.log["seq"] == 3,
+      repr((_rd_mid, _rd_seen, gl.log["seq"])))
 gl.st["q"] = list(_rd_q)
+gl.st["seq"] = 4
 gl.log["seq"] = 0
 def _rd_boom(now, fx=None):
     raise MemoryError("memory allocation failed")

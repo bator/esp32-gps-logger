@@ -841,7 +841,10 @@ kept (`HIST_DAYS`; a day written both as text and as `.trb` is one day). The
 history yields to the tracks: under 1 MB
 free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
 batch would be dropped on a full flash, and nothing is added under
-2 × `MIN_FREE`. An append cut short (the flash full mid-write) leaves no
+2 × `MIN_FREE`. A failed write (or a bug in the copy) costs only the
+drawing: it is counted (`hist_errs` in `/status.json`) and in the
+diagnostic log as `track hist error`, the first and then one per 10
+minutes. An append cut short (the flash full mid-write) leaves no
 footer: the next one starts with 32 `0xC0` bytes and a newline
 (`HIST_SEP`), which end a record cut there (no keyframe is lost to it, no
 point made up). The page asks `/hist?d=YYYYMMDD&o=<offset>` and gets the
@@ -1064,8 +1067,11 @@ tell a stay from a drive, so the stay filter works on positions.
 - **No drift on flash.** While a stay may still be proven, its windows'
   lines are held in RAM, and they are dropped when it begins, after a boot or
   a new fix too. The way in is kept up to where it first comes within 50 m of
-  the anchor. Closing a file for upload never writes the held lines; they
-  move on to the next file.
+  the anchor, and an excursion out past 150 m that came back (a U-turn past
+  the place, back to park) is never dropped; a multipath spike out there is.
+  A way out already begun is kept too, a car's included (a stop of ~90 s:
+  the first 150-290 m of the drive off went as drift). Closing a file for
+  upload never writes the held lines; they move on to the next file.
 - **Anchor.** The mean of the two windows, refined by fixes within 50 m. If
   the device settles 50–150 m away (out of the car, into the building), three
   consecutive matching window pairs there (about four minutes) move the
@@ -1089,8 +1095,11 @@ tell a stay from a drive, so the stay filter works on positions.
   it lasts, and an excursion that turns back does not count. The way out is
   written from near the anchor, from the last 90 samples, in time order
   (kept in preallocated arrays, 28 bytes a sample: as line tuples they took
-  ~20 kB of the heap and broke uploads). Each line is rebuilt exactly as it
-  would have been written then, the board's single-precision rounding
+  ~20 kB of the heap and broke uploads). It begins at the last sample within
+  5 m of the anchor, or within 50 m after 30 s without a sample kept: a home
+  stay in calm reception wrote up to 90 samples hours old before the way
+  out, the new track named after the first. Each line is rebuilt exactly as
+  it would have been written then, the board's single-precision rounding
   included.
 - **Leaving after a fix gap** (over 30 s; a metro or a garage, then sitting
   still elsewhere): beyond 150 m the stay ends without waiting for the fixes
@@ -1133,7 +1142,9 @@ tell a stay from a drive, so the stay filter works on positions.
   in RAM only. A window that spread out on its own (its centroid over 75 m
   from both its first and its last fix: an out-and-back turn at driving or
   cycling speed) proves no stay, so a U-turn no longer drops part of the
-  trip. A walk turning back within ~80 m still can: indoor drift looks the
+  trip; nor one whose last two fixes are over 150 m from its centroid (a
+  car stopped for about a minute and a half and off again). A walk turning
+  back within ~80 m still can: indoor drift looks the
   same. A fix back after 5 minutes more than 150 m away writes
   what was held to the old track before it closes.
 - **Leaving home** is accepted only once the home network is out of range:

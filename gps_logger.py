@@ -2334,6 +2334,7 @@ _RPAD = b" " * RE_W                      # an empty _RE entry
 def log_reset():
     log.clear()
     log.update(file=None, created=False, batch=[], points=0, err=0, herr=0,
+               herr_at=None,
                fix=False, lost_at=None, new_seg=False, seg_tc=[],
                full=False, wfail=False, wfails=0,
                still=_still_state(), clock=None, seq=0,
@@ -2631,6 +2632,20 @@ def _werr(what, e=None):
     except MemoryError:
         pass
 
+def _herr(what, e=None):
+    """Count a day history write error (log["herr"], hist_errs on the
+    status page), the first, then one per WERR_EVERY, in the diag log as
+    _werr's: the count alone was shown nowhere, and a bug in the history
+    copy (it takes any error: the commit after it is what matters) only
+    printed. Never raises."""
+    log["herr"] += 1
+    try:
+        if not _recent_s(log["herr_at"], WERR_EVERY // 1000):
+            log["herr_at"] = _stamp()
+            _diag_write("track hist error %d %r %s" % (log["herr"], e, what))
+    except MemoryError:
+        pass
+
 def _cut_to_footer(path, good, sz):
     """Before a failing file is left: a failed append that partly landed
     left the start of the batch after the last good footer, without one,
@@ -2748,8 +2763,8 @@ def _hist_close(hf, ok=True):
             try:
                 out += FOOTER.encode()
                 f.write(out)
-            except (OSError, MemoryError):
-                log["herr"] += 1
+            except (OSError, MemoryError) as e:
+                _herr("close", e)
         try:
             f.close()
         except OSError:
@@ -2999,6 +3014,7 @@ def _still_window(now, pos, fx=None):
     cannot add up 60 latitudes to the metre."""
     sl = log["still"]
     _still_gap(now, pos)
+    q = sl["pos"]                        # (the usable fix before this one)
     sl["last_at"], sl["pos"] = _stamp(), pos
     if sl["win_at"] is None:
         sl.update(win_at=_stamp(), win_tc=_tc(fx), ref=pos, sum=[0.0, 0.0, 0],
@@ -3018,7 +3034,10 @@ def _still_window(now, pos, fx=None):
     c = None
     if sm[2] >= STILL_MIN_FIXES:
         c = (r[0] + sm[0] / sm[2], _dlon(r[1] + sm[1] / sm[2]))
-        if _spread(r, c, pos, STILL_EXIT // 2) or _walking(r, sm, qs):
+        if (_spread(r, c, pos, STILL_EXIT // 2) or _walking(r, sm, qs)
+                or (q is not None
+                    and _dist(c[0], c[1], pos[0], pos[1]) > STILL_EXIT
+                    and _dist(c[0], c[1], q[0], q[1]) > STILL_EXIT)):
             # its ends STILL_EXIT apart through the centroid: a drive (a
             # bike from ~10 km/h) pairs with nothing. Out and back with the
             # turn near a window boundary, the way out and the way back had
@@ -3027,6 +3046,10 @@ def _still_window(now, pos, fx=None):
             # spreads less: its quarters advance steadily (_walking), and
             # one such window of a pair is enough to tell. A walk on, a
             # walk in before a stop: the pair waits for two calm windows.
+            # Nor a window that ends with the board gone, its last two
+            # fixes out past STILL_EXIT: a car stopped for ~90 s and
+            # off again (its centroid at the stop), the stay it proved
+            # dropped the first 150-290 m of the drive as drift.
             c = None
             sl["hold_tc"] = None
     else:
@@ -3214,15 +3237,18 @@ def _still_enter(now, anchor, since_tc, n, c=None, fx=None):
     on, all still in RAM: see _still_hold) is dropped, and the track is
     closed, so the arrival uploads during the stay. Away from home the
     anchor opens a new file, now and then every STILL_HEARTBEAT.
-    Kept: the way in up to where it first comes within STILL_NEAR of c,
+    Kept: an excursion out past STILL_EXIT and back; the way in up to
+    where it first comes within STILL_NEAR of c after that,
     the later window's centroid (the anchor, the mean of both, lies back
     along a way in that the earlier window still held), and on while it
     kept coming closer steadily (each line at most STILL_TOL farther and
     2 * STILL_TOL closer than the one before; drift jumps), when that took
     it STILL_RUN closer over STILL_RUN // 2 lines at least. At walking
     pace the last 50 m were dropped as drift (~36 s). Likewise the newest
-    lines when they recede from c that way: the walk on already began in
-    the later window (a stop of ~90 s), its start no drift either. Then
+    lines when they recede from c that way (each line at most STILL_TOL
+    closer, its step at most 2 * STILL_TOL longer or shorter than the next
+    one's: a car accelerates): the walk or drive on already began in the
+    later window (a stop of ~90 s), its start no drift either. Then
     no anchor point is written now: it would come after them, back at the
     stop."""
     log["still"] = sl = _still_state()
@@ -3237,6 +3263,19 @@ def _still_enter(now, anchor, since_tc, n, c=None, fx=None):
         i += 1
     if c is None:
         c = anchor
+    # Never dropped: an excursion out past STILL_EXIT from c that came back
+    # (a U-turn 240 m past the place, back to park went whole). Out there
+    # by steps a vehicle makes (radially at most STILL_EXIT // 3 a line,
+    # from within STILL_NEAR): a multipath spike out and back is drift.
+    e, y, ok = i, None, True
+    for q in range(i, len(b)):
+        z = _line_m(c, b[q])
+        if y is not None:
+            if ok and y > STILL_EXIT >= z:
+                e = q                    # (the first line back)
+            ok = z <= STILL_NEAR or (ok and abs(z - y) <= STILL_EXIT // 3)
+        y = z
+    i = e
     x = None
     while i < len(b):
         x = _line_m(c, b[i])
@@ -3273,10 +3312,16 @@ def _still_enter(now, anchor, since_tc, n, c=None, fx=None):
     if i < k:                            # the way out, already begun
         j = k - 1
         y = hi = lo = _line_m(c, b[j])
+        # (g: the step of the line after. A car's step changes by less than
+        # 2 * STILL_TOL a second, drift jumps. Each step at most 10 m, as
+        # before, dropped the drive off a car stop.)
+        g = None
         while j > i:
             z = _line_m(c, b[j - 1])
-            if z > y + STILL_TOL or z < y - 2 * STILL_TOL:
+            if z > y + STILL_TOL or (g is not None
+                                     and abs(y - z - g) > 2 * STILL_TOL):
                 break
+            g = y - z
             j -= 1
             y = z
             if z < lo:
@@ -3360,7 +3405,13 @@ def _ring_add(sl, now, pos, d, fx=None):
     """Keep a usable sample of the stay in the departure ring (see _RT),
     the oldest overwritten when it is full. A sample that falls back from
     the one before by more than STILL_TOL starts it over: the ring is
-    always a run that kept receding, the way out (_still_leave). One
+    always a run that kept receding, the way out (_still_leave). So does
+    one within STILL_TOL of the anchor (at the place: the way out begins at
+    the last one), and one within STILL_NEAR over STILL_GAP after the one
+    before: in calm reception the stay's jitter rarely moved STILL_DEP_STEP
+    or fell back, and a home stay (no anchor points: nothing to cut it)
+    wrote up to STILL_DEP_MAX samples hours old before the way out, the
+    new track named after the first. One
     within STILL_DEP_STEP of the one before is left out: at walking pace
     the way out to STILL_EXIT and the samples that prove it took ~120 s,
     and the ring kept the last STILL_DEP_MAX (lost: the first ~30 m)."""
@@ -3370,8 +3421,11 @@ def _ring_add(sl, now, pos, d, fx=None):
     cap = len(_RT)
     n, i = sl["rn"], sl["ri"]
     if n:
-        k = 3 * ((i + n - 1) % cap)
-        if d + STILL_TOL < _RF[k + 2]:
+        j = (i + n - 1) % cap
+        k = 3 * j
+        if (d + STILL_TOL < _RF[k + 2] or d <= STILL_TOL
+                or (d <= STILL_NEAR
+                    and s - sl["rt0"] - _RT[j] > STILL_GAP // 1000)):
             n = 0
         elif _dist(_RF[k], _RF[k + 1], pos[0], pos[1]) <= STILL_DEP_STEP:
             return
@@ -3638,11 +3692,17 @@ def _drain_q():
     """Sample every averaged second not seen yet, oldest first, each as its
     own Fix at the ticks it was published (its fix time and freshness). st
     stays the latest second all the while."""
-    if st["seq"] == log["seq"]:
+    s = st["seq"]
+    if s == log["seq"]:
         return
     for fx in _rcv.drain(log["seq"]):
+        # seen as each one is sampled: a second published meanwhile (a
+        # read_uart() under _sample, e.g. the WiFi scan of _home_veto) comes
+        # after it, and marking st["seq"] seen at the end lost that second
+        log["seq"] = fx[_rcv.F_SEQ]
         _sample(fx[_rcv.F_POS_AT], fx)
-    log["seq"] = st["seq"]
+    if log["seq"] < s:                   # (all up to s were in the queue)
+        log["seq"] = s
 
 def _sample(now, fx=None):
     """One second: the Fix fx (a published second, see _drain_q), or the
@@ -4589,7 +4649,7 @@ def _hist_batch(path, off, end, key):
         ok = True
     except Exception as e:               # (best effort: the commit after
         print("hist", repr(e))           # it is what matters)
-        log["herr"] += 1
+        _herr("write", e)
     finally:
         _hist_close(hf, ok)
 
@@ -6582,6 +6642,7 @@ def _web_rows():
         ("web_errs", _web_errs[0]),      # page requests that hit a bug
         ("tick_bugs", _tick_bugs()),     # guarded ticks' bugs: count, last
         ("diag_errs", _diag_errs[0]),    # diag lines that failed to write
+        ("hist_errs", log["herr"]),      # day history write errors
         ("track_drop", log["drop"]),   # points lost (full flash,
         ("write_errs", log["err"]),    # MAX_BATCH, time back), track
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
