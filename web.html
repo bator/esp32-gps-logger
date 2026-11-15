@@ -24,7 +24,7 @@
 <style>
 :root{--b:#0c0d0f;--s:#1f2226;--l:rgba(255,255,255,.09);--t:#eceef0;--m:#9ba1a8;--ok:#4ade80;--mid:#c3e15a;--warn:#f5a524;--bad:#f87171;--rt:#2563eb;--rtx:#60a5fa;--midt:#c3e15a;
  --g0:#e4e4e7;--g2:#4ade80;--g3:#f5a524;--g6:#f472b6;color-scheme:dark}
-@media(prefers-color-scheme:light){:root{--b:#f3f3f1;--s:#e6e6e2;--l:rgba(0,0,0,.1);--t:#17181a;--m:#5d6268;--ok:#15803d;--mid:#5a9a0c;--warn:#b45309;--bad:#c62828;--rt:#2563eb;--rtx:#1e40af;--midt:var(--t);
+@media(prefers-color-scheme:light){:root{--b:#f3f3f1;--s:#e6e6e2;--l:rgba(0,0,0,.1);--t:#17181a;--m:#5d6268;--ok:#15803d;--mid:#5a9a0c;--warn:#b45309;--bad:#c62828;--rtx:#1e40af;--midt:var(--t);
  --g0:#3f3f46;--g2:#15803d;--g3:#b45309;--g6:#db2777;color-scheme:light}}
 body{margin:0;background:var(--b);color:var(--t);font:14px/1.4 Inter,system-ui,sans-serif}
 b{font-weight:600;font-variant-numeric:tabular-nums}
@@ -37,7 +37,7 @@ b{font-weight:600;font-variant-numeric:tabular-nums}
 .up{margin-left:auto;color:var(--m)}
 .pg{max-width:1320px;margin:auto;padding:0 24px 32px;transition:opacity .3s}.off .pg{opacity:.55}
 h3{font-size:11px;font-weight:600;letter-spacing:.16em;color:var(--m);margin:0 0 14px;display:flex;justify-content:space-between;gap:12px;text-transform:uppercase}
-h3 b{letter-spacing:.04em;color:var(--t)}h3 b.ok{color:var(--ok)}h3 b.warn{color:var(--warn)}h3 b.bad{color:var(--bad)}
+h3 b{letter-spacing:.04em;color:var(--t)}
 .alert{margin-top:14px;padding:11px 14px;border:1px solid var(--bad);border-radius:10px;color:var(--bad);font-size:12px;font-weight:600;letter-spacing:.06em}
 .alert em{font-style:normal;color:var(--t);font-weight:400;margin-left:8px}.alert:empty{display:none}
 /* the position and the day beside the map */
@@ -179,8 +179,8 @@ summary{cursor:pointer;padding:15px 0;font-size:11px;font-weight:600;letter-spac
 .strip{grid-template-columns:1fr 1fr}.er{grid-template-columns:80px 1fr 44px}.er .sk{display:none}}
 /* a tablet: Logger and Sky side by side, the diag log under them */
 @media(min-width:600px) and (max-width:900px){.cols{grid-template-columns:1fr 1fr}
-.cols>section:nth-child(2){border-left:1px solid var(--l);padding-left:18px}.cols>section:first-child{padding-right:18px}
-.cols>section:nth-child(2){border-top:0}.cols>section:last-child{grid-column:1/-1}.skg svg{max-width:200px}}
+.cols>section:nth-child(2){border-left:1px solid var(--l);padding-left:18px;border-top:0}.cols>section:first-child{padding-right:18px}
+.cols>section:last-child{grid-column:1/-1}.skg svg{max-width:200px}}
 </style>
 </head>
 <body>
@@ -265,7 +265,8 @@ function num(n) { return n == null ? "-" : esc(String(n).replace(/\B(?=(\d{3})+(
 function gid(sv) { return GNSS[sv.system] === undefined ? 1 : GNSS[sv.system]; }
 function cls(sv) { return "g" + gid(sv) + (sv.used ? "" : " u"); }
 function tip(sv) { return esc(sv.name) + " " + esc(sv.cno || "-") + " dBHz"; }
-function fixTone(fix) { return fix.indexOf("3D") === 0 ? "ok" : fix.indexOf("fix") >= 0 ? "warn" : "bad"; }
+// a fix: 3D, 2D, "Fix" (valid, its type not said; DGPS too)
+function fixTone(fix) { return /^3D/.test(fix) ? "ok" : /fix/i.test(fix) ? "warn" : "bad"; }
 function mpp(lat, z) { return 156543.03 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z); }   // metres a pixel
 function wifiQ(rssi) {                 // [arcs 0-3, quality %, tone] for an RSSI in dBm
   if (rssi == null) return null;
@@ -309,7 +310,7 @@ var EVK = [
   ["grx", /^gps /, "Receiver start", 0, "mut"],
   ["other", /^/, "Other", -1, "mut"]
 ];
-var EV_STATUS = /^up \d+ utc (\S+) .*? sats (\d+)\/(\S+) fix (\S+)/, EV_PEND = 500;
+var EV_STATUS = /^up (\d+) utc (\S+) .*? sats (\d+)\/(\S+) fix (\S+)/, EV_PEND = 500;
 var EV_LINK = /^up (\d+) .*? nmea (\d+)\/(\d+) .*? hdop (\S+)/;
 function evKind(l) {
   if (/^up \d+ utc /.test(l)) return "status";
@@ -318,7 +319,7 @@ function evKind(l) {
 }
 function evNew() {                      // the aggregate of a diag log read so far
   return {rest: "", n: 0, n3: 0, nno: 0, t0: null, t1: null, b5: {}, bk: [], g: {}, pend: [],
-    lk: null, lt: null, tu: null, drops: 0, run: 0, lng: 0, bad: 0, okn: 0, up: 0, dn: 0, eps: []};
+    lk: null, lt: null, tu: null, drops: 0, run: 0, bad: 0, okn: 0, dn: 0, eps: []};
 }
 // UTC "20261102T091639Z" -> ms, or null
 // a compact UTC time -> ms, or null: no real time in 2020-2099 either (as the
@@ -349,10 +350,16 @@ function evLine(a, l) {
   if (/^up \d+ utc /.test(l)) {
     var m = EV_STATUS.exec(l);
     if (!m) return;
+    // a line's minutes: the up since the line before (DIAG apart, any
+    // DIAG); after a boot the up since it, after a gap (over 3 steps) one
+    // step, at most (60 s while none is known)
+    var up = +m[1], dt = up - a.pu, s = a.st,
+      w = (!(dt > 0) || s && dt > 3 * s ? Math.min(up, s || 60) : dt) / 60, t = evUtc(m[2]), r = t;
+    a.pu = up;
+    if (dt > 0) a.st = dt;
     a.n++;
-    if (/^3D/.test(m[4])) a.n3++;
-    else if (!/^2D/.test(m[4])) a.nno++;
-    var t = evUtc(m[1]), up = +/^up (\d+)/.exec(l)[1], r = t;
+    if (/^3D/.test(m[5])) a.n3++;
+    else if (!/^(2D|Fix)/.test(m[5])) a.nno += w;
     if (t === null) return;
     // a silent receiver: the line repeats the last GPS time (the board's
     // clock), its time goes on with up
@@ -362,8 +369,8 @@ function evLine(a, l) {
     a.t1 = t;
     var k = Math.floor(t / 300000), b = a.b5[k];
     if (!b) { b = a.b5[k] = [t, 0, 0, 0, 0, 0, 0]; a.bk.push(k); }
-    b[1] += +m[2] || 0; b[2] += +m[3] || 0; b[3]++;
-    evLink(a, l, b, /^(3D|2D|Fix)/.test(m[4]), t);
+    b[1] += +m[3] || 0; b[2] += +m[4] || 0; b[3]++;
+    evLink(a, l, b, /^(3D|2D|Fix)/.test(m[5]), t, s);
     for (var i = 0; i < a.pend.length; i++) evAdd(a.g, a.pend[i][0], a.pend[i][1], t);
     a.pend = [];
     return;
@@ -374,29 +381,28 @@ function evLine(a, l) {
 }
 // the receiver link and accuracy from a status line: its NMEA count against
 // the line before (a boot starts it again: up or the count goes back, or a
-// gap over 3 min), a minute it stood still is a drop-out minute (the board
-// ran, the receiver sent nothing); HDOP while there was a fix. b: the
-// 5-minute bucket [.., hdop sum, its count, drop-out minutes]
-function evLink(a, l, b, fix, t) {
+// gap over 3 steps s, DIAG), the time since it a drop-out when the count
+// stood still (the board ran, the receiver sent nothing); HDOP while there
+// was a fix. b: the 5-minute bucket [.., hdop sum, its count, drop-out lines]
+function evLink(a, l, b, fix, t, s) {
   var m = EV_LINK.exec(l);
   if (!m) return;
   var up = +m[1], ok = +m[2], er = +m[3], h = parseFloat(m[4]), p = a.lk, pt = a.lt;
   if (fix && h > 0) { b[4] += h; b[5]++; }
   a.lk = [up, ok, er]; a.lt = t;
-  if (!p || up <= p[0] || ok < p[1] || er < p[2] || up - p[0] > 180) { a.run = 0; return; }
+  if (!p || up <= p[0] || ok < p[1] || er < p[2] || up - p[0] > 3 * s) { a.run = 0; return; }
   a.bad += er - p[2]; a.okn += ok - p[1];
   if (ok === p[1]) {                     // a drop-out: from the line before to this one
-    a.dn++; b[6]++;
+    a.dn += (up - p[0]) / 60; b[6]++;
     if (!a.run) {
       a.drops++;
       a.eps.push([pt, t, 0]);
       if (a.eps.length > 20) a.eps.shift();
     }
-    a.run += Math.round((up - p[0]) / 60) || 1;
-    a.lng = Math.max(a.lng, a.run);
+    a.run += (up - p[0]) / 60;
     var e = a.eps[a.eps.length - 1];
     e[1] = t; e[2] = a.run;
-  } else { a.up++; a.run = 0; }
+  } else a.run = 0;
 }
 function evHour(t) { return Math.floor((t - new Date(t).getTimezoneOffset() * 60000) / 3600000); }   // a local hour
 function evAdd(gs, k, l, t) {
@@ -459,7 +465,6 @@ var EVD = {
   full: function (d, l) { var m = / drop (\d+)/.exec(l); d.drop = (d.drop || 0) + (m ? +m[1] : 0); return 1; },
   grx: function (d, l) { d.x = [l.slice(4)]; return 1; },
   setup: function (d, l) { evText(d, l.replace(/^gps (setup not taken: )?/, "")); return evMore(l); },
-  pvt: function (d, l) { evText(d, l.replace(/^gps pvt /, "")); return 1; },
   tback: function (d, l) { evText(d, l.replace(/^time back /, "")); return 1; },
   stay: function (d, l) { evText(d, l.replace(/^stay left /, "")); return 1; },
   disp: function (d, l) { evText(d, l.replace(/^tft light (\d+)$/, "$1 %")); return 1; },
@@ -532,14 +537,14 @@ function evView(a, st) {
   }
   v.evs = a.t0 !== null ? when(a.t0) + "&ndash;" + when(a.t1) + MD + dur(a.t1 - a.t0) :
     st.done ? "no status line with a time" : "reading&hellip;";
-  var no = a.nno, sm = function (k, b, e, tone) {
+  var no = Math.round(a.nno), sm = function (k, b, e, tone) {
     return '<div class="' + (tone || "") + '"><small>' + k + "</small><b>" + b + "</b>" + (e ? "<em>" + e + "</em>" : "") + "</div>";
   };
   var tel = evTele(a, st.cols || 72);
   v.evk = tel.big + '<div class="sm">' +
     sm("3D fix", (a.n ? Math.round(a.n3 * 100 / a.n) : "-") + " %", "of minutes", "t-ok") +
     sm("No fix / no data", hmin(no), "", no ? "t-warn" : "") +
-    sm("Receiver silent", hmin(a.dn), a.drops + " drop-out" + (a.drops === 1 ? "" : "s"), a.dn ? "t-warn" : "") +
+    sm("Receiver silent", hmin(Math.round(a.dn)), a.drops + " drop-out" + (a.drops === 1 ? "" : "s"), a.dn ? "t-warn" : "") +
     sm("Boots", nb, (boot.pw || 0) + " power-on") +
     sm("Updates", ota[0], ota[1] ? ota[1] + " failed" : ota[0] ? (ota[2] ? "checking" : "all ok") : "none", ota[1] ? "t-warn" : "") +
     sm("Broken NMEA", num(a.bad), a.bad ? "1 in " + num(Math.round((a.okn + a.bad) / a.bad)) : "none") + "</div>";
@@ -551,7 +556,7 @@ function evView(a, st) {
   };
   for (i = a.eps.length - 1; i >= 0 && i >= a.eps.length - 5; i--) {
     var e = a.eps[i];
-    h += row(when(e[1] - e[2] * 60000), "warn", "Receiver silent", "until " + when(e[1]), "", e[2] + " min");
+    h += row(when(e[1] - e[2] * 60000), "warn", "Receiver silent", "until " + when(e[1]), "", Math.round(e[2]) + " min");
   }
   if (a.drops > 5) h += row("", "mut", (a.drops - 5) + " earlier drop-outs", "", "", "");
   var mn = [], ml = null, mt = 0;      // the minor kinds (severity 0 and less): one row at the end
@@ -686,7 +691,7 @@ function accM(d) { return typeof d.hdop === "number" ? d.hdop * UERE : null; }
 // status.json -> the HTML of every box (pure: tests/web_page_test.js runs it;
 // prev: the poll before, for rates)
 function view(d, prev) {
-  var v = {}, svs = d.satellites || [], used = 0, fix = d.fix || "-", dot = " &middot; ";
+  var v = {}, svs = d.satellites || [], used = 0, fix = d.fix || "-";
   var sats = String(d.sats || "- / -").replace(/None/g, "-").split(" / ");   // "seen / used"
   var nm = String(d.nmea || "0 / 0").split(" / "), ok = +nm[0], bad = +nm[1];
   var pct = ok + bad ? bad * 100 / (ok + bad) : 0;
@@ -698,7 +703,7 @@ function view(d, prev) {
   var gl = gpsLink(d, prev), ua = d.upload_age_s;
   var late = d.left > 0 && (ua == null ? d.uptime > UPLOAD_LATE_S : ua > UPLOAD_LATE_S);
   v.dev = esc(d.device || "GPS logger").toUpperCase();
-  v.up = "UP " + esc(hms(d.uptime).toUpperCase()) + (d.fw === undefined ? "" : dot + "FW " + esc(d.fw));
+  v.up = "UP " + esc(hms(d.uptime).toUpperCase()) + (d.fw === undefined ? "" : MD + "FW " + esc(d.fw));
   v.gl = gl && gl.silent ? "GPS SILENT &middot; " + esc(hms(gl.silent).toUpperCase()) + "<em>" +
     (gl.junk ? "bytes arrive but no valid sentence: check TX/RX and the baud rate" :
       "nothing from the receiver: check its power and the TX wire") + "</em>" : "";
@@ -729,30 +734,32 @@ function view(d, prev) {
   // Logger: a row a subsystem (its tone, the word only when not nominal),
   // the drive the free flash holds as the number; counters that are 0 are
   // left out
-  var utone = d.bad_files > 0 ? "bad" : d.upload_err > 0 || late || /err|low/.test(d.upload || "") ? "warn" : "";
+  // (upload_err and gps_loops count since boot: one old error kept them
+  // amber till a reboot; the state and late say what is wrong now)
+  var utone = d.bad_files > 0 ? "bad" : late || /err|low/.test(d.upload || "") ? "warn" : "";
   var subs = [
-    ["GPS receiver", esc(comma > 0 ? rx.slice(0, comma) : rx) + dot + esc(fix) + dot + esc(sats[1]) + "/" + esc(sats[0]) + " sats" +
-      dot + "HDOP " + (hd === null ? "-" : hd.toFixed(2)) +
-      (d.setup_ok === false ? dot + "setup failed" : "") + (d.gps_loops > 0 ? dot + num(d.gps_loops) + " loops" : ""),
-      fix.indexOf("3D") === 0 && !(d.gps_loops > 0) && d.setup_ok !== false ? "" : "warn"],
-    ["Upload", esc(d.upload) + (d.left ? dot + num(d.left) + " waiting" : "") + (d.sent ? dot + num(d.sent) + " sent" : "") +
-      (d.upload_err ? dot + num(d.upload_err) + " err" : "") + (d.bad_files ? dot + num(d.bad_files) + " bad" : "") + dot + "last " +
+    ["GPS receiver", esc(comma > 0 ? rx.slice(0, comma) : rx) + MD + esc(fix) + MD + esc(sats[1]) + "/" + esc(sats[0]) + " sats" +
+      MD + "HDOP " + (hd === null ? "-" : hd.toFixed(2)) +
+      (d.setup_ok === false ? MD + "setup failed" : "") + (d.gps_loops > 0 ? MD + num(d.gps_loops) + " loops" : ""),
+      fix.indexOf("3D") === 0 && d.setup_ok !== false ? "" : "warn"],
+    ["Upload", esc(d.upload) + (d.left ? MD + num(d.left) + " waiting" : "") + (d.sent ? MD + num(d.sent) + " sent" : "") +
+      (d.upload_err ? MD + num(d.upload_err) + " err" : "") + (d.bad_files ? MD + num(d.bad_files) + " bad" : "") + MD + "last " +
       (ua == null ? (d.upload_age_s === undefined ? "-" : "none yet") : hms(ua) + " ago"), utone],
-    ["Storage", (fk == null ? "-" : (fk / 1024).toFixed(1) + " MB") + " free" + dot + num(d.points) + " logged" +
-      (d.stay === "yes" ? " (staying)" : "") + dot + num(d.files) + " files", fk != null && fk < 1024 ? "warn" : ""],
-    ["Memory", "IDF " + (isNaN(big) ? "-" : big + " KB") + (q.length > 1 && !isNaN(fr) ? " of " + fr : "") + dot + "heap " + esc(pk) + "/" + esc(d.heap_kb) + " KB",
+    ["Storage", (fk == null ? "-" : (fk / 1024).toFixed(1) + " MB") + " free" + MD + num(d.points) + " logged" +
+      (d.stay === "yes" ? " (staying)" : "") + MD + num(d.files) + " files", fk != null && fk < 1024 ? "warn" : ""],
+    ["Memory", "IDF " + (isNaN(big) ? "-" : big + " KB") + (q.length > 1 && !isNaN(fr) ? " of " + fr : "") + MD + "heap " + esc(pk) + "/" + esc(d.heap_kb) + " KB",
       big < TLS_KB ? "bad" : pk !== null && pk < 8 ? "warn" : ""],
     ["Wi-Fi", (q4 ? wifiIcon(q4[0]) : "") + esc(ssid || nn(ws[0])) +
-      (q4 ? dot + q4[1] + " % " + (q4[2] === "bad" ? "poor" : q4[2] ? "weak" : q4[0] === 3 ? "strong" : "good") + dot + esc(d.rssi) + " dBm" : "") +
-      (d.pulses ? dot + num(d.pulses) + " keep-alive" : ""), q4 ? q4[2] : ""]
+      (q4 ? MD + q4[1] + " % " + (q4[2] === "bad" ? "poor" : q4[2] ? "weak" : q4[0] === 3 ? "strong" : "good") + MD + esc(d.rssi) + " dBm" : "") +
+      (d.pulses ? MD + num(d.pulses) + " keep-alive" : ""), q4 ? q4[2] : ""]
   ];
   if (gl)                               // (a firmware without the counters: none)
-    subs.splice(1, 0, ["GPS link", (gl.rate === null ? "" : num(Math.round(gl.rate)) + " B/s" + dot) +
+    subs.splice(1, 0, ["GPS link", (gl.rate === null ? "" : num(Math.round(gl.rate)) + " B/s" + MD) +
       (d.good_age_s === null ? "no frame yet" : "frame " + hms(d.good_age_s) + " ago") +
-      (d.gps_boots > 0 ? dot + num(d.gps_boots) + " restarts" : "") + dot + bytes(d.rx_bytes) + " read" + dot +
+      (d.gps_boots > 0 ? MD + num(d.gps_boots) + " restarts" : "") + MD + bytes(d.rx_bytes) + " read" + MD +
       pct.toFixed(2) + " % broken", gl.tone || (pct > 1 ? "warn" : "")]);
   if (d.fw !== undefined)
-    subs.push(["Firmware", (d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw)) + dot +
+    subs.push(["Firmware", (d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw)) + MD +
       esc(OTA[d.ota] || (d.ota == null ? "-" : "ota " + d.ota)), /bad|err|too big|rolled/.test(d.ota || "") ? "warn" : ""]);
   var nom = 0, worst = "";
   for (var k = 0; k < subs.length; k++) {
@@ -767,15 +774,15 @@ function view(d, prev) {
   v.coord = p ?
     Math.abs(p[0]).toFixed(5) + "&deg; " + (p[0] < 0 ? "S" : "N") + "  " +
     Math.abs(p[1]).toFixed(5) + "&deg; " + (p[1] < 0 ? "W" : "E") +
-    (acc === null ? "" : dot + "&plusmn;" + acc.toFixed(1) + " m") :
+    (acc === null ? "" : MD + "&plusmn;" + acc.toFixed(1) + " m") :
     "NO FIX &middot; " + esc(fix).toUpperCase();
   // the device in one strip: what the page shows nowhere else (the uptime
   // is the top bar's, the position the card's): the boot with its time
   var dl = function (k, val, tone) { return '<div class="' + (tone || "") + '"><small>' + k + "</small><b>" + val + "</b></div>"; };
   v.dl = dl("Last boot", esc(BOOT[d.boot_cause] || d.boot_cause) +
-      (typeof d.uptime === "number" ? dot + when(Date.now() - d.uptime * 1000) : ""), d.boot_cause === 3 ? "warn" : "") +
+      (typeof d.uptime === "number" ? MD + when(Date.now() - d.uptime * 1000) : ""), d.boot_cause === 3 ? "warn" : "") +
     (pr ? dl("Previous run", esc(prevText(d)), /crash/.test(pr) ? "warn" : "") : "") +
-    dl("Chip", esc(d.temp) + " &deg;C" + dot + esc(d.mhz) + " MHz") +
+    dl("Chip", esc(d.temp) + " &deg;C" + MD + esc(d.mhz) + " MHz") +
     (d.utc ? dl("GPS time", esc(String(d.utc).slice(11, 19)) + " UTC") : "");
   return v;
 }
@@ -808,11 +815,11 @@ function histNew(day) {                 // day: a local day's YYYYMMDD, null tod
 function histParse(day, text) {
   var ls = ((hist.rest[day] || "") + text).split("\n");
   hist.rest[day] = ls.pop();
-  var late = false;
+  var late = false, lt;
   for (var i = 0; i < ls.length; i++) {
     var f = ls[i].split(","), s = f[f.length - 1];
     if (f.length < 5 || s.length !== 16 || f[0] === "") continue;
-    var t = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(9, 11), +s.slice(11, 13), +s.slice(13, 15));
+    var t = lt = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(9, 11), +s.slice(11, 13), +s.slice(13, 15));
     var la = +f[0], lo = +f[1], q = hist.pts[hist.pts.length - 1];
     if (t < hist.start || t >= hist.end || isNaN(t) || isNaN(la) || isNaN(lo)) continue;
     if (q && t < q[0]) late = true;
@@ -823,6 +830,9 @@ function histParse(day, text) {
   // to the day file after the newer ones: put them in time order again
   // (the km come from tripsOf: the Day figures and the timeline sum the trips)
   if (late) hist.pts.sort(function (a, b) { return a[0] - b[0]; });
+  // -> the text's last point is past the day's end (in time order): a past
+  // day's last UTC day need not be read on
+  return !late && lt >= hist.end;
 }
 function histLoad() {
   var now = Date.now();
@@ -859,12 +869,13 @@ function histNext(i) {
     // lines (a .trk day ignores t) need no seek either
     if (ok && sk !== "1") delete h.t[day];
     if (sk !== null && nx !== null) { h.off[day] = +nx; histNext(i); return; }
-    if (t) histParse(day, t);
+    var past = t && histParse(day, t);
     // a .trb day: its decoded lines, X-Hist-Next where to ask from next,
-    // again while short of X-Hist-End; a .trk day (older firmware): bytes
-    if (nx !== null && end !== null) { h.off[day] = +nx; histNext(+nx > o && +nx < +end ? i : i + 1); return; }
+    // again while short of X-Hist-End (and of the shown day's end); a .trk
+    // day (older firmware): bytes
+    if (nx !== null && end !== null) { h.off[day] = +nx; histNext(+nx > o && +nx < +end && !past ? i : i + 1); return; }
     if (t) h.off[day] = o + t.length;
-    histNext(t.length >= HIST_REPLY ? i : i + 1);
+    histNext(t.length >= HIST_REPLY && !past ? i : i + 1);
   };
   x.onerror = x.ontimeout = function () { if (h === hist) { h.busy = false; h.at = Date.now(); trackPaint(); } };
   x.send();
@@ -927,8 +938,8 @@ function navPaint() {
       (today ? "Today" : dayLabel(ds[k])) + "</button>";
   }
   paint({days: h});
-  document.getElementById("dprev").disabled = i <= 0;
-  document.getElementById("dnext").disabled = i >= ds.length - 1;
+  $("dprev").disabled = i <= 0;
+  $("dnext").disabled = i >= ds.length - 1;
 }
 function pick(day) {
   sel = day || null;
@@ -1117,7 +1128,10 @@ function gpxSave() {
 // bytes a reply at most, then f=0 (DIAG_FILE); after that once a minute f=0
 // from where it got to. X-Diag-Size is the file's size: DIAG_FILE smaller
 // than where the page got to (it became DIAG_OLD), or DIAG_OLD another size
-// while it is read: both again from the start (the aggregate anew).
+// while it is read, or DIAG_FILE's X-Diag-Old (DIAG_OLD's size, 0 none)
+// another than it read (a rotation missed while the board was away, its
+// DIAG_FILE grown past the page's offset): both again from the start (the
+// aggregate anew).
 var dg = dgNew();
 function dgNew() { return {f: 1, off: [0, 0], s1: null, busy: false, done: false, at: 0, a: evNew()}; }
 function diagDue() { return !dg.busy && Date.now() - dg.at >= 60000; }
@@ -1132,9 +1146,9 @@ function diagNext() {
     if (g !== dg) return;
     if (x.status !== 200 && x.status !== 404) { fail(); return; }   // (404: no such file)
     var ok = x.status === 200, t = ok ? x.responseText : "", hs = ok ? x.getResponseHeader("X-Diag-Size") : null;
-    var size = hs === null ? o + t.length : +hs;
-    if (ok && (f === 0 ? size < o : g.s1 !== null && size !== g.s1)) { dg = dgNew(); diagLoad(); return; }
-    if (ok && f === 1) g.s1 = size;
+    var size = hs === null ? o + t.length : +hs, so = ok ? x.getResponseHeader("X-Diag-Old") : null;
+    if (ok && (f === 0 ? size < o || so !== null && +so !== g.s1 : g.s1 !== null && size !== g.s1)) { dg = dgNew(); diagLoad(); return; }
+    if (f === 1) g.s1 = ok ? size : 0;
     if (t) { evFeed(g.a, t); g.off[f] = o + t.length; }
     if (t && g.off[f] < size) { evPaint(); diagNext(); return; }
     if (f === 1) { evEnd(g.a); g.f = 0; diagNext(); return; }
@@ -1147,7 +1161,7 @@ function diagNext() {
   x.send();
 }
 function evPaint() {                    // (a matrix column at least 8 px wide)
-  var e = document.getElementById("evt"), w = e && e.clientWidth ? e.clientWidth : 460;
+  var e = $("evt"), w = e && e.clientWidth ? e.clientWidth : 460;
   dg.cols = Math.max(12, Math.min(96, Math.floor(w / 8)));
   paint(evView(dg.a, dg));
 }
@@ -1228,20 +1242,23 @@ function histPath(t, z, i0, i1) {       // SVG path in the tile layer's pixels
 var tpKey = "";
 function trackPaint() {
   // (read once at least, or not: no "no trip" before the day is in)
-  var busy = hist.busy || !hist.at, k = hist.start + "/" + hist.pts.length + "/" + hist.hl + "/" + busy;
+  var busy = hist.busy || !hist.at;
+  if (hist.trips === undefined || hist.tn !== hist.pts.length) { hist.trips = tripsOf(hist.pts); hist.tn = hist.pts.length; }
+  // the last trip open (a point in the last 5 min) in the key: once it
+  // closes its end place is asked (the panel was not drawn again: no end
+  // name, ever)
+  var tn = hist.trips.length, tl = tn && hist.trips[tn - 1], open = tl && !hist.past && Date.now() - tl.t1 <= GAP_MS,
+    k = hist.start + "/" + hist.pts.length + "/" + hist.hl + "/" + busy + "/" + open;
   if (k === tpKey) return;
   tpKey = k;
-  if (hist.trips === undefined || hist.tn !== hist.pts.length) { hist.trips = tripsOf(hist.pts); hist.tn = hist.pts.length; }
-  var tn = hist.trips.length, tl = tn && hist.trips[tn - 1];
   // the places asked once the day is in (a trip's end read so far moves on)
-  var line = timeline(hist.trips, hist.hl, hist.past,
-    busy ? [] : tripPlaces(hist.trips, hist.pts, tl && !hist.past && Date.now() - tl.t1 <= GAP_MS), busy);
+  var line = timeline(hist.trips, hist.hl, hist.past, busy ? [] : tripPlaces(hist.trips, hist.pts, open), busy);
   paint({tkpi: kpis(hist.trips), tline: line + (tn || busy ? "" : dayBefore())});
-  var kp = document.getElementById("tkpi");
+  var kp = $("tkpi");
   if (kp) kp.className = "kp" + (busy && tn ? " busy" : "");
   placeNext();
   navPaint();
-  document.getElementById("gpx").disabled = !hist.pts.length;
+  $("gpx").disabled = !hist.pts.length;
 }
 
 // a day without a trip: a button to the board's day before it (the empty
@@ -1256,7 +1273,7 @@ function dayBefore() {
 var mapKey = "", trkKey = "", mapD = null;
 function placeMap(d) {
   mapD = d;
-  var el = document.getElementById("map"), p = posOf(d), fix = !!p;
+  var el = $("map"), p = posOf(d), fix = !!p;
   trackPaint();
   if (!fix) paint({st: '<span class="' + fixTone(d.fix || "-") + '"><i></i>No fix</span> <em>&middot; ' + esc(d.fix || "-") + "</em>",
     nst: "No position yet", nsub: "", nr: "", ncoord: ""});
@@ -1272,12 +1289,12 @@ function placeMap(d) {
   var nx = Math.ceil(el.offsetWidth / 512 / sc) + 1, ny = Math.ceil(el.offsetHeight / 512 / sc) + 1;
   var t = {x: Math.floor(v.X / 256), y: Math.floor(v.Y / 256), fx: v.X % 256, fy: v.Y % 256,
     mpp: mpp(lat, z) / sc};
-  var key = z + "/" + t.x + "/" + t.y + "/" + nx + "/" + ny, box = document.getElementById("tiles");
+  var key = z + "/" + t.x + "/" + t.y + "/" + nx + "/" + ny, box = $("tiles");
   // the pin, its ring and the coordinates at the position (off the anchor
   // when the view is centred on the day's track)
   var ids = ["acc", "pin", "cone"];
   for (var j = 0; j < 3; j++) {
-    var s = document.getElementById(ids[j]).style;
+    var s = $(ids[j]).style;
     s.left = "calc(50% + " + ((me[0] - v.X) * sc).toFixed(1) + "px)";
     s.top = "calc(50% + " + ((me[1] - v.Y) * sc).toFixed(1) + "px)";
   }
@@ -1292,7 +1309,7 @@ function placeMap(d) {
   }
   box.style.transform = (sc < 1 ? "scale(" + sc.toFixed(4) + ") " : "") +
     "translate(" + (-t.fx).toFixed(1) + "px," + (-t.fy).toFixed(1) + "px)";
-  var trk = document.getElementById("trk");
+  var trk = $("trk");
   trk.style.transform = box.style.transform;
   if (key + "/" + hist.pts.length + "/" + hist.hl !== trkKey) {
     trkKey = key + "/" + hist.pts.length + "/" + hist.hl;
@@ -1303,7 +1320,7 @@ function placeMap(d) {
       ends(t, z, hr ? hr[0] : 0, hr ? hr[1] : hist.pts.length - 1, sc) + "</svg>" : "";
   }
   // the ring's radius: HDOP * UERE
-  var acc = document.getElementById("acc"), px = (accM(d) || 0) * 2 / t.mpp;
+  var acc = $("acc"), px = (accM(d) || 0) * 2 / t.mpp;
   acc.style.width = acc.style.height = Math.max(36, Math.round(px)) + "px";
 }
 
@@ -1397,25 +1414,27 @@ function nowPaint(d, lat, lon) {
   var a = addr.a && addr.at && metres(addr.at, [0, lat, lon]) < 4 * ADDR_M ? addr.a : null;
   // the coordinates as the status painted them (view() runs first)
   paint(nowCard(d, a, h, (drawn.coord || "").replace(/ &middot; &plusmn;.*$/, "")));
-  var hd = h.kmh !== null && h.kmh >= 3 ? heading(hist.pts) : null, cone = document.getElementById("cone");
+  var hd = h.kmh !== null && h.kmh >= 3 ? heading(hist.pts) : null, cone = $("cone");
   cone.className = hd === null ? "cone" : "cone on";
   cone.style.transform = hd === null ? "" : "rotate(" + hd.toFixed(0) + "deg)";
   addrLoad(lat, lon);
 }
 
 var last = 0, every = 15, prevD = null, drawn = {};
+// a box by its id (the document asked each call: the tests swap it)
+function $(i) { return document.getElementById(i); }
 // a box rewritten only when its HTML changed: drawn holds what was written
 // (innerHTML reads back normalised, &middot; as U+00B7: it always differed)
 function paint(v) {
   for (var id in v) {
     if (drawn[id] === v[id]) continue;
-    var e = document.getElementById(id);
+    var e = $(id);
     if (e) { e.innerHTML = v[id]; drawn[id] = v[id]; }
   }
 }
 function stale() {
   document.body.className = "off";
-  document.getElementById("live").innerHTML = last ? "OFFLINE &middot; " + esc(hms((Date.now() - last) / 1000).toUpperCase()) +
+  $("live").innerHTML = last ? "OFFLINE &middot; " + esc(hms((Date.now() - last) / 1000).toUpperCase()) +
     " AGO" : "NO ANSWER";
 }
 function tick() {
@@ -1432,7 +1451,7 @@ function tick() {
       // board's: that stays OFFLINE
       var ct = x.status ? String(x.getResponseHeader("Content-Type") || "") : "";
       if (x.status === 500 || x.status && x.status !== 200 && /^text\/plain/i.test(ct))
-        document.getElementById("live").innerHTML = "BOARD ERROR &middot; " +
+        $("live").innerHTML = "BOARD ERROR &middot; " +
           (x.status === 500 ? "" : "HTTP " + x.status + " ") + esc(String(x.responseText).slice(0, 60));
     }
     // a bug drawing a box is not the board gone: LIVE stays, the error shows
@@ -1440,7 +1459,7 @@ function tick() {
       every = d.refresh_s || 15;
       last = Date.now();
       document.body.className = "";
-      document.getElementById("live").innerHTML = "LIVE";
+      $("live").innerHTML = "LIVE";
       paint(view(d, prevD));
       prevD = d;
       boardDays = d.days || [];
@@ -1451,7 +1470,7 @@ function tick() {
       if (histDue()) histLoad();
       if (diagDue()) diagLoad();
     } catch (e) {
-      document.getElementById("live").innerHTML = "LIVE &middot; PAGE ERROR " + esc(String(e && e.message || e)).slice(0, 60);
+      $("live").innerHTML = "LIVE &middot; PAGE ERROR " + esc(String(e && e.message || e)).slice(0, 60);
     }
     setTimeout(tick, every * 1000);
   };

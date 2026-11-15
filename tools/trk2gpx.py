@@ -196,7 +196,9 @@ def trb_lines(data, errors="replace"):
             b = 0
             while b < 6 and j < n:       # where the record ends (_rd_rec)
                 if m & (1 << b):
-                    while j < n and data[j] >= 0x80:
+                    # (bounded: past REC_MAX it is damaged anyway, and an
+                    # unbounded scan made a long 0xFF run quadratic)
+                    while j < n and data[j] >= 0x80 and j - i <= REC_MAX:
                         j += 1
                     j += 1
                 b += 1
@@ -261,7 +263,10 @@ def trb_lines(data, errors="replace"):
             return
         if line.startswith("="):
             st = _state(line[1:-1])
-            yield line[1:]
+            # a keyframe "=#END" is no footer (the logger's _rd_footer
+            # matches the raw record only) and "=#..." no header: no point
+            if not line.startswith("=#"):
+                yield line[1:]
         elif line == "-\n" or line.startswith("#"):
             yield line
         else:
@@ -323,6 +328,7 @@ def main(argv):
             name = name[:-len(suf)]
             break
     n = []
+    crlf = False
     # (bytes that are not UTF-8 never reach the GPX: read_points keeps
     # only numbers and checked times)
     if path.endswith((".trb", ".trb.err")):
@@ -338,12 +344,14 @@ def main(argv):
             sys.stdout.write(convert(f, name, n))
         with open(path, "rb") as f:
             data = f.read()
+        # (a text track only: in a binary .trb a varint byte 0x0D before a
+        # newline is no CRLF)
+        crlf = b"\r\n" in data
     if not n[0] and data:
         # an empty <trkseg> said nothing: a file copied with CRLF line ends
         # has no valid time on any line
         sys.stderr.write("trk2gpx: no valid points in %s%s\n"
-                         % (path, " (CRLF line ends?)" if b"\r\n" in data
-                            else ""))
+                         % (path, " (CRLF line ends?)" if crlf else ""))
     return 0
 
 

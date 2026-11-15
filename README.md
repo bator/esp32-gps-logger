@@ -91,7 +91,9 @@ firmware R6.0.0.0Build3700.
   WiFi, shows yesterday's. Before the first fix the clock comes from NTP on any WiFi
   (`NTP_SERVER`), and `--:--` without one; while the receiver is silent it runs on
   from the last fix by the board's ticks. `gps_tft.py`, its
-  anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
+  anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`, from Space
+  Grotesk Bold in `tools/fonts/`, SIL Open Font License 1.1: `tools/fonts/OFL.txt`;
+  Pillow 11.0.0 wrote the committed file, and CI checks that it still does).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
   socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
@@ -162,7 +164,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `SSID`, `WPA2` / `SSID2`, `WPA2_2` / `SSID3`, `WPA2_3` | Networks #1–#3 |
 | `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` | `1`/`0` (or `true`/`false`): treat as home. #1 is home by default, #2 and #3 are not. |
 | `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried although the scan never lists it by name: in every round whose scan shows an AP with an empty SSID (a hidden network still beacons), and in the first round after a link loss, a wake or an arrival and every 4th round otherwise. Set it for every hidden network: without it a hidden SSID is tried only in those first and 4th rounds (up to ~40 minutes apart). |
-| `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a console message. |
+| `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a line in the [diagnostic log](#diagnostic-log) (`env IP needs a valid IP and GW, using DHCP`). |
 | `GEO_URL` | Dawarich origin. Use `https://`; see [Upload](#upload). |
 | `API_KEY` | Dawarich API key, sent as `Authorization: Bearer <key>` |
 | `DEVICE_ID` | Overland tracker id, `[A-Za-z0-9._-]{1,32}` |
@@ -176,18 +178,24 @@ HOSTNAME=Dawarich-GPS-tracker
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
-| `WEB_AWAY` | `1`/`0`: with `WEB` on, the radio stays on for the page on the non-home networks too (e.g. a phone hotspot), instead of sleeping once all is uploaded. Default 0. |
+| `WEB_AWAY` | `1`/`0`: with `WEB` on, the page is served on the non-home networks too (e.g. a phone hotspot), to everyone there, without a password, and the radio stays on for it instead of sleeping once all is uploaded. `0`: off home nothing is served, also while the radio is on for an upload. Default 0. |
+| `UPLOAD_AWAY_UNVERIFIED` | `1`/`0`: `0` uploads only over verified TLS (`https://` with `/ca.der`) on a non-home network; without the certificate, or with an `http://` `GEO_URL`, the tracks wait for a home network (state `err unverified`, the radio sleeps meanwhile), so an evil-twin hotspot never sees the API key. Default 1 (uploads everywhere, as before). |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `UPLOAD_AWAY_UNVERIFIED`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Values may be quoted. On the keys above the comment goes first, then the
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored. A file saved as ANSI does not stop the boot: an SSID or password
-  that is not UTF-8 is used byte for byte, any other such value is skipped
-  with a console line.
+  that is not UTF-8 is used byte for byte, any other such value (or a key
+  that is not UTF-8) is skipped with a line in the diagnostic log.
+- A value out of range or unreadable keeps the default and says so in the
+  [diagnostic log](#diagnostic-log), on the console too (in the field there
+  is none): `env KEEPALIVE not 0 or 5-600 s, using 5 s`, the key named,
+  never the value. `DIAG` is read first, right after the boot line, so the
+  other keys' lines land in the log.
 
 A static IP for network #1 (a network without `IP` stays on DHCP, and moving
 from a static network to a DHCP one hands the interface back to DHCP):
@@ -205,16 +213,20 @@ DNS=192.168.1.111
 ### 3. Deploy
 
 ```bash
-./deploy.sh                      # default port /dev/ttyUSB0
-PORT=/dev/ttyACM0 ./deploy.sh    # the board's USB Serial/JTAG
+./deploy.sh                      # default port /dev/ttyACM0, the board's USB Serial/JTAG
+PORT=/dev/ttyACM1 ./deploy.sh    # another port (one that is not there: "No such port")
 VENV=../venv ./deploy.sh         # python, pip and mpremote from another venv
                                  # (default ./.venv; a relative path is
                                  # relative to where you run the script)
 ```
 
-The script asks the board what it is (anything but the Heltec is refused:
-`Unsupported board`), compiles `gps_logger.py`, `gps_clock.py` and `gps_receiver.py` to `.mpy` when the
-firmware has no frozen logger and checks the free flash (it stops with `Not
+The script first makes everything it sends, in a temporary directory and
+before it talks to the board (a local failure, such as a page
+`tools/web_min.py` refuses, then stops it with the board untouched): it
+compiles `gps_logger.py`, `gps_clock.py` and `gps_receiver.py` to `.mpy`
+(sent only when the firmware has no frozen logger). Then it asks the board
+what it is (anything but the Heltec is refused: `Unsupported board`) and
+checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
 It makes `web.html.gz` with `tools/web_min.py` (~24 KB instead of the ~80 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
@@ -297,10 +309,14 @@ The firmware also freezes `gps_clock.py`, the Clock (date maths, the one test
 of a real UTC time, Stamps and Anchors), `gps_receiver.py`, the Receiver (the
 UC6580's UART, the NMEA, the seconds it publishes in `st`; the logger imports
 both, so a plain board gets a `gps_clock.mpy` and a `gps_receiver.mpy` beside
-`gps_logger.mpy`), and `gps_boot.py`: what `main.py`
-does around the logger's start for OTA and the boot-fail retry. Frozen, its
-code is not compiled into the heap at every boot; `main.py` runs without it
-on a plain firmware. And it carries a small `gps_frozen` module with the
+`gps_logger.mpy`), and `gps_boot.py`: the logger's start itself
+(`gps_boot.start()`: the boot-bypass pin, the boot-fail counter and retry,
+the OTA glue before the import), which `main.py` only calls. Frozen, its
+code is not compiled into the heap at every boot, and an OTA brings a new
+one; `main.py` is a file an OTA does not touch, so a change to `main.py`
+needs `./deploy.sh`. `main.py` starts the logger itself on a plain
+firmware and with an older frozen `gps_boot` without `start()` (the old
+firmware after a rollback). And it carries a small `gps_frozen` module with the
 commit (`-dirty` when the tree had uncommitted changes), the BUILD time and
 five SHA-256s: `SHA` of the frozen `gps_logger.py`, `TFT` of `gps_tft.py` +
 `gps_tft_font.py` (cat'ed in that order), `BOOT` of `gps_boot.py`, `CLOCK`
@@ -367,11 +383,14 @@ not newer than the published manifest's is refused (a board only takes a
 newer one; `FORCE=1` publishes it anyway). The
 manifest carries the build (the commit time), the commit, size and SHA-256
 of each file, and an HMAC-SHA256 over them with the key in `OTA_KEY_FILE`
-(default `~/.config/gps-logger/ota.key`). The key is printable ASCII without
-quotes or spaces, 16 characters or more (the board reads it from `.env`):
-`openssl rand -hex 32 > ~/.config/gps-logger/ota.key`. A key file readable
-by everyone is refused (`chmod 600` it), one readable by its group is
-warned about; the key itself is never printed. Only a clean,
+(default `~/.config/gps-logger/ota.key`). The key is one line of printable
+ASCII without quotes or spaces, 16 characters or more (the board reads it
+from `.env`): `openssl rand -hex 32 > ~/.config/gps-logger/ota.key`; it is
+checked as `tools/firmware.py` signs with it, the file stripped (a
+two-line key passed the old check and signed with the newline in it: bad
+hmac on every board). A key file readable by everyone is refused (`chmod
+600` it), one readable by its group is warned about (the mode of the file
+a symlink points to); the key itself is never printed. Only a clean,
 committed tree is published. A `--flash` or dirty build carries the build
 time instead of the commit time, so the OTA does not replace what was just
 flashed by hand with an older published build.
@@ -379,6 +398,15 @@ flashed by hand with an older published build.
 ```bash
 OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 ```
+
+Once the new manifest is up, the files only the replaced manifest named
+are removed from `OTA_DEST` (plain names only, never one the new manifest
+names, nothing else in the folder). The HMAC binds no freshness: anyone
+who kept an older signed manifest and its image can serve them again (a
+spoofed server on the LAN), and a board behind that build installs it.
+The board refuses a build not newer than its own, and the removal keeps
+the server itself from serving old builds; a signed minimum build would
+need a new HMAC string, which the boards in the field do not check.
 
 The `OTA_DEST` path is a plain one: only letters, digits and `_ . / -` (no
 `~`, spaces or shell specials; `scp` takes it as it is, the `ssh` rename
@@ -409,7 +437,10 @@ runs to ~220). A `/gps_logger.mpy` or `.py`
 (or `/gps_clock.mpy`, `/gps_receiver.mpy`, `.py`) on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
 (`''` comes first in `sys.path`): on a frozen firmware the install moves
 it aside as `<name>.ota-old`, the valid new firmware deletes it, and
-after a rollback `main.py` puts it back before the import. A Ctrl-C
+after a rollback `main.py` puts it back before the import. One that does
+not move aside stops the install before `set_boot` (`ota cannot move
+aside <path>`, waits `OTA_RETRY` as `shadow err`): it went on, and the old
+module ran on the new image. A Ctrl-C
 between `set_boot` and the reset no longer skips the reset (left there,
 the next reset booted the new slot with no pending note, valid without a
 health check); a boot slot that is set but not the running one at boot
@@ -418,7 +449,13 @@ health check); a boot slot that is set but not the running one at boot
 once more (HTTP 200, the fields and the HMAC as above, every minute until
 it is: `OTA_PROBE`; a build whose update path is broken would otherwise
 only get the next one over USB, and a manifest signed with another key no
-longer makes it valid), mark it valid, and only then do the
+longer makes it valid), mark it valid (`/ota.mark` says `valid` first: a
+power cut between the confirmation and the note's removal booted the
+valid image as pending again, and the next boot now ends the confirmation
+at once; a confirmation that fails keeps the image pending, one diag line
+`ota <commit> not confirmed`, is tried again each tick and ends in the
+health reset, where the steps below ran over an unconfirmed image with
+`ota ok` in the log), and only then do the
 staged page files replace the old ones (on a file system that does not
 rename over a file, the old one is moved aside first and back if the new
 one still does not go up; a page that does not go up is a diag line,
@@ -431,13 +468,15 @@ the bootloader boots the old slot; no WiFi or no manifest within 10 minutes
 the old slot to boot itself: that left the old image pending, and the next
 reset fell back to `ota_0`). A download that fails its SHA-256 or is cut
 short (a network error, a short body), or a page file that fails its
-SHA-256 or cannot be written, is tried again an hour later (`OTA_RETRY`),
+SHA-256 or cannot be written, a flash error writing or reading the slot
+back, is tried again an hour later (`OTA_RETRY`),
 not every check (the image came again every 10 minutes, the loop blocked
 for it); an error (server down) goes to the diagnostic log once per kind.
 Points waiting for upload hold the check back only with a `GEO_URL` and
 `API_KEY` to send them to (without, they would hold it for good). A build that crashed (the logger's crash
 branch notes it in `/ota.mark`) or whose watchdog fired while the logger
-ran is noted in `/ota.bad` and not tried again. Any other rollback may
+ran is noted in `/ota.bad` and not tried again (the page then says `ota bad
+<commit>`, not `up to date`). Any other rollback may
 not be the build's fault and is a try instead, counted per build in
 `/ota.tries`: at power-on (the cable pulled; MicroPython 1.29 reports a
 brownout as a power-on too, and a build that browned out on a weak supply
@@ -446,9 +485,17 @@ router or server outage), and a reset from outside (`mpremote reset`, a
 USB-JTAG reset, the watchdog after an `mpremote` session stopped the
 logger: Ctrl-C notes `stop`; each of these marked a good build bad at
 once). A panic is a try too: it reads as a hard reset, like `mpremote
-reset`, and no Python code runs to note it. The build is tried again an
-hour after the next boot (`OTA_RETRY`) and is bad after 2 tries
-(`OTA_TRIES_MAX`); the health reset removes the note before it counts its
+reset`, and no Python code runs to note it. The rollback's cause is the
+old firmware's first boot after it: `gps_boot` notes it in `/ota.mark`
+(`cause <n>`) before the import, so a reset of the old firmware before it
+read the note (a Ctrl-C, a stall and its watchdog) is not taken for the
+new build's. The build is tried again an
+hour after the next boot (`OTA_RETRY`); after 2 tries (`OTA_TRIES_MAX`)
+it is held a day (`OTA_HOLD`, UTC from the first check with a clock; twice
+as long each further round, at most 32 days) and then tried again: never
+bad for good, as two power cuts in the 2-minute pending window made a good
+build (a build in `/ota.bad` from an older firmware's tries stays there:
+remove the file to try it again); the health reset removes the note before it counts its
 try, so a power cut between them cannot count one attempt twice, and it
 writes the points in RAM first. A boot without a pending note confirms
 the running image. A note that is there but cannot be read or parsed is
@@ -466,7 +513,7 @@ Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
 The status page shows the running build under *Logger*: the `Firmware` row
 gives the build's date (the commit time, `fw_build` in the JSON, local
-time) and the OTA state (`up to date`, `updated`, `checking`, `rolled back`,
+time) and the OTA state (`up to date`, `updated`, `checking`, `rolled back`, `ota bad <commit>`,
 …); the commit is in the top bar (`FW 02e4317`).
 
 After the migration, `--flash` over USB still works. It backs up both slots
@@ -484,7 +531,7 @@ and shows the route and its state on the display (see [Hardware](#hardware)).
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup answered, not answered, or sent again |
 | `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an answered setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
-| `gps setup unverified: no fix` | 30 minutes after an answered setup still no fix to check it by: no verdict |
+| `gps setup unverified: no fix` | 30 minutes after an answered setup still no fix to check it by: said once, the check still waits for its 3 valid seconds |
 | `gps setup lost: no GST` | No `GST` for 30 s with sentences coming (`UC_GST_LOST`): a restart whose banner was lost; it is set up again |
 | `gps refused <command>` | The receiver answered a command `$FAIL`. A refused rate (`CFGNAV`): it stays at its rate, the rest of the setup goes on, and 1 fix/s is then no "not taken" verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
@@ -517,7 +564,11 @@ What counts, and what follows:
 
 - an import failure of `gps_logger`, or an exception escaping `run()`: the
   count goes up, then `main.py` waits 5 s per failure so far (5 s, 10 s, …
-  at most 30 s) and resets;
+  at most 30 s) and resets; the error is printed and a `crash boot <n>
+  <error>` line goes to the diagnostic log (it was silent), and so does
+  `crash boot fail <n>` when the REPL takes over. A count that can be
+  stored neither in RTC memory nor in `/boot_fail` goes to the REPL and
+  its retry too (it reset every 5 s for good);
 - a crash inside `run()` (the main loop): the count goes up, the batch is
   flushed, a `crash` line goes to the diagnostic log and the board resets
   after 1 s (no growing delay);
@@ -529,11 +580,21 @@ boot cause 2 (hard reset), the same as the logger's own `machine.reset()`
 1 (power on). The counter is cleared after 60 s (`BOOT_OK_MS`) of a healthy
 main loop, by `deploy.sh` or by a power cycle. By hand:
 `mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
+An NMEA handler that raises anything but a MemoryError (a TypeError, a
+KeyError: a bug, not a bad sentence) is not counted as a bad sentence: it
+counts apart (`st["bug"]`) and writes `bug nmea <type> <error>` once per
+exception type a boot; an exception in the receiver setup writes `bug gps
+setup <error>` the same way.
 A bug in the WiFi, upload or OTA tick, the status page's or a status
 line's, no longer resets the board: it is
-one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
+one diagnostic line a kind (`bug <tick> <error>`; a kind is the tick and
+the exception type, so a message that varies is one kind, and one that
+goes on is written again every hour, `BUG_AGAIN`: the one line a boot
+rotated out of the log in a day or two), that tick pauses 5 s
 (`TICK_PAUSE`) and logging goes on; an upload bug also backs the upload
-off. Ten MemoryErrors of one tick, each within 40 minutes of the one before
+off. Each tick's bugs since boot are counted: `tick_bugs` in
+`/status.json` (`upload:1234 ValueError('x')`, the last one each) and
+`bugs upload:1234,wifi:2` at the end of the diag status line. Ten MemoryErrors of one tick, each within 40 minutes of the one before
 (`GUARD_MEM_MAX`, `GUARD_MEM_QUIET`: over the longest upload backoff, so a
 lasting one in a backed-off tick keeps counting; counted per tick, and a
 pass that runs through between them, an upload in its backoff or an idle
@@ -593,7 +654,9 @@ segment),
 `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
-used, `clock set <UTC>` once a boot when the board clock is set from the
+used, `upload GEO_URL https without /ca.der: …` at the start when the server
+is not verified, `upload: <file> unreadable, parked as .err` (or `… not
+parked <error>`), `clock set <UTC>` once a boot when the board clock is set from the
 GPS (`clock set <UTC> gps`: the last fix's clock run on, the fix gone;
 `clock set <UTC> ntp`: from NTP, no fix since the boot), `clock ntp
 <UTC>` when NTP tells the display the time before a fix, `heap grew in <step> to N KB` when the
@@ -612,8 +675,8 @@ h). They take up to 320 KB of the ~12 MB file system; below the 32 KB flash
 reserve nothing is written. Nothing reads a whole file into RAM: the
 rotation only looks at the size, the boot reads the last few lines, and the
 status page reads both files in 16 KB pieces (`/diag?f=1|0&o=<byte>`, see
-the *Event log* below; `/status.json` still carries the last 15 lines,
-`WEB_DIAG`). After a walk, plug the board in and read it:
+the *Event log* below; `/status.json?diag` carries the last 15 lines,
+`WEB_DIAG`, plain `/status.json` no longer reads them). After a walk, plug the board in and read it:
 
 ```bash
 .venv/bin/mpremote resume fs cat :/diag.log
@@ -623,7 +686,7 @@ the *Event log* below; `/status.json` still carries the last 15 lines,
 | Field | Meaning |
 |-------|---------|
 | `boot cause N` | Why the chip started (`machine.reset_cause()` of MicroPython 1.29): 1 power-on (also a brownout, or a power bank switching back on), 2 hard reset (the logger's own reset after a crash or for TLS memory, `mpremote reset`, a panic), 3 watchdog, 4 deep sleep, 5 soft reset (Ctrl-D), 0 other (e.g. a reset over USB-JTAG) |
-| `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; exact before a deliberate reset, which writes a status line first; `0` = under a minute, `-` = no log) |
+| `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; exact before a deliberate reset, which writes a status line first; `0` = under a minute, `-` = no log, or more than 40 event lines after its last status line). `/diag.1` only when the whole of `/diag.log` has no status, crash or boot line (just rotated) |
 | `up` | Seconds since boot (summed from tick differences, so it does not wrap after 12.4 days) |
 | `utc` | GPS time, `-` until the receiver has one |
 | `nmea ok/bad` | Valid and broken NMEA sentences so far |
@@ -633,12 +696,15 @@ the *Event log* below; `/status.json` still carries the last 15 lines,
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
 | `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`); at home, if it stays low for 5 minutes with tracks waiting, the board reboots cleanly (at most once per 30 minutes) |
+| `bugs`, `diag_errs` | Only when there are any: each guarded tick's bugs since boot (`bugs upload:12,wifi:1`), diag lines that failed to write (`diag_errs 3`; also in `/status.json`) |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
 `http://192.168.1.60/`) and the same data as JSON at
 `/status.json`: fix, satellites seen/used ("used" from the satellite list:
-GGA stops at 12) and the satellite list with its age (system and number,
+GGA stops at 12) and the satellite list with its age (none once it is
+2 min old, two `SV_POLL`, so a silent receiver's last sky is not shown as
+live; system and number,
 e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`; signal in
 dBHz, elevation, azimuth, used), HDOP, GPS time,
 position (`position` to 5 decimals, `pos6` to the track line's 6; both
@@ -649,14 +715,17 @@ wrapping at 2^30,
 `rx_age_s` / `good_age_s`: seconds since the last byte / the last whole
 NMEA sentence, `null` for none yet), the receiver model,
 receiver restarts; points logged, waiting and uploaded,
-quarantined `.bad` files, upload state, `upload_age_s` (seconds since the
+quarantined `.bad` files, parked `.err` files (`err_files`), upload state,
+whether the upload's TLS is verified (`tls`), `upload_age_s` (seconds since the
 last accepted batch, `null` for none since boot), the day history's
 `days`, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON, `prev_end` the time of its last line), boot
 cause, the build (`fw`, `fw_build`), chip temperature, free Python heap
 and flash,
-WiFi, keep-alive pulses; and the last lines of the diagnostic log (the page
-itself no longer uses them: it reads the whole log, below). The
+WiFi, keep-alive pulses; with `?diag` (`/status.json?diag`) also the last
+lines of the diagnostic log (the page itself reads the whole log, below).
+No RAM while the JSON is built is no bug: the client is dropped (it is not
+counted in `web_errs`, no `web error` line). The
 page follows the phone's light or dark setting in one colour world (green,
 amber and red only for meaning). A thin top bar names the board (`device`),
 says `LIVE` (or `OFFLINE · 12 MIN AGO`, `NO ANSWER`, `BOARD ERROR`) and
@@ -669,7 +738,7 @@ day sit beside the map (on a phone the map comes first):
   and 20 s) with district and city; how long it has been here, the speed,
   the accuracy (HDOP x 2.5 m) and the age of the last fix; the coordinates
   (N/S, E/W) under them;
-- *Day*: a chip a day (today first, then the days the board keeps) and
+- *Day*: a chip a day (the days the board keeps, oldest first, today last) and
   `‹ ›` arrows; on top the km, the moving time and the trips; below, the
   day as a line (as in Maps Timeline): a dot and a solid stretch per trip
   (start time, km, duration, mean km/h) and a dashed stretch per stop (its
@@ -696,8 +765,8 @@ Below, three columns split by hairlines (one under the other on a phone):
   days`, at 7 bytes a `.trb` point), then a row a subsystem with its detail,
   a green, amber or red dot and the word (`Warn`, `Error`) only when it is
   not nominal; the heading counts them (`7/7 OK`). `GPS receiver` (model,
-  fix, satellites used/seen, HDOP; amber without a 3D fix, a failed setup or
-  reset loops), `GPS link` (B/s, the last whole frame, restarts, bytes read,
+  fix, satellites used/seen, HDOP; amber without a 3D fix or after a failed
+  setup; the reset loops since boot are counted in it, not coloured), `GPS link` (B/s, the last whole frame, restarts, bytes read,
   the share of broken NMEA sentences), `Upload` (state, points waiting,
   sent, errors, `.bad` files, the last accepted upload), `Storage` (free MB,
   points logged, track files), `Memory` (the largest IDF block, red under
@@ -742,7 +811,12 @@ Below, three columns split by hairlines (one under the other on a phone):
   file's size; ~16 KB a reply, `HIST_REPLY`), parsing as it goes (only the
   totals are kept, not the lines); after that once a minute `f=0` from
   where it got to. When `/diag.log` is smaller than that, it became
-  `/diag.1`: the page reads both again.
+  `/diag.1`: the page reads both again; so it does when the `f=0` answer's
+  `X-Diag-Old` (the size of `/diag.1`, 0 without one) is not the size it
+  read (a rotation missed while the board was away, its `/diag.log` grown
+  past the page's offset again). The minutes are summed from the status
+  lines' `up` (the time since the line before, so any `DIAG`; after a boot
+  the `up` itself, after a gap one step).
 
 Under the columns the device in one strip: how long it has run and since
 when (local time), the boot cause, the run before it and until when, chip
@@ -815,7 +889,10 @@ kept (`HIST_DAYS`; a day written both as text and as `.trb` is one day). The
 history yields to the tracks: under 1 MB
 free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
 batch would be dropped on a full flash, and nothing is added under
-2 × `MIN_FREE`. An append cut short (the flash full mid-write) leaves no
+2 × `MIN_FREE`. A failed write (or a bug in the copy) costs only the
+drawing: it is counted (`hist_errs` in `/status.json`) and in the
+diagnostic log as `track hist error`, the first and then one per 10
+minutes. An append cut short (the flash full mid-write) leaves no
 footer: the next one starts with 32 `0xC0` bytes and a newline
 (`HIST_SEP`), which end a record cut there (no keyframe is lost to it, no
 point made up). The page asks `/hist?d=YYYYMMDD&o=<offset>` and gets the
@@ -834,7 +911,9 @@ answers no lines, only `X-Hist-Next` at the last keyframe before that time,
 found by the keyframes' text without decoding the deltas (`HIST_SEEK_MS`;
 `X-Hist-Seek: 1` when it ran out of time: ask again from there), so a past
 day no longer reads the whole UTC day before it (~16 replies of ~2.4 s for
-its last hour). A day without a file is a `204` (the page asks for today's
+its last hour). A past local day that ends inside a UTC day stops reading
+that day at the first reply whose last point is past the local day's end
+(points in time order), not at the UTC day's own end. A day without a file is a `204` (the page asks for today's
 every minute before its first point). `status.json`'s `day_span` gives each
 `.trb` day's first and last point (seconds into the UTC day; one day read a
 request, kept with its file size), so the day picker offers a UTC day's next
@@ -865,13 +944,13 @@ phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
 measured at most every 30 s and the waiting files are
 counted at most every 10 s. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
-`WEB=0` in `.env` turns both off. On the other networks the page is up
-only while the radio is on anyway (something still to upload, then up to
-`WIFI_IDLE`, 10 s, before it sleeps); with `WEB_AWAY=1` the radio stays
-connected for it there too. `WEB_AWAY` decides how long the radio stays
-on, not who is served: whenever the board is connected, on any network in
-`.env`, the page answers everyone on that network, with no password.
-Those networks use DHCP: find
+`WEB=0` in `.env` turns both off. On the other networks the page is
+served only with `WEB_AWAY=1`, which also keeps the radio connected for it
+there; without it the board serves nothing off home, also while the radio
+is on for an upload (the page has no password: a hotspot or a friend's
+network got the live position, the 7-day track and the diag log with its
+SSIDs). With `WEB_AWAY=1` it answers everyone on those networks, with no
+password. Those networks use DHCP: find
 the board's address in the hotspot or router client list (by its DHCP
 hostname, `HOSTNAME`) or in the `web http://…/`
 console line.
@@ -893,15 +972,19 @@ console line.
   (`GPS_VERIFY`) it is checked: valid seconds still at one fix each, or NMEA but no
   `GST` (without it the `GPS_MAX_STD` filter is off), count as not taken, and it
   is sent again. Only valid seconds tell: before the first fix (a setup at boot,
-  indoors) the check waits for 3 of them, up to 30 minutes (`GPS_VERIFY_MAX`). It
-  counts as taken only with 5 fixes a second and `GST`. One that answers every
+  indoors) the check waits for 3 of them, however long that takes (after 30
+  minutes, `GPS_VERIFY_MAX`, it says so once: a receiver that answered but stayed
+  at 1 fix a second is still caught when the fix comes). It counts as taken only with 5 fixes a second and `GST`. One that answers every
   setup but keeps sending what it turned off gets the second retry after 5 s too,
   then 10, 20, 40 s and every minute (`GPS_IGNORED_MAX`). A start-up banner (power
   dip) sets it up again at once and starts that backoff afresh; no `GST` for 30 s
   with sentences coming (`UC_GST_LOST`) is a restart whose banner was lost.
-- **Satellite list.** From `GSV`, one list a `GSV_EVERY` (5 s): the same satellite
-  on two bands counts once, with its stronger signal; used from `GSA`. A receiver
-  restart forgets the list and the model (`$PDTINFO`), which is asked anew.
+- **Satellite list.** From `GSV`, one list a `GSV_EVERY` (5 s): a round is the
+  `GSV` of one receiver second (any systems, also a `GPS_SYS` mask without GPS),
+  closed by the next second's first `GSV`. The same satellite on two bands counts
+  once, with its stronger signal; used from `GSA`. A list older than 2 minutes
+  is not used for the seen count. A receiver restart forgets the list and the
+  model (`$PDTINFO`), which is asked anew.
 - **Averaging.** The valid `GGA` positions, altitude and HDOP of each UTC
   second are averaged and published when the next second starts (`RMC`
   positions if a second had no `GGA`). `GST` gives the receiver's own error
@@ -1034,8 +1117,11 @@ tell a stay from a drive, so the stay filter works on positions.
 - **No drift on flash.** While a stay may still be proven, its windows'
   lines are held in RAM, and they are dropped when it begins, after a boot or
   a new fix too. The way in is kept up to where it first comes within 50 m of
-  the anchor. Closing a file for upload never writes the held lines; they
-  move on to the next file.
+  the anchor, and an excursion out past 150 m that came back (a U-turn past
+  the place, back to park) is never dropped; a multipath spike out there is.
+  A way out already begun is kept too, a car's included (a stop of ~90 s:
+  the first 150-290 m of the drive off went as drift). Closing a file for
+  upload never writes the held lines; they move on to the next file.
 - **Anchor.** The mean of the two windows, refined by fixes within 50 m. If
   the device settles 50–150 m away (out of the car, into the building), three
   consecutive matching window pairs there (about four minutes) move the
@@ -1059,8 +1145,11 @@ tell a stay from a drive, so the stay filter works on positions.
   it lasts, and an excursion that turns back does not count. The way out is
   written from near the anchor, from the last 90 samples, in time order
   (kept in preallocated arrays, 28 bytes a sample: as line tuples they took
-  ~20 kB of the heap and broke uploads). Each line is rebuilt exactly as it
-  would have been written then, the board's single-precision rounding
+  ~20 kB of the heap and broke uploads). It begins at the last sample within
+  5 m of the anchor, or within 50 m after 30 s without a sample kept: a home
+  stay in calm reception wrote up to 90 samples hours old before the way
+  out, the new track named after the first. Each line is rebuilt exactly as
+  it would have been written then, the board's single-precision rounding
   included.
 - **Leaving after a fix gap** (over 30 s; a metro or a garage, then sitting
   still elsewhere): beyond 150 m the stay ends without waiting for the fixes
@@ -1103,13 +1192,15 @@ tell a stay from a drive, so the stay filter works on positions.
   in RAM only. A window that spread out on its own (its centroid over 75 m
   from both its first and its last fix: an out-and-back turn at driving or
   cycling speed) proves no stay, so a U-turn no longer drops part of the
-  trip. A walk turning back within ~80 m still can: indoor drift looks the
+  trip; nor one whose last two fixes are over 150 m from its centroid (a
+  car stopped for about a minute and a half and off again). A walk turning
+  back within ~80 m still can: indoor drift looks the
   same. A fix back after 5 minutes more than 150 m away writes
   what was held to the old track before it closes.
 - **Leaving home** is accepted only once the home network is out of range:
   below −85 dBm (`SEEN_MIN_RSSI`) on the home link or in a ~2 s scan while
-  the radio sleeps after it, below −75 dBm (`ROAM_MIN_RSSI`) in a scan
-  otherwise. While it is in
+  the radio sleeps after it (a hidden home's learned BSSIDs too), below
+  −75 dBm (`ROAM_MIN_RSSI`) in a scan otherwise. While it is in
   range the departure is a GPS jump (measured: a 194 m jump at a desk) and
   further departures wait 60 s.
 - **After a fix gap** (over 30 s): fixes more than 150 m from the open window
@@ -1249,12 +1340,15 @@ home.
   body is the same as before.
 - Progress is a `<file>.pos` byte offset, written atomically. It advances
   only after HTTP 2xx or a durable copy to `<file>.bad`, so an interrupted
-  POST is resent (Dawarich deduplicates). A 2xx that is not JSON (an HTML
-  or plain-text body, or a `204 No Content`) is a captive portal or proxy
-  answering, not Dawarich: it counts as a failed POST (`upload err html …`
-  or `upload err not json … (captive portal?)` in the diagnostic log). A
-  2xx whose headers could not be read stays a success (a resend would
-  duplicate). A file that cannot be deleted after its
+  POST is resent (Dawarich deduplicates). Only a 2xx with a JSON
+  `Content-Type` commits. One that is not JSON (an HTML or plain-text
+  body, no `Content-Type` at all, or a `204 No Content`) is a captive
+  portal or proxy answering, not Dawarich: it counts as a failed POST
+  (`upload err html …` or `upload err not json … (captive portal?)` in the
+  diagnostic log). So does a 2xx whose headers could not be read to their
+  end (a reset, a timeout, the guard: `upload err head not read …`): it is
+  resent and Dawarich drops the duplicate points; a portal's bare `200`
+  used to delete the track as sent. A file that cannot be deleted after its
   last batch is parked as `.err` after 3 tries.
 - 400 / 413 / 422 quarantine the batch to `<file>.bad`. Three in a row
   without a success count as a server problem: backoff, no more quarantine
@@ -1265,12 +1359,24 @@ home.
   (the flash reserve, an I/O error) is `fs err` and is tried again.
   Points moved to a `.bad` leave `left` once (a `.bad` is not counted).
 - Other errors back off from 15 s up to 30 minutes (`Retry-After` is
-  honoured); 401 waits 30 minutes. Between POSTs it pauses 5 s at home, 30 s
+  honoured); 401 waits 30 minutes. The same batch answered 3 times in a
+  row with a server error (5xx, or a proxy's 404 / 403) holds its track
+  for 30 minutes while the others go; the first such hold ends with any
+  track's 2xx (the server is back, e.g. after a Dawarich restart), a
+  second one for that batch only when it runs out. Holds for payload
+  errors stay. Between POSTs it pauses 5 s at home, 30 s
   elsewhere. Flash and memory errors back off too, and with every waiting
   track held back (state `held`) the radio sleeps until the first is due.
 - An unreadable track (`OSError` on read) is held back so the newer ones
-  still go; after three tries it is parked as `<file>.err`. A `.pos` that
+  still go; after three tries it is parked as `<file>.err`
+  (`upload: <file> unreadable, parked as .err` in the diagnostic log, or
+  `… not parked <error>` when even the rename fails; `err_files` in
+  `/status.json` counts the `.err` files). A `.pos` that
   cannot be written is a flash error (`fs err`, retried), not a read error.
+- A batch in which no point is valid (an erased flash block reads `0xFF`:
+  a damaged 1-byte record each byte) reads on past 50 records, up to 4 KB
+  (`UPLOAD_SCAN`), and the next round follows at once: a 4 KB bad block
+  costs one round, not ~80 rounds of 50 bytes, 5 s and a `.pos` write each.
 - **Reading:** track lines are read with `readinto` into one 512-byte
   buffer (`LINE_MAX`) and a `.trk` point is parsed there and written
   straight into the JSON buffer, so a 50-point batch makes only small,
@@ -1284,7 +1390,8 @@ home.
   console ends with the POST time. Answer lines are read 256 bytes at a
   time (`HTTP_LINE`); once the status line is in, an error while reading
   the headers (reset, timeout, the guard closing the socket) keeps the
-  status, so an accepted batch is not sent twice.
+  status, but the head is not whole: a 2xx then is resent (see above), a
+  5xx stays a 5xx.
 - **POST guard:** a hardware timer feeds the watchdog during a POST (it
   also runs while a socket or TLS call blocks) and closes the socket after
   60 s (`HTTP_MAX`, `upload aborted after 60 s` in the diagnostic log), so a
@@ -1300,7 +1407,13 @@ home.
   `https://` encrypts, but a MITM can still see the key and the points. A
   DER root certificate at `/ca.der` (`CA_FILE`; the one your server's chain
   ends in) turns verification on. With an `http://` `GEO_URL` the logger
-  warns that everything goes in the clear. The `SSLContext` (and the
+  warns that everything goes in the clear. Without `/ca.der` the start
+  writes `upload GEO_URL https without /ca.der: the server is not verified,
+  uploads away on|off` to the diagnostic log, and `/status.json` has `tls`:
+  `verified`, `unverified`, `off` (http) or `ca err`. On a phone hotspot an
+  unverified upload shows the Bearer key to whoever runs the access point:
+  `UPLOAD_AWAY_UNVERIFIED=0` in `.env` keeps such uploads to the home
+  networks. The `SSLContext` (and the
   certificate) is made once at boot, before the WiFi starts (made at the
   first POST it could grow the Python heap and keep that area), and reused.
   Only a missing `/ca.der` means no verification: one that cannot be read,
@@ -1451,6 +1564,7 @@ Constants at the top of `gps_logger.py`; most never need changing.
 |----------|---------|---------|
 | `UPLOAD_BATCH` | 50 | Points per POST |
 | `UPLOAD_GAP` / `UPLOAD_GAP_AWAY` | 5 s / 30 s | Pause between POSTs at home / elsewhere |
+| `UPLOAD_SCAN` | 4096 | Bytes a batch with no valid point yet reads on past `UPLOAD_BATCH` records (a damaged stretch) |
 | `BACKOFF_START` / `BACKOFF_MAX` | 15 s / 30 min | Upload backoff (and `Retry-After` cap) |
 | `AUTH_BACKOFF` | 30 min | Wait after HTTP 401 |
 | `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (connect, TLS) |
@@ -1482,11 +1596,11 @@ Constants at the top of `gps_logger.py`; most never need changing.
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
-| `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
+| `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_HOLD` / `OTA_STUCK` | 1 min / 2 / 24 h / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is held; how long it is held then (UTC, doubled each round, 32 times at most); how long without a successful upload before waiting points stop holding the update check back |
 | `WEB_PAGE_GZ` / `WEB_GZ_WBITS` / `WEB_PAGE` / `WEB_REFRESH` | `/web.html.gz` / 12 / `/web.html` / 15 s | The page on the board, kept only gzipped (as is to clients accepting gzip, inflated for the others); its window (2^12 = 4 KB of heap to inflate; `deploy.sh` and `--publish` use it); an older board's plain page, served while it is there; how often the page polls `/status.json` |
 | `KEY_EVERY` | 64 | Delta records between two keyframes of a `.trb` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply (and bytes at most per `/diag` reply) |
-| `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
+| `WEB_AWAY` | off | The page served, and the radio kept on for it, on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` | 60 s | A satellite list younger than two of these gives the used count (else GGA) |
 | `GSA_EVERY` / `GSA_MAX` | 5 s / 8 | GSA round interval; more GSA a second means the rate was not taken |
 | `SEEN_WAIT` | 60 s | Least time between home-seen wakes |
@@ -1530,15 +1644,28 @@ every pull request:
     file in from a `.tmp` and refusing a build not newer than the published
     one, a key file readable by everyone, and an `OTA_DEST` that is not a
     plain path.
-  The page checks run on Node 24 (`actions/setup-node`, pinned). The page's
+  The page checks run on Node 24.22 (`actions/setup-node`, pinned; the
+  stripped page's AST check reaches node's own acorn). The page's
   layout check (headless Chrome at 375 and 800 px) runs where `google-chrome`
   or `chromium` is on the `PATH`, else it is skipped; the workflow installs
-  neither. The suite removes every temporary directory it made when it ends
+  neither (the ubuntu-24.04 runner image has `google-chrome`).
+  `TFT-FONT-REGEN` runs `tools/make_tft_font.py` and compares its output
+  with the committed `gps_tft_font.py` (the workflow installs Pillow 11.0.0;
+  elsewhere it is skipped without that Pillow). A check that cannot run
+  prints `SKIP` and is counted in the summary (`N passed, N failed, N
+  skipped`, then the skipped and the failed ones); with `CI=true` (GitHub
+  Actions) a skip is a FAIL, as the workflow installs all the suite needs
+  (`CI_SKIP_OK` lists the exceptions, none now). The summary is printed also
+  when an uncaught exception ends the run early (`RUN ENDED EARLY`). The
+  suite removes every temporary directory it made when it ends
   (`KEEP_TMP=1` keeps them to look at after a failure).
 - `mpy-cross` 1.29 for `xtensawin` on every frozen module (`gps_logger.py`,
   `gps_clock.py`, `gps_receiver.py`, `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
   itself (ESP-IDF, `boards/GPS_LOGGER_S3`) is not built in CI: a board or
   freeze-manifest breakage shows at the next local `tools/build_firmware.sh`.
+- Every action pinned by commit SHA, `pyflakes`, `mpy-cross` and Pillow by
+  exact version; the MicroPython cache key includes the workflow's hash (a
+  changed build recipe builds anew).
 - `pyflakes` on every Python file: `gps_logger.py`, `gps_clock.py`, `gps_receiver.py`,
   `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`, `main.py`, `tools/` and `tests/`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
@@ -1546,7 +1673,7 @@ every pull request:
 The same locally:
 
 ```bash
-.venv/bin/pip install pyflakes "mpy-cross==1.29.*"
+.venv/bin/pip install "pyflakes==4.1.0" "mpy-cross==1.29.0.post2" "pillow==11.0.0"
 .venv/bin/python -m pyflakes gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 shellcheck deploy.sh tools/build_firmware.sh
 for m in gps_logger gps_clock gps_receiver gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done

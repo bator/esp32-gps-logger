@@ -371,6 +371,7 @@ def ring_lines():
 check("departure ring rebuilds its lines exactly (single precision)", ring_lines())
 gl._rcv.reset()
 gl.st["svs"] = saved_svs
+gl.st["svs_at"] = time.ticks_ms()        # (a fresh list: an old one is none)
 
 try:
     jd = json.loads("".join(gl._web_json_parts(gl._web_rows(), gl._sv_list())))
@@ -623,7 +624,7 @@ if sys.implementation.name == "micropython":
     import socket as _socket
     gl.wifi_reset()
     gl.up_reset()
-    gl.wifi["state"] = "connected"
+    gl.wifi.update(state="connected", home=True)
     gl.WEB = True
     for k in range(8):                  # a free port
         gl.WEB_PORT = 20000 + (time.ticks_ms() * 7 + k * 1013) % 20000

@@ -552,10 +552,13 @@ WLAN.instances = []
 
 def FakeResp(code, headers=None):
     """What HTTP_POST returns: (code, Retry-After, Content-Type), the headers
-    bytes as they came."""
+    bytes as they came. Dawarich answers JSON: a test that wants no
+    Content-Type sets it None (a whole head without one: "")."""
     headers = headers or {}
-    retry, ctype = headers.get("Retry-After"), headers.get("Content-Type")
-    return code, retry and retry.encode(), ctype and ctype.encode()
+    retry = headers.get("Retry-After")
+    ctype = headers.get("Content-Type", "application/json; charset=utf-8")
+    return (code, retry and retry.encode(),
+            None if ctype is None else ctype.encode())
 
 
 def _post(url, data=None, headers=None, timeout=None):
@@ -687,6 +690,9 @@ def _reload_logger():
 
 
 _install_mocks()
+import gps_boot as _gboot              # (its start's diag line and count file,
+_gboot.DIAG_FILE = os.path.join(diag_dir, "boot-diag.log")   # main.py's too:
+_gboot.BOOT_FAIL_FILE = os.path.join(diag_dir, "boot_fail")  # never the host's /
 import gps_clock as _gck               # (its Stamp state: _gck._up)
 
 
@@ -711,6 +717,12 @@ _EPOCH_S = gl.EPOCH_DAYS * 86400         # 1970 -> the firmware's 2020
 passed = 0
 failed = 0
 failures = []
+skips = []
+# With CI=true (GitHub Actions) a check that cannot run is a FAIL, not a
+# SKIP: the workflow installs all the suite needs (node, the MicroPython
+# builds, Pillow, the font), so a skip there means a check silently stopped
+# running. Only these may skip in CI:
+CI_SKIP_OK = ()
 
 
 def check(name, cond, detail=""):
@@ -723,6 +735,73 @@ def check(name, cond, detail=""):
         msg = "FAIL  %s%s" % (name, (" - " + str(detail)) if detail else "")
         print(msg)
         failures.append(msg)
+
+
+def skip_check(name, why):
+    """A check that cannot run here (a tool missing): counted and listed in
+    the summary; a FAIL under CI=true unless name is in CI_SKIP_OK."""
+    if os.environ.get("CI") == "true" and name not in CI_SKIP_OK:
+        check("%s: runs in CI, never skips" % name, False, why)
+        return
+    msg = "SKIP  %s: %s" % (name, why)
+    print(msg)
+    skips.append(msg)
+
+
+_summary_done = []
+
+
+@atexit.register
+def _summary():
+    """The totals and the failures, also when the run dies on the way (an
+    uncaught exception in a check's cleanup ended it without them)."""
+    if _summary_done:
+        return
+    _summary_done.append(1)
+    print()
+    print("%d passed, %d failed, %d skipped" % (passed, failed, len(skips)))
+    if skips:
+        print("skipped:")
+        for s_ in skips:
+            print(" ", s_)
+    if failures:
+        print("failures:")
+        for f_ in failures:
+            print(" ", f_)
+    if not _run_ended:
+        print("RUN ENDED EARLY: an uncaught exception above stopped the suite "
+              "(the checks after it did not run)")
+
+
+_run_ended = []
+
+
+class _LoopLimit(BaseException):
+    """Ends a main loop a test started by mistake (no Exception: run() and
+    _boot_start catch those)."""
+
+
+def _loop_limit(fn, passes=200):
+    """fn() with gps_logger's main loop held to passes passes: a
+    _boot_start regression that starts the logger ends instead of hanging
+    the run. -> True when the limit ended it (the loop ran)."""
+    m = sys.modules.get("gps_logger") or gl
+    real, n = m.log_tick, [0]
+
+    def tick(*a, **k):
+        n[0] += 1
+        if n[0] > passes:
+            raise _LoopLimit()
+        return real(*a, **k)
+
+    m.log_tick = tick
+    try:
+        fn()
+    except _LoopLimit:
+        return True
+    finally:
+        m.log_tick = real
+    return False
 
 
 HEADER = "#TRK1\n"
@@ -1645,7 +1724,7 @@ try:
             drain_wifi()
             tries.append([c[0] for c in WLAN.connects])
         return tries
-    every = getattr(gl, "UNLISTED_EVERY", 4)
+    every = gl.UNLISTED_EVERY
     tries = wr_rounds(triple, every)
     hid = wr_rounds(env_hid_home, 2, (("unrelated", -40), ("", -80)))
     hid_none = wr_rounds(env_hid_home, 2)
@@ -1828,8 +1907,10 @@ try:
     setattr(gl, rl_name, boom_line)
     try:
         gl.up_reset()
+        # (it asserted nothing: the read must have failed, and been caught)
         check("B2: count_points/up_reset catch MemoryError (no reset)",
-              True)
+              memerr and gl.up["left"] == 0,
+              "memerr=%s left=%s" % (memerr, gl.up["left"]))
     except MemoryError:
         check("B2: count_points/up_reset catch MemoryError (it escaped)", False)
     finally:
@@ -2239,6 +2320,26 @@ try:
           "second) is skipped",
           (n, n_ok) == (9, 2) and got_t == want_t, repr((n, n_ok, got_t)))
 
+    # UPL-LATLON: a latitude past +-90 or a longitude past +-180 is a line
+    # counted but no point; +-90 and +-180 themselves are points
+    ll_p = os.path.join(end_dir, "20261005_190000.trk")
+    with open(ll_p, "wb") as f:
+        f.write((HEADER + "".join(
+            "%s,%s,1.0,1.0,20261101T1000%02dZ\n" % (la_, lo_, i_)
+            for i_, (la_, lo_) in enumerate(
+                (("91.000000", "19.100000"), ("-90.500000", "19.100000"),
+                 ("47.100000", "181.000000"), ("47.100000", "-180.000001"),
+                 ("90.000000", "-180.000000"))))
+            + gl.FOOTER).encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(ll_p, 0)
+    j_ll = _strict_json(bytes(gl._body[:size]))
+    got_ll = ([x["geometry"]["coordinates"] for x in j_ll["locations"]]
+              if isinstance(j_ll, dict) else j_ll)
+    check("UPL-LATLON: lat 91 / -90.5, lon 181 / -180.000001 are no points; "
+          "90, -180 is",
+          (n, n_ok) == (5, 1) and got_ll == [[-180.0, 90.0]],
+          repr((n, n_ok, got_ll)))
+
     gl.LOG_DIR = saved_dir
 
     # --- K1: keepalive deinit + deadline -----------------------------------
@@ -2341,15 +2442,17 @@ try:
     else:
         __builtins__.print = cap
     try:
-        boot_ns["_boot_start"]()
+        # (bounded: a regression that starts the logger here ran the real
+        # loop for ever, the suite hung)
+        k2_ran = _loop_limit(boot_ns["_boot_start"])
     finally:
         if isinstance(__builtins__, dict):
             __builtins__["print"] = real_print
         else:
             __builtins__.print = real_print
     check("K2: at BOOT_FAIL_MAX the logger is not started (REPL)",
-          any("REPL" in line for line in printed),
-          repr(printed))
+          any("REPL" in line for line in printed) and not k2_ran,
+          repr((k2_ran, printed[-5:])))
 
     # --- K3: delayed CONNECTING does not block GPS sampling ----------------
     reset_wlan()
@@ -4046,7 +4149,7 @@ try:
     _clock[0] += 1000
     epoch("120132.00")
     held = (gl.st["std"], gl._usable(_clock[0]))
-    _clock[0] += getattr(gl, "GST_HOLD", 6000) + 1000
+    _clock[0] += gl.GST_HOLD + 1000
     epoch("120133.00")
     _clock[0] += 1000
     epoch("120134.00")
@@ -4498,8 +4601,9 @@ try:
           and got == want and got[0].endswith("20880119T090010Z\n"),
           "err=%r first=%r" % (err, got[:1]))
     # the way out is the whole ring: _ring_add starts it over at a sample
-    # that falls back, so the walk back for the receding run (removed)
-    # always reached its start
+    # that falls back, or one within STILL_TOL of the anchor (at the place),
+    # so the walk back for the receding run (removed) always reached its
+    # start
     frnd = random.Random(23)
     bad = 0
     for _ in range(200):
@@ -4517,7 +4621,8 @@ try:
             ref.append((k, dd))
         ref = ref[-gl.STILL_DEP_MAX:]
         i = len(ref) - 1
-        while i > 0 and ref[i - 1][1] <= ref[i][1] + gl.STILL_TOL:
+        while (i > 0 and ref[i][1] > gl.STILL_TOL
+               and ref[i - 1][1] <= ref[i][1] + gl.STILL_TOL):
             i -= 1
         gl._still_leave()
         tcs = [l.split(",")[4] for l in gl.log["batch"]]
@@ -4558,6 +4663,30 @@ try:
     check("MINMOVE: 3 m kept a point every ~2-3 s; standing adds none",
           walk3 < 0.5 * walk_pts and still_new == 0,
           "3m=%d 1m=%d still=%d" % (walk3, walk_pts, still_new))
+    # ... and the way out rebuilt from the departure ring the same (its
+    # samples are STILL_DEP_STEP apart): MIN_MOVE 10, a walk out of a stay
+    mrnd, mm_sec0 = random.Random(1119), rv_sec[0]
+    saved_mm = gl.MIN_MOVE
+    try:
+        gl.MIN_MOVE = 10
+        sv_reset()
+        for i in range(150):
+            sv_fix(mrnd.uniform(-0.3, 0.3), mrnd.uniform(-0.3, 0.3), 1.0)
+        mm_stay = sv_active()
+        for i in range(1, 160):
+            sv_fix(i * 1.4, 0, 5.0)
+        gl.flush()
+        mm_way = [l for l in sv_lines() if l.split(",")[2] != ""][-80:]
+        mm_gap = [gl._dist(*(list(map(float, a.split(",")[:2]))
+                             + list(map(float, b.split(",")[:2]))))
+                  for a, b in zip(mm_way, mm_way[1:])]
+    finally:
+        gl.MIN_MOVE = saved_mm
+    check("MINMOVE: the way out from the departure ring is thinned as the "
+          "track (MIN_MOVE 10: no two of its points closer)",
+          mm_stay and not sv_active() and bool(mm_gap) and min(mm_gap) > 10,
+          repr((mm_stay, sv_active(), min(mm_gap) if mm_gap else None)))
+    rv_sec[0] = mm_sec0
 
     # walking slowly away from a stay (1 m/s) leaves past STILL_EXIT
     sv_reset()
@@ -4688,6 +4817,69 @@ try:
     check("STAY-WALK: walking in to a stop and on, at most a few seconds of "
           "the walk are lost on either side", ws_bad == [], repr(ws_bad))
     rv_sec[0] = ws_sec0
+    # STOP-DRIVE: a car stopped 90-150 s and driving off (1.5 m/s² to 14
+    # m/s): the later window's centroid lay at the stop with the drive off
+    # already in it, the pair proved a stay, and the drive off (over 10 m a
+    # line) was dropped as drift: 15-26 s, 150-290 m of it. UTURN-PARK: 240
+    # m past the place, a U-turn and back to park there: the stay dropped
+    # the whole loop in some window alignments. (Own random numbers and
+    # times, as above.)
+    sd_sec0 = rv_sec[0]
+    srnd = random.Random(1115)
+    sd_bad = []
+    for stop, pre in ((90, 200), (90, 255), (110, 235), (110, 240),
+                      (150, 205), (150, 210)):
+        sv_reset()
+        rv_sec[0] = 0
+        e = 0.0
+        for i in range(pre):
+            e += 14.0
+            sv_fix(e, 0, 50.0)
+        e0, v, off = e, 0.0, {}
+        for i in range(stop):
+            sv_fix(e0 + srnd.uniform(-0.5, 0.5), srnd.uniform(-0.5, 0.5), 1.0)
+        for i in range(120):
+            v = min(14.0, v + 1.5)
+            e += v
+            off[rv_sec[0]] = e - e0
+            sv_fix(e, 0, v * 3.6)
+        gl.flush()
+        have = set(ws_secs(l, 0) for l in sv_lines())
+        far = max([m for t, m in off.items() if t not in have] or [0])
+        if far > gl.STILL_NEAR:
+            sd_bad.append((stop, pre, round(far)))
+    check("STOP-DRIVE: a car stopped 90-150 s and off again keeps its drive "
+          "off (nothing farther than STILL_NEAR from the stop dropped)",
+          sd_bad == [], repr(sd_bad))
+    sd_bad = []
+    for over, pre in ((240, 200), (240, 205), (240, 210), (360, 200)):
+        sv_reset()
+        rv_sec[0] = 0
+        e, loop = 0.0, {}
+        for i in range(pre):
+            e += 12.0
+            sv_fix(e, 0, 43.0)
+        dest = e
+        for i in range(over // 12):
+            e += 12.0
+            loop[rv_sec[0]] = e - dest
+            sv_fix(e, 0, 43.0)
+        for i in range(over // 12):
+            e -= 12.0
+            loop[rv_sec[0]] = e - dest
+            sv_fix(e, 4.0, 43.0)
+        for i in range(400):
+            sv_fix(e + srnd.uniform(-0.5, 0.5), 4.0 + srnd.uniform(-0.5, 0.5),
+                   1.0)
+        gl.flush()
+        have = set(ws_secs(l, 0) for l in sv_lines())
+        far = max([abs(m) for t, m in loop.items() if t not in have] or [0])
+        if far > gl.STILL_NEAR:
+            sd_bad.append((over, pre, round(far)))
+    check("UTURN-PARK: 240-360 m past the place, a U-turn and back to park "
+          "there keeps the loop (nothing farther than STILL_NEAR dropped)",
+          sd_bad == [], repr(sd_bad))
+    rv_sec[0] = sd_sec0
 
     # home network: arrive, stay, leave
     sv_reset(home=True)
@@ -4722,6 +4914,36 @@ try:
           bool(new) and gl.log["file"].endswith(
               new[0].strip().split(",")[4].replace("T", "_")[:15] + gl.TRB),
           "file=%s first=%r" % (gl.log["file"], new[0] if new else None))
+    # RING-CALM: a home stay in calm reception (the jitter rarely moves
+    # STILL_DEP_STEP and never falls back STILL_TOL) kept filling the
+    # departure ring for hours, and a home stay writes no anchor point to
+    # cut it: the way out began with STILL_DEP_MAX samples of the stay, the
+    # oldest 1-2 h before the drive, and the new track was named after it
+    rc_sec0 = rv_sec[0]
+    crnd = random.Random(1116)
+    sv_reset(home=True)
+    rv_sec[0] = 0
+    for i in range(60):
+        sv_fix(-14.0 * (60 - i), 0, 50.0)
+    x = y = 0.0
+    for i in range(3600):
+        x = max(-1.5, min(1.5, x + crnd.uniform(-0.4, 0.4)))
+        y = max(-1.5, min(1.5, y + crnd.uniform(-0.4, 0.4)))
+        sv_fix(x, y, 1.0)
+    rc_home = sv_active() and gl.log["still"]["home"]
+    rc_dep = rv_sec[0]
+    for i in range(1, 41):
+        sv_fix(i * 14.0, 0, 50.0)
+    gl.flush()
+    with open(gl.log["file"]) as f:
+        rc_new = [l for l in f if l.count(",") == 4]
+    rc_old = [l for l in rc_new if ws_secs(l, 0) < rc_dep]
+    check("RING-CALM: leaving a calm home stay the way out begins at the "
+          "departure, not with the stay's samples (the track named after it)",
+          rc_home and not sv_active() and bool(rc_new) and len(rc_old) <= 2
+          and rc_dep - ws_secs(rc_new[0], 0) <= 5,
+          repr((rc_home, sv_active(), len(rc_old), rc_new[:1], gl.log["file"])))
+    rv_sec[0] = rc_sec0
 
     # driving past the home network without stopping is all recorded
     sv_reset(home=True)
@@ -4867,7 +5089,7 @@ try:
         pass
     check("TIME-BACK: a false future time lets go after TIME_BACK_N fixes "
           "an hour behind it: the walk goes on in a new segment",
-          len(tb_after) >= 89 - getattr(gl, "TIME_BACK_N", 10) - 2
+          len(tb_after) >= 89 - gl.TIME_BACK_N - 2
           and not any(x[9:11] == "11" for x in tb_t)
           and "\n-\n" in tb_txt and len(tb_d) == 1,
           "after=%d glitch=%s diag=%r" % (
@@ -5082,8 +5304,8 @@ try:
             hb_fix(0, 0, nofix=True, speed=0.0)
         return ok, len(sv_lines())
 
-    gap_stay = getattr(gl, "STILL_GAP_STAY", 60000)    # (getattr: the
-    gap_jump = getattr(gl, "STILL_GAP_JUMP", 1000)     # old code runs too)
+    gap_stay = gl.STILL_GAP_STAY
+    gap_jump = gl.STILL_GAP_JUMP
     ok0, n0 = g_gap()
     states = []
     first = None
@@ -5255,6 +5477,29 @@ try:
           sv_active() is True and wait is not None
           and wait <= gl.STILL_HEARTBEAT // 1000 + 2, repr(wait))
 
+    # BEATOUT: home WiFi lost while the board is out past STILL_NEAR (at the
+    # car, 80 m out): the anchor points begin, but none stamped out there
+    # (a home stay had none, so nothing else held this one back)
+    bo_rs, bo_sec0 = rnd.getstate(), rv_sec[0]
+    sv_reset(home=True)
+    sv_drift(150, box=10.0, step=3.0)
+    bo_home = sv_active() and gl.log["still"]["home"]
+    for i in range(1, 58):
+        sv_fix(i * 1.4, 0, 5.0)
+    for i in range(20):
+        sv_fix(80.0, (i % 3) * 0.5, 1.0)
+    gl.wifi.update(state="offline", home=False)
+    n1 = len(sv_lines())
+    for i in range(60):
+        sv_fix(80.0, (i % 3) * 0.5, 1.0)
+    beats = [l for l in sv_lines()[n1:] if l.split(",")[2] == ""]
+    check("BEATOUT: home WiFi lost while out past STILL_NEAR: the stay goes "
+          "on away, no anchor point stamped out there",
+          bo_home and sv_active() and not gl.log["still"]["home"]
+          and beats == [], repr((bo_home, sv_active(), beats)))
+    rnd.setstate(bo_rs)
+    rv_sec[0] = bo_sec0
+
     # EXIT: a frozen multipath jump is not a departure; a slow walk still is
     sv_reset()
     sv_drift(150, box=15.0, step=5.0)
@@ -5280,6 +5525,33 @@ try:
     check("EXIT: a car (6 m/s) leaves after STILL_EXIT_N gaining samples",
           sv_active() is False and len([l for l in sv_lines()
                                         if sv_m(l) > 150]) >= 25)
+
+    # EXIT-BACK: out past STILL_EXIT a sample that falls back more than
+    # STILL_TOL starts the departure count over: a jump bouncing 160-195 m
+    # out never makes STILL_EXIT_SLOW samples that gained STILL_SLOW_GAIN.
+    # After a fix gap too (_still_recede then counts every sample). Without
+    # one a sample that falls back counts as one at the place: STILL_MOVE_HITS
+    # window pairs out there move the anchor there.
+    eb_rs, eb_sec0 = rnd.getstate(), rv_sec[0]
+    eb = []
+    for gap in (True, False):
+        sv_reset()
+        sv_drift(150, box=10.0, step=3.0)
+        a0 = gl.log["still"]["anchor"]
+        ok = sv_active()
+        if gap:
+            for _ in range(gl.STILL_GAP // 1000 + 5):
+                hb_fix(0, 0, nofix=True)
+        for k in range(12 if gap else 360):
+            sv_fix((160.0, 190.0, 165.0, 195.0)[k % 4], 0, 1.0)
+            ok = ok and sv_active()
+        a = gl.log["still"]["anchor"] or a0     # (None: the stay ended)
+        eb.append((ok, round(gl._dist(a0[0], a0[1], a[0], a[1]))))
+    check("EXIT-BACK: samples bouncing 160-195 m out, after a fix gap or "
+          "not, keep the stay; without a gap the anchor moves out there",
+          eb[0][0] and eb[1][0] and eb[1][1] > gl.STILL_EXIT, repr(eb))
+    rnd.setstate(eb_rs)
+    rv_sec[0] = eb_sec0
 
     # ARRIVE: entering a stay closes the arrival track on any network; the
     # anchor file rotates every STILL_FILE while connected
@@ -5503,6 +5775,46 @@ try:
           and gl.log["batch"] == [] and len(sv_lines()) >= 200,
           "held=%d ram=%d lines=%d" % (held0, len(gl.log["batch"]),
                                        len(sv_lines())))
+
+    # HOLD-FAR: a calm minute, then driving on: once the open window is
+    # STILL_EXIT from the calm one, that one can pair with nothing, and a
+    # flush writes it with the drive (held to the open window's end before)
+    hrnd, hr_sec0 = random.Random(1118), rv_sec[0]
+    sv_reset()
+    for i in range(65):
+        sv_fix(hrnd.uniform(-1, 1), hrnd.uniform(-1, 1), 1.0)
+    for i in range(1, 36):
+        sv_fix(i * 10.0, 0, 36.0)
+    gl.flush(gl._still_hold())
+    hf = (len(sv_lines()), len(gl.log["batch"]))
+    check("HOLD-FAR: a calm minute and a drive on STILL_EXIT from it: a "
+          "flush writes the minute and the drive",
+          not sv_active() and hf[0] > 60 and hf[1] == 0, repr(hf))
+    # HOLD-GAP: drift, a fix gap, the first fix back 60 m off (the window
+    # starts over and holds on from where the first began), drift at the
+    # place again: the stay drops the drift from before the gap too
+    sv_reset()
+    for i in range(200):
+        sv_fix(-600.0 + i * 10.0, 0, 36.0)        # until a window closes
+        if i > 50 and gl.log["still"]["win_at"] is None:
+            break
+    hg_first = set()
+    for i in range(40):
+        sv_fix(hrnd.uniform(-3, 3), hrnd.uniform(-3, 3), 1.0)
+        hg_first.add(gl.log["batch"][-1])
+    for _ in range(gl.STILL_GAP // 1000 + 5):
+        hb_fix(0, 0, nofix=True)
+    sv_fix(60.0, 0, 1.0)
+    for i in range(200):
+        sv_fix(hrnd.uniform(-3, 3), hrnd.uniform(-3, 3), 1.0)
+    gl.flush()
+    hg_left = [l for l in sv_lines() if l in hg_first]
+    # (the way in may keep the first few: the arrival)
+    check("HOLD-GAP: a stay proven across a fix gap (back 60 m off first) "
+          "drops the drift from before the gap too",
+          sv_active() and len(hg_first) > 20 and len(hg_left) <= 3,
+          repr((sv_active(), len(hg_first), len(hg_left))))
+    rv_sec[0] = hr_sec0
 
     # MIDNIGHT: a GGA past midnight whose RMC was lost is not dated a day back
     gl._rcv.reset()
@@ -5735,6 +6047,55 @@ try:
           and all(l in trip_body for l in before) and not later,
           "held=%d in trip=%d in later files=%d" % (
               len(before), sum(l in trip_body for l in before), len(later)))
+    # ... and with seconds queued as the fix comes back (the loop blocked),
+    # the oldest 400 m off (a cold start), the latest at the place: judged
+    # again from the oldest (_sample, last_at unchanged), the gap released
+    # the drift held for the stay to the next flush
+    fq_rs, fq_sec0 = rnd.getstate(), rv_sec[0]
+    qrnd = random.Random(1117)
+
+    def fq_pub(east, north, tick=True):
+        _clock[0] += gl.SAMPLE
+        sec = rv_sec[0]
+        rv_sec[0] += 1
+        gl.st.update(valid=True, date="2026-10-18",
+                     time="%02d:%02d:%02d" % (8 + sec // 3600,
+                                              (sec // 60) % 60, sec % 60),
+                     lat=47.5 + north * M_LAT, lon=19.0 + east * M_LON,
+                     alt=100.0, hdop=1.0, hdop_at=_clock[0], status="A",
+                     quality=1, fixtype=3, speed=1.0, std=None, std_at=None,
+                     epochs=5)
+        gl._rcv._published(_clock[0])
+        if tick:
+            gl.log_tick()
+    sv_reset()
+    gl.wifi.update(state="offline")
+    for i in range(200):
+        fq_pub(-600.0 + i * 10.0, 0)              # until a window closes
+        if i > 50 and gl.log["still"]["win_at"] is None:
+            break
+    fq_held = set()
+    for i in range(80):
+        fq_pub(qrnd.uniform(-3, 3), qrnd.uniform(-3, 3))
+        fq_held.add(gl.log["batch"][-1])
+    for _ in range(gl.NEW_FILE_GAP + 10):
+        hb_fix(0, 0, nofix=True)
+    for e in (400.0, 200.0, 0.0):
+        fq_pub(e, 0, tick=False)
+    gl.log_tick()
+    for i in range(150):
+        fq_pub(qrnd.uniform(-3, 3), qrnd.uniform(-3, 3))
+    gl.flush()
+    fq_out = [l for n in sorted(os.listdir(rv_dir))
+              if n.endswith((".trk", ".trb"))
+              for l in open(os.path.join(rv_dir, n)) if l in fq_held]
+    check("FIXGAP: ... with seconds queued, the oldest 400 m off: the drift "
+          "held for the stay is not written",
+          sv_active() and bool(fq_held) and fq_out == [],
+          repr((sv_active(), len(fq_held), len(fq_out))))
+    sv_reset()                           # (sv_fix: no queued seconds)
+    rnd.setstate(fq_rs)
+    rv_sec[0] = fq_sec0
     # a fix back elsewhere right after a flush: the drive held by its open
     # window kept the batch non-empty, so the new trip went into the old
     # file after a "-"; a loss over NEW_FILE_GAP is a new file
@@ -5882,7 +6243,7 @@ try:
           away_no_web == "sleep", away_no_web)
 
     # WEB server: GET / and /status.json answered from the main loop
-    inf_wbits = getattr(gl, "WEB_GZ_WBITS", 12)
+    inf_wbits = gl.WEB_GZ_WBITS
 
     class FakeConn:
         def __init__(self, req, fail=False):
@@ -5962,7 +6323,7 @@ try:
     try:
         gl._web_close()
         gl.wifi.update(state="connected", ip="192.168.1.60", ssid="<b>home",
-                       rssi=-50)
+                       rssi=-50, home=True)
         gl.log["points"] = 42
         gl.up["left"] = 7
         gl.up["sent"] = 35
@@ -5975,7 +6336,8 @@ try:
         reqs = [FakeConn(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"),
                 FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n"),
                 FakeConn(b"GET /nope HTTP/1.1\r\n\r\n"),
-                FakeConn(b"", fail=True)]
+                FakeConn(b"", fail=True),
+                FakeConn(b"GET /status.json?diag HTTP/1.1\r\n\r\n")]
         gl.WEB_PAGE = gl.WEB_PAGE + ".missing"
         nopage = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
         lst.waiting.append(nopage)
@@ -5991,7 +6353,7 @@ try:
         gz_file = gzip.compress(page_file)
         with open(os.path.join(gz_td, "web.html.gz"), "wb") as f:
             f.write(gz_file)
-        saved_gz = getattr(gl, "WEB_PAGE_GZ", None)
+        saved_gz = gl.WEB_PAGE_GZ
         gl.WEB_PAGE_GZ = os.path.join(gz_td, "web.html.gz")
         gz_reqs = [
             FakeConn(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n"
@@ -6050,6 +6412,10 @@ try:
             jd = json.loads(jbody)
         except ValueError:
             jd = {}
+        try:
+            jdd = json.loads(reqs[4].sent.partition(b"\r\n\r\n")[2])
+        except ValueError:
+            jdd = {}
         gl.wifi["state"] = "sleep"
         gl.web_tick()
         closed_on_sleep = lst.closed and gl._web_sock is None
@@ -6125,18 +6491,22 @@ try:
           in oh, repr(oh[:200]))
     check("WEB-GZ-WBITS: the page's window is 2**9..2**12 bytes (the RAM "
           "the inflate takes: ~15 KB of heap is free; gzip -9's 32 KB is "
-          "not)", 9 <= getattr(gl, "WEB_GZ_WBITS", 15) <= 12,
-          getattr(gl, "WEB_GZ_WBITS", None))
+          "not)", 9 <= gl.WEB_GZ_WBITS <= 12,
+          gl.WEB_GZ_WBITS)
     check("WEB: no web.html on the board -> 404 naming deploy.sh and the JSON",
           nopage.sent.startswith(b"HTTP/1.0 404") and b"deploy.sh" in
           nopage.sent and b"/status.json" in nopage.sent,
           repr(nopage.sent[:200]))
-    check("WEB: /status.json has the same values and the diag tail",
+    check("WEB: /status.json has the same values; the diag tail only on "
+          "/status.json?diag (the page reads the whole log from /diag: "
+          "every poll read the tail for nothing)",
           jhead.startswith(b"HTTP/1.0 200 OK") and jd.get("points") == 42
           and jd.get("left") == 7 and jd.get("sent") == 35
           and "fix" in jd and "sats" in jd and jd.get("refresh_s") == 15
-          and jd.get("wifi") == "connected <b>home"
-          and jd.get("diag", [""])[-1].startswith("up 60"), repr(jd)[:300])
+          and jd.get("wifi") == "connected <b>home" and "diag" not in jd
+          and jdd.get("points") == 42 and "satellites" in jdd
+          and jdd.get("diag", [""])[-1].startswith("up 60"),
+          repr((jd, jdd))[:400])
     check("WEB: unknown path 404, a failing client is closed, no raise",
           reqs[2].sent.startswith(b"HTTP/1.0 404") and reqs[3].closed
           and reqs[3].sent == b"")
@@ -6180,7 +6550,7 @@ try:
     gl.WEB = True
     gl.WEB_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "..", "web.html")
-    gl.wifi.update(state="connected", ip="192.168.1.60")
+    gl.wifi.update(state="connected", ip="192.168.1.60", home=True)
     good = b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"
 
     def serve(c):
@@ -6443,7 +6813,7 @@ try:
         _clock[0] += 60000
         gl._set_freq(80)                 # within the hold: left alone
         held = _freqs[-1] == 160000000
-        _clock[0] += getattr(gl, "FREQ_RETRY", 1800000)
+        _clock[0] += gl.FREQ_RETRY
         gl._set_freq(80)
         back = _freqs[-1] == 80000000 and 80 not in gl._freq_bad
     finally:
@@ -6824,7 +7194,7 @@ if mpy_bin:
               + out.decode(errors="replace")[-400:])
 
 else:
-    print("SKIP  mpy-unix (no micropython binary)")
+    skip_check("mpy-unix", "no micropython binary")
 
 # Optional: a single-precision unix build, floats as on the board (ESP32:
 # MICROPY_FLOAT_IMPL_FLOAT). The smoke's departure ring checks then see what
@@ -6852,7 +7222,7 @@ if mpy_f32:
         check("mpy-unix-f32: gps_logger smoke", False, repr(e) + " "
               + out.decode(errors="replace")[-400:])
 else:
-    print("SKIP  mpy-unix-f32 (MICROPYTHON_F32 not set)")
+    skip_check("mpy-unix-f32", "MICROPYTHON_F32 not set")
 
 # The same smoke under CPython (keeps the script itself working)
 import subprocess
@@ -6878,10 +7248,10 @@ lb_plain = os.path.join(lb_td, "web.min.html")
 with open(lb_plain, "wb") as f:
     f.write(_page_min(lb_page))
 with open(lb_gz, "wb") as f:              # (as deploy.sh makes it)
-    f.write(_gz_small(_page_min(lb_page), getattr(gl, "WEB_GZ_WBITS", 12)))
+    f.write(_gz_small(_page_min(lb_page), gl.WEB_GZ_WBITS))
 for interp, tag in ((mpy_bin, "MicroPython unix"), (sys.executable, "CPython")):
     if not interp:
-        print("SKIP  WEB-LOOPBACK on %s (no binary)" % tag)
+        skip_check("WEB-LOOPBACK on " + tag, "no binary")
         continue
     try:
         out = subprocess.check_output(
@@ -7049,7 +7419,12 @@ def deploy_run(env_extra):
                                             if fz != "clock-stale" else "0" * 64))
                 f.write('RX = "%s"\n' % (rx_sha               # and gps_receiver.py's
                                          if fz != "rx-stale" else "0" * 64))
-    env = dict(os.environ, PORT="/dev/fakeACM0", FAKE_DEV=dev,
+    if env_extra.get("FAKE_BAD_PAGE"):           # tools/web_min.py fails on it
+        with open(os.path.join(work, "web.html"), "w") as f:
+            f.write('<script>\nvar a = "cut;\n</script>\n')
+    port = os.path.join(work, "ttyACM0")        # (deploy.sh checks it is there)
+    open(port, "w").close()
+    env = dict(os.environ, PORT=port, FAKE_DEV=dev,
                FAKE_LOG=os.path.join(work, "log"),
                FAKE_LOGGER=os.path.join(work, "logger"),
                FAKE_SHIM=os.path.join(work, ".venv", "bin", "shim.py"))
@@ -7113,9 +7488,9 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and dev_file(dev, "gps_receiver.py") is None
           and len(cps) == 5 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Heltec Wireless Tracker" in out and "(xtensawin)" in out
-          and "Deployed to /dev/fakeACM0" in out,
+          and "Deployed to %s/ttyACM0" % os.path.dirname(dev) in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
-    dp_w = getattr(gl, "WEB_GZ_WBITS", 12)
+    dp_w = gl.WEB_GZ_WBITS
     check("DEPLOY-GZIP: only web.html.gz goes up, stripped (tools/web_min.py), "
           "made with the board's small window (WEB_GZ_WBITS: it inflates it for "
           "curl), no mtime; the old plain web.html is removed in the same swap",
@@ -7164,7 +7539,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and _gunzip_w(dev_file(dev, "web.html.gz") or b"", dp_w) == new_page
           and sorted(c[1] for c in cps) == ["main.py", "web.html.gz"]
           and "frozen in (abc1234)" in out
-          and "Deployed to /dev/fakeACM0" in out,
+          and "Deployed to %s/ttyACM0" % os.path.dirname(dev) in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
     # DEPLOY-OTA: an OTA install still being validated (/ota.pending): the
     # deploy's reset would abort the pending image (the bootloader rolls back
@@ -7353,8 +7728,40 @@ if shutil.which("bash") and shutil.which("sha256sum"):
     check("DEPLOY-FORCE-SPLIT: FORCE=1 does not get past a pending OTA, "
           "FORCE_PENDING=1 does not get past a stale frozen logger",
           split and split2, "%r %r rc=%d %r" % (split, split2, rc, err[-300:]))
+    # DEPLOY-PORT: the default port was /dev/ttyUSB0 (the Heltec is USB
+    # Serial/JTAG: /dev/ttyACM0), and a port that is not there got
+    # mpremote's error and the exit's restart; now "No such port" before
+    # anything. DEPLOY-LOCAL-FIRST: the .mpy files and web.html.gz were made
+    # after the logger was stopped, and a local failure then reset a healthy
+    # board: now they are made before the first session
+    with open(os.path.join(ROOT, "deploy.sh")) as f:
+        dp_src = f.read()
+    pl = os.path.join(tempfile.mkdtemp(dir=dp_td), "py.log")
+    rc, out, err, dev, calls = deploy_run({"PORT": "/dev/nonexistent-ttyACM9",
+                                           "FAKE_PY_LOG": pl})
+    dp_port = (rc, "No such port: /dev/nonexistent-ttyACM9" in err, calls,
+               dev_logger(dev), os.path.exists(pl))
+    rc, out, err, dev, calls = deploy_run({"FAKE_BAD_PAGE": "1"})
+    dp_local = (rc, "cut short" in err, calls, dev_logger(dev),
+                dev_file(dev, "main.py"))
+    pl = os.path.join(tempfile.mkdtemp(dir=dp_td), "py.log")
+    rc, out, err, dev, calls = deploy_run({"FAKE_PY_LOG": pl})
+    with open(pl) as f:
+        dp_first = f.read().count("-O3")
+    check("DEPLOY-PORT: the default port is /dev/ttyACM0; a port that is not "
+          "there stops with 'No such port' before anything (no build, no "
+          "session, the logger left running)",
+          "PORT=${PORT:-/dev/ttyACM0}" in dp_src and "ttyUSB0" not in dp_src
+          and dp_port[0] == 1 and dp_port[1:] == (True, [], [], False),
+          repr(dp_port + (err[-200:],)))
+    check("DEPLOY-LOCAL-FIRST: the .mpy files and web.html.gz are made before "
+          "the first session: a page tools/web_min.py refuses stops the deploy "
+          "with the board untouched (no session, no reset)",
+          dp_local[0] != 0 and dp_local[1:] == (True, [], [], b"old main")
+          and rc == 0 and dp_first == 3,
+          repr(dp_local + (rc, dp_first)))
 else:
-    print("SKIP  DEPLOY: no bash/sha256sum")
+    skip_check("DEPLOY", "no bash/sha256sum")
 
 # BUILD: tools/build_firmware.sh with a fake ESP-IDF, MicroPython tree,
 # esptool and mpremote: the marker module records the SHA-256 of the frozen
@@ -7696,6 +8103,39 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
                   for r_ in bad_dests.values()),
           repr((rc_k4, err_k4[-200:], rc_k0, err_k0[-200:],
                 {k_: (r_[0], r_[2][-120:]) for k_, r_ in bad_dests.items()})))
+    # BUILD-PUBLISH-KEY: the key file's mode is the file's, not a symlink's
+    # (777: a 600 key behind a link was refused), and the key checked is
+    # what firmware.py signs with (the file stripped): the newlines dropped
+    # first, a two-line key passed and signed with "\n" in it, bad hmac on
+    # every board
+    k_real = os.path.join(key_dir, "real.key")
+    with open(k_real, "w") as f:
+        f.write(key_secret + "\n")
+    os.chmod(k_real, 0o600)
+    k_link = os.path.join(key_dir, "link.key")
+    os.symlink(k_real, k_link)
+    k_two = os.path.join(key_dir, "two.key")
+    with open(k_two, "w") as f:
+        f.write(key_secret[:16] + "\n" + key_secret[16:] + "\n")
+    os.chmod(k_two, 0o600)
+    dest_l = tempfile.mkdtemp(dir=dp_td)
+    rc_ln, _o, err_ln, _w, _c = build_run(
+        ["--publish"], {"OTA_KEY_FILE": k_link, "OTA_DEST": "fakehost:" + dest_l})
+    rc_two, out_two, err_two, _w, calls_two = build_run(
+        ["--publish"], {"OTA_KEY_FILE": k_two, "OTA_DEST": "fakehost:" + dest_l})
+    fwp = os.path.join(ROOT, "tools", "firmware.py")
+    fk = [subprocess.run([sys.executable, fwp, "key", k_], capture_output=True,
+                         text=True) for k_ in (k_real, k_two)]
+    check("BUILD-PUBLISH-KEY: a 600 key behind a symlink is published; a "
+          "two-line key is refused before the build (firmware.py key: the "
+          "stripped content, one line), the key never printed",
+          rc_ln == 0 and os.path.exists(os.path.join(dest_l, "manifest.json"))
+          and rc_two != 0 and "one line" in err_two and "Built" not in out_two
+          and not [c for c in calls_two if c[0] in ("scp", "ssh")]
+          and [r_.returncode for r_ in fk] == [0, 1]
+          and key_secret[:16] not in err_two + out_two + fk[1].stderr,
+          repr((rc_ln, err_ln[-200:], rc_two, err_two[-200:],
+                [(r_.returncode, r_.stderr[-80:]) for r_ in fk])))
     # BUILD-PUBLISH-EARLY: no OTA_DEST, one without "host:" or no key file
     # stops --publish before the build (it failed only after ESP-IDF's)
     early = [build_run(["--publish"], e_) for e_ in (
@@ -7809,7 +8249,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           == ["/web.html.gz"]
           and named == ["micropython-%s.bin" % man.get("commit"),
                         "web-%s.html.gz" % man.get("commit")]
-          and _gunzip_w(pub_gz, getattr(gl, "WEB_GZ_WBITS", 12)) == pub_page
+          and _gunzip_w(pub_gz, gl.WEB_GZ_WBITS) == pub_page
           and not os.path.exists(os.path.join(
               dest, "web-%s.html" % man.get("commit"))) and old_ok,
           repr((man.get("files"), sorted(os.listdir(dest)), old_ok)))
@@ -7844,11 +8284,56 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           and kept and rc_force == 0 and forced,
           repr((atomic, order, scp, ssh, rc_same, err_same[-200:], rc_old,
                 kept, rc_force, forced)))
+    # BUILD-PUBLISH-OLD: publish left every older micropython-<commit>.bin
+    # on the server, and the HMAC binds no freshness (an older signed
+    # manifest and its image could be served again). Once the new manifest
+    # is up, the files only the replaced one named go: plain names only,
+    # never one the new manifest names, nothing outside the folder
+    dest_r = tempfile.mkdtemp(dir=dp_td)
+    rc_a, _o, err_a, _w, _c = build_run(
+        ["--publish"], dict(penv, OTA_DEST="fakehost:" + dest_r, FAKE_CT="1700000000"))
+    with open(os.path.join(dest_r, "manifest.json")) as f:
+        man_a = json.load(f)
+    with open(os.path.join(dest_r, "notes.txt"), "w") as f:
+        f.write("mine")
+    rc_b, _o, err_b, _w, _c = build_run(
+        ["--publish"], dict(penv, OTA_DEST="fakehost:" + dest_r, FAKE_CT="1700000100"))
+    with open(os.path.join(dest_r, "manifest.json")) as f:
+        man_b = json.load(f)
+    left_r = sorted(os.listdir(dest_r))
+    base_h = tempfile.mkdtemp(dir=dp_td)
+    dest_h = os.path.join(base_h, "ota")
+    os.makedirs(dest_h)
+    for n_ in ("old.bin", "a;b", "outside.bin"):
+        with open(os.path.join(dest_h if n_ != "outside.bin" else base_h, n_),
+                  "w") as f:
+            f.write("x")
+    with open(os.path.join(dest_h, "manifest.json"), "w") as f:
+        json.dump({"build": 1, "board": "GPS_LOGGER_S3", "commit": "abc1234",
+                   "url": "../outside.bin",
+                   "files": [{"url": "old.bin"}, {"url": "a;b"},
+                             {"url": "manifest.json"}, {"url": "/etc/x"}]}, f)
+    rc_h, _o, err_h, _w, _c = build_run(
+        ["--publish"], dict(penv, OTA_DEST="fakehost:" + dest_h))
+    check("BUILD-PUBLISH-OLD: the replaced manifest's files go once the new "
+          "one is up (never the new ones, other files stay); a name that is "
+          "not plain (.., /, a shell special) is left alone",
+          rc_a == 0 and rc_b == 0 and man_a.get("commit") != man_b.get("commit")
+          and left_r == sorted(["manifest.json", "notes.txt",
+                                "micropython-%s.bin" % man_b.get("commit"),
+                                "web-%s.html.gz" % man_b.get("commit")])
+          and rc_h == 0 and not os.path.exists(os.path.join(dest_h, "old.bin"))
+          and os.path.exists(os.path.join(dest_h, "a;b"))
+          and os.path.exists(os.path.join(base_h, "outside.bin"))
+          and os.path.exists(os.path.join(dest_h, "manifest.json")),
+          repr((rc_a, rc_b, left_r, rc_h, err_b[-200:], err_h[-200:],
+                sorted(os.listdir(dest_h)))))
     # SECRETS-IGNORE: the migration recipe copied /.env and /hist into the
     # repo root, and neither was ignored; it uses ~/.config/gps-logger now
     ign = subprocess.run(
         ["git", "-C", ROOT, "check-ignore", "--no-index", "env.backup",
-         "hist/20261101.trk", "x.env", ".env.new", "env.bak"],
+         "hist/20261101.trk", "x.env", ".env.new", "env.bak", "env",
+         "ota.key", "ota.key.old", "sign.key", ".claude/settings.json"],
         capture_output=True, text=True).stdout.split()
     tracked_ign = subprocess.run(
         ["git", "-C", ROOT, "ls-files", "-ci", "--exclude-standard"],
@@ -7856,15 +8341,16 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     with open(os.path.join(ROOT, "README.md")) as f:
         rd = f.read()
     mig = rd[rd.index("**Once, over USB:**"):rd.index("**Then:**")]
-    check("SECRETS-IGNORE: env.backup, hist/ and *.env* are ignored (no "
+    check("SECRETS-IGNORE: env.backup, hist/, *.env*, env (the backup's "
+          "/.env copy), *.key, ota.key* and .claude/ are ignored (no "
           "tracked file is); the migration recipe keeps them in "
           "~/.config/gps-logger, mode 600",
-          len(ign) == 5 and tracked_ign == []
+          len(ign) == 10 and tracked_ign == []
           and "~/.config/gps-logger" in mig and "chmod 600" in mig
           and "env.backup +" not in mig and "cp -r :/hist . " not in mig,
           repr((ign, tracked_ign, mig[:400])))
 else:
-    print("SKIP  BUILD: no bash/sha256sum/git/make")
+    skip_check("BUILD", "no bash/sha256sum/git/make")
 shutil.rmtree(dp_td, ignore_errors=True)
 
 
@@ -8042,6 +8528,69 @@ try:
     check("DIAG: .env DIAG 0 off, 10-3600 s, anything else the default",
           vals == [0, 30000, 60000, 60000, 3600000, 60000], repr(vals))
 
+    # ENV-SAY: every refused .env value is a diag line (_say), the key
+    # named, the value never: they were console prints, and in the field
+    # there is no console
+    diag_clear()
+    gl.DIAG = 60000
+    es_g = ("CPU_MHZ", "CPU_MHZ_UPLOAD", "PB_KEEPALIVE", "WEB", "WEB_AWAY",
+            "TFT_IDLE", "OTA_URL", "OTA_KEY", "DIAG", "DEVICE_ID", "HOSTNAME")
+    es_keep = {k_: getattr(gl, k_) for k_ in es_g}
+    es_up = (gl.up["url"], gl.up["key"])
+    es_open = os.path.join(diag_dir, "env_es")
+    with open(es_open, "wb") as fh:
+        fh.write(b"K\xe9Y=zq9x\nNTP_SERVER=zq9x\xe9\nDEVICE_ID=bike\n")
+    es_env, es_part, es_mhz = {}, None, None
+    try:
+        es_got = []
+        es_got.append(gl._mhz_env({"CPU_MHZ": "zq9x"}, "CPU_MHZ", 80))
+        es_got.append(gl._mhz_env({"CPU_MHZ": "999"}, "CPU_MHZ", 80))
+        gl._diag_env({"DIAG": "999999"})
+        es_got.append(gl._static_ip({"IP": "zq9x"}, ("IP", "MASK", "GW", "DNS")))
+        es_got.append(gl._static_ip({"IP": "10.0.0.9", "GW": "10.0.0.1",
+                                     "MASK": "zq9x", "DNS": "zq9x"},
+                                    ("IP", "MASK", "GW", "DNS")))
+        gl._keepalive_env({"KEEPALIVE": "zq9x"})
+        gl._keepalive_env({"KEEPALIVE": "999"})
+        gl._web_env({"WEB": "zq9x", "WEB_AWAY": "zq9x"})
+        gl._tft_env({"TFT_IDLE": "zq9x"})
+        gl._ota_env({"OTA_URL": "zq9x"})
+        es_env = gl.load_env(es_open)
+        gl.wifi_reset()
+        gl.wifi_start({"CPU_MHZ": "40", "CPU_MHZ_UP": "20", "KEEPALIVE": "5"})
+        es_mhz = (gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD)
+
+        def _es_open(path, *a, **k):
+            if path == es_open:
+                raise RuntimeError("zq9x")
+            return builtins.open(path, *a, **k)
+        gl.open = _es_open
+        try:
+            es_part = gl.load_env(es_open)
+        finally:
+            del gl.open
+    finally:
+        for k_, v_ in es_keep.items():
+            setattr(gl, k_, v_)
+        gl.up["url"], gl.up["key"] = es_up
+        gl.wifi_reset()
+    es_lines = diag_lines()
+    es_keys = [l_.split()[1] for l_ in es_lines if l_.startswith("env ")]
+    check("ENV-SAY: CPU_MHZ, DIAG, IP / MASK / DNS, KEEPALIVE, WEB, WEB_AWAY, "
+          "TFT_IDLE, OTA, a .env key or value not UTF-8, a failed read and "
+          "CPU_MHZ / CPU_MHZ_UP too slow for WiFi are diag lines; the value "
+          "is never in one",
+          es_got == [80, 80, None, ("10.0.0.9", "255.255.255.0", "10.0.0.1",
+                                    "10.0.0.1")]
+          and es_keys == ["CPU_MHZ", "CPU_MHZ", "DIAG", "IP", "MASK", "DNS",
+                          "KEEPALIVE", "KEEPALIVE", "WEB", "WEB_AWAY",
+                          "TFT_IDLE", "OTA_URL/OTA_KEY", "a", "NTP_SERVER",
+                          "CPU_MHZ", "CPU_MHZ_UP", "read"]
+          and len(es_lines) == len(es_keys)
+          and es_env == {"DEVICE_ID": "bike"} and es_mhz == (80, 80)
+          and es_part == {} and not any("zq9x" in l_ for l_ in es_lines),
+          repr((es_got, es_lines, es_env, es_mhz, es_part)))
+
     diag_clear()
     gl.DIAG = 60000
     gl._rcv.reset()
@@ -8088,6 +8637,7 @@ try:
     check("DIAG: DIAG=0 writes nothing", diag_lines() == [])
     gl.DIAG = 60000
 
+    de_0 = getattr(gl, "_diag_errs", [None])[0]
     saved_file = gl.DIAG_FILE
     gl.DIAG_FILE = os.path.join(diag_dir, "no", "such", "dir", "d.log")
     try:
@@ -8099,6 +8649,22 @@ try:
         gl.DIAG_FILE = saved_file
     check("DIAG: a write error is printed, never raised", raised is None,
           repr(raised))
+    # DIAG-ERRS: the failed write is counted, in status.json and on the
+    # next diag line that gets through (it only printed: no console in the
+    # field)
+    de_n = getattr(gl, "_diag_errs", [None])[0]
+    de_row = dict(gl._web_rows()).get("diag_errs")
+    diag_clear()
+    gl._diag(1000)
+    de_line = (diag_lines() or [""])[-1]
+    check("DIAG-ERRS: a failed diag write is counted: diag_errs in status.json "
+          "and on the next status line",
+          de_0 is not None and de_n == de_0 + 1 and de_row == de_n
+          and de_line.endswith(" diag_errs %d" % de_n),
+          repr((de_0, de_n, de_row, de_line[-40:])))
+    if hasattr(gl, "_diag_errs"):
+        gl._diag_errs[0] = 0
+    diag_clear()
 
     # run(): boot line before the GPS setup, crash line before the reset
     diag_clear()
@@ -8123,6 +8689,30 @@ try:
           len(lines) == 2 and lines[0].startswith("boot cause ")
           and lines[1].startswith("crash up ") and "diag boom" in lines[1]
           and bool(_resets), repr(lines))
+    # ENV-SAY: run() reads DIAG first and writes the boot line, then the
+    # other readers' .env mistakes reach the diag (they only printed: no
+    # console in the field), the key named, the value never
+    diag_clear()
+    _resets[:] = []
+    gl._wdt = None
+    es_saved = (gl._rcv.UC_SYS, gl.MIN_MOVE, gl.TFT_LIGHT)
+    write_env(diag_dir, "GPS_SYS=zq9x\nMIN_MOVE=zq9x\nTFT_LIGHT=zq9x\n")
+    gl._loop = diag_boom
+    try:
+        gl.run()
+    except SystemExit:
+        pass
+    finally:
+        gl._loop = orig_loop
+        gl._rcv.UC_SYS, gl.MIN_MOVE, gl.TFT_LIGHT = es_saved
+    es_lines = diag_lines()
+    check("ENV-SAY: run() writes the boot line first, then the refused .env "
+          "values of GPS_SYS, MIN_MOVE and TFT_LIGHT (key yes, value never)",
+          len(es_lines) == 5 and es_lines[0].startswith("boot cause ")
+          and [l_.split()[:2] for l_ in es_lines[1:4]]
+          == [["env", "GPS_SYS"], ["env", "MIN_MOVE"], ["env", "TFT_LIGHT"]]
+          and not any("zq9x" in l_ for l_ in es_lines), repr(es_lines))
+    write_env(diag_dir, "")
     # previous run: read from the last diag lines at boot
     check("UPTIME: seconds read as s, min, h, d",
           [gl._hms(x) for x in (None, 45, 754, 3494, 11040, 183600)]
@@ -8473,13 +9063,25 @@ nf_again = (cfgs(), gl.st["ack_n"])
 check("SETUP-NOFIX: no verdict before a fix, then 1 fix/s -> set up again",
       nf_wait == (False, 2, 0) and nf_again[0] > 0 and nf_again[1] >= 2,
       "wait=%r again=%r" % (nf_wait, nf_again))
+# GPS_VERIFY_MAX without a fix closed the verdict for good: a receiver that
+# answered but stayed at 1 Hz (CFGNAV ignored) was never caught once a fix
+# came. Now it is said once and the verdict still waits
 nofix_setup()
-nofix_secs(0, getattr(gl._rcv, "GPS_VERIFY_MAX", 1800000) // 1000 + 20,
-           gst_every=5, step=10)
-check("SETUP-NOFIX: no fix for GPS_VERIFY_MAX -> the wait ends, no verdict",
-      gl.st["checked"] is True and gl.st["ack_n"] == 2 and cfgs() == 0
-      and not gl.st["extra"], "%r %r %d" % (gl.st["checked"],
-                                          gl.st["ack_n"], cfgs()))
+nm_said = []
+nm_print = builtins.print
+builtins.print = lambda *a, **k: nm_said.append(" ".join(str(x) for x in a))
+try:
+    nm_k = getattr(gl._rcv, "GPS_VERIFY_MAX", 1800000) // 1000 + 20
+    nofix_secs(0, nm_k + 600, gst_every=5, step=10)
+    nm_wait = (gl.st["checked"], gl.st["ack_n"], cfgs(), gl.st["extra"])
+    nofix_secs(nm_k + 600, 30, fix=True)
+finally:
+    builtins.print = nm_print
+nm_un = [ln for ln in nm_said if "unverified" in ln]
+check("SETUP-NOFIX: no fix for GPS_VERIFY_MAX -> said once, no verdict; a 1 fix/s "
+      "fix after it is still set up again",
+      nm_wait == (False, 2, 0, 0) and nm_un == ["gps setup unverified: no fix"]
+      and cfgs() > 0, "%r %r %d" % (nm_wait, nm_un, cfgs()))
 
 # NO-GST-NOFIX: without a fix (indoors) no verdict from _setup_check, GST or not:
 # "no GST" was a verdict once, and indoor stretches were set up again and again.
@@ -8581,6 +9183,33 @@ check("GPS-19: previous run found in diag.1 behind a non-status line",
       gl.prev_run["up"] == 3494 and gl.prev_run["how"] == "status",
       repr(gl.prev_run))
 diag_clear()
+# DIAG-PREV-DEEP: diag.1's tail was read with diag.log's and searched from
+# the end: 8 event lines after the run's last status line gave the end of a
+# run days before, in diag.1. diag.1 only when diag.log was read whole;
+# further back in diag.log first; past that the run is unknown
+_dp_old = "".join("up %d utc 20261101T0%d0000Z nmea 1/0\n" % (3600 * k, k)
+                  for k in range(1, 6))
+_dp_cur = ("up 400000 utc 20261110T120000Z x\n"
+           "boot cause 1 prev_up 400000 mhz 80 mem 1\n"
+           "up 3600 utc 20261114T100000Z x\n"
+           "up 7200 utc 20261114T110000Z x\n")
+_dp_ev = "".join("wifi fail home status 201 after 3000 ms %d\n" % k
+                 for k in range(9))
+_dp = []
+for _dp_text in (_dp_cur + _dp_ev, _dp_cur + _dp_ev * 6, _dp_ev):
+    diag_clear()
+    with open(gl.DIAG_OLD, "w") as f:
+        f.write(_dp_old)
+    with open(gl.DIAG_FILE, "w") as f:
+        f.write(_dp_text)
+    gl._diag_prev()
+    _dp.append((gl.prev_run["up"], gl.prev_run["end"]))
+diag_clear()
+check("DIAG-PREV-DEEP: the last status line 9 event lines back in diag.log is "
+      "the run's end (not diag.1's older one); 54 back it is unknown; a "
+      "diag.log read whole without one goes on in diag.1",
+      _dp == [(7200, "2026-11-14 11:00:00Z"), (None, None),
+              (18000, "2026-11-01 05:00:00Z")], repr(_dp))
 
 # DIAG-TAIL: status lines are ~180 B, so 160 B a line gave the page 13 of
 # WEB_DIAG lines, and right after a rotation only one; now the page takes
@@ -8756,8 +9385,11 @@ try:
     dw_bad = [_dget(q)[0] for q in (b"f=2&o=0", b"f=x&o=0", b"f=0&o=-1",
                                     b"f=0&o=x", b"o=0", b"f=0&o=1x")]
     dw_host = _dget(b"f=0&o=0", b"Host: evil.example\r\n")[0]
+    dw_xold = [_dget(b"f=0&o=999999")[1].get("X-Diag-Old"),
+               _dget(b"f=1&o=0")[1].get("X-Diag-Old")]
     os.remove(gl.DIAG_OLD)
     dw_missing = _dget(b"f=1&o=0")[0]
+    dw_xold.append(_dget(b"f=0&o=0")[1].get("X-Diag-Old"))
 finally:
     gl._rcv.read_uart = dw_real_uart
 check("DIAG-WEB: /diag?f=1 and f=0 paged from o are the files byte for "
@@ -8780,6 +9412,10 @@ check("DIAG-WEB: a bad f or o, or a missing file, is a 404; a foreign Host "
       and dw_missing == b"HTTP/1.0 404 Not Found"
       and dw_host == b"HTTP/1.0 403 Forbidden",
       repr((dw_bad, dw_missing, dw_host)))
+check("DIAG-WEB-OLD: f=0 also says X-Diag-Old, diag.1's size (0 without "
+      "one): a rotation the page missed while its diag.log grew past the "
+      "page's offset again is seen by it; f=1 has none",
+      dw_xold == [str(len(dw_old)), None, "0"], repr(dw_xold))
 diag_clear()
 
 # GPS-20: a cut-off sentence glued to a whole one keeps the whole one
@@ -8963,6 +9599,14 @@ gl.st["svs_at"] = _clock[0] - 3 * gl._rcv.SV_POLL
 used_old = gl._rcv.sv_used()
 check("GPS: used from a fresh satellite list, else GGA",
       used_list == 16 and used_old == 12, "%r %r" % (used_list, used_old))
+gl.st["view"] = {"GP": 5, "GA": 2}
+gl.st["svs_at"] = _clock[0]
+seen_list = gl._rcv.sv_seen()
+gl.st["svs_at"] = _clock[0] - 2 * gl._rcv.SV_POLL
+seen_old = gl._rcv.sv_seen()
+check("GPS-SEEN-AGE: seen from a satellite list younger than two SV_POLL (as "
+      "used), else GSV's count: a list no round closes is stale",
+      seen_list == 16 and seen_old == 7, "%r %r" % (seen_list, seen_old))
 gl._rcv.reset()
 _uart_rx[:] = []
 ban = b"FWVer R6.0.0.0Build3700\r\n"
@@ -8996,6 +9640,22 @@ check("RXBUF: a preallocated buffer, lines across 7-byte reads, junk dropped",
       isinstance(getattr(gl._rcv, "_rx", None), bytearray)
       and rx_ok == (6, 0) and gl.st["ok"] == 9,
       "%r ok=%d" % (rx_ok, gl.st["ok"]))
+# RXBUF-JUNK: a whole buffer of junk (RX_LINE + RX_READ bytes, no newline) is
+# dropped: without it the buffer stayed full, every readinto read nothing and
+# no sentence was read again
+gl._rcv.reset()
+_uart_rx[:] = []
+_uart_rx.extend(b"\x00" * (gl._rcv.RX_LINE + gl._rcv.RX_READ + 88) + rmcs)
+gl._rcv.read_uart()
+_uart_rx.extend(rmcs)
+gl._rcv.read_uart()
+check("RXBUF-JUNK: RX_LINE + RX_READ bytes without a newline are dropped, the "
+      "sentences after them read, the buffer empty again",
+      gl.st["ok"] == 6 and gl.st["err"] == 0 and gl._rcv._rx_n == 0
+      and not _uart_rx, repr((gl.st["ok"], gl.st["err"], gl._rcv._rx_n, len(_uart_rx))))
+gl._rcv.reset()
+_uart_rx[:] = []
+gl._rcv._rx_n = gl._rcv._rx_s = 0
 
 
 
@@ -9246,12 +9906,45 @@ for rc_err in (MemoryError, RuntimeError):
     finally:
         gl._rcv.HANDLERS["GGA"] = rc_gga
     rc_got.append((rc_raised, rc_calls[0], [s[9] for s in gl.st["q"]],
-                   gl.st["err"], gl._rcv._rx_n))
+                   gl.st["err"] + gl.st.get("bug", 0), gl._rcv._rx_n))
 gl._rcv.reset()
 gl._rcv._rx_n = gl._rcv._rx_s = 0
 _uart_rx[:] = []
 check("RXBUF-COMMIT: a handler's error counts the line, nothing handled twice",
       rc_got == [(None, 4, ["10:00:00", "11:00:00"], 1, 0)] * 2, repr(rc_got))
+
+# NMEA-BUG: a handler's programming error (TypeError, KeyError) was booked as
+# a bad sentence (st["err"]), silently and for ever. A MemoryError stays a bad
+# line; any other exception counts in st["bug"] and writes one diag line per
+# exception type a boot
+nb_lines, nb_dw = [], gl._diag_write
+gl._diag_write = nb_lines.append
+gl._rcv._bugs[:] = []
+nb_got = []
+for nb_err in (MemoryError, TypeError, TypeError, KeyError):
+    gl._rcv.reset()
+    _uart_rx[:] = []
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
+    nb_rmc = gl._rcv.HANDLERS["RMC"]
+
+    def nb_boom(t, f, err=nb_err):
+        raise err("x")
+    gl._rcv.HANDLERS["RMC"] = nb_boom
+    try:
+        _uart_rx.extend(rv_nmea("GPRMC,100000.00,V,,,,,,,171026,,,N") + b"\r\n")
+        gl._rcv.read_uart()
+    finally:
+        gl._rcv.HANDLERS["RMC"] = nb_rmc
+    nb_got.append((gl.st["err"], gl.st.get("bug")))
+gl._diag_write = nb_dw
+gl._rcv._bugs[:] = []
+gl._rcv.reset()
+_uart_rx[:] = []
+check("NMEA-BUG: a handler's TypeError / KeyError counts as a bug, not bad NMEA, "
+      "one diag line a type; a MemoryError is still a bad line",
+      nb_got == [(1, 0), (0, 1), (0, 1), (0, 1)]
+      and nb_lines == ["bug nmea RMC TypeError('x')", "bug nmea RMC KeyError('x')"],
+      repr((nb_got, nb_lines)))
 
 
 # SECONDS: 5 Hz epochs, one point a second; midnight; seconds queued behind a
@@ -9436,6 +10129,31 @@ check("TRK2: trk2gpx reads TRK2 lines (acc and speed as extensions)",
 check("TRK2: trk2gpx output of TRK1 lines unchanged (no extension namespace)",
       "xmlns:esp" not in trk2gpx.convert(
           ["47.5,19.0,10.0,0.9,20261031T120002Z\n"], "x"))
+# T2G-DAMAGE: a .trb's delta record end scan ran to the end of a 0xFF run
+# for each of its bytes (16 KB took ~12 s, 256 KB ~2 h); a keyframe "=#END"
+# ended the track (the logger's _rd_footer takes the raw footer only); a
+# binary .trb with no point got the "(CRLF line ends?)" hint
+_t2g_kf = b"=47.500000,19.000000,120.0,0.9,20261101T100000Z\n"
+_t2g_t0 = time.perf_counter()
+_t2g_ff = len(list(trk2gpx.read_points(trk2gpx.trb_lines(
+    b"#TRKB\n" + _t2g_kf + b"\xff" * 16384 + b"\n" * 40 + _t2g_kf + bytes([0x80]) + b"#END\n"))))
+_t2g_dt = time.perf_counter() - _t2g_t0
+_t2g_end = len(list(trk2gpx.read_points(trk2gpx.trb_lines(
+    b"#TRKB\n" + _t2g_kf + b"=#END\n" + _t2g_kf.replace(b"100000Z", b"100005Z")
+    + b"#END\n"))))
+_t2g_td = tempfile.mkdtemp(prefix="t2g-")
+_t2g_p = os.path.join(_t2g_td, "x.trb")
+with builtins.open(_t2g_p, "wb") as f:
+    f.write(b"#TRKB\n=bad\n" + bytes([0x86, 0x0D, 0x0A]) + b"#END\n")
+_t2g_r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"),
+                         _t2g_p], capture_output=True, text=True)
+shutil.rmtree(_t2g_td, True)
+check("T2G-DAMAGE: trk2gpx reads past a 16 KB 0xFF run in well under 1.5 s "
+      "(both keyframes and the delta kept); a keyframe \"=#END\" is no footer; a "
+      "binary .trb without points gets no CRLF hint",
+      _t2g_ff == 3 and _t2g_dt < 1.5 and _t2g_end == 2
+      and "no valid points" in _t2g_r.stderr and "CRLF" not in _t2g_r.stderr,
+      repr((_t2g_ff, round(_t2g_dt, 2), _t2g_end, _t2g_r.stderr[-200:])))
 
 # RING-LINE: the way out rebuilt from the departure ring is the line
 # _sample_line writes (single precision: mpy_unix_logger)
@@ -10220,7 +10938,7 @@ try:
     gl.wifi.update(blank_rssi=-50, blank_bssid=b"\x12" * 6, roaming=True)
     gl._mark_failed("home", "test")
     held = not gl._blank_home_ok()
-    _clock[0] += getattr(gl, "BLANK_BAD_HOLD", 3600000)
+    _clock[0] += gl.BLANK_BAD_HOLD
     expired = gl._blank_home_ok()
     gl.wifi["roaming"] = True
     gl._mark_failed("home", "test")
@@ -10650,7 +11368,7 @@ try:
                {"ssid": "hot", "pw": "y", "home": False, "hidden": False,
                 "bssid": None, "ip": None}]
         aps, miss = [R2_NEIGH], {}
-        n_miss = getattr(gl, "HOME_AP_MISS", 5)
+        n_miss = gl.HOME_AP_MISS
         hist = []
         for _ in range(n_miss):
             rv_connect(["home"], [("", -50, R2_OURS)],
@@ -11260,7 +11978,9 @@ check("U-10: an unreadable track is held, the next uploads, then .err",
       len(_posts) >= 1 and not os.path.exists(ok_p)
       and os.path.exists(bad_p + ".err") and not os.path.exists(bad_p),
       "posts=%d %r" % (len(_posts), os.listdir(up_td)))
-os.remove(bad_p + ".err")
+for p_ in (bad_p, bad_p + ".err"):      # (a failed check leaves either: a
+    if os.path.exists(p_):              # bare remove ended the whole run)
+        os.remove(p_)
 
 # UPL-7: the points of a track parked as .err leave up["left"] (counted at
 # boot, they were never sent: 'left' stayed above 0 and held the OTA)
@@ -11284,7 +12004,9 @@ check("UPL-7: a track parked as .err after read errors leaves 'left'",
       u7_left0 == 8 and os.path.exists(bad_p + ".err")
       and not os.path.exists(ok_p) and gl.up["left"] == 0,
       repr((u7_left0, gl.up["left"], os.listdir(up_td))))
-os.remove(bad_p + ".err")
+for p_ in (bad_p, bad_p + ".err"):
+    if os.path.exists(p_):
+        os.remove(p_)
 # ... and one parked because it cannot be deleted after its last batch
 make_trk(ok_p, 3)
 gl.up["left"] = gl.count_points()
@@ -11301,7 +12023,9 @@ finally:
 check("UPL-7: a track parked as .err after failed deletes leaves 'left'",
       os.path.exists(ok_p + ".err") and gl.up["left"] == gl.count_points()
       == 0, repr((gl.up["left"], os.listdir(up_td))))
-os.remove(ok_p + ".err")
+for p_ in (ok_p, ok_p + ".err"):
+    if os.path.exists(p_):
+        os.remove(p_)
 
 # UPL-4: a 5xx or another answer that is no payload error (404, 403, 3xx)
 # for the same batch SRV_ERR_MAX times in a row holds that track, so the
@@ -11314,7 +12038,7 @@ for code_ in (500, 404):
     make_trk(bad_p, 3)
     make_trk(ok_p, 4)
     _post_code[0] = code_
-    for _ in range(getattr(gl, "SRV_ERR_MAX", 3)):
+    for _ in range(gl.SRV_ERR_MAX):
         pump()
         _clock[0] += 1000
     held4 = bad_p in (gl.up.get("hold") or {})
@@ -11330,6 +12054,149 @@ check("UPL-4: SRV_ERR_MAX server errors on one batch hold that track, the "
       "next one goes, then the held one",
       u4 == [(500, True, 4, True, False, False),
              (404, True, 4, True, False, False)], repr(u4))
+
+# UPL-SRV: a server-error hold is lifted by a 2xx of another track (the
+# server is back: after a 2-minute Dawarich restart the oldest track
+# waited BACKOFF_MAX); the same batch failing again is held by a hold no
+# 2xx lifts; a payload hold stays through another track's 2xx
+c_p = os.path.join(up_td, "20261003_100000.trk")
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+make_trk(ok_p, 4)
+make_trk(c_p, 2)
+_post_code[0] = 502
+for _ in range(gl.SRV_ERR_MAX):
+    pump()
+    _clock[0] += 1000
+us = [bad_p in gl.up["hold"]]
+_post_code[0] = 201
+pump()                                   # ok_p goes: bad_p's hold lifted
+us.append((os.path.exists(ok_p), bad_p in gl.up["hold"]))
+_post_code[0] = 502
+pump()                                   # bad_p's batch fails once more
+us.append(bad_p in gl.up["hold"])
+_post_code[0] = 201
+pump()                                   # c_p goes, bad_p stays held
+us.append((os.path.exists(c_p), bad_p in gl.up["hold"]))
+gl.up["hold"] = {}
+pump()
+us.append(os.path.exists(bad_p))
+check("UPL-SRV: a 2xx of another track lifts a server-error hold once; the "
+      "batch failing again stays held through the next 2xx",
+      us == [True, (False, False), True, (False, True), False], repr(us))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+make_trk(ok_p, 4)
+gl.up["fail4"] = gl.MAX_GLOBAL_PAYLOAD - 1
+_post_code[0] = 422
+pump()                                   # "err payload": bad_p held
+us2 = [bad_p in gl.up["hold"], gl.up["state"]]
+_post_code[0] = 201
+pump()
+us2 += [os.path.exists(ok_p), bad_p in gl.up["hold"]]
+check("UPL-SRV: a payload hold stays through another track's 2xx",
+      us2 == [True, "err payload", False, True], repr(us2))
+for x_ in (bad_p, c_p, bad_p + ".pos"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-FAIL4: a 2xx ends a run of payload errors: two 422s, a 201, then a
+# 422 still quarantines (without the reset the third one was "err payload",
+# its track held BACKOFF_MAX)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+f4_p = os.path.join(up_td, "20261004_100000.trk")
+make_trk(f4_p, 4 * gl.UPLOAD_BATCH + 5)
+f4 = []
+for code_ in (422, 422, 201, 422):
+    _post_code[0] = code_
+    pump()
+    f4.append((gl.up["state"], gl.up["fail4"]))
+_post_code[0] = 201
+check("UPL-FAIL4: 422, 422, 201, 422: the last one is quarantined too",
+      f4 == [("quarantine", 1), ("quarantine", 2), ("ok", 0),
+             ("quarantine", 1)] and pts_in(f4_p + ".bad")
+      == 3 * gl.UPLOAD_BATCH, repr((f4, pts_in(f4_p + ".bad"))))
+for x_ in (f4_p, f4_p + ".pos", f4_p + ".bad"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-GATE: right after a quarantine (allow_bad off) the new .bad is not
+# sent in the next round (only after a 2xx or at the next boot)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+g_p = os.path.join(up_td, "20261004_110000.trk")
+make_trk(g_p, 3)
+_post_code[0] = 422
+pump()
+g1 = (os.path.exists(g_p), os.path.exists(g_p + ".bad"),
+      gl.up["allow_bad"], len(_posts))
+_post_code[0] = 201
+pump()
+g2 = (len(_posts), os.path.exists(g_p + ".bad"))
+check("UPL-GATE: a .bad is not retried in the round after its quarantine",
+      g1 == (False, True, False, 1) and g2 == (1, True), repr((g1, g2)))
+for x_ in (g_p, g_p + ".bad"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-EOFPOS: the commit at the end of a track takes its .pos with it, not
+# up_reset's orphan cleanup at the next boot
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+e_p = os.path.join(up_td, "20261004_120000.trk")
+make_trk(e_p, gl.UPLOAD_BATCH + 5)
+pump()
+e1 = (os.path.exists(e_p), os.path.exists(e_p + ".pos"))
+pump()
+e2 = (os.path.exists(e_p), os.path.exists(e_p + ".pos"))
+check("UPL-EOFPOS: a .pos is there between batches and goes with the last",
+      e1 == (True, True) and e2 == (False, False), repr((e1, e2)))
+for x_ in (e_p, e_p + ".pos"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-ERR: a track parked as .err after read errors says so in the diag
+# log, so does a rename that fails too (it was a bare pass), and the JSON
+# counts .err files (err_files: at boot, and as they are parked)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+diag_clear()
+_ue_dg, gl.DIAG = gl.DIAG, 60000
+_ue_rn = os.rename
+ue = []
+gl.read_batch = rb_fail
+try:
+    os.rename = lambda a_, b_: ((_ for _ in ()).throw(OSError(5))
+                                if a_ == bad_p else _ue_rn(a_, b_))
+    for _ in range(gl.READ_ERR_MAX):
+        gl.up["hold"] = {}
+        pump()
+    ue.append((os.path.exists(bad_p), gl.up.get("err_files")))
+    os.rename = _ue_rn
+    for _ in range(gl.READ_ERR_MAX):
+        gl.up["hold"] = {}
+        pump()
+    ue.append((os.path.exists(bad_p + ".err"), gl.up.get("err_files"),
+               dict(gl._web_rows()).get("err_files")))
+    gl.up_reset()
+    ue.append(gl.up.get("err_files"))
+finally:
+    os.rename = _ue_rn
+    gl.read_batch = real_rb
+    gl.DIAG = _ue_dg
+ue_d = [l for l in diag_lines() if l.startswith("upload: ")]
+check("UPL-ERR: parking an unreadable track and failing to are diag lines; "
+      "err_files counts the .err files",
+      ue == [(True, 0), (True, 1, 1), 1]
+      and ue_d == ["upload: %s unreadable, not parked OSError(5)" % bad_p,
+                   "upload: %s unreadable, parked as .err" % bad_p],
+      repr((ue, ue_d)))
+os.remove(bad_p + ".err")
+diag_clear()
 
 # UPL-SKIP: one passing MemoryError on a track set up["skip"], cleared only
 # by a 2xx: the other track answered 500 for ever (and never held, the
@@ -11372,10 +12239,11 @@ check("UPL-SKIP: a track skipped after one MemoryError is tried again while "
 
 # POS-ERR: a batch with nothing to send whose .pos write fails is a flash
 # error, not an unreadable track: READ_ERR_MAX of them must not park it
+# (more than UPLOAD_SCAN bytes of them: the batch ends before the end)
 pe_p = os.path.join(up_td, "20261002_100000.trk")
-make_trk(pe_p, gl.UPLOAD_BATCH + 10,
-         times=["2026-10-05T00:00:%02dX" % (i % 60)
-                for i in range(gl.UPLOAD_BATCH + 10)])
+pe_n = gl.UPLOAD_SCAN // 30
+make_trk(pe_p, pe_n, times=["2026-10-05T00:00:%02dX" % (i % 60)
+                            for i in range(pe_n)])
 real_wo = gl.write_offset
 gl.write_offset = lambda path, off: (_ for _ in ()).throw(OSError(28))
 _posts[:] = []
@@ -11959,6 +12827,98 @@ check("TLS-CTX: a context that failed to be made is made on the next POST",
 check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
       to is not None and _clock[0] - t0 >= gl.HTTP_WAIT, repr(to))
 
+# TLS-AWAY: https without CA_FILE is "tls": "unverified" in the JSON and a
+# diag line at the start; UPLOAD_AWAY_UNVERIFIED=0 keeps such an upload
+# (and plain http) to home networks, verified TLS goes anywhere; the
+# default (1) uploads unverified away as before
+ta_td = tempfile.mkdtemp(prefix="tlsaway-")
+ta_tls = sys.modules.get("tls")
+ta_gone = None
+sys.modules["tls"] = RvTls
+ta = []
+ta_d = []
+ta_dg = gl.DIAG
+ta_p = os.path.join(ta_td, "20261005_120000.trk")
+try:
+    gl.DIAG = 60000
+    gl.CA_FILE = os.path.join(ta_td, "ca.der")       # (none yet)
+    online(ta_td)
+    tls_ctx_reset()
+    gl._tls_context()
+    diag_clear()
+    gl._up_env({"UPLOAD_AWAY_UNVERIFIED": "0"})
+    ta_d = [l for l in diag_lines() if "not verified" in l]
+    ta.append((gl._tls_state(), dict(gl._web_rows()).get("tls"),
+               gl.UPLOAD_AWAY_UNVERIFIED))
+    make_trk(ta_p, 3)
+    gl.wifi["home"] = False
+    pump()
+    ta.append((len(_posts), gl.up["state"], os.path.exists(ta_p)))
+    gl.wifi["home"] = True
+    pump()
+    ta.append((len(_posts), os.path.exists(ta_p)))
+    with open(gl.CA_FILE, "wb") as f:
+        f.write(b"\x30\x82der")
+    tls_ctx_reset()
+    gl._tls_context()
+    make_trk(ta_p, 3)
+    gl.wifi["home"] = False
+    _posts[:] = []
+    pump()
+    ta.append((gl._tls_state(), len(_posts), os.path.exists(ta_p)))
+    os.rename(gl.CA_FILE, gl.CA_FILE + ".x")   # gone, the context kept
+    make_trk(ta_p, 3)
+    _posts[:] = []
+    pump()
+    ta_gone = (gl._tls_state(), len(_posts), gl.up["state"],
+               os.path.exists(ta_p))
+    os.rename(gl.CA_FILE + ".x", gl.CA_FILE)
+    tls_ctx_reset()
+    gl._tls_context()
+    if os.path.exists(ta_p):
+        os.remove(ta_p)
+    gl.up["url"] = "http://d.example"
+    make_trk(ta_p, 3)
+    _posts[:] = []
+    pump()
+    ta.append((gl._tls_state(), len(_posts), gl.up["state"]))
+    gl._up_env({})                       # (no key: the setting stays)
+    ta.append(gl.UPLOAD_AWAY_UNVERIFIED)
+    gl.UPLOAD_AWAY_UNVERIFIED = True
+    os.remove(gl.CA_FILE)
+    gl.up["url"] = "https://d.example"
+    tls_ctx_reset()
+    gl._tls_context()
+    pump()
+    ta.append((gl._tls_state(), len(_posts), os.path.exists(ta_p)))
+finally:
+    gl.UPLOAD_AWAY_UNVERIFIED = True
+    gl.CA_FILE = "/ca.der"
+    gl.DIAG = ta_dg
+    gl.wifi["home"] = False
+    if ta_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = ta_tls
+    tls_ctx_reset()
+    diag_clear()
+check("TLS-AWAY: https without CA_FILE: 'tls' unverified and a diag line at "
+      "the start",
+      ta[:1] == [("unverified", "unverified", False)]
+      and ta_d == ["upload GEO_URL https without %s: the server is not "
+                   "verified, uploads away off"
+                   % os.path.join(ta_td, "ca.der")], repr((ta, ta_d)))
+check("TLS-AWAY: UPLOAD_AWAY_UNVERIFIED=0: an unverified or plain http "
+      "upload waits for a home network, a verified one goes away too; the "
+      "default sends unverified away",
+      ta[1:] == [(0, "err unverified", True), (1, False),
+                 ("verified", 1, False), ("off", 0, "err unverified"),
+                 False, ("unverified", 1, False)], repr(ta))
+check("TLS-AWAY-GONE: CA_FILE removed after a verified context was made: "
+      "away with UPLOAD_AWAY_UNVERIFIED=0 no POST (the context made again "
+      "is CERT_NONE), 'tls' unverified",
+      ta_gone == ("unverified", 0, "err unverified", True), repr(ta_gone))
+
 # HEAD-ERR: once the status line is in, an error in the header loop keeps
 # the 2xx (a reset there resent the batch: a duplicate); bounded reads
 gl.socket, gl.select = fake_sockmod, fake_sel
@@ -12020,6 +12980,56 @@ check("HEAD-NAMES: _raw_post gives Retry-After and Content-Type by name, any cas
 check("HEAD-LINES: a head over HTTP_LINES lines stops there, the 200 stands",
       r_lines == (200, None, None) and n_lines == gl.HTTP_LINES + 1,
       "%r %d" % (r_lines, n_lines))
+
+# UPL-HEAD: _raw_post tells a whole head without a Content-Type (b"") from
+# one not read to its blank line (None); through upload_tick neither is a
+# commit: a captive portal's bare 200 (HTTP/1.0, no headers) deleted the
+# track as sent
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+uh_res = []
+uh_tick = []
+real_hp = gl.HTTP_POST
+uh_ru = gl._rcv.read_uart
+gl._rcv.read_uart = lambda: None
+try:
+    for resp_ in (b"HTTP/1.0 200 OK\r\n\r\n<html>login</html>",
+                  b"HTTP/1.1 201 Created\r\nServer: x\r\n",
+                  b"HTTP/1.1 201 Created\r\nContent-Type: application/json"
+                  b"\r\n\r\n{}"):
+        rv_sock[0] = RvSock(resp_, polls=0)
+        uh_res.append(gl._raw_post("https://d.example", b"{}", {}, 15))
+    uh_p = os.path.join(up_td, "20261005_101500.trk")
+    for resp_ in (b"HTTP/1.0 200 OK\r\n\r\n<html>login</html>",
+                  b"HTTP/1.1 200 OK\r\nServer: portal\r\nContent-Length: 20"
+                  b"\r\n\r\n<html>login</html>",
+                  b"HTTP/1.1 201 Created\r\nContent-Type: application/json"
+                  b"\r\n\r\n{}"):
+        online(up_td)
+        tls_ctx_reset()
+        gl.HTTP_POST = gl._raw_post
+        make_trk(uh_p, 5)
+        rv_sock[0] = RvSock(resp_, polls=0)
+        pump()
+        uh_tick.append((os.path.exists(uh_p), gl.up["sent"], gl.up["state"]))
+finally:
+    gl.HTTP_POST = real_hp
+    gl._rcv.read_uart = uh_ru
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    tls_ctx_reset()
+    for x_ in (uh_p, uh_p + ".pos"):
+        if os.path.exists(x_):
+            os.remove(x_)
+check("UPL-HEAD: _raw_post gives b\"\" for a whole head without a "
+      "Content-Type, None for one not read to its end",
+      [r_[2] for r_ in uh_res] == [b"", None, b"application/json"]
+      and [r_[0] for r_ in uh_res] == [200, 201, 201], repr(uh_res))
+check("UPL-HEAD: a bare 200 (no Content-Type) keeps the track unsent; only "
+      "a JSON 201 sends it",
+      uh_tick == [(True, 0, "err net"), (True, 0, "err net"),
+                  (False, 5, "ok")], repr(uh_tick))
 
 # HOST-PORT: the Host header names a port that is not the scheme's default
 # (RFC 7230 5.4: a proxy or virtual host on :8443 routes by it)
@@ -12225,7 +13235,7 @@ check("TLS-CA-OOM: ValueError making the context counts as out of memory "
 ca_td = tempfile.mkdtemp(prefix="ca-")
 ca_p = os.path.join(ca_td, "ca.der")
 with open(ca_p, "wb") as f:
-    f.write(b"\x30\x82" + b"x" * getattr(gl, "CA_MAX", 200000))
+    f.write(b"\x30\x82" + b"x" * gl.CA_MAX)
 ca_reads = []
 
 
@@ -12576,7 +13586,7 @@ class LinesOnly(object):
 real_open = open
 gl.open = lambda p, *a, **k: LinesOnly(real_open(p, *a, **k))
 try:
-    pieces = list(gl._web_json_parts(gl._web_rows(), gl._sv_list()))
+    pieces = list(gl._web_json_parts(gl._web_rows(), gl._sv_list(), True))
 finally:
     del gl.open
     gl.DIAG_FILE = saved_diag_file
@@ -12614,9 +13624,12 @@ saved_log_dir, saved_log_file = gl.LOG_DIR, gl.log["file"]
 gl.LOG_DIR = fc_td
 gl.log["file"] = fc_td + "/20261001_120000.trk"   # being written
 gl._fc[2] = None
+# (the day history's own 30 s listing is not this one's: it ran or not as an
+# earlier check left gl._hd; now it runs in r1, and only LOG_DIR's count)
+gl._hd[1] = None
 listings = []
 real_listdir = os.listdir
-os.listdir = lambda p: listings.append(p) or real_listdir(p)
+os.listdir = lambda p: (p == fc_td and listings.append(p)) or real_listdir(p)
 try:
     r1 = dict(gl._web_rows())
     r2 = dict(gl._web_rows())
@@ -12853,13 +13866,13 @@ finally:
     gl.wifi["home"] = False
 check("LOWIDF: below TLS_MIN_KB no POST; away it waits, at home too at first",
       away == (0, "low idf", 0)
-      and home == (0, 0, "low idf", getattr(gl, "LOWIDF_RETRY", -1)),
+      and home == (0, 0, "low idf", gl.LOWIDF_RETRY),
       "%r %r" % (away, home))
 
 # LOWIDF-WAIT: at home the reboot comes only after LOWIDF_WAIT of low idf
 # with tracks waiting, and it tells the next boot (LOWIDF_MARK)
-wait_ms = getattr(gl, "LOWIDF_WAIT", 300000)
-mark = getattr(gl, "LOWIDF_MARK", os.path.join(diag_dir, "lowidf"))
+wait_ms = gl.LOWIDF_WAIT
+mark = gl.LOWIDF_MARK
 if os.path.exists(mark):
     os.remove(mark)
 online(up_td)
@@ -12889,7 +13902,7 @@ check("LOWIDF-WAIT: at home a reboot only after LOWIDF_WAIT of low idf",
 online(up_td)                            # up_reset at boot takes the mark
 gl.up["url"], gl.up["key"] = "https://d.example", "k"
 make_trk(os.path.join(up_td, "20261007_100000.trk"), 3)
-gap_ms = getattr(gl, "LOWIDF_REBOOT_GAP", 1800000)
+gap_ms = gl.LOWIDF_REBOOT_GAP
 took = (gl.up.get("lowidf_boot"), os.path.exists(mark))
 saved_up = list(_gck._up)
 _gck._up[:] = [0, _clock[0], 0]           # just booted
@@ -12898,7 +13911,7 @@ gl.wifi["home"] = True
 _resets[:] = []
 t_boot = _clock[0]
 t_reboot = None
-retry_ms = getattr(gl, "LOWIDF_RETRY", 30000)
+retry_ms = gl.LOWIDF_RETRY
 try:
     while _clock[0] - t_boot < gap_ms + 4 * retry_ms:
         try:
@@ -13094,7 +14107,7 @@ try:
 finally:
     del sys.modules["gps_frozen"]
 check("LOWPY-FROZEN: TLS_MIN_PY_KB is 8 on frozen firmware, 12 otherwise",
-      fz_ == (True, 8) and (getattr(gl, "FROZEN", None), gl.TLS_MIN_PY_KB)
+      fz_ == (True, 8) and (gl.FROZEN, gl.TLS_MIN_PY_KB)
       == (False, 12), "%r %r" % (fz_, gl.TLS_MIN_PY_KB))
 
 # HEAP: gc.mem_free() includes the largest free IDF block (modgc.c), so the
@@ -13193,7 +14206,8 @@ tls_ctx_reset()
 real_hp = gl.HTTP_POST
 gl.HTTP_POST = gl._raw_post
 try:
-    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n"
+                        b"Content-Type: application/json\r\n\r\n", polls=0)
     make_trk(hg_p, 3)
     pump()
 finally:
@@ -13243,7 +14257,8 @@ gl.HTTP_POST = gl._raw_post
 diag_clear()
 gl.DIAG = 60000
 try:
-    rv_sock[0] = RvSockGrow(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    rv_sock[0] = RvSockGrow(b"HTTP/1.1 201 Created\r\n"
+                            b"Content-Type: application/json\r\n\r\n", polls=0)
     make_trk(hg_p, 3)
     pump()
 finally:
@@ -13363,7 +14378,7 @@ try:
     base = _clock[0]
     loops0 = gl.st["loops"]
     for dt in (gl._rcv.GPS_FLAP_WINDOW + 10000,
-               getattr(gl, "TICKS_CAP", 86400000) + 10000):
+               gl._rcv.TICKS_CAP + 10000):
         _clock[0] = base + dt
         gl._rcv.gps_check(_clock[0])
     _clock[0] = base + TPW + 5000            # all would read 5-30 s old
@@ -13424,11 +14439,8 @@ import re
 import shutil
 import subprocess
 node = shutil.which("node")
-if node is None and os.environ.get("CI") == "true":
-    check("PAGE: node is installed (CI runs the page checks, never skips)",
-          False)
-elif node is None:
-    print("SKIP  PAGE: node not installed")
+if node is None:
+    skip_check("PAGE", "node not installed")
 else:
     here = os.path.dirname(os.path.abspath(__file__))
     out, raws = [], []
@@ -13578,12 +14590,13 @@ else:
           repr(evw.get("evs")))
     evk = evw.get("evk", "")
     check("PAGE-EV: the summary - 3D fix % of the status lines (2 after a "
-          "boot without utc counted), no fix as a duration, boots with "
-          "power-on, updates once each with the failures",
+          "boot without utc counted), no fix as a duration summed from up "
+          "(30 lines a minute apart, the 2 after the boot at up 30: 30 s "
+          "each), boots with power-on, updates once each with the failures",
           ev.get("lines") == 166
           and '<div class="t-ok"><small>3D fix</small><b>81 %</b><em>of minutes'
               '</em></div>' in evk
-          and '<div class="t-warn"><small>No fix / no data</small><b>32<em>'
+          and '<div class="t-warn"><small>No fix / no data</small><b>31<em>'
               'min</em></b></div>' in evk
           and "<small>Boots</small><b>3</b><em>1 power-on</em>" in evk
           and '<div class="t-warn"><small>Updates</small><b>2</b><em>1 failed'
@@ -13724,6 +14737,10 @@ else:
         ("env WPA2_2 empty: SSID2 is tried as an open network", "env"),
         ("env FOO ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, WPA2_3 "
          "only)", "env"),
+        ("env DIAG not 0 or 10-3600 s, using 60 s", "env"),
+        ("env a key not UTF-8, its line skipped", "env"),
+        ("env NTP_SERVER not UTF-8, skipped", "env"),
+        ("env read stopped by MemoryError, the rest skipped", "env"),
         ("wifi fail krumpli status 201 after 12000 ms (+2 more)", "wfail"),
         ("wifi back krumpli after 2 min 05 s, 3 failed tries, rssi -60",
          "wback"),
@@ -13732,6 +14749,7 @@ else:
          "track"),
         ("track create failing 20261102_100000.trk new x.trk", "track"),
         ("track write error 3 OSError(28) 20261102_100000.trk", "track"),
+        ("track hist error 2 OSError(28) close", "track"),
         ("time back 20261102T100500Z 20261102T100400Z", "tback"),
         ("stay left wifi aps 3 scans 6", "stay"),
         ("track full 20261102T1000-20261102T1005 drop 3", "full"),
@@ -13744,6 +14762,13 @@ else:
         ("tft light 100", "disp"),
         ("upload err html 403 (captive portal?)", "upl"),
         ("upload err not json 204 (captive portal?)", "upl"),
+        ("upload err head not read 201", "upl"),
+        ("upload: /gpx/20261102_100000.trk unreadable, parked as .err",
+         "track"),
+        ("upload: /gpx/20261102_100000.trk unreadable, not parked "
+         "OSError(5)", "track"),
+        ("upload GEO_URL https without /ca.der: the server is not "
+         "verified", "env"),
         ("upload aborted after 120 s", "upl"),
         ("upload err OSError(113)", "upl"),
         ("reboot tls memory 3", "reboot"),
@@ -13771,15 +14796,30 @@ else:
          "(running 2e8bc6e)", "ota"),
         ("ota a3f2271 ok", "ota"),
         ("ota a3f2271 no fix in 900 s, rolling back, bad", "ota"),
+        ("ota a3f2271 rolled back after a power-off, 2 times: held 24 h "
+         "(running 2e8bc6e)", "ota"),
+        ("ota a3f2271 no wifi in 600 s, rolling back, held", "ota"),
+        ("ota a3f2271 booted, confirming again", "ota"),
+        ("ota a3f2271 not confirmed: OSError(-1)", "otax"),
+        ("ota tries 1793548800 not written: OSError(28)", "otax"),
+        ("ota mark valid not written: OSError(28)", "otax"),
+        ("ota cannot move aside /gps_logger.mpy: OSError(13)", "otax"),
+        ("crash boot 2 ImportError('no module named x')", "crash"),
+        ("crash boot fail 5: REPL, one more start in 30 min", "crash"),
         ("ota: uploads stuck 6 h (err 503), checking anyway", "otax"),
         ("ota error OSError(-202)", "otax"),
         ("web error KeyError('y')", "bug"),
         ("bug upload ValueError('x')", "bug"),
         ("bug tft OSError(5)", "bug"),
+        ("bug nmea RMC TypeError('x')", "bug"),
+        ("bug gps setup TypeError('x')", "bug"),
         ("crash up 3600 MemoryError()", "crash"),
         ("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
          "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
-         "idf None/None heap 124", "status")]
+         "idf None/None heap 124", "status"),
+        ("up 120 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
+         "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
+         "idf None/None heap 124 bugs upload:3,wifi:1 diag_errs 2", "status")]
     ev_src = ""
     for n_ in ("gps_logger.py", "gps_receiver.py"):   # (the receiver's lines too)
         with open(os.path.join(ROOT, n_)) as f:
@@ -14254,6 +15294,48 @@ else:
     check("TELE-FROZEN: status lines that repeat a stale GPS time go on "
           "with up: a 3 min drop-out spans 3 min", ft.get("frozen") ==
           [300000, [[180000, 3]]], repr(ft.get("frozen")))
+    # REVIEW-2026-11-14 (the status page): each finding's regression
+    # (tests/web_page_test.js diagRot ... histEnd)
+    check("SP-DIAG-ROT: a rotation missed while the board was away (its "
+          "diag.log grown past the page's offset again): X-Diag-Old, "
+          "diag.1's size in the f=0 answer, differs, both are read anew "
+          "(the old aggregate was kept, the new diag.1 never read)",
+          ft.get("diagRot") == [40, 60, 0, ["/diag?f=0&o=2980",
+                                            "/diag?f=1&o=0",
+                                            "/diag?f=0&o=0"]],
+          repr(ft.get("diagRot")))
+    check("SP-END-PLACE: today's last trip closing (5 min without a point) "
+          "redraws the day: its end place is asked (it never was)",
+          ft.get("endPlace") == [["47.100,18.400"],
+                                 ["47.100,18.400", "47.115,18.400"],
+                                 "47.100,18.400", "47.115,18.400"],
+          repr(ft.get("endPlace")))
+    check("SP-FIX-WORD: \"Fix\" / \"Fix DGPS\" (a valid position of no "
+          "said type) is a fix: amber like 2D and Waiting (as before), "
+          "no data red; in the diag summary no \"no fix\" minute",
+          ft.get("fixWord") == [["ok", "ok", "warn", "warn", "warn", "warn",
+                                 "bad", "bad"], 0], repr(ft.get("fixWord")))
+    _sb = ft.get("sinceBoot") or [[None], [None]]
+    check("SP-SINCE-BOOT: an upload error or GPS loops long ago (counted "
+          "since boot) are shown but turn no row amber",
+          _sb[0][0] == "" and _sb[1][0] == "" and "1 err" in _sb[0][1]
+          and "2 loops" in _sb[1][1], repr(_sb))
+    check("SP-DIAG-STEP: the diag summary in minutes summed from up, for "
+          "any DIAG (10 s said 6 h no fix and 3 h silent, 300 s 12 min "
+          "and no drop-out: over 180 s each line began a new run)",
+          ft.get("diagStep") == [["1 h 00 min", "30 min 1 drop-out"]] * 2
+          + [["56 min", "30 min 1 drop-out"]], repr(ft.get("diagStep")))
+    check("SP-HIST-END: a past local day ending inside its second UTC day "
+          "reads that day only up to the reply past the local day's end "
+          "(it read the whole UTC day)",
+          ft.get("histEnd") == [["/hist?d=20261107&o=0&t=230000",
+                                 "/hist?d=20261107&o=0",
+                                 "/hist?d=20261108&o=0",
+                                 "/hist?d=20261108&o=500"], False, True, 3],
+          repr(ft.get("histEnd")))
+    check("SP-EVD-DEAD: every per-kind detail is for a kind the page has "
+          "(EVD.pvt had none)", ft.get("evdKinds") == [],
+          repr(ft.get("evdKinds")))
     check("WEBR-2: a 500 from the board shows its error, not NO ANSWER",
           ft.get("wr2") == ["off", "BOARD ERROR &middot; "
                                    "TypeError(&#39;row bug&#39;)"],
@@ -14396,6 +15478,33 @@ check("WEB-MIN-FAIL: what it cannot read (a string, regex or comment cut short, 
       "literal) stops the build, nothing written",
       web_min and not _wm_bad and _wm_r.returncode == 1 and "cut short" in _wm_r.stderr
       and not os.path.exists(os.path.join(_wm_td, "o.gz")), repr((_wm_bad, _wm_r.stderr[-200:])))
+# WEB-MIN-EDGE: a // comment ended only at \n (the code after a \r or a
+# U+2028 went with it), a /* */ holding a lone \r became a space, "</script >"
+# was no end tag (the script went through the markup's comment regex), a
+# "<style>" named in an HTML comment started a block, <pre> lost its
+# indentation
+_wm_edge = []
+if web_min:
+    _wm_edge = [
+        web_min.minify_js("a = 1 // c\rb = 2") == "a = 1\nb = 2",
+        web_min.minify_js("a = 1 // c\u2028b = 2; // d\u2029c = 3") == "a = 1\nb = 2;\nc = 3",
+        web_min.minify_js("return /*\r*/ x") == "return\nx",
+        web_min.minify('<script>\nvar s = "<!-- x -->"; // c\n</script >')
+        == '<script>\nvar s = "<!-- x -->";\n</script >\n',
+        web_min.minify('<!-- see <style> -->\n<p>50 /* about */ km</p>\n<style>\na{b:c}\n</style>\n')
+        == '<p>50 /* about */ km</p>\n<style>\na{b:c}\n</style>\n']
+    for src_ in ("<pre>\n  a\n</pre>", "<p>x</p><TEXTAREA>\n  a</TEXTAREA>",
+                 "<script>\nf()\n", "<style>a{b:c}"):
+        try:
+            web_min.minify(src_)
+            _wm_edge.append(src_)
+        except web_min.MinifyError:
+            _wm_edge.append(True)
+check("WEB-MIN-EDGE: a // comment ends at \\r, U+2028 and U+2029 too, a /* */ with "
+      "a lone \\r ends the line; \"</script >\" ends a script (its \"<!--\" string "
+      "kept); a \"<style>\" in an HTML comment starts no block; <pre>, <textarea> "
+      "and a <script>/<style> without an end tag stop the build",
+      web_min and _wm_edge == [True] * 9, repr(_wm_edge))
 _wm_page = web_min.minify(page_src) if web_min else page_src
 _wm_css = lambda t_: re.sub(r"\s+", " ", re.sub(r"/\*.*?\*/", " ", t_[t_.index("<style>"):t_.index("</style>")],
                                                 flags=re.S)).replace(" }", "}").strip()
@@ -14408,7 +15517,7 @@ _wm_data = b""
 if os.path.exists(_wm_gz):
     with open(_wm_gz, "rb") as f:
         _wm_data = f.read()
-_wm_w = getattr(gl, "WEB_GZ_WBITS", 12)
+_wm_w = gl.WEB_GZ_WBITS
 check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
       "mtime, not over 25 KB (35.7, then 28.5 before A+C); the CSS and the markup only lose comments and "
       "white space; stripping again changes nothing; web.html itself keeps its comments",
@@ -14457,7 +15566,7 @@ if node is not None:
     _wm_r = subprocess.run([node, "--expose-internals", "-e", _wm_ast, os.path.join(ROOT, "web.html"), _wm_min],
                            capture_output=True, text=True)
     if "Cannot find module" in _wm_r.stderr or "bad option" in _wm_r.stderr:
-        print("SKIP  WEB-MIN-AST: this node has no acorn to reach")
+        skip_check("WEB-MIN-AST", "this node has no acorn to reach")
     else:
         try:
             _wm_j = json.loads(_wm_r.stdout)
@@ -14506,11 +15615,11 @@ check("PAGE: polls status.json at the board's refresh_s, no reload; Atlas "
 # status.json with long values, offline (the top bar's longest state): no
 # horizontal scrolling, the top bar's items inside the screen and not over
 # each other. Runs wherever google-chrome or chromium is on the PATH, else
-# SKIP; the CI workflow installs neither, so there it runs only if the runner
-# image has one.
+# SKIP; the CI workflow installs neither: the ubuntu-24.04 runner image has
+# google-chrome (and CI=true makes a skip a FAIL).
 chrome = shutil.which("google-chrome") or shutil.which("chromium")
 if chrome is None:
-    print("SKIP  PAGE-LAYOUT: google-chrome not installed")
+    skip_check("PAGE-LAYOUT", "google-chrome not installed")
 else:
     import functools
     import http.server
@@ -14819,7 +15928,7 @@ def _bad_open(name, mode="r", *a, **k):
     return _open3(name, mode, *a, **k)
 builtins.open = _bad_open
 try:
-    for r in range(getattr(gl, "WFAIL_SWITCH", 3)):
+    for r in range(gl.WFAIL_SWITCH):
         gl.log["batch"].append(trk_line(47.2, 18.4,
                                         "2026-11-01T10:05:%02dZ" % r))
         gl.flush()
@@ -15375,7 +16484,7 @@ _ota_dir = tempfile.mkdtemp()
 _ota_saved = (gl.esp32, gl.HTTP_GET, gl.OTA_URL, gl.OTA_KEY, gl.FW_BUILD,
               gl.FW_COMMIT, gl.OTA_PENDING, gl.OTA_BAD, gl.machine.reset,
               gl.DIAG, gl.OTA_TRIES, gl.OTA_PAGES)
-_ota_saved2 = (getattr(gl, "OTA_MARK", None), getattr(gl, "OTA_SHADOW", None))
+_ota_saved2 = (gl.OTA_MARK, gl.OTA_SHADOW)
 gl.esp32 = _FakeEsp32
 gl.OTA_PENDING = os.path.join(_ota_dir, "ota.pending")
 gl.OTA_BAD = os.path.join(_ota_dir, "ota.bad")
@@ -15430,7 +16539,7 @@ def _ota_reset():
         sl.mem[:] = b"\0" * len(sl.mem)
         sl.boot = False
     for f in (gl.OTA_PENDING, gl.OTA_BAD, gl.OTA_TRIES,
-              getattr(gl, "OTA_MARK", None) or os.path.join(_ota_dir, "-"),
+              gl.OTA_MARK or os.path.join(_ota_dir, "-"),
               os.path.join(_ota_dir, "web.html.gz"),
               os.path.join(_ota_dir, "web.html.gz.new")):
         try:
@@ -15501,9 +16610,11 @@ try:
         if _ota_log:
             states.append(list(_ota_log))
     check("OTA-REFUSE: older build, bad HMAC, sha256 mismatch, too big, a "
-          "failed build, no slot API, no manifest: nothing boots",
-          states == ["current", "bad hmac", "bad image", "too big", "current",
-                     "no ota slot", "manifest 404"], repr(states))
+          "failed build (its own state 'bad <commit>', not 'current': the "
+          "page said up to date), no slot API, no manifest: nothing boots",
+          states == ["current", "bad hmac", "bad image", "too big",
+                     "bad abc0200", "no ota slot", "manifest 404"],
+          repr(states))
 
     # pending: valid after OTA_VALID_AFTER with WiFi and the manifest read
     # (the staged page goes up); no WiFi in OTA_HEALTH: a reset (no
@@ -15674,6 +16785,22 @@ try:
           pp == [("ok", _page, None), ("ok", _page, b"new plain"),
                  ("ok", b"old gz", b"old plain"),
                  ("rolled back", b"old gz", b"old plain")], repr(pp))
+    # OTA-PROMOTE-ORDER: the plain page the manifest names stays whatever
+    # the order (staged first, it went up before the gzip; "both" above
+    # put it up last and hid a gzip that removed it anyway)
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+    for p, b in ((page_p, b"old gz"), (page_p + ".new", _page),
+                 (plain_p, b"old plain"), (plain_p + ".new", b"new plain")):
+        with open(p, "wb") as f:
+            f.write(b)
+    gl._ota_promote([plain_p, page_p])
+    po = (dev_file(_ota_dir, "web.html.gz"), dev_file(_ota_dir, "web.html"))
+    for p in (plain_p, plain_p + ".new"):
+        if os.path.exists(p):
+            os.remove(p)
+    check("OTA-PROMOTE-ORDER: a plain page the manifest names stays when it "
+          "goes up before the gzip", po == (_page, b"new plain"), repr(po))
     # set_boot failing: no pending note blames a build that never ran, the
     # staged page is dropped
     _ota_reset()
@@ -15813,15 +16940,72 @@ try:
           "image, nothing boots",
           _ota_log == [] and gl.ota["state"] == "bad image",
           repr((_ota_log, gl.ota["state"])))
+    # OTA-FLASH-ERR: the last block's write (w.close) and the read-back
+    # (_slot_sha) were outside the try that sets "failed": a flash error
+    # there downloaded the image again every OTA_CHECK, not OTA_RETRY. A
+    # failed set_boot was labelled "bad page"
+    fe = []
+    fe_gets = []
+    def _fe_get(url, sink, limit):
+        fe_gets.append(url)
+        return _ota_get(url, sink, limit)
+    gl.HTTP_GET = _fe_get
+    try:
+        for how in ("last write", "read back", "set_boot"):
+            _ota_reset()
+            gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+            _serve(_manifest(200))
+            del fe_gets[:]
+            if how == "last write":
+                _fe_wb = _slots[1].writeblocks
+                def _fe_w(blk, buf, _wb=_fe_wb):
+                    if blk == len(_img) // 4096:     # (the tail: close())
+                        raise OSError(5)
+                    _wb(blk, buf)
+                _slots[1].writeblocks = _fe_w
+            elif how == "read back":
+                def _fe_r(blk, buf):
+                    raise OSError(5)
+                _slots[1].readblocks = _fe_r
+            else:
+                def _fe_sb():
+                    raise OSError(-1)
+                _slots[1].set_boot = _fe_sb
+            try:
+                for _k in range(2):
+                    try:
+                        gl._ota_check()
+                    except OSError:
+                        pass
+                    _clock[0] += gl.OTA_CHECK
+            finally:
+                for a_ in ("writeblocks", "readblocks", "set_boot"):
+                    if a_ in _slots[1].__dict__:
+                        delattr(_slots[1], a_)
+            fe.append(((gl.ota.get("failed") or (0, 0, None))[2],
+                       gl.ota["state"],
+                       sum(1 for u in fe_gets if u.endswith(".bin")),
+                       list(_ota_log)))
+    finally:
+        gl.HTTP_GET = _ota_get
+    check("OTA-FLASH-ERR: a flash error in the last block's write or the "
+          "read-back waits OTA_RETRY (one download, not one per check); a "
+          "failed set_boot is 'set_boot err', not 'bad page'",
+          fe == [("download err", "download err", 1, []),
+                 ("download err", "download err", 1, []),
+                 ("set_boot err", "set_boot err", 1, [])], repr(fe))
 
     # OTA-POWERON: MicroPython 1.29 reports a brownout as PWRON_RESET, so a
     # build that browned out on a weak supply was rolled back, never blamed
     # and installed again 2 min after every boot. A power-on rollback is a
     # try (OTA_TRIES): the next install waits OTA_RETRY, the
-    # OTA_TRIES_MAX-th rollback marks the build bad
+    # OTA_TRIES_MAX-th rollback holds the build (OTA-HOLD), not bad for
+    # good (two power cuts in the pending window banned a good build)
     _ota_reset()
     gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
     _serve(_manifest(200))
+    _ota_clk = (gl.log["clock"], gl._ntp[0])
+    gl.log["clock"] = gl._ntp[0] = None  # (no clock yet: held)
     pw = []
     for boot in range(5):
         gl.ota.update(state="idle", pend=None, failed=None, at=None)
@@ -15836,12 +17020,68 @@ try:
             gl._ota_check()
         pw.append(first + (("boot", "ota_1") in _ota_log,))
     check("OTA-POWERON: a build rolled back at power-on (a brownout) waits "
-          "OTA_RETRY, and is bad after OTA_TRIES_MAX such rollbacks",
+          "OTA_RETRY, and is held (not bad) after OTA_TRIES_MAX such "
+          "rollbacks, 'rolled back' on the page",
           [p[1:] for p in pw] == [(True, True), (False, True), (False, False),
                                   (False, False), (False, False)]
-          and pw[1][0] == "rolled back" and pw[2][0] == "current"
-          and gl._ota_bad() == [200],
-          repr((pw, gl._ota_bad())))
+          and pw[1][0] == "rolled back" and pw[2][0] == "rolled back"
+          and gl._ota_bad() == [] and gl._ota_tries() == (200, 2),
+          repr((pw, gl._ota_bad(), gl._ota_tries())))
+    # OTA-HOLD: the hold runs on UTC from the first check with a clock
+    # (OTA_TRIES keeps the two words an older firmware reads until then),
+    # OTA_HOLD long; after it the build is installed again; the next
+    # round's hold is twice as long. The ban by tries was for good
+    def _t_hold():
+        out = []
+        with open(gl.OTA_TRIES) as f:
+            out.append(f.read().split())         # ['200', '2']: no clock
+        gl.log["clock"] = (1000000, gl._stamp())
+        gl.ota["failed"] = None
+        del _ota_log[:]
+        gl._ota_check()                          # the hold begins
+        with open(gl.OTA_TRIES) as f:
+            out.append((gl.ota["state"], len(f.read().split()),
+                        list(_ota_log)))
+        _clock[0] += (gl.OTA_HOLD - 60) * 1000
+        gl._ota_check()
+        out.append((gl.ota["state"], list(_ota_log)))
+        _clock[0] += 120000
+        gl._ota_check()                          # a day on: again
+        out.append((gl.ota["state"], ("boot", "ota_1") in _ota_log))
+        # rolled back by power twice more: held again, twice as long
+        for _k in range(2):
+            gl.ota.update(state="idle", pend=None, failed=None, at=None)
+            _reset_cause[0] = 1
+            gl.ota_boot()
+            del _ota_log[:]
+            if _k == 0:
+                _clock[0] += gl.OTA_RETRY + 1000
+                gl._ota_check()                  # (the 3rd install)
+        gl.ota["failed"] = None
+        gl._ota_check()
+        _clock[0] += (gl.OTA_HOLD + 60) * 1000
+        gl._ota_check()
+        st1 = (gl.ota["state"], ("boot", "ota_1") in _ota_log)
+        _clock[0] += gl.OTA_HOLD * 1000
+        gl._ota_check()
+        out.append((gl._ota_tries(), st1,
+                    ("boot", "ota_1") in _ota_log, gl._ota_bad(),
+                    [l for l in diag_lines() if "held" in l][-1:]))
+        return out
+    try:
+        hd = _t_hold()
+    except Exception as e:               # (the fix missing: its repr)
+        hd = ("raised", repr(e)[:80])
+    finally:
+        gl.log["clock"], gl._ntp[0] = _ota_clk
+    check("OTA-HOLD: a held build waits OTA_HOLD of UTC from the first "
+          "check with a clock, then is installed again; the next hold is "
+          "twice as long; never bad for good",
+          hd[:4] == [["200", "2"], ("rolled back", 3, []),
+                     ("rolled back", []), ("downloading", True)]
+          and hd[4][:4] == ((200, 4), ("rolled back", False), True, [])
+          and "4 times: held 48 h" in str(hd[4][4]),
+          repr(hd))
 
     # OTA-NOWIFI: no WiFi in OTA_HEALTH rolled back and blamed the build
     # for good: a router outage excluded a good build forever. It is a try
@@ -15873,10 +17113,13 @@ try:
         nw.append(r + (gl.ota["state"], list(_ota_log)))
     gl.wifi_reset()
     check("OTA-NOWIFI: no WiFi in OTA_HEALTH resets; the build waits "
-          "OTA_RETRY and is bad only after OTA_TRIES_MAX such rollbacks",
+          "OTA_RETRY and is held (not bad) after OTA_TRIES_MAX such "
+          "rollbacks",
           nw == [([("reset",)], [], "rolled back", []),
-                 ([("reset",)], [200], "current", [])],
-          repr(nw))
+                 ([("reset",)], [], "rolled back", [])]
+          and gl._ota_tries() == (200, 2)
+          and any(l.endswith("rolling back, held") for l in diag_lines()),
+          repr((nw, gl._ota_tries())))
 
     # OTA-PROBE: a pending firmware is valid only once it read the manifest
     # too (HTTP 200, parsed): a build with a broken update path rolls back
@@ -16192,6 +17435,80 @@ try:
                   False, True, True),
           repr(ext))
 
+    # OTA-CAUSE: the old firmware back after a rollback (a power-off) that
+    # stopped or stalled before ota_boot (Ctrl-C, then its watchdog) made
+    # the next boot's WDT cause the new build's: bad for good. gps_boot
+    # (before the import) notes the first boot's cause in OTA_MARK
+    def _t_cause():
+        import gps_boot as gb
+        saved = (gb.OTA_PENDING, gb.OTA_MARK, gb.OTA_SHADOW,
+                 sys.modules.get("gps_frozen"))
+        gb.OTA_PENDING, gb.OTA_MARK = gl.OTA_PENDING, gl.OTA_MARK
+        gb.OTA_SHADOW = gl.OTA_SHADOW
+        fz = sys.modules["gps_frozen"] = types.ModuleType("gps_frozen")
+        out = []
+        try:
+            for running, mark in ((100, None), (100, "stop"), (100, "crash"),
+                                  (200, None)):
+                _ota_reset()
+                fz.BUILD = running
+                gl.FW_BUILD, gl.FW_COMMIT = running, "abc%04d" % running
+                _pend(200)
+                if mark:
+                    _set_mark(mark)
+                _reset_cause[0] = 1          # the rollback: a power-off
+                gb.unshadow()
+                _reset_cause[0] = 3          # stalled: its watchdog
+                gb.unshadow()
+                m1 = gl._ota_mark_get()
+                if running == 100:
+                    gl.ota_boot()
+                out.append((m1, gl._ota_bad(), gl._ota_tries()))
+        finally:
+            gb.OTA_PENDING, gb.OTA_MARK, gb.OTA_SHADOW = saved[:3]
+            if saved[3] is None:
+                sys.modules.pop("gps_frozen", None)
+            else:
+                sys.modules["gps_frozen"] = saved[3]
+            _reset_cause[0] = 1
+            gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        return out
+    cs = _guarded(_t_cause)
+    check("OTA-CAUSE: the old firmware's first boot after a rollback notes "
+          "its cause (a later WDT of its own is not the new build's: a try, "
+          "not bad); a crash or stop mark stays; nothing for the pending "
+          "build running",
+          cs == [("cause 1", [], (200, 1)), ("stop", [], (200, 1)),
+                 ("crash", [200], (None, 0)), (None, [], (None, 0))],
+          repr(cs))
+
+    # OTA-WRITE-DIAG: a try count or a mark that could not be written was
+    # silent (the old firmware then misread the rollback, the build came
+    # again sooner): a diag line now
+    def _t_wdiag():
+        _ota_reset()
+        _pend(100)
+        real_open = gl.open if hasattr(gl, "open") else None
+        def _ro(p, mode="r", *a, **k):
+            if p in (gl.OTA_TRIES, gl.OTA_MARK) and "w" in mode:
+                raise OSError(28)
+            return builtins.open(p, mode, *a, **k)
+        gl.open = _ro
+        try:
+            gl._ota_try(200)
+            gl._ota_mark("crash")
+        finally:
+            if real_open is None:
+                del gl.open
+            else:
+                gl.open = real_open
+        return [l for l in diag_lines() if "not written" in l]
+    wd = _guarded(_t_wdiag)
+    check("OTA-WRITE-DIAG: a try count or an OTA mark that cannot be "
+          "written is a diag line",
+          len(wd) == 2 and "tries 200" in wd[0] and "mark crash" in wd[1],
+          repr(wd))
+
     # OTA-BAD-TOKEN: one token in OTA_BAD that is no number skips only
     # itself (the file is only appended to: the whole list was forgotten)
     def _t_badtok():
@@ -16347,6 +17664,44 @@ try:
           "it back; not on a plain (non-frozen) firmware",
           sh == [[False, True, "ok", False, False], [True, False],
                  [True, False]], repr(sh))
+    # OTA-SHADOW-FAIL: a shadowing module that does not move aside (not
+    # ENOENT) let the install go on: the old module ran on the new image,
+    # "ota ok" in the diag. The install stops before set_boot, a diag line
+    def _t_shfail():
+        mpy = gl.OTA_SHADOW[0]
+        _ota_reset()
+        for p in (mpy, mpy + ".ota-old"):
+            if os.path.exists(p):
+                os.remove(p)
+        with open(mpy, "wb") as f:
+            f.write(b"MPY emergency")
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        _serve(_manifest(200))
+        real_rename = gl.os.rename
+
+        def _ren(a, b):
+            if a == mpy:
+                raise OSError(13)        # EACCES
+            return real_rename(a, b)
+        gl.os.rename = _ren
+        try:
+            try:
+                gl._ota_check()
+                r = "returned"
+            except OSError:
+                r = "raised"
+        finally:
+            gl.os.rename = real_rename
+        return (r, list(_ota_log), os.path.exists(gl.OTA_PENDING),
+                os.path.exists(mpy), (gl.ota.get("failed") or (0, 0, ""))[2],
+                [l for l in diag_lines() if "aside" in l])
+    shf = _guarded(_t_shfail)
+    check("OTA-SHADOW-FAIL: a shadowing module that cannot be moved aside "
+          "stops the install before set_boot (no note, no reset), a diag "
+          "line",
+          shf[:5] == ("raised", [], False, True, "shadow err")
+          and len(shf[5]) == 1 and gl.OTA_SHADOW[0] in shf[5][0],
+          repr(shf))
     # main.py puts it back before the import when the pending build is not
     # the one running (rolled back) or the note is gone (the health reset)
     def _t_shadow_main():
@@ -16394,6 +17749,29 @@ try:
           shm == ([(b"", True), (b"MPY emergency", False),
                    (b"MPY emergency", False),
                    (b"MPY deployed since", False)], True), repr(shm))
+    # OTA-SHADOW-BACK: ota_boot's rollback puts the .ota-old back only
+    # where no module is (one deployed since is newer: it stays)
+    def _t_shback():
+        mpy = gl.OTA_SHADOW[0]
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        for p, b in ((mpy, b"MPY deployed since"),
+                     (mpy + ".ota-old", b"MPY emergency")):
+            with open(p, "wb") as f:
+                f.write(b)
+        _pend(200)
+        _reset_cause[0] = 1
+        gl.ota_boot()
+        with open(mpy, "rb") as f:
+            body = f.read()
+        for p in (mpy, mpy + ".ota-old"):
+            if os.path.exists(p):
+                os.remove(p)
+        return gl.ota["state"], body
+    shb = _guarded(_t_shback)
+    check("OTA-SHADOW-BACK: a rollback does not put the .ota-old over a "
+          "module deployed since",
+          shb == ("rolled back", b"MPY deployed since"), repr(shb))
 
     # OTA-HEALTH-ORDER: (a) a power cut between _ota_try and removing the
     # note counted the one attempt twice (bad at once); (b) the RAM batch
@@ -16469,6 +17847,122 @@ try:
     check("OTA-HEALTH-RESET: the health timeout resets even when a step "
           "before the reset fails", hr[1] == [("reset",)], repr(hr))
 
+    # OTA-VALID-CUT: a power cut between the confirmation and the note's
+    # removal booted the valid image as pending again: the staged page
+    # dropped, a try, and away from WiFi a reset. OTA_MARK "valid" goes
+    # first now, and a boot that finds it ends the confirmation at once
+    def _t_vcut():
+        seen = []
+
+        class _E(_FakeEsp32):
+            class Partition(_FakeEsp32.Partition):
+                @staticmethod
+                def mark_app_valid_cancel_rollback():
+                    seen.append(gl._ota_mark_get())
+                    _ota_log.append(("valid",))
+        _ota_reset()
+        gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+        _serve(_manifest(200))
+        gl._ota_check()                  # installed: note, page staged
+        gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+        _reset_cause[0] = 2
+        gl.ota_boot()
+        gl.wifi_reset()
+        gl.wifi["state"] = "connected"
+        real_promote = gl._ota_promote
+
+        def _cut(paths):
+            raise KeyboardInterrupt("power cut")
+        gl._ota_promote = _cut
+        gl.esp32 = _E
+        _clock[0] += gl.OTA_VALID_AFTER + 1000
+        try:
+            gl._ota_health(_clock[0])
+        except KeyboardInterrupt:
+            pass
+        finally:
+            gl._ota_promote = real_promote
+            gl.esp32 = _FakeEsp32
+        cut = (seen, os.path.exists(gl.OTA_PENDING))
+        del _ota_log[:]
+        _reset_cause[0] = 1              # the same image, after the cut
+        gl.ota_boot()
+        gl.wifi_reset()
+        gl.wifi["state"] = "not found"   # (away from home)
+        _clock[0] += gl.OTA_HEALTH + 1000
+        gl.ota_tick(_clock[0])
+        gl.wifi_reset()
+        return (cut, gl.ota["state"], gl.ota["pend"], list(_ota_log),
+                os.path.exists(gl.OTA_PENDING), gl._ota_mark_get(),
+                dev_file(_ota_dir, "web.html.gz"), gl._ota_tries())
+    vc = _guarded(_t_vcut)
+    check("OTA-VALID-CUT: OTA_MARK 'valid' is written before the image is "
+          "confirmed; a boot that finds it ends the confirmation (page up, "
+          "notes gone) without a health check or a reset",
+          vc == ((["valid"], True), "ok", None, [("valid",)], False, None,
+                 _page, (None, 0)), repr(vc))
+
+    # OTA-VALID-FAIL: a confirmation that failed (OSError) was swallowed:
+    # the page went up, the notes went, "ota ok", over an image the next
+    # reset rolled back. It keeps the pending state now, one diag line,
+    # is tried again each tick, and resets at OTA_HEALTH (a try)
+    def _t_vfail():
+        out = []
+        for fails in (2, 10 ** 6):
+            n_ = [fails]
+
+            class _E(_FakeEsp32):
+                class Partition(_FakeEsp32.Partition):
+                    @staticmethod
+                    def mark_app_valid_cancel_rollback():
+                        if n_[0] > 0:
+                            n_[0] -= 1
+                            raise OSError(-1)
+                        _ota_log.append(("valid",))
+            _ota_reset()
+            gl.FW_BUILD, gl.FW_COMMIT = 200, "abc0200"
+            with open(page_p + ".new", "wb") as f:
+                f.write(_page)
+            with open(gl.OTA_PENDING, "w") as f:
+                f.write("200 abc0200\n" + page_p)
+            _serve(_manifest(200))
+            gl.ota_boot()
+            gl.esp32 = _E
+            try:
+                gl.wifi_reset()
+                gl.wifi["state"] = "connected"
+                gl.ota_tick(_clock[0])
+                _clock[0] += gl.OTA_VALID_AFTER + 1000
+                gl.ota_tick(_clock[0])
+                first = (gl.ota["state"], os.path.exists(gl.OTA_PENDING),
+                         os.path.exists(page_p + ".new"))
+                for _k in range(3):
+                    if gl.ota["pend"] is None:
+                        break            # (confirmed)
+                    _clock[0] += 1000
+                    gl.ota_tick(_clock[0])
+                if fails > 2:
+                    _clock[0] += gl.OTA_HEALTH
+                    gl.ota_tick(_clock[0])
+            finally:
+                gl.esp32 = _FakeEsp32
+                gl.wifi_reset()
+            out.append((first, gl.ota["state"], list(_ota_log),
+                        len([l for l in diag_lines() if "not confirmed" in l]),
+                        gl._ota_tries(),
+                        [l for l in diag_lines() if "rolling back" in l]))
+        return out
+    vf = _guarded(_t_vfail)
+    check("OTA-VALID-FAIL: a failed confirmation keeps the pending state, "
+          "the note and the staged page (one diag line), is tried again "
+          "the next tick; failing on, the OTA_HEALTH reset (a try)",
+          not isinstance(vf[0], str)
+          and vf[0][:5] == (("pending", True, True), "ok", [("valid",)], 1,
+                            (None, 0))
+          and vf[1][:5] == (("pending", True, True), "pending", [("reset",)],
+                            1, (200, 1))
+          and "no confirmation (OSError(-1))" in str(vf[1][5]), repr(vf))
+
     # OTA-PROBE-HMAC: the pending firmware's probe took any manifest with
     # the right fields: one signed with another key made it valid
     def _t_probe():
@@ -16542,6 +18036,31 @@ try:
     ct = _guarded(_t_cteq)
     check("OTA-CTEQ: the manifest HMAC is compared in constant time",
           ct == ([True, False, False, False, False], False), repr(ct))
+    # OTA-CTEQ-64: the strings above differ in the last character only:
+    # "x = ord(a[i]) ^ ord(b[i])" for "|=" passed them all (it keeps only
+    # the last difference). A correct HMAC with one hex digit flipped, at
+    # each of its 64 places, is unequal, and _ota_check refuses it
+    def _t_cteq64():
+        good = _manifest(200)
+        h = good["hmac"]
+        flips = [h[:i] + "0123456789abcdef"[("0123456789abcdef".index(h[i])
+                                             + 1) % 16] + h[i + 1:]
+                 for i in range(64)]
+        eq_ = [i for i, x in enumerate(flips) if gl._ota_eq(h, x)]
+        st = []
+        for i in range(64):
+            _ota_reset()
+            gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+            _serve(dict(good, hmac=flips[i]))
+            gl._ota_check()
+            if gl.ota["state"] != "bad hmac" or _ota_log:
+                st.append((i, gl.ota["state"], list(_ota_log)))
+        return gl._ota_eq(h, h), eq_, st
+    c64 = _guarded(_t_cteq64)
+    _ota_reset()
+    check("OTA-CTEQ-64: a correct HMAC with one hex digit flipped at any of "
+          "its 64 places is unequal and refused ('bad hmac', nothing "
+          "installed)", c64 == (True, [], []), repr(c64)[:300])
 
     # OTA-STUCK: an upload error that never clears ("err payload" is only
     # cleared by a 2xx) held every check back: an upload bug blocked the
@@ -16599,7 +18118,8 @@ try:
             del _ota_log[:]
             RTC.mem = b"%d" % (ns["BOOT_FAIL_MAX"] - (how == "error"))
             if how == "start":
-                ns["_boot_start"]()
+                if _loop_limit(ns["_boot_start"]):
+                    out.append("the logger started")
             else:
                 out.append(ns["_boot_handle_error"]())
             t = [x for x in _timers if x.callback]
@@ -16661,6 +18181,124 @@ try:
     mc = _guarded(_t_main_crash)
     check("MAIN-CRASH: a logger failing in main.py while an OTA is pending "
           "marks the build's run as a crash", mc == ["crash", None], repr(mc))
+    # BOOT-START: main.py is not updated by an OTA, yet held the rollback
+    # glue (unshadow, crash, the boot-fail counter): it is gps_boot.start()
+    # now (frozen, an OTA brings it), main.py calls it and starts the
+    # logger itself only without one (a plain firmware, an older gps_boot
+    # after a rollback). A failed start is printed and a diag line (it
+    # was silent); a count that cannot be stored goes to the REPL with
+    # its retry, not a reset every 5 s for good
+    def _t_bstart():
+        import gps_boot as gb
+        mp = os.path.join(ROOT, "main.py")
+        out = []
+        prev_gb = sys.modules.get("gps_boot")
+        prev_gl = sys.modules.get("gps_logger")
+        calls = []
+        real_sleep = time.sleep
+        try:
+            for has_start in (True, False):
+                fake_gb = types.ModuleType("gps_boot")
+                fake_gb.unshadow = lambda: calls.append("unshadow")
+                fake_gb.crash = lambda: None
+                fake_gb.safe = lambda *a: calls.append("safe")
+                if has_start:
+                    fake_gb.start = lambda: calls.append("start")
+                sys.modules["gps_boot"] = fake_gb
+                fl = types.ModuleType("gps_logger")
+                fl.run = lambda: calls.append("run")
+                sys.modules["gps_logger"] = fl
+                RTC.mem = b"0"
+                exec(compile(_slurp(mp), mp, "exec"), {"__name__": "__main__"})
+                out.append(list(calls))
+                del calls[:]
+            sys.modules["gps_boot"] = prev_gb
+
+            def _boom():
+                raise RuntimeError("init crash")
+            fl.run = _boom
+            slept = []
+            time.sleep = lambda s: slept.append(s)
+            for mem in (b"1", b"%d" % (gb.BOOT_FAIL_MAX - 1)):
+                del _ota_log[:]
+                del _timers[:]
+                if os.path.exists(gb.DIAG_FILE):
+                    os.remove(gb.DIAG_FILE)
+                RTC.mem = mem
+                gb.start()
+                with open(gb.DIAG_FILE) as f:
+                    dl = f.read().splitlines()
+                out.append((RTC.mem, list(slept), list(_ota_log), dl,
+                            [t.period for t in _timers if t.callback]))
+                del slept[:]
+            # neither RTC memory nor the file stores the count
+            real_mem = RTC.memory
+
+            def _nomem(self, data=None):
+                raise OSError(19)
+            RTC.memory = _nomem
+            bff = gb.BOOT_FAIL_FILE
+            gb.BOOT_FAIL_FILE = os.path.join(diag_dir, "no", "such", "f")
+            mns = {"__name__": "boot_nomem"}
+            exec(compile(_slurp(mp), mp, "exec"), mns)
+            mns["BOOT_FAIL_FILE"] = gb.BOOT_FAIL_FILE
+            try:
+                for run_ in (gb.start, mns["_boot_start"]):
+                    del _ota_log[:]
+                    del _timers[:]
+                    if os.path.exists(gb.DIAG_FILE):
+                        os.remove(gb.DIAG_FILE)
+                    run_()
+                    with open(gb.DIAG_FILE) as f:
+                        dl = f.read().splitlines()
+                    out.append((list(_ota_log), dl[-1:],
+                                [t.period for t in _timers if t.callback]))
+            finally:
+                RTC.memory = real_mem
+                gb.BOOT_FAIL_FILE = bff
+        finally:
+            time.sleep = real_sleep
+            sys.modules["gps_boot"] = prev_gb
+            if prev_gl is None:
+                sys.modules.pop("gps_logger", None)
+            else:
+                sys.modules["gps_logger"] = prev_gl
+            RTC.mem = b""
+            del _timers[:]
+        gsrc_ = _slurp(os.path.join(ROOT, "gps_boot.py"))
+        out.append(gsrc_.index("unshadow()  ") < gsrc_.index(
+            "import gps_logger"))
+        return out
+    bs = _guarded(_t_bstart)
+    check("BOOT-START: main.py calls gps_boot.start() when there is one and "
+          "starts the logger itself without; start() counts a failed start, "
+          "a diag line, the delay and a reset, at BOOT_FAIL_MAX the REPL "
+          "with its retry; a count that cannot be stored goes to the REPL "
+          "and its retry (start() and main.py's own), not a reset loop",
+          isinstance(bs, list) and len(bs) == 7
+          and bs[0] == ["start"] and bs[1] == ["unshadow", "run"]
+          and bs[2][:3] == (b"2", [10], [("reset",)])
+          and bs[2][3][-1].startswith("crash boot 2 RuntimeError")
+          and bs[2][4] == []
+          and bs[3][0] == b"5" and bs[3][1:3] == ([], [])
+          and "crash boot fail 5" in bs[3][3][-1] and bs[3][4] == [1800000]
+          and bs[4][0] == [] and "not stored" in str(bs[4][1])
+          and bs[4][2] == [1800000]
+          and bs[5][0] == [] and "crash boot fail" in str(bs[5][1])
+          and bs[5][2] == [1800000] and bs[6] is True,
+          repr(bs)[:600])
+    def _const(name, k, pat=r"(\S+)"):
+        m_ = re.search(r"^%s = %s" % (k, pat),
+                       _slurp(os.path.join(ROOT, name)), re.M)
+        return m_ and m_.group(1)
+    bss = [(k, _const("main.py", k), _const("gps_boot.py", k))
+           for k in ("SKIP_PIN", "BOOT_FAIL_MAX", "BOOT_FAIL_FILE",
+                     "BOOT_RETRY_MS")]
+    bss.append(("DIAG_FILE", _const("gps_logger.py", "DIAG_FILE", r'"([^"]+)"'),
+                _const("gps_boot.py", "DIAG_FILE", r'"([^"]+)"')))
+    check("BOOT-START-SAME: gps_boot's boot constants are main.py's, its "
+          "DIAG_FILE gps_logger's",
+          all(a_ is not None and a_ == b_ for _k, a_, b_ in bss), repr(bss))
     # OTA-DOC: the boot-bypass pin is GPIO7, not GPIO25
     with open(os.path.join(ROOT, "tests", "device_bench.py")) as f:
         bench = f.read()
@@ -16876,7 +18514,7 @@ gl._web_sock, gl.WEB = _Lsn(), True
 gl._web_read = lambda c: b"GET / HTTP/1.0\r\n\r\n"
 gl._web_reply = lambda c, r: (_ for _ in ()).throw(TypeError("bug"))
 gl.wifi_reset()
-gl.wifi["state"] = "connected"
+gl.wifi.update(state="connected", home=True)
 gl._web_errs[0] = 0
 try:
     gl.web_tick()
@@ -16911,7 +18549,7 @@ def _wr_row_bug():
 
 
 gl._web_errs[0] = 0
-gl._bugs[:] = []
+gl._bugs.clear()
 gl.wifi_reset()
 gl._web_rows = _wr_row_bug
 c, c2 = RvConn(b""), RvConn(b"")
@@ -16932,7 +18570,7 @@ check("WEBR-2: a bug building status.json is a 500 with the error, not a "
 _wsaved = (gl._web_sock, gl._web_read, gl._web_reply, gl.WEB)
 gl._web_sock, gl.WEB = _Lsn(), True
 gl._web_read = lambda c: b"GET / HTTP/1.0\r\n\r\n"
-gl.wifi["state"] = "connected"
+gl.wifi.update(state="connected", home=True)
 try:
     for e_ in (KeyError("k"), KeyError("k"), ValueError("v")):
         gl._web_reply = lambda c, r, e_=e_: (_ for _ in ()).throw(e_)
@@ -17167,6 +18805,355 @@ check("GUARD-INT: an upload bug backs the upload off, the history copy "
       "GUARD_MEM_MAX MemoryErrors in a row reboot",
       gi_sched and gi_hist == "ok" and gi_pend == "raised"
       and len(gi_mem) == 1, repr((gi_sched, gi_hist, gi_pend, gi_mem)))
+# TICK-BUGS: a guarded tick's bug that goes on every TICK_PAUSE had one diag
+# line a boot (rotated out in a day or two), and a message that varies
+# filled BUG_KINDS with one bug, so a later one was never logged. The kind
+# is the tick and the exception type now, written again every BUG_AGAIN
+# while it goes on; status.json and the diag line count them per tick
+getattr(gl, "_tick_errs", {}).clear()
+gl._bugs.clear()
+gl._tick_bug.clear()
+diag_clear()
+
+
+def _tb_raise(e):
+    def f():
+        raise e
+    return f
+
+
+try:
+    for i_ in range(10):                 # an index that changes each time
+        gl._tick_bug.clear()
+        gl._guarded("ntp", _tb_raise(IndexError("index %d" % i_)))
+    gl._tick_bug.clear()
+    gl._guarded("wifi", _tb_raise(TypeError("w")))
+    tb_first = _wr_bugs("bug ")
+    _clock[0] += 60000                   # a minute on: not again
+    gl._tick_bug.clear()
+    gl._guarded("ntp", _tb_raise(IndexError("index 10")))
+    tb_min = _wr_bugs("bug ")
+    _clock[0] += gl.BUG_AGAIN * 1000 if hasattr(gl, "BUG_AGAIN") else 3600000
+    gl._tick_bug.clear()
+    gl._guarded("ntp", _tb_raise(IndexError("index 11")))
+    tb_hour = _wr_bugs("bug ")
+    tb_row = dict(gl._web_rows()).get("tick_bugs")
+    diag_clear()
+    gl._diag(_clock[0])
+    tb_line = (diag_lines() or [""])[-1]
+finally:
+    gl._tick_bug.clear()
+    getattr(gl, "_tick_errs", {}).clear()
+    gl._bugs.clear()
+check("TICK-BUGS: a bug whose message varies is one kind (the tick and the "
+      "type), so a later kind is still logged",
+      tb_first == ["bug ntp IndexError('index 0')", "bug wifi TypeError('w')"],
+      repr(tb_first))
+check("TICK-BUGS: a kind that keeps happening is written again after "
+      "BUG_AGAIN (an hour), not before",
+      tb_min == tb_first
+      and tb_hour == tb_first + ["bug ntp IndexError('index 11')"],
+      repr((tb_min, tb_hour)))
+check("TICK-BUGS: status.json's tick_bugs and the diag status line count "
+      "each tick's bugs, the last one in the JSON",
+      tb_row == "ntp:12 IndexError('index 11'), wifi:1 TypeError('w')"
+      and tb_line.startswith("up ") and tb_line.endswith(" bugs ntp:12,wifi:1"),
+      repr((tb_row, tb_line[-60:])))
+
+# LOOP-WIRING: one _loop pass runs every tick, in this order, the ones that
+# take it with this pass's ticks; the status and diag lines when due
+_lw_names = ("log_tick", "wifi_tick", "keepalive_tick", "upload_tick",
+             "web_tick", "ota_tick", "ntp_tick", "tft_tick", "_status",
+             "_diag", "_set_freq", "_boot_ok")
+_lw_saved = ({k_: getattr(gl, k_) for k_ in _lw_names},
+             gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms,
+             gl._wdt, gl.STATUS, gl.DIAG, gl._boot_ok_done)
+_lw_ev = []
+
+
+def _lw_rec(name, arg=False):
+    if arg:
+        return lambda a: _lw_ev.append((name, a))
+    return lambda: _lw_ev.append(name)
+
+
+_lw_n = [0, 2]
+
+
+def _lw_sleep(ms):
+    _clock[0] += ms
+    _lw_n[0] += 1
+    _lw_ev.append("sleep")
+    if _lw_n[0] >= _lw_n[1]:
+        raise KeyboardInterrupt
+
+
+try:
+    for k_ in _lw_names:
+        setattr(gl, k_, _lw_rec(k_, k_ in ("keepalive_tick", "ota_tick",
+                                          "ntp_tick", "tft_tick", "_diag",
+                                          "_set_freq")))
+    gl._rcv.read_uart = _lw_rec("read_uart")
+    gl._rcv.gps_check = _lw_rec("gps_check", True)
+    gl.time.sleep_ms = _lw_sleep
+    gl.STATUS = gl.DIAG = 20             # due in the second pass
+    gl._boot_ok_done = True
+    gl._tick_bug.clear()
+    gl._wdt = None
+    _lw_t0 = _clock[0]
+    try:
+        gl._loop()
+    except KeyboardInterrupt:
+        pass
+finally:
+    for k_, v_ in _lw_saved[0].items():
+        setattr(gl, k_, v_)
+    (gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms, gl._wdt,
+     gl.STATUS, gl.DIAG, gl._boot_ok_done) = _lw_saved[1:]
+
+
+def _lw_pass(t):
+    return ["read_uart", ("gps_check", t), "log_tick", "wifi_tick",
+            ("keepalive_tick", t), "upload_tick", "web_tick", ("ota_tick", t),
+            ("ntp_tick", t), ("tft_tick", t)]
+
+
+_lw_want = (_lw_pass(_lw_t0) + ["sleep"] + _lw_pass(_lw_t0 + 20)
+            + ["_status", ("_set_freq", gl.CPU_MHZ), ("_diag", _lw_t0 + 20),
+               "sleep"])
+check("LOOP-WIRING: a _loop pass calls the UART read, gps_check, log, WiFi, "
+      "keep-alive, upload, page, OTA, NTP and display ticks in order (with "
+      "this pass's ticks), then the due status line, the CPU clock and the "
+      "diag line",
+      _lw_ev == _lw_want, repr(_lw_ev))
+
+# LOOP-WRAP: the loop started 3 s before ticks_ms wraps at 2**30 (12.4 days
+# after boot): every deadline and timer that is a tick Mark still ends on
+# time after the wrap. The default fake ticks_diff (a - b) never wraps, so
+# these lines never ran across one: the status and diag timers, the WiFi
+# connect timeout, the upload deadline (_upload_wait, _waiting), the page's
+# request deadline, the POST guard, the Ctrl-C keep-alive limit, a tick's
+# TICK_PAUSE (_age), the receiver's settle minute and its GSV window
+_lp_w = 1 << 30
+_lp_saved = (time.ticks_diff, time.ticks_add, time.ticks_ms, list(_gck._up),
+             _clock[0], {k_: getattr(gl, k_) for k_ in _lw_names},
+             gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms, gl._wdt,
+             gl.STATUS, gl.DIAG, gl._boot_ok_done, gl._wifi_failed,
+             gl.KEEPALIVE_MAX, gl._keep, gl._keep_from, gl._running,
+             gl._rcv.UC_SETTLE, dict(gl._guard), gl._web_end[0],
+             dict(gl._rcv._uc_sv),
+             {k_: gl.up[k_] for k_ in ("state", "next_at", "hold")},
+             {k_: gl._rcv.st.get(k_) for k_ in ("settled", "fix_first", "speed")},
+             gl.pending)
+_lp = {"status": [], "diag": [], "fail": [], "wait": [], "waiting": [], "held": [],
+       "web": [], "close": [], "deinit": [], "ntp": [], "settled": [],
+       "gsv": [], "fed": []}
+
+
+class _LpW(object):
+    def status(self, *a):
+        return gl.network.STAT_CONNECTING
+
+
+class _LpSock(object):
+    def close(self):
+        _lp["close"].append(_lp_off())
+
+
+class _LpConn(object):
+    def settimeout(self, t):
+        pass
+
+
+class _LpTimer(object):
+    def deinit(self):
+        _lp["deinit"].append(_lp_off())
+
+
+def _lp_off():
+    return (_clock[0] - _lp_t0) % _lp_w
+
+
+def _lp_wifi():
+    if not _lp["fail"]:
+        gl._wifi_poll(_lp_cw)
+
+
+def _lp_up():
+    now = time.ticks_ms()
+    _lp["wait"].append((_lp_off(), gl._upload_wait(now)))
+    _lp["waiting"].append((_lp_off(), gl._waiting(now, gl.up["next_at"],
+                                                  gl.UP_WAIT_MAX)))
+    gl.up["state"] = "idle"              # (every waiting track held back)
+    _lp["held"].append((_lp_off(), gl._upload_wait(now)))
+    gl.up["state"] = "err 503"
+
+
+def _lp_web():
+    try:
+        gl._web_left(_LpConn())
+    except OSError:
+        _lp["web"].append(_lp_off())
+    _lp["gsv"].append((_lp_off(), gl._rcv._uc_gsv_skip()))
+
+
+def _lp_ntp(now):
+    _lp["ntp"].append(_lp_off())
+    if len(_lp["ntp"]) == 1:
+        raise ValueError("before the wrap")   # paused TICK_PAUSE
+
+
+def _lp_keep(now):
+    if gl._keep is not None:
+        gl._keep_cb(None)
+
+
+def _lp_ota(now):
+    if not gl._rcv.unsettled(now) and not _lp["settled"]:
+        _lp["settled"].append(_lp_off())
+
+
+def _lp_sleep(ms):
+    _clock[0] += ms
+    fed = gl._wdt.fed
+    gl._guard_cb(None)                   # (its timer: a second; here a pass)
+    if gl._guard["until"] is not None and gl._wdt.fed > fed:
+        _lp["fed"].append(_lp_off())
+    if _lp_off() >= 15000:
+        raise KeyboardInterrupt
+
+
+_lp_cw = _LpW()
+try:
+    time.ticks_diff = lambda a, b: (a - b + (_lp_w >> 1)) % _lp_w - (_lp_w >> 1)
+    time.ticks_add = lambda a, b: (a + b) % _lp_w
+    time.ticks_ms = lambda: _clock[0] % _lp_w
+    _clock[0] = _lp_w - 3000
+    _lp_t0 = _clock[0]
+    _gck._up[:] = [0, None, 0]
+    gl._stamp()
+    for k_ in _lw_names:
+        setattr(gl, k_, _lw_rec(k_, k_ in ("keepalive_tick", "ota_tick",
+                                          "ntp_tick", "tft_tick", "_diag",
+                                          "_set_freq")))
+    gl._status = lambda: _lp["status"].append(_lp_off())
+    gl._diag = lambda now: _lp["diag"].append(_lp_off())
+    gl.wifi_tick, gl.upload_tick, gl.web_tick = _lp_wifi, _lp_up, _lp_web
+    gl.ntp_tick, gl.keepalive_tick, gl.ota_tick = _lp_ntp, _lp_keep, _lp_ota
+    gl._rcv.read_uart = lambda *a: None
+    gl._rcv.gps_check = lambda now: None
+    gl.time.sleep_ms = _lp_sleep
+    gl.STATUS, gl.DIAG = 4000, 5000
+    gl._boot_ok_done = True
+    gl._tick_bug.clear()
+    gl._wdt = None
+    gl.wifi_reset()
+    gl.wifi.update(state="connecting", try_at=None, prev_status=None)
+    gl._wifi_failed = lambda w, s, el: _lp["fail"].append((_lp_off(), el))
+    now_ = time.ticks_ms()
+    gl.up["state"], gl.up["next_at"] = "err 503", time.ticks_add(now_, 6000)
+    gl.up["hold"] = {"t.trb": time.ticks_add(now_, 6500)}
+    gl.pending = lambda: ["t.trb"]
+    gl._web_end[0] = time.ticks_add(now_, 5000)
+    gl._guard.update(until=time.ticks_add(now_, 7000), sock=_LpSock())
+    gl.KEEPALIVE_MAX, gl._keep_from, gl._keep = 8000, now_, _LpTimer()
+    gl._running = False
+    gl._rcv.UC_SETTLE = 6000
+    gl._rcv.st.update(settled=False, fix_first=now_, speed=0)
+    gl._rcv._uc_sv["until"] = time.ticks_add(now_, 4000)
+    try:
+        gl._loop()
+        _lp_r = "returned"
+    except KeyboardInterrupt:
+        _lp_r = "ki"
+finally:
+    (time.ticks_diff, time.ticks_add, time.ticks_ms, _lp_up_s, _clock[0],
+     _lp_fns, gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms, gl._wdt,
+     gl.STATUS, gl.DIAG, gl._boot_ok_done, gl._wifi_failed, gl.KEEPALIVE_MAX,
+     gl._keep, gl._keep_from, gl._running, gl._rcv.UC_SETTLE, _lp_g,
+     gl._web_end[0], _lp_sv, _lp_upd, _lp_std, gl.pending) = _lp_saved
+    _gck._up[:] = _lp_up_s
+    for k_, v_ in _lp_fns.items():
+        setattr(gl, k_, v_)
+    gl._guard.clear()
+    gl._guard.update(_lp_g)
+    gl._rcv._uc_sv.clear()
+    gl._rcv._uc_sv.update(_lp_sv)
+    gl.up.update(_lp_upd)
+    gl._rcv.st.update(_lp_std)
+    gl._tick_bug.clear()
+    getattr(gl, "_tick_errs", {}).clear()
+    gl._bugs.clear()
+    gl.wifi_reset()
+
+
+def _lp_first(k, v):
+    """Offset of the first pass whose result was v (None: none)."""
+    return next((o for o, r in _lp[k] if r == v), None)
+
+
+def _lp_until(k, v, end):
+    """Every result before end was v."""
+    return all(r == v for o, r in _lp[k] if o < end)
+
+
+check("LOOP-WRAP: the status and diag lines are due 4 / 5 s on, after the "
+      "2**30 ticks wrap 3 s into the loop",
+      _lp_r == "ki" and _lp["status"] == [4000, 8000, 12000]
+      and _lp["diag"] == [5000, 10000], repr((_lp_r, _lp["status"],
+                                              _lp["diag"])))
+check("LOOP-WRAP: the WiFi connect timeout (12 s), the upload deadline "
+      "(6 s: _upload_wait, _waiting), a held track's (6.5 s) and the page's "
+      "request deadline (5 s) end on time across the wrap, not at once and "
+      "not never",
+      _lp["fail"] == [(gl.CONNECT_TIMEOUT, gl.CONNECT_TIMEOUT)]
+      and _lp_first("wait", 0) == 6000 and _lp_until("wait", 6000, 20)
+      and all(0 < r <= 6000 for o, r in _lp["wait"] if o < 6000)
+      and _lp_first("waiting", False) == 6000
+      and _lp_until("waiting", True, 6000)
+      and _lp_first("held", 0) == 6500
+      and all(0 < r <= 6500 for o, r in _lp["held"] if o < 6500)
+      and (_lp["web"] or [None])[0] == 5000,
+      repr((_lp["fail"], _lp["wait"][:2], _lp_first("wait", 0),
+            _lp_first("waiting", False), _lp["web"][:1])))
+check("LOOP-WRAP: the POST guard feeds the WDT and closes the socket at its "
+      "7 s deadline, the Ctrl-C keep-alive stops after KEEPALIVE_MAX, across "
+      "the wrap",
+      _lp["close"] == [7000] and _lp["fed"][:1] == [20]
+      and _lp["fed"][-1] == 6980 and _lp["deinit"] == [8020],
+      repr((_lp["close"], _lp["fed"][:1], _lp["fed"][-1:], _lp["deinit"])))
+check("LOOP-WRAP: a tick that raised 3 s before the wrap sits out "
+      "TICK_PAUSE, the receiver's settle minute (6 s here) and its GSV "
+      "window (4 s) end on time after it",
+      _lp["ntp"][:2] == [0, gl.TICK_PAUSE] and _lp["settled"] == [6000]
+      and _lp_first("gsv", False) == 4000 and _lp_until("gsv", True, 4000),
+      repr((_lp["ntp"][:2], _lp["settled"], _lp_first("gsv", False))))
+# HIST-ERR: a day history write error (log["herr"]) goes to the diag log, the
+# first at once, then one per WERR_EVERY, and status.json has the count: it
+# was shown nowhere, and a bug in the copy (it takes any error) only printed
+gl.log_reset()
+diag_clear()
+gi_saved = (gl._track_lines, gl.HIST_DAYS)
+gl.HIST_DAYS = 7
+gl._track_lines = lambda *a: (_ for _ in ()).throw(TypeError("hist bug"))
+gi_n = []
+try:
+    for r in range(3):
+        if r == 2:
+            _clock[0] += gl.WERR_EVERY
+        gl._hist_batch(gi_tr, 0, 1, 0)
+        gi_n.append(len([x for x in diag_lines()
+                         if x.startswith("track hist error")]))
+finally:
+    gl._track_lines, gl.HIST_DAYS = gi_saved
+gi_rows = dict(gl._web_rows())
+check("HIST-ERR: the first day history write error goes to the diag log with "
+      "the error, then one per 10 min; status.json has hist_errs",
+      gi_n == [1, 1, 2] and gl.log["herr"] == 3 and gi_rows.get("hist_errs") == 3
+      and any("hist bug" in x for x in diag_lines()),
+      repr((gi_n, gl.log["herr"], gi_rows.get("hist_errs"), diag_lines()[-2:])))
+gl.log_reset()
+diag_clear()
 # WEB-JSON-TAIL: an error after the 200 (reading the diag tail, a
 # satellite) still cut the JSON (the page: OFFLINE). The parts after the
 # rows end the JSON instead, the error counted
@@ -17180,7 +19167,8 @@ def _wj_diag():
 
 gl._web_diag = _wj_diag
 try:
-    wj_text = "".join(gl._web_json_parts(gl._web_rows(), gl._sv_list()))
+    wj_text = "".join(gl._web_json_parts(gl._web_rows(), gl._sv_list(),
+                                         True))
     try:
         wj = json.loads(wj_text)
         wj_ok = (wj["diag"] == ["first line"] and "satellites" in wj)
@@ -17192,6 +19180,75 @@ check("WEB-JSON-TAIL: an error while streaming the diag lines still ends "
       "a valid JSON", wj_ok is True, repr((wj_ok, wj_text[-120:])))
 (gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl._web_rows, gl.WEB_PAGE) = _wr_saved
 shutil.rmtree(_wr_dir, ignore_errors=True)
+
+# WEB-MEMERR: no RAM while building status.json (the rows, the diag tail,
+# the satellites) is no bug: it was booked as one ("Caught bug" on the page
+# for a day, web_errs up); it goes to web_tick, which drops the client
+_me_saved = (gl._web_rows, gl._web_diag, gl._sv_list, gl._web_errs[0],
+             list(gl._bugs))
+_me_calls = []
+
+
+def _me_raise(*a):
+    raise MemoryError("memory allocation failed")
+
+
+def _me_diag():
+    _me_calls.append(1)
+    return ["a line"]
+
+
+class _MeSv(object):
+    def __iter__(self):
+        raise MemoryError("memory allocation failed")
+
+
+def _me_try(f):
+    try:
+        f()
+        return "no raise"
+    except MemoryError:
+        return "MemoryError"
+    except Exception as e:
+        return repr(e)[:60]
+
+
+_me_res = []
+try:
+    gl._web_rows = _me_raise
+    _me_res.append(_me_try(lambda: gl._web_status(_DConn())))
+    gl._web_rows = _me_saved[0]
+    gl._web_diag = _me_raise
+    _me_res.append(_me_try(lambda: "".join(gl._web_json_parts([], [], True))))
+    gl._web_diag = _me_diag
+    _me_res.append(_me_try(lambda: "".join(gl._web_json_parts([], _MeSv()))))
+    "".join(gl._web_json_parts([], []))  # (no diag asked: none read)
+    _me_res.append((gl._web_errs[0] - _me_saved[3],
+                    [b for b in gl._bugs if b not in _me_saved[4]],
+                    len(_me_calls)))
+finally:
+    gl._web_rows, gl._web_diag, gl._sv_list = _me_saved[:3]
+check("WEB-MEMERR: a MemoryError building status.json (its rows, the diag "
+      "tail, the satellites) goes up to web_tick, not booked as a web bug; "
+      "without ?diag the diag log is not read",
+      _me_res == ["MemoryError", "MemoryError", "MemoryError", (0, [], 0)],
+      repr(_me_res))
+
+# SV-STALE: the satellite list two SV_POLL old is none for the page (as
+# sv_used): a silent receiver's last list showed in the Sky box as live
+_sv_saved = (gl.st["svs"], gl.st["svs_at"])
+try:
+    gl.st["svs"] = [(16, 26, 0, 90, True, False, 0, 26, 21)]
+    _sv_now = gl.time.ticks_ms()
+    gl.st["svs_at"] = gl.time.ticks_add(_sv_now, -(2 * gl._rcv.SV_POLL - 5000))
+    _sv_res = [len(gl._sv_list())]
+    gl.st["svs_at"] = gl.time.ticks_add(_sv_now, -2 * gl._rcv.SV_POLL)
+    _sv_res += [gl._sv_list(), json.loads(_web_json())["satellites"]]
+finally:
+    gl.st["svs"], gl.st["svs_at"] = _sv_saved
+check("SV-STALE: a satellite list under 2 SV_POLL old is listed, one older "
+      "is none (the page's empty state, not a stale sky shown as live)",
+      _sv_res == [1, [], []], repr(_sv_res))
 
 # CLOCK-STAMP: a Stamp is whole seconds of uptime that do not wrap: 13 days of
 # 30 s steps on a 2**30 ms clock (12.4 days), a Stamp of day 0 is 13 days old
@@ -17388,7 +19445,8 @@ _rd = gl._rcv
 check("RX-DRAIN: a Fix's field indexes are _SNAP's order",
       [_rd._SNAP[i] for i in (_rd.F_SEQ, _rd.F_LAT, _rd.F_LON, _rd.F_ALT, _rd.F_HDOP,
                               _rd.F_HDOP_AT, _rd.F_STD, _rd.F_STD_AT, _rd.F_POS_AT,
-                              _rd.F_TIME, _rd.F_DATE, _rd.F_VALID, _rd.F_EPOCHS)]
+                              _rd.F_TIME, _rd.F_DATE, _rd.F_VALID, _rd.F_EPOCHS,
+                              _rd.F_FIXTYPE)]
       == list(_rd._SNAP), "")
 _rd.reset()
 gl.log_reset()
@@ -17415,7 +19473,30 @@ check("RX-DRAIN: seconds 2-4 sampled in order as their own Fix at their ticks, s
       and all(x[2] == 4 and x[3] == _rd_q[3][_rd.F_LAT] for x in _rd_seen)
       and [x[4] for x in _rd_seen] == [q[_rd.F_LAT] for q in _rd_q[1:]]
       and _rd_left == ([], 4), repr((_rd_seen, _rd_left)))
+# a second published while one is sampled (read_uart() under _sample: the WiFi
+# scan of _home_veto) is sampled on the next pass: log["seq"] went to st["seq"]
+# after the loop and marked it seen
+gl.st["q"] = list(_rd_q[:2])
+gl.st["seq"], gl.log["seq"] = 2, 0
+_rd_seen = []
+def _rd_pub(now, fx=None):
+    _rd_seen.append(fx[_rd.F_SEQ])
+    if fx[_rd.F_SEQ] == 1:
+        gl.st["q"] = gl.st["q"] + [_rd_q[2]]
+        gl.st["seq"] = 3
+gl._sample = _rd_pub
+try:
+    gl._drain_q()
+    _rd_mid = list(_rd_seen)
+    gl._drain_q()
+finally:
+    gl._sample = _rd_saved
+check("RX-DRAIN: a second published while an earlier one is sampled is sampled on the "
+      "next pass, not marked seen",
+      _rd_mid == [1, 2] and _rd_seen == [1, 2, 3] and gl.log["seq"] == 3,
+      repr((_rd_mid, _rd_seen, gl.log["seq"])))
 gl.st["q"] = list(_rd_q)
+gl.st["seq"] = 4
 gl.log["seq"] = 0
 def _rd_boom(now, fx=None):
     raise MemoryError("memory allocation failed")
@@ -17433,6 +19514,46 @@ check("RX-DRAIN: a sample that raises leaves st on the latest second, not a queu
       and gl.st["lat"] == _rd_q[3][_rd.F_LAT], repr((gl.st["seq"], gl.st["time"])))
 _rd.reset()
 gl.log_reset()
+
+# RX-FIXTYPE: a queued Fix's altitude is judged by its own fix type (GSA's when
+# it was published), not by st's now: a 3D second queued behind a POST lost
+# its altitude once a 2D one came, a 2D one got one after a 3D
+_rd.reset()
+gl.st.update(seq=1, lat=47.5, lon=19.0, alt=100.0, hdop=1.0, hdop_at=_clock[0],
+             std=None, std_at=None, pos_at=_clock[0], time="12:00:01",
+             date="2026-11-10", valid=True, epochs=5, fixtype=3)
+_ft3 = _rd._snap()
+gl.st.update(seq=2, fixtype=2)
+_ft2 = _rd._snap()
+_ft_e3 = gl._fields(_clock[0], _ft3)[0]
+gl.st["fixtype"] = 3
+_ft_e2 = gl._fields(_clock[0], _ft2)[0]
+check("RX-FIXTYPE: a queued Fix's elevation by its own fix type, not st's now",
+      _ft_e3 == "100.0" and _ft_e2 == "", repr((_ft_e3, _ft_e2)))
+_rd.reset()
+
+# RX-TTFF: the time to the first fix is a Stamp difference: from a whole-boot
+# Mark it read negative after 6.2 days (ticks_ms wraps at 2**30)
+_tt_saved = (time.ticks_diff, time.ticks_add, _clock[0], list(_gck._up))
+time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
+time.ticks_add = lambda a, b: (a + b) & (TPW - 1)
+try:
+    _clock[0] &= TPW - 1
+    _gck.stamp()
+    _rd.reset()
+    for _k in range(7):                  # a week without a fix
+        _clock[0] = (_clock[0] + 86400000) & (TPW - 1)
+        _gck.stamp()
+    _rd.handle(rv_nmea("GPGGA,120000.00,4730.000,N,01900.000,E,1,08,1.0,"
+                       "100.0,M,40.0,M,,"))
+    _rd.handle(rv_nmea("GPRMC,120001.00,V,,,,,,,171026,,,N"))
+    _tt = gl.st["ttff"]
+finally:
+    time.ticks_diff, time.ticks_add, _clock[0] = _tt_saved[:3]
+    _gck._up[:] = _tt_saved[3]
+_rd.reset()
+check("RX-TTFF: a first fix a week after boot has a TTFF of a week, not a "
+      "negative one", _tt == 7 * 86400, repr(_tt))
 
 # RX-STATUS: st is the Receiver's: the logger reads it and never writes into it
 # (it set settled and dropped the queue itself)
@@ -18035,6 +20156,8 @@ try:
 
     # no keyframe in the first batch (its "=" damaged): the upload goes on
     # from the .pos "offset -1", it does not send the same batch forever
+    # (UPLOAD_SCAN 0: the empty batch ends at UPLOAD_BATCH records, before
+    # the next keyframe, so the "-1" is what is committed)
     online(_tb)
     gl.LOG_DIR = _tb
     _tb_write(pr, rl[:120], per=120)
@@ -18043,12 +20166,16 @@ try:
     with builtins.open(pr, "wb") as f:
         f.write(raw)
     poss = []
-    for _ in range(6):
-        if os.path.exists(pr):
-            pump()
-            if os.path.exists(pr + ".pos"):
-                with builtins.open(pr + ".pos") as f:
-                    poss.append(f.read().split())
+    _tb_scan, gl.UPLOAD_SCAN = gl.UPLOAD_SCAN, 0
+    try:
+        for _ in range(6):
+            if os.path.exists(pr):
+                pump()
+                if os.path.exists(pr + ".pos"):
+                    with builtins.open(pr + ".pos") as f:
+                        poss.append(f.read().split())
+    finally:
+        gl.UPLOAD_SCAN = _tb_scan
     ts = [x["properties"]["timestamp"] for x in locations()]
     check("TRKB: a first batch without a keyframe is passed ('offset -1'), "
           "the rest goes up once",
@@ -18292,6 +20419,100 @@ try:
           repr((os.path.exists(pr), len(ts), len(set(ts)), left_,
                 gl.up["left"])))
 
+    # UPL-SCAN: an erased block inside a .trb (a damaged 1-byte record each
+    # byte) went UPLOAD_BATCH bytes an upload round: ~160 rounds for 8 KB,
+    # a .pos write and UPLOAD_GAP each. While no point is valid a batch
+    # reads on to UPLOAD_SCAN bytes, and the next round follows at once
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:200], per=200)
+    raw = _tb_raw(pr)
+    q_ = [i_ for i_ in _tb_starts(raw) if raw[i_] >= 0x80][20]
+    with builtins.open(pr, "wb") as f:
+        f.write(raw[:q_] + b"\xff" * 8192 + raw[q_:])
+    _posts[:] = []
+    us_w = []
+    us_wo = gl.write_offset
+
+    def _us_wo(path, off, key=None):
+        us_w.append(off)
+        return us_wo(path, off, key)
+    gl.write_offset = _us_wo
+    us_gap = []
+    try:
+        for _ in range(600):
+            if not os.path.exists(pr):
+                break
+            n0_, w0_ = len(_posts), len(us_w)
+            gl.upload_tick()
+            if len(us_w) > w0_ and len(_posts) == n0_:   # no POST: a commit
+                us_gap.append(gl.up["next_at"] - _clock[0])  # of nothing
+            _clock[0] += 1000
+    finally:
+        gl.write_offset = us_wo
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    check("UPL-SCAN: an 8 KB erased block in a .trb takes 2-3 rounds "
+          "without a POST (not ~160), each followed at once; the points "
+          "around it up once",
+          not os.path.exists(pr) and 2 <= len(us_gap) <= 3
+          and all(g_ == 0 for g_ in us_gap) and len(ts) == len(set(ts))
+          and len(ts) >= 100, repr((os.path.exists(pr), us_gap, len(ts))))
+
+    # UPL-LEFT: flush adds the points it wrote to "left", a commit takes
+    # its batch's off again: a track written and uploaded ends at 0
+    online(_tb)
+    gl.LOG_DIR = _tb
+    gl.up["left"] = 0
+    _tb_write(pr, rl[:120], per=40)
+    ul = [gl.up["left"]]
+    pump()
+    ul.append(gl.up["left"])
+    for _ in range(5):
+        if os.path.exists(pr):
+            pump()
+    ul.append(gl.up["left"])
+    check("UPL-LEFT: three flushes of 40 make 'left' 120, a 50-point batch "
+          "takes 50 off, the last one leaves 0",
+          ul == [120, 70, 0] and not os.path.exists(pr), repr(ul))
+
+    # UPL-POS0: a .pos whose offset is inside a record (its keyframe good)
+    # is read from 0: the day history and a quarantine take the batch from
+    # 0 too (from the bad offset they got none of its lines: an empty .bad
+    # and the batch dropped)
+    p0 = []
+    p0_hd, p0_days = gl.HIST_DIR, gl.HIST_DAYS
+    try:
+        for code_ in (201, 422):
+            online(_tb)
+            gl.LOG_DIR = _tb
+            gl.HIST_DIR = tempfile.mkdtemp(prefix="pos0h-")
+            gl.HIST_DAYS = 7
+            _tb_write(pr, rl[:40], per=40)
+            raw = _tb_raw(pr)
+            st_ = _tb_starts(raw)
+            k_ = [i_ for i_ in st_ if raw[i_:i_ + 1] == b"="][0]
+            o_ = [a_ + 1 for a_, b_ in zip(st_, st_[1:])
+                  if a_ > k_ and b_ - a_ >= 2 and raw[a_] >= 0x80][3]
+            with builtins.open(pr + ".pos", "w") as f:
+                f.write("%d %d\n" % (o_, k_))
+            _post_code[0] = code_
+            pump()
+            _post_code[0] = 201
+            hist_n = sum(pts_in(os.path.join(gl.HIST_DIR, h_))
+                         for h_ in os.listdir(gl.HIST_DIR))
+            bad_n = pts_in(pr + ".bad") if os.path.exists(pr + ".bad") else 0
+            p0.append((code_, gl.read_pos(pr)[0] if os.path.exists(pr)
+                       else None, hist_n, bad_n))
+            for x_ in (pr, pr + ".pos", pr + ".bad"):
+                if os.path.exists(x_):
+                    os.remove(x_)
+    finally:
+        gl.HIST_DIR, gl.HIST_DAYS = p0_hd, p0_days
+        _post_code[0] = 201
+    check("UPL-POS0: a .pos inside a record, read from 0: the day history "
+          "(2xx) and the .bad (422) get every line of the batch",
+          p0 == [(201, None, 40, 0), (422, None, 40, 40)], repr(p0))
+
     # out of memory while encoding is no write failure: the batch waits
     online(_tb)
     gl.LOG_DIR = _tb
@@ -18489,6 +20710,31 @@ check("UC-FAIL: a refused rate is said and is no \"not taken\" verdict; the "
       and "gps refused CFGNAV,200,200,1000" in _hd
       and any(c.startswith(b"$CFGMSG,0,7,5") for c in hl._rcv.uart.cmds), _hd[-200:])
 
+# UC-SETUP-BUG: a programming error in the setup was only printed: now one diag
+# line per exception type a boot, and the setup is not ok (set up again)
+_sb_l, _sb_w, _sb_m = [], hl._diag_write, hl._rcv._uc_msgs
+hl._diag_write = _sb_l.append
+hl._rcv._bugs[:] = []
+
+
+def _sb_boom():
+    raise TypeError("x")
+
+
+hl._rcv._uc_msgs = _sb_boom
+try:
+    hl._rcv.reset()
+    hl._rcv.uart = _UcUart()
+    hl._rcv.gps_setup()
+    hl._rcv.gps_setup()
+    _sb_ok = hl.st["setup_ok"]
+finally:
+    hl._diag_write, hl._rcv._uc_msgs = _sb_w, _sb_m
+    hl._rcv._bugs[:] = []
+check("UC-SETUP-BUG: an exception in the setup is a diag line (once a type), the "
+      "setup not ok", _sb_ok is False and _sb_l == ["bug gps setup TypeError('x')"],
+      repr((_sb_ok, _sb_l)))
+
 # a restart: the banner the board prints after a power cycle
 hl._rcv.reset()
 hl._rcv.uart = _UcUart()
@@ -18502,6 +20748,14 @@ check("UC-RESTART: the plain text banner is one restart, not 7 bad lines; the "
       hl.st["gps_boots"] == _b0 + 1 and hl.st["err"] == _e0
       and hl.st["extra"] >= 1 and hl.st["gps_ver"] is None,
       repr((hl.st["gps_boots"], hl.st["err"], hl.st["extra"])))
+# UC-RESTART-SEC: the restart forgets the receiver second too (GSA's rounds and
+# GSV's go by it): the second before the restart was kept
+_uc_feed(hl, _nmea("GNRMC,090000.00,V,,,,,,,170126,,,N,V"))
+_rs0 = list(hl._rcv._sec)
+_uc_feed(hl, "FWVer R6.0.0.0Build3700")
+check("UC-RESTART-SEC: a receiver restart forgets the receiver second",
+      _rs0[0] == "090000" and hl._rcv._sec == [None, None],
+      repr((_rs0, hl._rcv._sec)))
 
 # 5 Hz with a fix: the setup's verdict
 hl._rcv.reset()
@@ -18605,6 +20859,45 @@ check("UC-GSV-EMPTY: a round with no satellites (no signal) is the list: "
       "none seen, not the last round's",
       hl.st["svs"] == [] and hl._rcv.sv_seen() == 0 and hl._sv_list() == [],
       repr((hl.st["svs"], hl._rcv.sv_seen())))
+# UC-GSV-WEAK: a satellite's cno is its strongest band's: a later weaker or
+# empty band (L5 listed without a C/N0) overwrote it while its elevation was
+# still empty (#107); the elevation comes from whichever band has one
+hl._rcv.reset()
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_uc_feed(hl, _nmea("GPGSV,1,1,03,14,,,40,17,56,319,35,20,,,30,1"),
+         _nmea("GPGSV,1,1,03,14,,,,17,56,319,20,20,33,120,25,8"),
+         _nmea("GPGSV,1,1,00,1"))
+_wk = {v[0]: v[:4] + v[6:] for v in hl.st["svs"] or []}
+check("UC-GSV-WEAK: a weaker or empty band later keeps a satellite's cno; its "
+      "elevation from the band that has it",
+      _wk == {14: (14, 40, None, 0, 0, 40, 0), 17: (17, 35, 56, 319, 0, 35, 20),
+              20: (20, 30, 33, 120, 0, 30, 25)}, repr(_wk))
+
+
+# UC-GSV-ROUND: a round is one receiver second's GSV. It began only with GPS's
+# ",1" sentence: a GPS_SYS mask without GPS never made a list, and an empty GPS
+# sentence of another signal never closed one (the last sky stayed)
+def _gsv_s(t, *bodies):
+    _uc_feed(hl, _nmea("GNRMC,%s.00,V,,,,,,,151126,,,N,V" % t),
+             *[_nmea(b_) for b_ in bodies])
+    _clock[0] += 1000
+
+
+hl._rcv.reset()
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_gsv_s("101000", "GAGSV,1,1,01,11,45,120,37,7", "GBGSV,1,1,01,22,20,010,30,1")
+_gsv_s("101001", "GAGSV,1,1,01,11,45,120,36,7", "GBGSV,1,1,01,22,20,010,31,1")
+_ng = sorted((v[6], v[0], v[1]) for v in hl.st["svs"] or [])
+hl._rcv.reset()
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_gsv_s("101100", "GPGSV,1,1,01,14,77,011,40,1")
+for _k in range(1, 13):                  # the sky goes dark
+    _gsv_s("1011%02d" % _k, "GPGSV,1,1,00,0")
+_dark = (hl.st["svs"], hl._rcv.sv_seen())
+hl._rcv.reset()
+check("UC-GSV-ROUND: a round per receiver second: without GPS in the mask a list "
+      "is made; GPS's empty sentence of another signal ends the last sky",
+      _ng == [(2, 11, 37), (3, 22, 30)] and _dark == ([], 0), repr((_ng, _dark)))
 
 # GPS_SYS: a mask set once, only when the receiver has another
 class _UcSys(_UcUart):
@@ -20361,7 +22654,8 @@ with open(_mf_path, encoding="utf-8") as f:
     _mf_src = f.read()
 _mf = {}
 if "def crop(" in _mf_src and '__name__ == "__main__"' in _mf_src:
-    exec(compile(_mf_src, _mf_path, "exec"), {"__name__": "make_tft_font"}, _mf)
+    exec(compile(_mf_src, _mf_path, "exec"),
+         {"__name__": "make_tft_font", "__file__": _mf_path}, _mf)
 _crop = _mf.get("crop")
 _row0 = b"\x00"
 _tiny = (_row0 + b"\x10" + b"\x20" + _row0                 # width 2: a byte a row
@@ -20378,10 +22672,18 @@ check("TFT-FONT-TOOL: crop keeps the rows from the first to the last with ink in
       and _crop(b"\x02", b"\x00\x10\x00\x20", 4, 2) == (b"\x00\x00", b"\x10\x00\x20", 3, 1)
       and _crop(b"\x02", b"\x00" * 3, 3, 2) == (b"\x00\x00", b"\x00", 1, 2)
       and _crop_err == "refused" and "main" in _mf, repr(_mf.keys()))
-# what the tool writes is what is committed (needs Pillow and the Space Grotesk TTFs)
-_mf_can = importlib.util.find_spec("PIL") is not None and bool(_mf) and os.path.exists(_mf["D"] % "Bold")
-if not _mf_can:
-    print("SKIP  TFT-FONT-REGEN: Pillow or the Space Grotesk TTFs are missing")
+# what the tool writes is what is committed (needs Pillow 11.0.0, which wrote
+# it: another one's FreeType anti-aliases a few pixels differently; the font
+# is in tools/fonts; CI installs that Pillow)
+try:
+    import PIL as _mf_pil
+    _mf_pv = _mf_pil.__version__
+except ImportError:
+    _mf_pv = None
+_mf_font = bool(_mf) and os.path.exists(_mf["D"] % "Bold")
+if _mf_pv != "11.0.0" or not _mf_font:
+    skip_check("TFT-FONT-REGEN", "Pillow %s (not 11.0.0) or no font: %s"
+               % (_mf_pv, _mf_font))
 else:
     _mf_td = tempfile.mkdtemp(prefix="font-")
     _mf_r = subprocess.run([sys.executable, _mf_path], cwd=_mf_td, capture_output=True, text=True)
@@ -21006,8 +23308,9 @@ def _gm_set(name, n):
     gl._guard_mem[name] = [n, gl.time.ticks_ms()]
 
 
-def _rb_web(home=False, away=False):
-    """The server closed, WEB on, connected; home and WEB_AWAY as asked."""
+def _rb_web(home=True, away=False):
+    """The server closed, WEB on, connected; home and WEB_AWAY as asked
+    (home by default: off home without WEB_AWAY nothing is served)."""
     gl._web_close()
     gl.socket = _RbSockMod
     gl.WEB, gl.WEB_AWAY = True, away
@@ -21022,23 +23325,35 @@ def _rb_web(home=False, away=False):
 
 _rb_socket = gl.socket
 
-# RB-WEB-NET: web_tick serves on whatever network the radio is on. WEB_AWAY
-# only keeps the radio on for it off home (README, status page; commit
-# 7276921): the page "up only briefly" off home is this, so it stays
+# RB-WEB-NET: the page has no password: off home it is served only with
+# WEB_AWAY=1 (which also keeps the radio on for it there). Before, a
+# hotspot or a friend's network got the live position, the 7-day track and
+# the diag log's SSIDs whenever the radio was up for the uploads
 _rb_rows = []
 for _h, _a in ((True, False), (False, False), (False, True)):
     _rb_web(_h, _a)
     gl.web_tick()
+    _made = len(_RbListen.made)
     _c = _RbConn(b"GET /nope HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n")
-    _RbListen.made[-1].waiting.append(_c)
+    if _made:
+        _RbListen.made[-1].waiting.append(_c)
     gl.web_tick()
     _s1 = bytes(_c.sent[:12])
     gl.wifi["state"] = "sleep"           # (asleep, on any network: closed)
     gl.web_tick()
-    _rb_rows.append((_s1, _RbListen.made[-1].closed, gl._web_sock is None))
-check("RB-WEB-NET: connected, home or not, WEB_AWAY or not, the page answers; "
-      "with the radio asleep the socket is closed",
-      _rb_rows == [(b"HTTP/1.0 404", True, True)] * 3, repr(_rb_rows))
+    _rb_rows.append((_made, _s1, gl._web_sock is None))
+_rb_web(True, False)                     # open at home, then on another
+gl.web_tick()                            # network (a roam): closed there
+gl.wifi["home"] = False
+gl.web_tick()
+_rb_rows.append((len(_RbListen.made), _RbListen.made[-1].closed,
+                 gl._web_sock is None))
+check("RB-WEB-NET: at home the page answers, off home only with WEB_AWAY "
+      "(without it no socket, or the open one closed); with the radio "
+      "asleep the socket is closed",
+      _rb_rows == [(1, b"HTTP/1.0 404", True), (0, b"", True),
+                   (1, b"HTTP/1.0 404", True), (1, True, True)],
+      repr(_rb_rows))
 
 # RB-OOM: one MemoryError in the page's accept()/socket setup or a status
 # line went through run()'s crash branch: a reset, a boot-fail and, an OTA
@@ -21053,13 +23368,16 @@ def _rb_loop(n=5):
         k[0] += 1
         if k[0] >= n:
             raise KeyboardInterrupt
+    # (ntp_tick too: the real one asked NTP once due, and what these
+    # checks saw depended on how far the clock had got)
     saved = (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
              gl.log_tick, gl._rcv.gps_check, gl.keepalive_tick, gl.tft_tick,
-             gl._boot_ok, gl._rcv.read_uart)
+             gl._boot_ok, gl._rcv.read_uart, gl.ntp_tick)
     gl.time.sleep_ms = _sl
     gl.wifi_tick = gl.upload_tick = gl.log_tick = lambda: None
     gl._boot_ok = gl._rcv.read_uart = lambda: None
     gl.ota_tick = gl._rcv.gps_check = gl.keepalive_tick = gl.tft_tick = lambda now: None
+    gl.ntp_tick = lambda now: None
     gl._wdt = None
     try:
         gl._loop()
@@ -21071,7 +23389,7 @@ def _rb_loop(n=5):
     finally:
         (gl.time.sleep_ms, gl.wifi_tick, gl.upload_tick, gl.ota_tick,
          gl.log_tick, gl._rcv.gps_check, gl.keepalive_tick, gl.tft_tick,
-         gl._boot_ok, gl._rcv.read_uart) = saved
+         gl._boot_ok, gl._rcv.read_uart, gl.ntp_tick) = saved
 
 
 def _rb_oom(*a):
@@ -21850,7 +24168,7 @@ try:
           and not _rn_out and rn5b == (201, None, None), repr((rn5, rn5b)))
     check("RN-8: the status line's timeout is what is left of HTTP_WAIT "
           "after the poll, set on the raw socket",
-          rn8a == (204, None, None) and len(rn8) == 2 and rn8[0] == 15
+          rn8a == (204, None, b"") and len(rn8) == 2 and rn8[0] == 15
           and gl.HTTP_WAIT // 1000 - 1 <= rn8[1] <= gl.HTTP_WAIT // 1000,
           repr((rn8a, rn8)))
     # RN-6: with /ca.der and no fix since the boot (indoors, at home) every
@@ -22501,6 +24819,7 @@ try:
         _clock[0] += gl.PB_KEEPALIVE + 1000
         gl.wifi["pb_at"] = time.ticks_add(time.ticks_ms(), -gl.PB_KEEPALIVE - 1)
         gl._scan_known(gl.wifi["wlan"])
+        r3_3b = list(_r3_ev)
         n_scan = _r3_ev.count("scan")
         gl.keepalive_tick(time.ticks_ms())
         r3_3 = (_r3_ev[:2], n_scan, _r3_ev.count("scan"),
@@ -22511,6 +24830,11 @@ try:
     check("RV14-3: a round's scan reads the UART before it and counts as the "
           "keep-alive load: no second scan right after it in the same pass",
           r3_3 == (["uart", "scan"], 1, 1, 0), repr(r3_3))
+    # RV14-3b: and again after it: the scan takes ~2 s, the connect or the
+    # clear after it up to 500 ms more, and the 8 KB buffer holds ~3.5 s.
+    # (Safe with _drain_q giving each queued Fix its own seq)
+    check("RV14-3b: a round's scan reads the UART after it too",
+          r3_3b == ["uart", "scan", "uart"], repr(r3_3b))
 
     # RV14-4: TLS 1.3 tickets are the first POLLIN: the wait goes on,
     # reading the UART, until the answer's first byte
@@ -22606,6 +24930,35 @@ try:
           "-78 dBm is in range, as it is connected; otherwise the scan's bar "
           "stays ROAM_MIN_RSSI",
           r3_6 == [True, False, False, True], repr(r3_6))
+    # RV14-6b: the same bar for a hidden home (one of its learned BSSIDs):
+    # _blank_home_ok and the scan's own-BSSID pick kept ROAM_MIN_RSSI, so
+    # asleep after it a learned AP at -78 dBm was out of range, and a
+    # stranger's blank AP at -70 dBm took its place
+    _r3_ours, _r3_strange = b"\x01\x02\x03\x04\x05\x06", b"\x09" * 6
+
+    class _R3HH(_R3H):
+        def __init__(self, rssi, other):
+            self.r, self.o = rssi, other
+        def scan(self):
+            aps = [(b"", _r3_ours, 6, self.r, 3, True)]
+            if self.o is not None:
+                aps.append((b"", _r3_strange, 6, self.o, 3, True))
+            return aps
+    r3_6b = []
+    for sh, rssi, other in ((True, -78, None), (True, -78, -70),
+                            (False, -78, None), (True, -90, -70),
+                            (False, -70, None)):
+        gl.wifi_reset()
+        gl.wifi.update(wlan=_R3HH(rssi, other), state="sleep", sleep_home=sh,
+                       home_aps=[_r3_ours],
+                       nets=[{"ssid": "h", "pw": "", "home": True,
+                              "hidden": True, "bssid": None, "ip": None}])
+        r3_6b.append(gl.home_in_range())
+    gl.wifi_reset()
+    check("RV14-6b: asleep after a hidden home, its learned BSSID at -78 dBm "
+          "is in range (a stranger's stronger blank AP beside it too); "
+          "otherwise the bar stays ROAM_MIN_RSSI",
+          r3_6b == [True, True, False, False, True], repr(r3_6b))
 
     # RV14-7: a wake whose round raises is kept, the radio off again
     class _R3R(object):
@@ -22692,20 +25045,34 @@ try:
     try:
         gl.up_reset()
         gl.up.update(url="https://d.example", key="k")
+        diag_clear()
+        _r3_dg, gl.DIAG = gl.DIAG, 60000
         for ans in ((204, None, None), (200, None, b"text/plain"),
                     (200, None, b"text/html; charset=utf-8"),
                     (201, None, b"application/json; charset=utf-8"),
-                    (201, None, None)):
+                    (201, None, None), (200, None, b""),
+                    (503, None, None)):
             gl.HTTP_POST = lambda *a, _r=ans: _r
             r3_10.append(gl._http_post(2)[0])
+        r3_10d = [l for l in diag_lines() if l.startswith("upload err")]
+        gl.DIAG = _r3_dg
     finally:
         gl.HTTP_POST = _r3_hp
         gl.up_reset()
         diag_clear()
     check("RV14-10: a 204, a plain-text or HTML 2xx is no Dawarich answer "
-          "(a failed POST, the batch kept); JSON or no Content-Type (a head "
-          "not read) stays a success",
-          r3_10 == [None, None, None, 201, 201], repr(r3_10))
+          "(a failed POST, the batch kept); only a JSON 2xx is a success",
+          r3_10[:4] == [None, None, None, 201], repr(r3_10))
+    # UPL-JSON: a 2xx whose head was not read whole (no Content-Type known)
+    # or a whole head without a Content-Type is a failed POST with a diag
+    # line, not a commit (a portal's bare 200 deleted the track); a 503
+    # with no head read stays a 503
+    check("UPL-JSON: a 2xx with no head read or no Content-Type is a failed "
+          "POST and a diag line; other codes keep theirs",
+          r3_10[4:] == [None, None, 503]
+          and r3_10d[-2:] == ["upload err head not read 201",
+                              "upload err not json 200 (captive portal?)"],
+          repr((r3_10, r3_10d)))
 
     # RV14-11: a hold that ran out goes, whichever list is due
     gl.up_reset()
@@ -22806,10 +25173,6 @@ finally:
     diag_clear()
     shutil.rmtree(_r3_dir, ignore_errors=True)
 
-print()
-print("%d passed, %d failed" % (passed, failed))
-if failures:
-    print("failures:")
-    for f in failures:
-        print(" ", f)
+_run_ended.append(1)
+_summary()
 sys.exit(1 if failed else 0)

@@ -17,8 +17,8 @@ const v = ctx.view(d);
 const SHOWN = ("fix sats hdop utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days day_span stay uptime prev_run " +
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
-const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
-  "track_drop", "write_errs", "q_thin", "pos6"];
+const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs", "tick_bugs", "diag_errs",
+  "track_drop", "write_errs", "q_thin", "pos6", "err_files", "tls", "hist_errs"];
 const labeled = new Set(OTHER);
 for (const k of SHOWN) labeled.add(k);
 v.unlabeled = Object.keys(d).filter((k) => !labeled.has(k));
@@ -35,7 +35,7 @@ function El(id) {
   this.id = id; this.innerHTML = ""; this.className = ""; this.style = {};
   this.offsetWidth = 0; this.offsetHeight = 0; this.writes = 0;
 }
-function page(width) {
+function page(width, D) {                // D: a Date of the test's own (a set clock)
   const els = {}, xhrs = [], timers = [];
   const doc = {
     body: new El("body"),
@@ -49,7 +49,7 @@ function page(width) {
   XHR.prototype.overrideMimeType = function (m) { this.mime = m; };
   XHR.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };
   const c = {document: doc, window: {}, XMLHttpRequest: XHR,
-    setTimeout: (f, ms) => timers.push(ms), Date: Date, Math: Math, JSON: JSON};
+    setTimeout: (f, ms) => timers.push(ms), Date: D || Date, Math: Math, JSON: JSON};
   vm.createContext(c);
   vm.runInContext(src, c);
   return {c, els, xhrs, timers, doc, map};
@@ -1034,5 +1034,127 @@ ft.rev = (() => {
   });
   return out;
 })();
+// REVIEW-2026-11-14 (the status page): each finding's regression
+function clockDate(ref) {                // a Date whose now is ref.now
+  const RD = Date;
+  function D(...a) { return a.length ? new RD(...a) : new RD(ref.now); }
+  D.now = () => ref.now; D.UTC = RD.UTC; D.parse = RD.parse;
+  return D;
+}
+// 1. the diag log rotated while the page could not read it, its DIAG_FILE
+// grown past where the page got to again: X-Diag-Old (DIAG_OLD's size in
+// the f=0 answer) differs from what the page read, so both are read anew
+ft.diagRot = (() => {
+  const q = page(1600), urls = [];
+  q.xhrs[0].responseText = JSON.stringify({refresh_s: 15, position: null});
+  q.xhrs[0].onload();
+  const L = (up, fix) => "up " + up + " utc 20261114T" + two2(Math.floor(up / 3600) % 24) + two2(Math.floor(up / 60) % 60) +
+    "00Z nmea " + up + "/0 gpsboots 0 loops 0 sats 9/6 fix " + fix + " hdop 1 points 0 sent 0 wifi connected pulses 0 mem 1 idf 1/1 heap 62\n";
+  function serve(files) {
+    for (let n = 0; n < 12; n++) {
+      const x = q.xhrs.find((r) => r.url.indexOf("/diag?") === 0 && !r.done);
+      if (!x) return;
+      x.done = true;
+      urls.push(x.url);
+      const m = /f=(\d)&o=(\d+)/.exec(x.url), f = files[m[1]];
+      if (f === undefined) { x.status = 404; x.responseText = "no such diag file"; x.headers = {}; x.onload(); continue; }
+      x.status = 200;
+      x.responseText = f.slice(+m[2], +m[2] + 16384);
+      x.headers = {"X-Diag-Size": String(f.length)};
+      if (m[1] === "0") x.headers["X-Diag-Old"] = String(files[1] === undefined ? 0 : files[1].length);
+      x.onload();
+    }
+  }
+  let old1 = "", new0 = "";
+  for (let k = 1; k <= 20; k++) old1 += L(k * 60, "3D_fix");
+  for (let k = 21; k <= 40; k++) new0 += L(k * 60, "3D_fix");
+  serve({1: old1, 0: new0});
+  const n1 = q.c.dg.a.n;
+  // away 40 h: rotated twice, the new DIAG_FILE (all without a fix) longer
+  // than the page's offset
+  let o2 = "", n2 = "";
+  for (let k = 1; k <= 30; k++) o2 += L(9000 + k * 60, "No_fix");
+  for (let k = 31; k <= 60; k++) n2 += L(9000 + k * 60, "No_fix");
+  q.c.dg.at = 0;
+  q.c.tick();
+  st(q)[1].responseText = JSON.stringify({refresh_s: 15, position: null});
+  st(q)[1].onload();
+  serve({1: o2, 0: n2});
+  return [n1, q.c.dg.a.n, q.c.dg.a.n3, urls.slice(2)];
+})();
+// 2. today's last trip closes (5 min without a point): its end place is
+// asked then (the panel was not drawn again: no end name, ever)
+ft.endPlace = (() => {
+  const ref = {now: Date.now()}, q = page(1600, clockDate(ref)), c = q.c;
+  c.hist = c.histNew(null);
+  for (let k = 0; k < 300; k++) c.hist.pts.push([ref.now - 120000 - (299 - k) * 1000, 47.1 + k * 0.00005, 18.4, 100]);
+  c.hist.at = ref.now;
+  c.trackPaint();
+  const open = c.placeQ.map((x) => x.k);
+  ref.now += 600000;
+  c.trackPaint();
+  return [open, c.placeQ.map((x) => x.k), c.placeKey(c.hist.pts[0]), c.placeKey(c.hist.pts[299])];
+})();
+// 3. "Fix" / "Fix DGPS" (a valid position, its type not said) is a fix:
+// amber like 2D, not red; "Waiting fix" and no data red; in the diag
+// summary such a line is not a "no fix" minute
+ft.fixWord = (() => {
+  const a = c0.evNew();
+  let t = "";
+  for (let k = 1; k <= 10; k++) t += "up " + k * 60 + " utc 20261114T10" + two2(k) + "00Z nmea " + k * 600 +
+    "/0 gpsboots 0 loops 0 sats 20/12 fix Fix_DGPS hdop 0.9 points 1 sent 1 wifi connected pulses 0 mem 1 idf 1/1 heap 1\n";
+  c0.evFeed(a, t);
+  return [["3D fix", "3D fix DGPS", "2D fix", "Fix", "Fix DGPS", "Waiting fix", "No data!", "-"].map((f) => c0.fixTone(f)), a.nno];
+})();
+// 4. the since-boot counters (upload_err, gps_loops) keep no row amber
+// once the state is fine: an error a week ago, all sent since
+ft.sinceBoot = (() => {
+  const w = c0.view({fix: "3D fix", sats: "20 / 12", hdop: 0.9, upload: "idle", upload_err: 1, left: 0, sent: 900,
+    upload_age_s: 40, uptime: 600000, gps_loops: 2, setup_ok: true, idf: "120 / 90", mem: 60000, heap_kb: 128,
+    flash_kb: 9000, wifi: "connected Home", rssi: -55, nmea: "9000 / 3", satellites: []});
+  const row = (n) => (new RegExp('<div class="([a-z]*)"><i></i><b>' + n + "</b><span>([^<]*)").exec(w.sys) || []).slice(1);
+  return [row("Upload"), row("GPS receiver")];
+})();
+// 5. a DIAG other than 60 s: 1 h without a fix, the receiver silent for
+// its second half, in minutes summed from up (DIAG=10 said 6 h and 3 h,
+// DIAG=300 12 min; over 180 s every line began a new drop-out)
+ft.diagStep = [10, 60, 300].map((step) => {
+  const a = c0.evNew();
+  let t = "", ok = 1000;
+  for (let s = step; s <= 3600; s += step) {
+    if (s <= 1800) ok += step * 10;
+    const u = new Date(Date.UTC(2026, 10, 14, 10, 0, s)).toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+    t += "up " + s + " utc " + u + " nmea " + ok + "/0 gpsboots 0 loops 0 sats 0/0 fix No_fix hdop None points 1 sent 1 " +
+      "wifi connected pulses 0 mem 1 idf 1/1 heap 1\n";
+  }
+  c0.evFeed(a, t);
+  const k = c0.evView(a, {done: true, cols: 72}).evk.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  return [(/No fix \/ no data (.*?) Receiver/.exec(k) || [])[1], (/Receiver silent (.*?) Boots/.exec(k) || [])[1]];
+});
+// 11. every per-kind detail (EVD) is for a kind the page has (EVK): pvt
+// had none, its code was dead
+ft.evdKinds = Object.keys(c0.EVD).filter((k) => !c0.EVK.some((e) => e[0] === k));
+// 9. a past local day that ends inside its second UTC day reads that day
+// up to the first reply past the local day's end, not to its own end
+ft.histEnd = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTime(), (c) => {
+  const urls = [];
+  c.XMLHttpRequest = function () { urls.push(this); };
+  c.XMLHttpRequest.prototype.open = function (mm, u) { this.url = u; };
+  c.XMLHttpRequest.prototype.send = function () {};
+  c.XMLHttpRequest.prototype.overrideMimeType = function () {};
+  c.XMLHttpRequest.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };
+  c.document = {getElementById: () => null};
+  c.mapD = null;
+  c.trackPaint = () => {};
+  c.hist = c.histNew("20261108");        // Nov 8 local: 23:00Z Nov 7 to 23:00Z Nov 8
+  c.histLoad();
+  const said = (body, hh) => { const r = urls[urls.length - 1]; r.status = 200; r.responseText = body; r.headers = hh; r.onload(); };
+  const ln = (h, m) => trkLine(Date.UTC(2026, 10, 8, h, m, 0), 47.1, 18.4);
+  said("", {"X-Hist-Next": "0", "X-Hist-End": "0", "X-Hist-Seek": "0"});      // Nov 7 from 23:00Z: the seek
+  said("", {"X-Hist-Next": "0", "X-Hist-End": "0"});                        // nothing there
+  said(ln(12, 0) + ln(22, 58), {"X-Hist-Next": "500", "X-Hist-End": "3000"});  // Nov 8, its first reply
+  said(ln(22, 59) + ln(23, 1), {"X-Hist-Next": "1000", "X-Hist-End": "3000"}); // past the local day's end
+  return [urls.map((r) => r.url), c.hist.busy, c.hist.done, c.hist.pts.length];
+});
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));

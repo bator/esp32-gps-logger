@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Write gps_tft_font.py: the Heltec TFT's anti-aliased fonts, from Space Grotesk.
 
-Needs Pillow and the Space Grotesk TTFs; the output is committed, the build does not run
-this. Each font: CHARS, the WIDTHS (advance, bytes), OFFS (2 bytes each, little
+Needs Pillow (11.0.0 wrote the committed file: another FreeType anti-aliases a few
+pixels differently) and Space Grotesk Bold, vendored in tools/fonts (SIL OFL 1.1,
+tools/fonts/OFL.txt); the output is committed, the build does not run this, CI
+checks that it is what this writes (TFT-FONT-REGEN).
+
+Each font: CHARS, the WIDTHS (advance, bytes), OFFS (2 bytes each, little
 endian) into DATA, rows top down of GS4_HMSB (16 levels, 2 pixels a byte, a row
 (w + 1) // 2 bytes), HEIGHT rows a glyph, BASE the baseline's row. In one bytes
 object each (frozen, in flash), not a dict of glyphs in the heap. Only the
@@ -12,7 +16,11 @@ is the blit's key) are over 1/3 of the file. BASE counts from the first row kept
 a string stays on the same rows (it can reach below HEIGHT: no descender).
 """
 
-D = "/usr/share/fonts/truetype/space-grotesk-zorin-os/SpaceGrotesk-%s.ttf"
+import os
+
+# (the Zorin OS package's copy, Space Grotesk 2.000)
+D = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts",
+                 "SpaceGrotesk-%s.ttf")
 
 
 def crop(widths, data, height, base):
