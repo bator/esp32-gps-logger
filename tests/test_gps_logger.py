@@ -8529,12 +8529,13 @@ gl._rcv.reset()
 gl.st["start"] = _clock[0]
 _clock[0] += gl._rcv.GPS_SILENT
 gl._rcv.gps_check(_clock[0])
+_gs_ms = gl.st["mute_s"] == gl._stamp() - gl._rcv.GPS_SILENT // 1000
 gl.st["mute_s"] = gl._stamp() - 7 * 86400   # (as if it began a week ago)
 gl.st["rx"] = _clock[0]
 gl._rcv.gps_check(_clock[0])
 _gs_long = [l for l in diag_lines() if "gps back" in l]
 check("GPS-SILENT-LONG: a week of silence is said as a week (from Stamps)",
-      len(_gs_long) == 1 and _gs_long[0] == "gps back after %d s" % (7 * 86400),
+      _gs_ms and len(_gs_long) == 1 and _gs_long[0] == "gps back after %d s" % (7 * 86400),
       repr(_gs_long))
 diag_clear()
 gl._rcv.reset()
@@ -8563,11 +8564,20 @@ gl._rcv.handle(_rf_nm("GNGGA,250001.00,4711.12279,N,01825.61582,E,1,12,0.9,100.0
 _rf_25 = (gl.st["err"] - _rf_err0, gl._rcv._sec[0], gl._rcv.ep["g"][4])
 gl._rcv.handle(_rf_nm("GNGGA,,4711.12279,N,01825.61582,E,1,12,0.9,100.0,M,40.0,M,,"))
 _rf_empty = gl._rcv.ep["g"][4]
+for t_ in ("240000.00", "236000.00", "235961.00"):
+    gl._rcv.handle(_rf_nm("GNGGA,%s,4711.12279,N,01825.61582,E,1,12,0.9,100.0,M,40.0,M,," % t_))
+_rf_bounds = gl._rcv._sec[0]
+_rf_spd0 = gl._rcv.ep["spd"]
+gl._rcv.handle(_rf_nm("GNRMC,250001.00,A,4711.12279,N,01825.61582,E,99.0,,151126,,,A,V"))
+_rf_rmc = (gl._rcv.ep["spd"] == _rf_spd0, gl._rcv.ep["r"])
+gl._rcv.handle(_rf_nm("GNGST,250001.00,1.0,,,,9.9,9.9,9.9"))
+_rf_gst = gl._rcv.ep.get("std")
 gl._rcv.reset()
 check("RCV-FIELDS: minutes start with a digit; a time that does not exist is no second "
       "(no bad sentence, the clock as it was); an empty time adds no position",
-      _rf == ["bad", "bad", 47.0917] and _rf_25 == (0, "120000", 1) and _rf_empty == 1,
-      repr((_rf, _rf_25, _rf_empty)))
+      _rf == ["bad", "bad", 47.0917] and _rf_25 == (0, "120000", 1) and _rf_empty == 1
+      and _rf_bounds == "120000" and _rf_rmc == (True, None) and _rf_gst is None,
+      repr((_rf, _rf_25, _rf_empty, _rf_bounds, _rf_rmc, _rf_gst)))
 
 saved_diag = (gl.DIAG, gl.DIAG_MAX)
 try:
@@ -11081,13 +11091,30 @@ try:
     gl.free = lambda: 0                  # never enough: as far as it goes
     gl._hist_trim(10 ** 6)
     hf_trim = sorted(os.listdir(gl.HIST_DIR))
+    # the HIST_DAYS window: a day past the clock's does not push a real old
+    # day out of it when a new day's file is closed
+    for n_ in os.listdir(gl.HIST_DIR):
+        os.remove(os.path.join(gl.HIST_DIR, n_))
+    _hf_days = ["202611%02d" % (15 - k_) for k_ in range(gl.HIST_DAYS)]
+    for d_ in _hf_days + ["20261130"]:
+        with builtins.open(os.path.join(gl.HIST_DIR, d_ + ".trb"), "wb") as f:
+            f.write(b"x")
+    gl.free = _hf_saved[2]
+    os.remove(os.path.join(gl.HIST_DIR, "20261115.trb"))
+    hf_w = [None, False, False, None]
+    ln_ = b"47.500000,19.000000,10.0,,20261115T115900Z\n"
+    gl._rbuf[0:len(ln_)] = ln_
+    gl._hist_put(hf_w, 0, len(ln_))
+    gl._hist_close(hf_w)
+    hf_window = sorted(n_[:8] for n_ in os.listdir(gl.HIST_DIR))
 finally:
     gl.HIST_DIR, gl.log["clock"], gl.free = _hf_saved
     shutil.rmtree(_hf_dir, ignore_errors=True)
-check("HIST-FUTURE: no day file for a line after the clock's day; under pressure a day "
-      "after it goes first and today's stays",
-      hf_today == "20261115" and hf_put == ["20261115.trb"] and hf_trim == ["20261115.trb"],
-      repr((hf_today, hf_put, hf_trim)))
+check("HIST-FUTURE: no day file for a line past the clock's day and one more (a clock a "
+      "second behind is let be); under pressure a day past that goes first and today's stays",
+      hf_today == "20261116" and hf_put == ["20261115.trb"] and hf_trim == ["20261115.trb"]
+      and sorted(_hf_days) == [d_ for d_ in hf_window if d_ != "20261130"],
+      repr((hf_today, hf_put, hf_trim, hf_window)))
 
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
 rv_td = tempfile.mkdtemp(prefix="rev29-")
@@ -15193,6 +15220,7 @@ else:
         ("bug upload ValueError('x')", "bug"),
         ("bug tft OSError(5)", "bug"),
         ("bug vbat OSError(116)", "bug"),
+        ("bug keepalive OSError(28)", "bug"),
         ("bug nmea RMC TypeError('x')", "bug"),
         ("bug gps setup TypeError('x')", "bug"),
         ("crash up 3600 MemoryError()", "crash"),
@@ -15487,6 +15515,7 @@ else:
           # (a failed read is not the day: "Reading" till its retry, not
           # "No trip", over a day half read or not read at all)
           and _dd.get("failed") == '<p class="hint">Reading the day&hellip;</p>'
+          and _dd.get("failedFlags") == [False, True] and "No trip" in (_dd.get("retried") or "")
           and ft.get("pickBusy") == '<p class="hint">Reading the day&hellip;</p>'
           and _days_css is not None and "flex-wrap:wrap" in _days_css.group(1)
           and "overflow" not in _days_css.group(1)
@@ -16585,10 +16614,14 @@ try:
     fq_times = [ln.strip()[-16:] for ln in gl.log["batch"]]
 finally:
     gl.free = _fq_free
-fq_ok = (fq_times and fq_times[0] >= "20261018T082130Z"
+gl.flush()
+fq_files = sorted(os.listdir(_fq_dir))
+fq_ok = (not [n for n in fq_files if "080130" < n[9:15] < "082130"]
+         and fq_times and fq_times[0] >= "20261018T082130Z"
          and all(b_ > a_ for a_, b_ in zip(fq_times, fq_times[1:])))
 check("FULL-QUEUE: after a full flash the new points start at the present second, none "
-      "of the seconds queued while it was full", fq_ok, repr(fq_times[:6]))
+      "of the seconds queued while it was full, in the batch or in a file", fq_ok,
+      repr((fq_times[:6], fq_files)))
 gl.log_reset()
 shutil.rmtree(_fq_dir, ignore_errors=True)
 
@@ -16643,10 +16676,15 @@ with builtins.open(os.path.join(_se_dir, "20261115_130000.trb"), "wb") as f:
 gl.log_reset()
 gl.start_file("20261115_130000")
 se_name = gl.log["file"][-19:]
+with builtins.open(os.path.join(_se_dir, "20261115_130001.trb"), "wb") as f:
+    f.write(b"old 2")
+gl.start_file("20261115_130000")
+se_name2 = gl.log["file"][-19:]
 with builtins.open(os.path.join(_se_dir, "20261115_130000.trb"), "rb") as f:
     se_old = f.read()
 check("START-EXISTS: a new file does not take an existing file's name (20261115_130001)",
-      se_name == "20261115_130001.trb" and se_old == b"old track", repr((se_name, se_old)))
+      se_name == "20261115_130001.trb" and se_old == b"old track"
+      and se_name2 == "20261115_130002.trb", repr((se_name, se_old, se_name2)))
 gl.log_reset()
 shutil.rmtree(_se_dir, ignore_errors=True)
 gl.LOG_DIR = _rev_dir
@@ -22757,40 +22795,58 @@ hl._dns.clear()
 hl._dns_bad.clear()
 
 # DNS-CACHE: lwIP resolves for 7 s without an answer (measured), nothing else
-# runs, the UART fills. A network whose resolver failed is not asked again
-# for DNS_RETRY: the address resolved before is used, or it fails at once;
-# another network, or after DNS_RETRY, is asked again
+# runs, the UART fills. A lookup that failed slowly (DNS_SLOW) is not asked
+# again on that network for DNS_RETRY or until a new IP: the address that
+# network resolved before is used, or it fails at once. A fast failure (no
+# such name) is only that; another network's address is never used (a LAN
+# address reached with the API key on a stranger's LAN)
 _dc_ssid = hl.wifi["ssid"]
-hl.wifi["ssid"] = "home"
-del _NtpMod.asked[:]
-_dc = [_nask(_nreply(_DAY))]             # resolved: kept
-_dc.append(_nask(_nreply(_DAY), OSError(-202)))   # fails: the old address
-_dc.append(_nask(_nreply(_DAY), OSError(-202)))   # not asked again
-_dc_asked = len(_NtpMod.asked)
-hl._dns.clear()
-_dc.append(_nask(_nreply(_DAY)))         # no old address: fails at once
-_dc_asked2 = len(_NtpMod.asked)
-hl.wifi["ssid"] = "phone"
-_dc.append(_nask(_nreply(_DAY)))         # another network: asked
-_dc_asked3 = len(_NtpMod.asked)
-hl.wifi["ssid"] = "home"
-_clock[0] += hl.DNS_RETRY * 1000 + 1000
-hl._dns_bad[("pool.ntp.org", 123, 2)] = ("home", hl._stamp() - hl.DNS_RETRY - 1)
-_dc.append(_nask(_nreply(_DAY)))         # after DNS_RETRY: asked again
-_dc_asked4 = len(_NtpMod.asked)
-hl.wifi["ssid"] = _dc_ssid
-hl._dns.clear()
-hl._dns_bad.clear()
-check("DNS-CACHE: a failed lookup uses the address from before and the network is not "
-      "asked again for DNS_RETRY (none from before: fails at once); another network and "
-      "after DNS_RETRY it is asked",
-      _dc == [_DAY, _DAY, _DAY, None, _DAY, _DAY]
-      and (_dc_asked, _dc_asked2, _dc_asked3, _dc_asked4) == (2, 2, 3, 4),
-      repr((_dc, _dc_asked, _dc_asked2, _dc_asked3, _dc_asked4)))
-# UPL-AWAY-HTML: away, a 400/413/422 that is no JSON is a portal or a proxy
-# refusing, not Dawarich: no quarantine (it sent two batches to .bad and held
-# the third track past the next network). JSON away, and anything at home
-# (the own proxy's HTML 413), still quarantine
+_dc_ga = _NtpMod.getaddrinfo
+_dc_slow = [0]
+
+
+def _dc_getaddrinfo(host, port, fam, typ):
+    _clock[0] += _dc_slow[0]
+    return _dc_ga(host, port, fam, typ)
+
+
+_NtpMod.getaddrinfo = staticmethod(_dc_getaddrinfo)
+try:
+    hl._dns.clear()
+    hl._dns_bad.clear()
+    hl.wifi["ssid"] = "home"
+    del _NtpMod.asked[:]
+    _dc = [_nask(_nreply(_DAY))]                    # resolved on home: kept
+    _dc.append(_nask(_nreply(_DAY), OSError(-202)))  # fast failure: only that
+    _dc_slow[0] = 7000
+    _dc.append(_nask(_nreply(_DAY), OSError(-202)))  # slow: home's address
+    _dc_slow[0] = 0
+    _dc.append(_nask(_nreply(_DAY), OSError(-202)))  # not asked again
+    _dc_asked = len(_NtpMod.asked)
+    hl.wifi["ssid"] = "phone"
+    _dc_slow[0] = 7000
+    _dc.append(_nask(_nreply(_DAY), OSError(-202)))  # another net: never home's
+    _dc_slow[0] = 0
+    _dc.append(_nask(_nreply(_DAY)))                # phone: fails at once
+    _dc_asked2 = len(_NtpMod.asked)
+    hl._dns_bad.clear()                             # (a new IP: _wifi_got_ip)
+    _dc.append(_nask(_nreply(_DAY)))                # asked again
+    _dc_asked3 = len(_NtpMod.asked)
+    _dc_src = inspect.getsource(hl._wifi_got_ip)
+finally:
+    _NtpMod.getaddrinfo = staticmethod(_dc_ga)
+    hl.wifi["ssid"] = _dc_ssid
+    hl._dns.clear()
+    hl._dns_bad.clear()
+check("DNS-CACHE: a fast failure is only that; a slow one uses that network's address and "
+      "does not ask again; another network's address is never used; a new IP asks again",
+      _dc == [_DAY, None, _DAY, _DAY, None, None, _DAY]
+      and (_dc_asked, _dc_asked2, _dc_asked3) == (3, 4, 5)
+      and "_dns_bad.clear()" in _dc_src,
+      repr((_dc, _dc_asked, _dc_asked2, _dc_asked3)))
+# UPL-AWAY-HTML: a 400/413/422 quarantines its batch, away too and JSON or
+# not: taken as no answer away, a poison batch (Rails' own HTML 400, the
+# proxy's HTML 413) held every track behind it for the whole trip
 _ah_dir = tempfile.mkdtemp()
 _ah = []
 for home_, ct_ in ((False, "text/html"), (True, "text/html"),
@@ -22812,9 +22868,10 @@ gl.up["state"] = "ca err"
 gl.up["next_at"] = _clock[0] + gl.BACKOFF_START
 _ah_wait = gl._upload_wait(_clock[0])
 gl.up["state"] = "idle"
-check("UPL-AWAY-HTML: away a non-JSON 400 quarantines nothing; at home and JSON it does; "
+check("UPL-AWAY-HTML: a payload error quarantines its batch away and at home, JSON or not "
+      "(away a non-JSON one taken as no answer held a poison batch for the whole trip); "
       "'ca err' waits out its backoff with the radio off",
-      _ah == [False, True, True] and _ah_wait == gl.BACKOFF_START,
+      _ah == [True, True, True] and _ah_wait == gl.BACKOFF_START,
       repr((_ah, _ah_state, _ah_wait)))
 
 # PB-PULSE: only the scan's errors are a failed pulse; what it leads to (a
@@ -22849,17 +22906,25 @@ try:
         raise OSError(28)                # the stay's write: ENOSPC
     gl._stay_scan = _pb_boom
     w_ = _PbW()
+    diag_clear()
     try:
         gl._pb_pulse_radio(w_)
-        _pb.append("swallowed")
+        _pb.append(("said", w_.on, [ln for ln in diag_lines() if ln.startswith("bug keepalive")]))
     except OSError as e_:
         _pb.append(("raised", e_.args[0], w_.on))
 finally:
     gl._stay_scan, gl._home_seen, gl._scan_empty = _pb_saved
-_pb_src = inspect.getsource(gl._loop) if hasattr(inspect, "getsource") else ""
+import ast as _pb_ast
+import textwrap as _pb_tw
+_pb_src = "".join(
+    '_guarded("keepalive", keepalive_tick' for n_ in _pb_ast.walk(_pb_ast.parse(
+        _pb_tw.dedent(inspect.getsource(gl._loop))))
+    if isinstance(n_, _pb_ast.Call) and getattr(n_.func, "id", "") == "_guarded"
+    and n_.args and getattr(n_.args[0], "value", None) == "keepalive")
 check("PB-PULSE: a failed scan is swallowed, the radio off; an error of what the scan led "
-      "to raises (radio off first); keepalive_tick runs guarded",
-      _pb == [[True, False], ("raised", 28, [True, False])]
+      "to is a diag line (was swallowed as a failed scan), not raised (a guarded pause "
+      "stretched the pulses); keepalive_tick runs guarded (a call, not a comment)",
+      _pb == [[True, False], ("said", [True, False], ["bug keepalive OSError(28)"])]
       and '_guarded("keepalive", keepalive_tick' in _pb_src
       and gl._guard_mem.get("keepalive") == [0, None],
       repr(_pb))

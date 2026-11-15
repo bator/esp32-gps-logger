@@ -912,9 +912,9 @@ uploaded after a newer one (held back, retried) lands later in the day
 file; the page puts the points in time order again. The newest 7 days are
 kept (`HIST_DAYS`; a day written both as text and as `.trb` is one day). The
 history yields to the tracks: under 1 MB
-free (`HIST_RESERVE`) the oldest days go first (today's stays: the clock's UTC
-day, not the newest name; a day after the clock's, from a time that leapt
-ahead, gets no file and goes first), also before a
+free (`HIST_RESERVE`) the oldest days go first (today's stays: by the clock's
+UTC day, not the newest name; a day more than one after the clock's, from a
+time that leapt ahead, gets no file and goes first), also before a
 batch would be dropped on a full flash, and nothing is added under
 2 × `MIN_FREE`. A failed write (or a bug in the copy) costs only the
 drawing: it is counted (`hist_errs` in `/status.json`) and in the
@@ -1383,9 +1383,7 @@ home.
   resent and Dawarich drops the duplicate points; a portal's bare `200`
   used to delete the track as sent. A file that cannot be deleted after its
   last batch is parked as `.err` after 3 tries.
-- 400 / 413 / 422 quarantine the batch to `<file>.bad`; away from home only
-  with a JSON `Content-Type` (one that is not JSON there is a portal or a
-  proxy refusing: a failed POST, `upload err not json …`). Three in a row
+- 400 / 413 / 422 quarantine the batch to `<file>.bad`. Three in a row
   without a success count as a server problem: backoff, no more quarantine
   (rejections of a `.bad` itself do not count here).
   A full `.bad` (64 kB) pauses that file (`BAD FULL`) instead of dropping
@@ -1426,9 +1424,12 @@ home.
   too: the POST guard's timer (once a second, running inside blocking
   socket calls: 13 times in that connect) reads the UART, never inside a
   read already. The name lookup cannot be (lwIP: 7 s without an answer,
-  nothing else runs): a network whose resolver failed is not asked again
-  for 10 min (`DNS_RETRY`), the address resolved before is used, or the
-  POST fails at once. NTP goes before the upload in the loop, so the first
+  nothing else runs): after a lookup that failed slowly (over 2 s,
+  `DNS_SLOW`; a fast "no such name" is only that) the network is not asked
+  again for 10 min (`DNS_RETRY`) or until it gives a new IP: the address
+  that same network resolved before is used, or the POST fails at once.
+  Another network's address is never used (a LAN address would take the
+  API key to a stranger's device on a LAN of the same range). NTP goes before the upload in the loop, so the first
   verified POST without a fix has the board clock set. The upload line on the
   console ends with the POST time. Answer lines are read 256 bytes at a
   time (`HTTP_LINE`); once the status line is in, an error while reading

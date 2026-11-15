@@ -421,9 +421,9 @@ def gst(talker, f):
     position: the larger of latitude and longitude. A cold start converging
     shows here while its HDOP already looks good."""
     sl, sn = _num(f[6]), _num(f[7])      # (read first: _num)
-    _second(f[1])
+    timed = _second(f[1])
     st["gst_at"] = time.ticks_ms()       # it comes (_setup_check)
-    if sl is not None and sn is not None:
+    if timed and sl is not None and sn is not None:
         ep["std"] = sl if sl > sn else sn
 
 def _gps_restarted():

@@ -1449,6 +1449,7 @@ def _net_hidden(ssid):
 
 def _wifi_got_ip(w):
     wifi["state"] = "connected"
+    _dns_bad.clear()                     # (a new IP: its resolver asked again)
     try:
         wifi["ip"] = w.ifconfig()[0]
     except WLAN_ERR:
@@ -1819,8 +1820,8 @@ def _pb_pulse_radio(w):
     """Radio on, one scan (it holds ~100 mA ~2 s, and watches the stay's access
     points and the home network: _stay_scan, _home_seen), off again. Only
     the scan's errors are a failed pulse: what the scan leads to (a stay's
-    end writes the track) runs after it, its errors its own (the guarded
-    tick's)."""
+    end writes the track) runs after it, its errors a diag line (they
+    were swallowed as a failed scan, the stay never ended)."""
     aps = None
     try:
         w.active(True)
@@ -1833,8 +1834,16 @@ def _pb_pulse_radio(w):
         except WLAN_ERR:
             pass
     if aps is not None and not _scan_empty(aps, "pb_empty"):
-        _stay_scan(aps)
-        _home_seen(aps)
+        # (its own errors: said once a kind, not a failed pulse, and not
+        # raised either: a guarded tick's TICK_PAUSE stretched the pulses
+        # past what a power bank counts as a load)
+        try:
+            _stay_scan(aps)
+            _home_seen(aps)
+        except MemoryError:
+            raise
+        except Exception as e:
+            _bug_once("bug keepalive %s" % repr(e)[:60], ("keepalive", type(e)))
 
 def keepalive_tick(now):
     """Power bank keep-alive. With the radio asleep the board draws less
@@ -2857,11 +2866,13 @@ def _tail_nl(path, size):
                 pass
 
 def _hist_today():
-    """The clock's UTC day, YYYYMMDD (GPS, else NTP), or None. A line's
-    time that leapt ahead (a digit flipped past the checksum) must not make
-    its day the newest: it would stay while today went under pressure."""
+    """The last UTC day the history takes, YYYYMMDD: the clock's (GPS, else
+    NTP) and one more (a clock a second behind, a flipped date digit, an
+    NTP-only clock), or None. A line's time that leapt further ahead (a
+    digit flipped past the checksum) must not make its day the newest: it
+    would stay while today went under pressure."""
     c = log["clock"] or _ntp[0]
-    return None if c is None else _stamp_s(_utc_s(c))[1][:8]
+    return None if c is None else _stamp_s(_utc_s(c) + 86400)[1][:8]
 
 def _hist_names():
     """The day history's files, the oldest first: YYYYMMDD.trb, and .trk
@@ -5149,38 +5160,47 @@ def _guard_stop():
 _post_phase = [None]                     # "connect", "tls", "http" in a POST,
                                          # "ctx" while the SSLContext is made
 
-DNS_RETRY = 600                          # s a network whose resolver failed
-                                         # is not asked again (_resolve)
-_dns = {}                                # (host, port, kind) -> the last address
-_dns_bad = {}                            # (host, port, kind) -> (SSID, Stamp)
+DNS_RETRY = 600                          # s a network whose resolver did not
+                                         # answer is not asked again (_resolve)
+DNS_SLOW = 2000                          # ms: a failed lookup this long is no
+                                         # answer (a fast one: no such name)
+DNS_KEEP = 8                             # addresses kept (host, port, kind, SSID)
+_dns = {}                                # key -> the last address on that net
+_dns_bad = {}                            # key -> Stamp of a slow failure
 
 def _resolve(host, port, kind=None):
-    """getaddrinfo's first answer. lwIP resolves for as long as its own
-    retries take (measured 7 s without an answer, nothing else runs, the
-    UART fills: no socket yet for the guard), so a network whose resolver
-    failed is not asked again for DNS_RETRY: the address resolved before
-    (another network's) is tried instead, or it fails at once."""
+    """getaddrinfo's first answer. A lookup that failed slowly (DNS_SLOW: a
+    resolver that does not answer; measured 7 s, nothing else runs, the
+    UART fills, no socket yet for the guard) is not asked again on that
+    network for DNS_RETRY or until it gives a new IP: the address that
+    network resolved before is used, or it fails at once. A fast failure
+    (no such name) is only that. Addresses are kept per network: another
+    network's (a LAN address reached by the API key on a stranger's LAN of
+    the same range) is never used."""
     if kind is None:
         kind = socket.SOCK_STREAM
-    key = (host, port, kind)
+    key = (host, port, kind, wifi["ssid"])
     bad = _dns_bad.get(key)
-    if (bad is not None and bad[0] == wifi["ssid"]
-            and _recent_s(bad[1], DNS_RETRY)):
+    if bad is not None and _recent_s(bad, DNS_RETRY):
         ai = _dns.get(key)
         if ai is None:
             raise OSError(-202)          # (lwIP's own "no answer")
         return ai
     feed()
+    t0 = time.ticks_ms()
     try:
         ai = socket.getaddrinfo(host, port, 0, kind)[0]
     except OSError:
         feed()
-        _dns_bad[key] = (wifi["ssid"], _stamp())
-        ai = _dns.get(key)
-        if ai is None:
-            raise
-        return ai
+        if time.ticks_diff(time.ticks_ms(), t0) >= DNS_SLOW:
+            _dns_bad[key] = _stamp()
+            ai = _dns.get(key)
+            if ai is not None:
+                return ai
+        raise
     feed()
+    if len(_dns) >= DNS_KEEP and key not in _dns:
+        _dns.clear()                     # (a few networks: no growth)
     _dns[key] = ai
     _dns_bad.pop(key, None)
     return ai
@@ -5385,15 +5405,6 @@ def _http_post(size):
             else:
                 print("upload: %d not JSON, not Dawarich (proxy?)" % code)
                 _diag_write("upload err not json %d (captive portal?)" % code)
-            code = None
-        elif (code in PAYLOAD_ERR and not at_home()
-              and (ct is None or b"json" not in ct)):
-            # a payload error quarantines the batch: away, one that is no
-            # JSON is a portal or a proxy refusing, not Dawarich (two
-            # batches went to .bad, the third track was held past the next
-            # network). At home it stays one (the own proxy's HTML 413)
-            print("upload: %d not JSON away, not Dawarich" % code)
-            _diag_write("upload err not json %d (captive portal?)" % code)
             code = None
         up["enomem"] = 0
         up["last_err"] = None
@@ -6655,6 +6666,8 @@ def _ota_health(now):
         # the note first: a power cut between the two then loses the try;
         # the other way round the old firmware found it and counted again
         _rm(OTA_PENDING)
+        _rm(OTA_MARK)                    # ("valid" of a failed confirmation:
+                                         # it spoke for the next build)
         n = _ota_try(build)
         _diag_final()
         what = "wifi"
