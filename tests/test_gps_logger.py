@@ -53,6 +53,17 @@ def _slurp(path):
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _docs_text():
+    """README.md and docs/*.md as one text: the README is short, the
+    details are in docs/ (a passage a check reads may be in any of them)."""
+    out = []
+    for n in ["README.md"] + sorted(os.path.join("docs", f) for f in os.listdir(
+            os.path.join(ROOT, "docs")) if f.endswith(".md")):
+        with open(os.path.join(ROOT, n)) as f:
+            out.append(f.read())
+    return "\n\n".join(out)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
@@ -3641,12 +3652,12 @@ try:
     # run() do and what machine.reset_cause() means on MicroPython 1.29
     # (ports/esp32/modmachine.c: 1 PWRON incl. brownout, 2 HARD incl.
     # panic and machine.reset(), 3 WDT, 4 DEEPSLEEP, 5 SOFT; there is no 6)
-    with open(os.path.join(ROOT, "README.md")) as f:
-        readme = f.read()
+    readme = _docs_text()
     with open(os.path.join(ROOT, "web.html")) as f:
         page_boot = f.read()
     guard = readme[readme.index("**Boot loop guard:**"):]
-    guard = " ".join(guard[:guard.index("\n\n**")].split())
+    guard = " ".join(guard[:min(x for x in (guard.find("\n\n**"), guard.find("\n\n#"))
+                                if x > 0)].split())
     import inspect
     run_src = inspect.getsource(gl.run)
     check("BOOT-DOC: boot loop guard text matches main.py and run()",
@@ -3776,8 +3787,7 @@ try:
     check("REVIEW-2: DEVICE_ID with a trailing comment is accepted",
           gl.DEVICE_ID == "car-1" and gl.HOSTNAME == "car-1",
           "%s %s" % (gl.DEVICE_ID, gl.HOSTNAME))
-    with open(os.path.join(ROOT, "README.md")) as f:
-        readme = f.read()
+    readme = _docs_text()
     blk = readme[readme.index("IP=192.168.1.60"):]
     blk = blk[:blk.index("```")]
     with open(env_p, "w") as f:
@@ -8348,8 +8358,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     tracked_ign = subprocess.run(
         ["git", "-C", ROOT, "ls-files", "-ci", "--exclude-standard"],
         capture_output=True, text=True).stdout.split()
-    with open(os.path.join(ROOT, "README.md")) as f:
-        rd = f.read()
+    rd = _docs_text()
     mig = rd[rd.index("**Once, over USB:**"):rd.index("**Then:**")]
     check("SECRETS-IGNORE: env.backup, hist/, *.env*, env (the backup's "
           "/.env copy), *.key, ota.key* and .claude/ are ignored (no "

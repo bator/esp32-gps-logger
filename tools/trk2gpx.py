@@ -183,7 +183,7 @@ def trb_lines(data, errors="replace"):
     scan as a record of up to REC_MAX bytes that runs into what follows, so
     a keyframe within 31 bytes after the damage is eaten as varints and
     lost with its deltas up to the next keyframe; the logger loses the same
-    (README, "Binary tracks").
+    (docs/internals.md, "Binary tracks").
 
     errors: how bytes that are not UTF-8 in a text line are decoded
     ("surrogateescape" lets read_points tell them from a U+FFFD)."""
