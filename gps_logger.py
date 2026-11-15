@@ -3502,15 +3502,7 @@ def _ring_add(sl, now, pos, d, fx=None):
         k = 3 * j
         if (d + STILL_TOL < _RF[k + 2] or d <= STILL_TOL
                 or (d <= STILL_NEAR
-                    and s - sl["rt0"] - _RT[j] > STILL_GAP // 1000)
-                # still near, the ring older than STILL_GAP and not going
-                # away: the jitter of a board sitting 5-50 m from the
-                # anchor (a terrace, a car waiting), not a way out. The
-                # samples it keeps (> STILL_DEP_STEP apart) never let the
-                # gap above end it: 13-73 points of it began the drive
-                or (d <= STILL_NEAR
-                    and s - sl["rt0"] - _RT[i] > STILL_GAP // 1000
-                    and d < _RF[3 * i + 2] + STILL_RUN)):
+                    and s - sl["rt0"] - _RT[j] > STILL_GAP // 1000)):
             n = 0
         elif _dist(_RF[k], _RF[k + 1], pos[0], pos[1]) <= STILL_DEP_STEP:
             return
@@ -4434,6 +4426,8 @@ def _fnum(a, b):
     point on the equator or at 0,0 went up; trk2gpx dropped it)."""
     i = a
     while i < b and not 48 <= _rbuf[i] <= 57:
+        if _rbuf[i] in (69, 101):        # e E: ".e1" is no number either
+            return None
         i += 1
     if i == b:
         return None
@@ -4446,6 +4440,8 @@ def _past(a, b):
     """A digit other than 0 after the point of _rbuf[a:b]: a value that a
     single-precision float rounds onto its limit (90.000003 is 90.0 on the
     board) is still past it."""
+    if _rbuf.find(b"e", a, b) >= 0 or _rbuf.find(b"E", a, b) >= 0:
+        return True                      # (900000001e-7 is 90.0 in f32 too)
     i = _rbuf.find(b".", a, b)
     if i < 0:
         return False

@@ -345,8 +345,8 @@ def main(argv):
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
     # (the name goes into XML: a byte that is not UTF-8 in the file name, a
     # surrogate here, or a control character made it no GPX)
-    name = "".join("?" if c < " " or "\ud800" <= c <= "\udfff" else c
-                   for c in name)
+    name = "".join("?" if c < " " or "\ud800" <= c <= "\udfff"
+                   or c in "\ufffe\uffff" else c for c in name)
     # the suffix only (the longest that fits): "my.trip.trk" is "my.trip"
     for suf in sorted(SUFFIXES, key=len, reverse=True):
         if name.endswith(suf):

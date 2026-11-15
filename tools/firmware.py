@@ -121,8 +121,19 @@ def manifest(d, key_file, build, commit, board):
     if not (0 < len(c) <= 20 and all(ch in "0123456789abcdef" for ch in c)):
         raise ValueError("commit %r: the board takes 1-20 lowercase hex"
                          " (git's short hash), maybe -dirty" % commit)
-    if not board or "|" in board:
-        raise ValueError("board %r: empty or with a |" % board)
+    own = None
+    try:                                 # the firmware's own OTA_BOARD
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "gps_logger.py")) as f:
+            for ln in f:
+                if ln.startswith('OTA_BOARD = "'):
+                    own = ln.split('"')[1]
+                    break
+    except OSError:
+        pass
+    if not board or "|" in board or (own is not None and board != own):
+        raise ValueError("board %r: not the firmware's OTA_BOARD %r (its"
+                         " boards would refuse the manifest)" % (board, own))
     key = read_key(key_file)
 
     def meta(name):

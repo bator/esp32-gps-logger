@@ -749,6 +749,22 @@ gl._vb[:] = [None, None, None, None, None, 0]
 gl._vb_hist[:] = []
 gl._vb_left[0] = None
 
+# track-line numbers the way the board reads them: MicroPython's float()
+# takes ".", "+." and ".e1" as 0.0 (CPython raises), and single precision
+# rounds 90.000003 onto 90.0
+ff = []
+for txt in (b".", b"+.", b".e1", b"e1", b"-.e5", b"47.5", b"5e1"):
+    gl._rbuf[0:len(txt)] = txt
+    ff.append(gl._fnum(0, len(txt)))
+fp = []
+for txt in (b"90.000003", b"90.000000", b"900000001e-7"):
+    gl._rbuf[0:len(txt)] = txt
+    fp.append(gl._past(0, len(txt)))
+print("fnum", ff, "past", fp)
+check("track fields: no digit before the exponent is no number; past the limit is past "
+      "it where single precision rounds onto it",
+      ff == [None, None, None, None, None, 47.5, 50.0] and fp == [True, False, True])
+
 if fails:
     raise SystemExit("mpy logger smoke FAILED: %s" % ", ".join(fails))
 print("mpy logger smoke passed")
