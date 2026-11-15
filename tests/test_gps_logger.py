@@ -8473,13 +8473,25 @@ nf_again = (cfgs(), gl.st["ack_n"])
 check("SETUP-NOFIX: no verdict before a fix, then 1 fix/s -> set up again",
       nf_wait == (False, 2, 0) and nf_again[0] > 0 and nf_again[1] >= 2,
       "wait=%r again=%r" % (nf_wait, nf_again))
+# GPS_VERIFY_MAX without a fix closed the verdict for good: a receiver that
+# answered but stayed at 1 Hz (CFGNAV ignored) was never caught once a fix
+# came. Now it is said once and the verdict still waits
 nofix_setup()
-nofix_secs(0, getattr(gl._rcv, "GPS_VERIFY_MAX", 1800000) // 1000 + 20,
-           gst_every=5, step=10)
-check("SETUP-NOFIX: no fix for GPS_VERIFY_MAX -> the wait ends, no verdict",
-      gl.st["checked"] is True and gl.st["ack_n"] == 2 and cfgs() == 0
-      and not gl.st["extra"], "%r %r %d" % (gl.st["checked"],
-                                          gl.st["ack_n"], cfgs()))
+nm_said = []
+nm_print = builtins.print
+builtins.print = lambda *a, **k: nm_said.append(" ".join(str(x) for x in a))
+try:
+    nm_k = getattr(gl._rcv, "GPS_VERIFY_MAX", 1800000) // 1000 + 20
+    nofix_secs(0, nm_k + 600, gst_every=5, step=10)
+    nm_wait = (gl.st["checked"], gl.st["ack_n"], cfgs(), gl.st["extra"])
+    nofix_secs(nm_k + 600, 30, fix=True)
+finally:
+    builtins.print = nm_print
+nm_un = [ln for ln in nm_said if "unverified" in ln]
+check("SETUP-NOFIX: no fix for GPS_VERIFY_MAX -> said once, no verdict; a 1 fix/s "
+      "fix after it is still set up again",
+      nm_wait == (False, 2, 0, 0) and nm_un == ["gps setup unverified: no fix"]
+      and cfgs() > 0, "%r %r %d" % (nm_wait, nm_un, cfgs()))
 
 # NO-GST-NOFIX: without a fix (indoors) no verdict from _setup_check, GST or not:
 # "no GST" was a verdict once, and indoor stretches were set up again and again.
@@ -8963,6 +8975,14 @@ gl.st["svs_at"] = _clock[0] - 3 * gl._rcv.SV_POLL
 used_old = gl._rcv.sv_used()
 check("GPS: used from a fresh satellite list, else GGA",
       used_list == 16 and used_old == 12, "%r %r" % (used_list, used_old))
+gl.st["view"] = {"GP": 5, "GA": 2}
+gl.st["svs_at"] = _clock[0]
+seen_list = gl._rcv.sv_seen()
+gl.st["svs_at"] = _clock[0] - 2 * gl._rcv.SV_POLL
+seen_old = gl._rcv.sv_seen()
+check("GPS-SEEN-AGE: seen from a satellite list younger than two SV_POLL (as "
+      "used), else GSV's count: a list no round closes is stale",
+      seen_list == 16 and seen_old == 7, "%r %r" % (seen_list, seen_old))
 gl._rcv.reset()
 _uart_rx[:] = []
 ban = b"FWVer R6.0.0.0Build3700\r\n"
@@ -8996,6 +9016,22 @@ check("RXBUF: a preallocated buffer, lines across 7-byte reads, junk dropped",
       isinstance(getattr(gl._rcv, "_rx", None), bytearray)
       and rx_ok == (6, 0) and gl.st["ok"] == 9,
       "%r ok=%d" % (rx_ok, gl.st["ok"]))
+# RXBUF-JUNK: a whole buffer of junk (RX_LINE + RX_READ bytes, no newline) is
+# dropped: without it the buffer stayed full, every readinto read nothing and
+# no sentence was read again
+gl._rcv.reset()
+_uart_rx[:] = []
+_uart_rx.extend(b"\x00" * (gl._rcv.RX_LINE + gl._rcv.RX_READ + 88) + rmcs)
+gl._rcv.read_uart()
+_uart_rx.extend(rmcs)
+gl._rcv.read_uart()
+check("RXBUF-JUNK: RX_LINE + RX_READ bytes without a newline are dropped, the "
+      "sentences after them read, the buffer empty again",
+      gl.st["ok"] == 6 and gl.st["err"] == 0 and gl._rcv._rx_n == 0
+      and not _uart_rx, repr((gl.st["ok"], gl.st["err"], gl._rcv._rx_n, len(_uart_rx))))
+gl._rcv.reset()
+_uart_rx[:] = []
+gl._rcv._rx_n = gl._rcv._rx_s = 0
 
 
 
@@ -9246,12 +9282,45 @@ for rc_err in (MemoryError, RuntimeError):
     finally:
         gl._rcv.HANDLERS["GGA"] = rc_gga
     rc_got.append((rc_raised, rc_calls[0], [s[9] for s in gl.st["q"]],
-                   gl.st["err"], gl._rcv._rx_n))
+                   gl.st["err"] + gl.st.get("bug", 0), gl._rcv._rx_n))
 gl._rcv.reset()
 gl._rcv._rx_n = gl._rcv._rx_s = 0
 _uart_rx[:] = []
 check("RXBUF-COMMIT: a handler's error counts the line, nothing handled twice",
       rc_got == [(None, 4, ["10:00:00", "11:00:00"], 1, 0)] * 2, repr(rc_got))
+
+# NMEA-BUG: a handler's programming error (TypeError, KeyError) was booked as
+# a bad sentence (st["err"]), silently and for ever. A MemoryError stays a bad
+# line; any other exception counts in st["bug"] and writes one diag line per
+# exception type a boot
+nb_lines, nb_dw = [], gl._diag_write
+gl._diag_write = nb_lines.append
+gl._rcv._bugs[:] = []
+nb_got = []
+for nb_err in (MemoryError, TypeError, TypeError, KeyError):
+    gl._rcv.reset()
+    _uart_rx[:] = []
+    gl._rcv._rx_n = gl._rcv._rx_s = 0
+    nb_rmc = gl._rcv.HANDLERS["RMC"]
+
+    def nb_boom(t, f, err=nb_err):
+        raise err("x")
+    gl._rcv.HANDLERS["RMC"] = nb_boom
+    try:
+        _uart_rx.extend(rv_nmea("GPRMC,100000.00,V,,,,,,,171026,,,N") + b"\r\n")
+        gl._rcv.read_uart()
+    finally:
+        gl._rcv.HANDLERS["RMC"] = nb_rmc
+    nb_got.append((gl.st["err"], gl.st.get("bug")))
+gl._diag_write = nb_dw
+gl._rcv._bugs[:] = []
+gl._rcv.reset()
+_uart_rx[:] = []
+check("NMEA-BUG: a handler's TypeError / KeyError counts as a bug, not bad NMEA, "
+      "one diag line a type; a MemoryError is still a bad line",
+      nb_got == [(1, 0), (0, 1), (0, 1), (0, 1)]
+      and nb_lines == ["bug nmea RMC TypeError('x')", "bug nmea RMC KeyError('x')"],
+      repr((nb_got, nb_lines)))
 
 
 # SECONDS: 5 Hz epochs, one point a second; midnight; seconds queued behind a
@@ -13776,6 +13845,8 @@ else:
         ("web error KeyError('y')", "bug"),
         ("bug upload ValueError('x')", "bug"),
         ("bug tft OSError(5)", "bug"),
+        ("bug nmea RMC TypeError('x')", "bug"),
+        ("bug gps setup TypeError('x')", "bug"),
         ("crash up 3600 MemoryError()", "crash"),
         ("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
          "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
@@ -17388,7 +17459,8 @@ _rd = gl._rcv
 check("RX-DRAIN: a Fix's field indexes are _SNAP's order",
       [_rd._SNAP[i] for i in (_rd.F_SEQ, _rd.F_LAT, _rd.F_LON, _rd.F_ALT, _rd.F_HDOP,
                               _rd.F_HDOP_AT, _rd.F_STD, _rd.F_STD_AT, _rd.F_POS_AT,
-                              _rd.F_TIME, _rd.F_DATE, _rd.F_VALID, _rd.F_EPOCHS)]
+                              _rd.F_TIME, _rd.F_DATE, _rd.F_VALID, _rd.F_EPOCHS,
+                              _rd.F_FIXTYPE)]
       == list(_rd._SNAP), "")
 _rd.reset()
 gl.log_reset()
@@ -17433,6 +17505,46 @@ check("RX-DRAIN: a sample that raises leaves st on the latest second, not a queu
       and gl.st["lat"] == _rd_q[3][_rd.F_LAT], repr((gl.st["seq"], gl.st["time"])))
 _rd.reset()
 gl.log_reset()
+
+# RX-FIXTYPE: a queued Fix's altitude is judged by its own fix type (GSA's when
+# it was published), not by st's now: a 3D second queued behind a POST lost
+# its altitude once a 2D one came, a 2D one got one after a 3D
+_rd.reset()
+gl.st.update(seq=1, lat=47.5, lon=19.0, alt=100.0, hdop=1.0, hdop_at=_clock[0],
+             std=None, std_at=None, pos_at=_clock[0], time="12:00:01",
+             date="2026-11-10", valid=True, epochs=5, fixtype=3)
+_ft3 = _rd._snap()
+gl.st.update(seq=2, fixtype=2)
+_ft2 = _rd._snap()
+_ft_e3 = gl._fields(_clock[0], _ft3)[0]
+gl.st["fixtype"] = 3
+_ft_e2 = gl._fields(_clock[0], _ft2)[0]
+check("RX-FIXTYPE: a queued Fix's elevation by its own fix type, not st's now",
+      _ft_e3 == "100.0" and _ft_e2 == "", repr((_ft_e3, _ft_e2)))
+_rd.reset()
+
+# RX-TTFF: the time to the first fix is a Stamp difference: from a whole-boot
+# Mark it read negative after 6.2 days (ticks_ms wraps at 2**30)
+_tt_saved = (time.ticks_diff, time.ticks_add, _clock[0], list(_gck._up))
+time.ticks_diff = lambda a, b: ((a - b + TPW // 2) & (TPW - 1)) - TPW // 2
+time.ticks_add = lambda a, b: (a + b) & (TPW - 1)
+try:
+    _clock[0] &= TPW - 1
+    _gck.stamp()
+    _rd.reset()
+    for _k in range(7):                  # a week without a fix
+        _clock[0] = (_clock[0] + 86400000) & (TPW - 1)
+        _gck.stamp()
+    _rd.handle(rv_nmea("GPGGA,120000.00,4730.000,N,01900.000,E,1,08,1.0,"
+                       "100.0,M,40.0,M,,"))
+    _rd.handle(rv_nmea("GPRMC,120001.00,V,,,,,,,171026,,,N"))
+    _tt = gl.st["ttff"]
+finally:
+    time.ticks_diff, time.ticks_add, _clock[0] = _tt_saved[:3]
+    _gck._up[:] = _tt_saved[3]
+_rd.reset()
+check("RX-TTFF: a first fix a week after boot has a TTFF of a week, not a "
+      "negative one", _tt == 7 * 86400, repr(_tt))
 
 # RX-STATUS: st is the Receiver's: the logger reads it and never writes into it
 # (it set settled and dropped the queue itself)
@@ -18489,6 +18601,31 @@ check("UC-FAIL: a refused rate is said and is no \"not taken\" verdict; the "
       and "gps refused CFGNAV,200,200,1000" in _hd
       and any(c.startswith(b"$CFGMSG,0,7,5") for c in hl._rcv.uart.cmds), _hd[-200:])
 
+# UC-SETUP-BUG: a programming error in the setup was only printed: now one diag
+# line per exception type a boot, and the setup is not ok (set up again)
+_sb_l, _sb_w, _sb_m = [], hl._diag_write, hl._rcv._uc_msgs
+hl._diag_write = _sb_l.append
+hl._rcv._bugs[:] = []
+
+
+def _sb_boom():
+    raise TypeError("x")
+
+
+hl._rcv._uc_msgs = _sb_boom
+try:
+    hl._rcv.reset()
+    hl._rcv.uart = _UcUart()
+    hl._rcv.gps_setup()
+    hl._rcv.gps_setup()
+    _sb_ok = hl.st["setup_ok"]
+finally:
+    hl._diag_write, hl._rcv._uc_msgs = _sb_w, _sb_m
+    hl._rcv._bugs[:] = []
+check("UC-SETUP-BUG: an exception in the setup is a diag line (once a type), the "
+      "setup not ok", _sb_ok is False and _sb_l == ["bug gps setup TypeError('x')"],
+      repr((_sb_ok, _sb_l)))
+
 # a restart: the banner the board prints after a power cycle
 hl._rcv.reset()
 hl._rcv.uart = _UcUart()
@@ -18502,6 +18639,14 @@ check("UC-RESTART: the plain text banner is one restart, not 7 bad lines; the "
       hl.st["gps_boots"] == _b0 + 1 and hl.st["err"] == _e0
       and hl.st["extra"] >= 1 and hl.st["gps_ver"] is None,
       repr((hl.st["gps_boots"], hl.st["err"], hl.st["extra"])))
+# UC-RESTART-SEC: the restart forgets the receiver second too (GSA's rounds and
+# GSV's go by it): the second before the restart was kept
+_uc_feed(hl, _nmea("GNRMC,090000.00,V,,,,,,,170126,,,N,V"))
+_rs0 = list(hl._rcv._sec)
+_uc_feed(hl, "FWVer R6.0.0.0Build3700")
+check("UC-RESTART-SEC: a receiver restart forgets the receiver second",
+      _rs0[0] == "090000" and hl._rcv._sec == [None, None],
+      repr((_rs0, hl._rcv._sec)))
 
 # 5 Hz with a fix: the setup's verdict
 hl._rcv.reset()
@@ -18605,6 +18750,45 @@ check("UC-GSV-EMPTY: a round with no satellites (no signal) is the list: "
       "none seen, not the last round's",
       hl.st["svs"] == [] and hl._rcv.sv_seen() == 0 and hl._sv_list() == [],
       repr((hl.st["svs"], hl._rcv.sv_seen())))
+# UC-GSV-WEAK: a satellite's cno is its strongest band's: a later weaker or
+# empty band (L5 listed without a C/N0) overwrote it while its elevation was
+# still empty (#107); the elevation comes from whichever band has one
+hl._rcv.reset()
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_uc_feed(hl, _nmea("GPGSV,1,1,03,14,,,40,17,56,319,35,20,,,30,1"),
+         _nmea("GPGSV,1,1,03,14,,,,17,56,319,20,20,33,120,25,8"),
+         _nmea("GPGSV,1,1,00,1"))
+_wk = {v[0]: v[:4] + v[6:] for v in hl.st["svs"] or []}
+check("UC-GSV-WEAK: a weaker or empty band later keeps a satellite's cno; its "
+      "elevation from the band that has it",
+      _wk == {14: (14, 40, None, 0, 0, 40, 0), 17: (17, 35, 56, 319, 0, 35, 20),
+              20: (20, 30, 33, 120, 0, 30, 25)}, repr(_wk))
+
+
+# UC-GSV-ROUND: a round is one receiver second's GSV. It began only with GPS's
+# ",1" sentence: a GPS_SYS mask without GPS never made a list, and an empty GPS
+# sentence of another signal never closed one (the last sky stayed)
+def _gsv_s(t, *bodies):
+    _uc_feed(hl, _nmea("GNRMC,%s.00,V,,,,,,,151126,,,N,V" % t),
+             *[_nmea(b_) for b_ in bodies])
+    _clock[0] += 1000
+
+
+hl._rcv.reset()
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_gsv_s("101000", "GAGSV,1,1,01,11,45,120,37,7", "GBGSV,1,1,01,22,20,010,30,1")
+_gsv_s("101001", "GAGSV,1,1,01,11,45,120,36,7", "GBGSV,1,1,01,22,20,010,31,1")
+_ng = sorted((v[6], v[0], v[1]) for v in hl.st["svs"] or [])
+hl._rcv.reset()
+_clock[0] += hl._rcv.GSV_EVERY * 1000 + 1
+_gsv_s("101100", "GPGSV,1,1,01,14,77,011,40,1")
+for _k in range(1, 13):                  # the sky goes dark
+    _gsv_s("1011%02d" % _k, "GPGSV,1,1,00,0")
+_dark = (hl.st["svs"], hl._rcv.sv_seen())
+hl._rcv.reset()
+check("UC-GSV-ROUND: a round per receiver second: without GPS in the mask a list "
+      "is made; GPS's empty sentence of another signal ends the last sky",
+      _ng == [(2, 11, 37), (3, 22, 30)] and _dark == ([], 0), repr((_ng, _dark)))
 
 # GPS_SYS: a mask set once, only when the receiver has another
 class _UcSys(_UcUart):

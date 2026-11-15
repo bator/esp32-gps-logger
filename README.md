@@ -484,7 +484,7 @@ and shows the route and its state on the display (see [Hardware](#hardware)).
 |------|---------|
 | `gps setup ok` / `no ack` / `again` | 5 Hz setup answered, not answered, or sent again |
 | `gps setup not taken: 1 fix/s` / `no GST` | 10 s after an answered setup (once it has 3 valid seconds to tell by) the receiver still sends one fix a second, or no `GST`: it is set up again. Also in the diagnostic log, at most every 10 minutes |
-| `gps setup unverified: no fix` | 30 minutes after an answered setup still no fix to check it by: no verdict |
+| `gps setup unverified: no fix` | 30 minutes after an answered setup still no fix to check it by: said once, the check still waits for its 3 valid seconds |
 | `gps setup lost: no GST` | No `GST` for 30 s with sentences coming (`UC_GST_LOST`): a restart whose banner was lost; it is set up again |
 | `gps refused <command>` | The receiver answered a command `$FAIL`. A refused rate (`CFGNAV`): it stays at its rate, the rest of the setup goes on, and 1 fix/s is then no "not taken" verdict |
 | `gps restarted` | The receiver printed its start-up banner (power dip); it is set up again at once |
@@ -529,6 +529,11 @@ boot cause 2 (hard reset), the same as the logger's own `machine.reset()`
 1 (power on). The counter is cleared after 60 s (`BOOT_OK_MS`) of a healthy
 main loop, by `deploy.sh` or by a power cycle. By hand:
 `mpremote exec "from machine import RTC; RTC().memory(b'0')"`, then reset.
+An NMEA handler that raises anything but a MemoryError (a TypeError, a
+KeyError: a bug, not a bad sentence) is not counted as a bad sentence: it
+counts apart (`st["bug"]`) and writes `bug nmea <type> <error>` once per
+exception type a boot; an exception in the receiver setup writes `bug gps
+setup <error>` the same way.
 A bug in the WiFi, upload or OTA tick, the status page's or a status
 line's, no longer resets the board: it is
 one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
@@ -893,15 +898,19 @@ console line.
   (`GPS_VERIFY`) it is checked: valid seconds still at one fix each, or NMEA but no
   `GST` (without it the `GPS_MAX_STD` filter is off), count as not taken, and it
   is sent again. Only valid seconds tell: before the first fix (a setup at boot,
-  indoors) the check waits for 3 of them, up to 30 minutes (`GPS_VERIFY_MAX`). It
-  counts as taken only with 5 fixes a second and `GST`. One that answers every
+  indoors) the check waits for 3 of them, however long that takes (after 30
+  minutes, `GPS_VERIFY_MAX`, it says so once: a receiver that answered but stayed
+  at 1 fix a second is still caught when the fix comes). It counts as taken only with 5 fixes a second and `GST`. One that answers every
   setup but keeps sending what it turned off gets the second retry after 5 s too,
   then 10, 20, 40 s and every minute (`GPS_IGNORED_MAX`). A start-up banner (power
   dip) sets it up again at once and starts that backoff afresh; no `GST` for 30 s
   with sentences coming (`UC_GST_LOST`) is a restart whose banner was lost.
-- **Satellite list.** From `GSV`, one list a `GSV_EVERY` (5 s): the same satellite
-  on two bands counts once, with its stronger signal; used from `GSA`. A receiver
-  restart forgets the list and the model (`$PDTINFO`), which is asked anew.
+- **Satellite list.** From `GSV`, one list a `GSV_EVERY` (5 s): a round is the
+  `GSV` of one receiver second (any systems, also a `GPS_SYS` mask without GPS),
+  closed by the next second's first `GSV`. The same satellite on two bands counts
+  once, with its stronger signal; used from `GSA`. A list older than 2 minutes
+  is not used for the seen count. A receiver restart forgets the list and the
+  model (`$PDTINFO`), which is asked anew.
 - **Averaging.** The valid `GGA` positions, altitude and HDOP of each UTC
   second are averaged and published when the next second starts (`RMC`
   positions if a second had no `GGA`). `GST` gives the receiver's own error

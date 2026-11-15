@@ -5,7 +5,8 @@
 # from it: the diag log (_diag_write) and the watchdog (feed).
 from machine import UART
 import sys, time, select
-from gps_clock import age as _age, recent as _recent, TICKS_CAP
+from gps_clock import age as _age, recent as _recent, TICKS_CAP, \
+    stamp as _stamp
 
 
 def _diag_write(line):                   # (bound by the logger)
@@ -20,6 +21,23 @@ def _say(line):
     """On the console and in the diag log (as the logger's _say)."""
     print(line)
     _diag_write(line)
+
+_bugs = []                               # (where, exception type) said
+
+def _bug_diag(where, line, e):
+    """An exception no input explains (a TypeError, a KeyError: a bug): line
+    and the exception on the console and in the diag log, once per place and
+    exception type a boot (one every sentence must not fill the log). Never
+    raises: read_uart calls it in its handler."""
+    try:
+        k = (where, type(e))
+        if k not in _bugs:
+            _bugs.append(k)
+            r = repr(e)
+            print(line, r)
+            _diag_write("%s %s" % (line, r[:60]))
+    except Exception:
+        pass
 
 
 def _dlon(d):
@@ -43,8 +61,9 @@ GPS_IGNORED_MAX = 60000                  # ms cap between setups a receiver
 GPS_VERIFY = 10000                       # ms after an answered setup:
                                          # still one fix a second, or no GST
                                          # = not taken, set up again
-GPS_VERIFY_MAX = 1800000                 # ms it waits for 3 valid seconds to
-                                         # tell (none before the first fix)
+GPS_VERIFY_MAX = 1800000                 # ms without 3 valid seconds to tell
+                                         # (none before the first fix): said
+                                         # once, the verdict still waits
 GPS_NOT_TAKEN_SAY = 600000               # ms between "setup not taken" diag
                                          # lines (the ones between counted)
 AVG_MAX_SPEED = 10                       # km/h: above this a second's point
@@ -85,8 +104,8 @@ ep = {}                                  # the second being collected
 
 def reset():
     st.clear()
-    st.update(start=time.ticks_ms(), rx=None, rx_b=0, good=None,
-              ok=0, err=0,
+    st.update(start=time.ticks_ms(), start_s=_stamp(), rx=None, rx_b=0,
+              good=None, ok=0, err=0, bug=0,
               quality=None, fixtype=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, used=None, view={},
@@ -100,12 +119,13 @@ def reset():
               svs=None, svs_at=None,
               gps_ver=None, gsa_at=None, gsa_n=0, gsa_t=None, uc_ok=0, uc_fail=0, uc_sys=None,
               uc_sys_sent=False, fix_first=None, settled=False, gst_said=None,
-              ack_n=0, rate_nak=False, checked=True,
+              ack_n=0, rate_nak=False, checked=True, unverified=False,
               hz1=0, hz5=0,
               set_ok=0, gst_at=None,
               nt_said=None, nt_more=0,
               set_boots=0)
     _ep_new(None)
+    _uc_sv_new()
 
 def _ep_new(t):
     # g / r: GGA / RMC positions as [ref lat, ref lon, sum dlat, sum dlon, n]
@@ -240,8 +260,8 @@ def _published(now):
     """The second in st is a fix: stamp it and queue it for log_tick."""
     st["pos_at"] = now
     st["seq"] += 1
-    if st["ttff"] is None:
-        st["ttff"] = time.ticks_diff(now, st["start"]) // 1000
+    if st["ttff"] is None:               # (a Stamp: a Mark of the boot read
+        st["ttff"] = _stamp() - st["start_s"]   # negative after 6.2 days)
     # queued for log_tick: after a blocking POST, scan or setup read_uart
     # publishes several seconds at once, and each is a point. Full (a POST
     # over a weak hotspot blocks up to HTTP_MAX): the second whose
@@ -260,16 +280,17 @@ def _published(now):
         st["q_thin"] += 1
 
 # a published second as a tuple in this order (seq first, pos_at at 8): one
-# small allocation a second rather than a dict
+# small allocation a second rather than a dict. fixtype: GSA's when the second
+# was published (a queued Fix's altitude is judged by its own)
 _SNAP = ("seq", "lat", "lon", "alt", "hdop", "hdop_at", "std", "std_at",
-         "pos_at", "time", "date", "valid", "epochs")
+         "pos_at", "time", "date", "valid", "epochs", "fixtype")
 
 def _snap():
     return tuple(st[k] for k in _SNAP)
 
 # a Fix's fields by index (_SNAP's order)
 F_SEQ, F_LAT, F_LON, F_ALT, F_HDOP, F_HDOP_AT, F_STD, F_STD_AT, F_POS_AT, \
-    F_TIME, F_DATE, F_VALID, F_EPOCHS = range(13)
+    F_TIME, F_DATE, F_VALID, F_EPOCHS, F_FIXTYPE = range(14)
 
 def unsettled(now):
     """True while the UC6580's first fix is under UC_SETTLE old and the board
@@ -410,7 +431,8 @@ def _gps_restarted():
     st.update(svs=None, svs_at=None, gps_ver=None, fix_first=None,
               settled=False)
     _ep_new(None)
-    _uc_sv.update(new={}, open=False, until=None, used=[], gsa=None, gt=None)
+    _sec[0] = _sec[1] = None             # (its time starts afresh too)
+    _uc_sv_new()
 
 def _gps_flap(now):
     """A receiver that restarts every few seconds but sends NMEA in between
@@ -446,9 +468,12 @@ def sv_used():
     return st["used"]
 
 def sv_seen():
-    """Satellites with a signal: from the last satellite list, else the GSV
-    count."""
-    if st["svs"] is not None:
+    """Satellites with a signal: from a satellite list younger than two
+    SV_POLL (as sv_used: a list no round closes any more is stale), else
+    the GSV count."""
+    at = st["svs_at"]
+    if (st["svs"] is not None and at is not None
+            and _age(time.ticks_ms(), at) < 2 * SV_POLL):
         return len([v for v in st["svs"] if v[1] > 0])
     n = 0
     for c in st["view"].values():
@@ -542,8 +567,8 @@ def _uc_setup():
                     st["rate_nak"] = True
         feed()
         return True
-    except Exception as e:
-        print("gps setup", repr(e))
+    except Exception as e:               # (an OSError of the UART too: said
+        _bug_diag("setup", "bug gps setup", e)   # once a type, not only printed)
         return False
 
 def _uc_line(p):
@@ -565,8 +590,15 @@ def _uc_line(p):
 
 _UC_GNSS = {"GP": 0, "GA": 2, "GB": 3, "GQ": 5, "GL": 6}  # (GNSS's numbers)
 _UC_SYS = {1: 0, 2: 6, 3: 2, 4: 3, 5: 5}  # GSA's system id -> gnssId
-_uc_sv = {"new": {}, "open": False, "until": None, "used": [], "gsa": None,
-          "gt": None}
+_uc_sv = {}
+
+def _uc_sv_new():
+    """No satellite round begun, no GSA list, no GSV window (reset, a
+    receiver restart)."""
+    _uc_sv.update(new={}, open=False, until=None, used=[], gsa=None, gt=None,
+                  sec=None, head=None)
+
+_uc_sv_new()
 # GSV's signal id (its last field) -> its band, 1 (L1/E1/B1) or 5 (L5/E5a/
 # B2a), keyed gnssId << 8 | id (UFirebird II spec, table 1-3); others none
 _UC_BAND = {0 << 8 | 1: 1, 0 << 8 | 8: 5, 2 << 8 | 7: 1, 2 << 8 | 1: 5,
@@ -581,6 +613,7 @@ def _uc_gsv_skip():
     if u["until"] is None:
         return False
     if 0 < time.ticks_diff(u["until"], time.ticks_ms()) <= GSV_EVERY * 1000:
+        u["sec"] = _sec[0]               # (seen: the window may end mid-round)
         return True                      # (a window from before a wrap is over)
     u["until"] = None
     return False
@@ -619,42 +652,58 @@ def _uc_gsa(talker, f):
 
 def _uc_gsv(talker, f):
     """One GSV sentence into a round's list (the same satellite on two
-    bands: its strongest as its cno, and each band's on its own). A round
-    starts with GPS's first sentence; the next such one closes it as
-    st["svs"]: (svid, cno, elevation, azimuth, used, unhealthy, gnssId,
-    L1 cno, L5 cno), and the next GSV_EVERY s of GSV are not even decoded
-    (_uc_gsv_skip)."""
+    bands: its strongest as its cno, and each band's on its own). A round is
+    the GSV of one receiver second (HHMMSS of the last time sentence, as
+    GSA's: they come in one burst after their epoch's time); the first GSV of
+    the next second closes it as st["svs"]: (svid, cno, elevation, azimuth,
+    used, unhealthy, gnssId, L1 cno, L5 cno), and the next GSV_EVERY s of
+    GSV are not even decoded (_uc_gsv_skip). Without a time sentence yet (or
+    the same second still), the round's first sentence coming again closes
+    it. (GPS's ",1" first sentence did: a GPS_SYS mask without GPS never
+    made a list, an empty GPS sentence of another signal never closed one.)"""
     g = _UC_GNSS.get(talker)
     if g is None:
         return
     u = _uc_sv
-    first = g == 0 and f[2] == "1" and f[-1] == "1"
-    if first and u["open"]:
+    e = _sec[0]
+    new = e is not None and e != u["sec"]    # its second's first GSV
+    u["sec"] = e
+    h = u["head"]
+    again = f[2] == "1" and h is not None and f[0] == h[0] and f[-1] == h[1]
+    if u["open"] and (new or again):
         # an empty round too: no signal at all, else the last sky stays
         used = u["used"]
-        st["svs"] = [(k & 255, v[0], v[1], v[2], k in used, False, k >> 8,
-                      v[3], v[4]) for k, v in u["new"].items()]
+        st["svs"] = [(k & 255, v[0], v[1], 0 if v[2] is None else v[2],
+                      k in used, False, k >> 8, v[3], v[4])
+                     for k, v in u["new"].items()]
         st["svs_at"] = time.ticks_ms()
         u["new"], u["open"] = {}, False
         u["until"] = time.ticks_add(time.ticks_ms(), GSV_EVERY * 1000)
         return
-    if first:
+    if not u["open"]:
+        if not (new or again or h is None and f[2] == "1"):
+            return                       # (the rest of a round begun before)
         u["open"] = True
-    elif not u["open"]:
-        return                           # (the rest of a round begun before)
+        if not again:
+            u["head"] = (f[0], f[-1])
     sig = f[-1]                          # ("B", BDS B2I, is hex: no band)
     band = _UC_BAND.get(g << 8 | int(sig)) if sig.isdigit() else None
     for i in range(4, len(f) - 3, 4):
         n = _num(f[i], int)
         if n is None:
             continue
-        k = g << 8 | n
+        el, az = _num(f[i + 1], int), _num(f[i + 2], int)
         cno = _num(f[i + 3], int) or 0
+        k = g << 8 | n
         v = u["new"].get(k)
         if v is None:
-            v = u["new"][k] = [0, None, 0, 0, 0]
-        if v[1] is None or cno > v[0]:
-            v[0], v[1], v[2] = cno, _num(f[i + 1], int), _num(f[i + 2], int) or 0
+            v = u["new"][k] = [0, None, None, 0, 0]
+        if cno > v[0]:                   # (a weaker or empty band later
+            v[0] = cno                   # keeps it)
+        if v[1] is None and el is not None:
+            v[1] = el                    # (from the first band that has it)
+        if v[2] is None and az is not None:
+            v[2] = az
         if band == 1 and cno > v[3]:
             v[3] = cno
         elif band == 5 and cno > v[4]:
@@ -675,7 +724,7 @@ def _setup_done(ok, boots):
     # it; a restart meanwhile (its banner was read) is: set up again
     st.update(setup_at=time.ticks_ms(),
               extra=0 if st["gps_boots"] == boots else 1, setup_ok=ok,
-              checked=not ok, hz1=0, hz5=0, set_ok=st["ok"],
+              checked=not ok, unverified=False, hz1=0, hz5=0, set_ok=st["ok"],
               set_boots=st["gps_boots"])
     if ok and st["gps_boots"] == boots:
         # it listens: a later revert is quick. One that answers but keeps
@@ -696,9 +745,10 @@ def _setup_check(now):
     coming but no GST (the GPS_MAX_STD filter would be off without a word):
     counted as a sentence it should not send, so gps_check sets it up again.
     Only valid seconds tell: before 3 of them (no fix yet: a setup at boot,
-    or indoors) there is no verdict yet, it waits up to GPS_VERIFY_MAX. Taken
-    (the backoff starts afresh) only with GPS_HZ fixes a second and GST
-    seen."""
+    or indoors) there is no verdict yet, however long that takes (said once
+    after GPS_VERIFY_MAX: it gave up then, and a receiver that answered but
+    stayed at 1 Hz was never caught once a fix came). Taken (the backoff
+    starts afresh) only with GPS_HZ fixes a second and GST seen."""
     if st["checked"]:
         return
     age = _age(now, st["setup_at"])
@@ -709,9 +759,9 @@ def _setup_check(now):
                                          # setup comes
     hz1, hz5 = st["hz1"], st["hz5"]
     if hz1 + hz5 < 3:
-        if age >= GPS_VERIFY_MAX:
-            st["checked"] = True         # no fix all this time: no verdict
-            print("gps setup unverified: no fix")
+        if age >= GPS_VERIFY_MAX and not st["unverified"]:
+            st["unverified"] = True      # no fix all this time: said once,
+            print("gps setup unverified: no fix")   # the verdict waits on
         return
     st["checked"] = True
     slow = GPS_HZ > 1 and not hz5 and not st["rate_nak"]
@@ -975,10 +1025,21 @@ def _rx_drop(r):
     _rxv[0:n] = _rxv[r:r + n]
     _rx_n = n
 
+def _rx_type(b, s, e):
+    """The sentence type of the line b[s:e] ("RMC"), "?" for an odd byte:
+    for a bug's diag line, never raises."""
+    try:
+        i = b.rfind(b"$", s, e)
+        return "".join(chr(c) if 32 < c < 127 else "?"
+                       for c in b[i + 3:min(i + 6, e)]) if i >= 0 else "-"
+    except Exception:
+        return "-"
+
 def read_uart():
     """What the UART has: lines to handle(), in place. An error in one (a
-    MemoryError while publishing a second) counts it bad (st["err"]) and the
-    rest is read: no exception leaves the buffer uncommitted, or the next
+    MemoryError while publishing a second) counts it bad (st["err"]), any
+    other is a bug (st["bug"], a diag line once a type), and the rest is
+    read: no exception leaves the buffer uncommitted, or the next
     call handled the same sentences again and queued the same seconds twice.
     At most RX_READS reads: a UART never empty (a flood, handlers slower than
     it) must not hold the loop, its feed() and the logging."""
@@ -1006,8 +1067,11 @@ def read_uart():
             e = j - 1 if j > r and b[j - 1] == 13 else j
             try:
                 handle(b, r, e)          # in place: no copy
-            except Exception:            # (a handler's MemoryError): the
-                st["err"] += 1           # line is bad, not read again
+            except MemoryError:          # (publishing a second): the line
+                st["err"] += 1           # is bad, not read again
+            except Exception as x:       # a bug, not bad NMEA: counted
+                st["bug"] += 1           # apart, said once a type
+                _bug_diag("nmea", "bug nmea " + _rx_type(b, r, e), x)
             r = s = j + 1
         if r:
             _rx_drop(r)

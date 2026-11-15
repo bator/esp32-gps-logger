@@ -2863,7 +2863,7 @@ def _fields(now, fx=None):
     when not known). Also what the departure ring keeps (_RE)."""
     ele = ""
     alt = _fv(fx, "alt")
-    if alt is not None and st.get("fixtype") != 2:
+    if alt is not None and _fv(fx, "fixtype") != 2:
         ele = "%.1f" % alt
     hdop = _fresh_hdop(now, fx)
     return ele, "" if hdop is None else "%.1f" % hdop
