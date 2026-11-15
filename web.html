@@ -266,7 +266,7 @@ function gid(sv) { return GNSS[sv.system] === undefined ? 1 : GNSS[sv.system]; }
 function cls(sv) { return "g" + gid(sv) + (sv.used ? "" : " u"); }
 function tip(sv) { return esc(sv.name) + " " + esc(sv.cno || "-") + " dBHz"; }
 // a fix: 3D, 2D, "Fix" (valid, its type not said; DGPS too)
-function fixTone(fix) { return /^3D/.test(fix) ? "ok" : /^(2D|Fix)/.test(fix) ? "warn" : "bad"; }
+function fixTone(fix) { return /^3D/.test(fix) ? "ok" : /fix/i.test(fix) ? "warn" : "bad"; }
 function mpp(lat, z) { return 156543.03 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z); }   // metres a pixel
 function wifiQ(rssi) {                 // [arcs 0-3, quality %, tone] for an RSSI in dBm
   if (rssi == null) return null;

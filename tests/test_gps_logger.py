@@ -15311,9 +15311,9 @@ else:
                                  "47.100,18.400", "47.115,18.400"],
           repr(ft.get("endPlace")))
     check("SP-FIX-WORD: \"Fix\" / \"Fix DGPS\" (a valid position of no "
-          "said type) is a fix: amber like 2D, Waiting and no data red; "
-          "in the diag summary no \"no fix\" minute",
-          ft.get("fixWord") == [["ok", "ok", "warn", "warn", "warn", "bad",
+          "said type) is a fix: amber like 2D and Waiting (as before), "
+          "no data red; in the diag summary no \"no fix\" minute",
+          ft.get("fixWord") == [["ok", "ok", "warn", "warn", "warn", "warn",
                                  "bad", "bad"], 0], repr(ft.get("fixWord")))
     _sb = ft.get("sinceBoot") or [[None], [None]]
     check("SP-SINCE-BOOT: an upload error or GPS loops long ago (counted "
