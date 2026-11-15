@@ -45,7 +45,9 @@
 # OTA_DEST (host:/path) with scp, each file as <name>.tmp moved over the
 # live one with ssh (a board reading a half-copied file got a mix), the
 # manifest last: a board reading the old manifest meanwhile still finds
-# the files it names. Each board has its own OTA_DEST and .env OTA_URL: a
+# the files it names; then the files only the replaced manifest named are
+# removed (an older signed build could be served again: the HMAC binds no
+# freshness). Each board has its own OTA_DEST and .env OTA_URL: a
 # manifest names its board and a board refuses another's. A build not newer than the published manifest's is
 # refused (FORCE=1 publishes it anyway). The manifest is signed with the
 # key in OTA_KEY_FILE (default ~/.config/gps-logger/ota.key, the board's
@@ -108,8 +110,9 @@ if [ "$MODE" = --publish ]; then
         exit 1
     fi
     # the key is a secret: readable by everyone is refused, by the group warned
-    # (its content is never printed here)
-    KMODE=$(stat -c %a "$KEY_FILE" 2>/dev/null || stat -f %Lp "$KEY_FILE" 2>/dev/null || true)
+    # (its content is never printed here); -L: the file a symlink points to
+    # (the link's own mode is 777: a 600 key behind one was refused)
+    KMODE=$(stat -L -c %a "$KEY_FILE" 2>/dev/null || stat -L -f %Lp "$KEY_FILE" 2>/dev/null || true)
     case "$KMODE" in
         ""|*[!0-7]*) echo "Could not read the mode of $KEY_FILE (chmod 600 it)" >&2 ;;
         *)
@@ -120,10 +123,10 @@ if [ "$MODE" = --publish ]; then
                 echo "WARNING: the OTA key file $KEY_FILE is readable by its group (mode $KMODE): chmod 600 it" >&2
             fi ;;
     esac
-    # the board reads it from .env: printable ASCII, no quotes or spaces
-    if ! tr -d '\n' < "$KEY_FILE" | LC_ALL=C grep -qE "^[!#-&(-~]{16,}$"; then
-        echo "The OTA key in $KEY_FILE must be 16+ printable ASCII characters" >&2
-        echo "without quotes or spaces (e.g. openssl rand -hex 32)" >&2
+    # the board reads it from .env: one line of printable ASCII, no quotes
+    # or spaces; checked as firmware.py signs with it (the file stripped: a
+    # check that dropped every newline passed a two-line key)
+    if ! python3 tools/firmware.py key "$KEY_FILE"; then
         exit 1
     fi
 fi
@@ -311,5 +314,24 @@ case "$MODE" in
     # shellcheck disable=SC2029
     ssh "$DHOST" "${MV}true"
     echo "Published $COMMIT (build $BUILD) to $OTA_DEST"
+    # the files only the replaced manifest named go (an older signed
+    # manifest and its image stayed on the server to be served again; the
+    # HMAC binds no freshness): after the new manifest is up, never one the
+    # new manifest names, plain names only (tools/firmware.py old)
+    RM=""
+    if [ -n "$LIVE" ]; then
+        for f in $(python3 tools/firmware.py old "$BINF" "web-$COMMIT.html.gz" <<< "$LIVE" 2>/dev/null || true); do
+            RM+=" $QDIR/$(printf %q "$f")"
+        done
+    fi
+    if [ -n "$RM" ]; then
+        # (RM built here, its paths %q-quoted)
+        # shellcheck disable=SC2029
+        if ssh "$DHOST" "rm -f$RM"; then
+            echo "Removed the previous build's files:$RM"
+        else
+            echo "WARNING: could not remove the previous build's files:$RM" >&2
+        fi
+    fi
     ;;
 esac
