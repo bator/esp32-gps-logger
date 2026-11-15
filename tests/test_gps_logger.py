@@ -5962,7 +5962,7 @@ try:
     try:
         gl._web_close()
         gl.wifi.update(state="connected", ip="192.168.1.60", ssid="<b>home",
-                       rssi=-50)
+                       rssi=-50, home=True)
         gl.log["points"] = 42
         gl.up["left"] = 7
         gl.up["sent"] = 35
@@ -5975,7 +5975,8 @@ try:
         reqs = [FakeConn(b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"),
                 FakeConn(b"GET /status.json HTTP/1.1\r\n\r\n"),
                 FakeConn(b"GET /nope HTTP/1.1\r\n\r\n"),
-                FakeConn(b"", fail=True)]
+                FakeConn(b"", fail=True),
+                FakeConn(b"GET /status.json?diag HTTP/1.1\r\n\r\n")]
         gl.WEB_PAGE = gl.WEB_PAGE + ".missing"
         nopage = FakeConn(b"GET / HTTP/1.1\r\n\r\n")
         lst.waiting.append(nopage)
@@ -6050,6 +6051,10 @@ try:
             jd = json.loads(jbody)
         except ValueError:
             jd = {}
+        try:
+            jdd = json.loads(reqs[4].sent.partition(b"\r\n\r\n")[2])
+        except ValueError:
+            jdd = {}
         gl.wifi["state"] = "sleep"
         gl.web_tick()
         closed_on_sleep = lst.closed and gl._web_sock is None
@@ -6131,12 +6136,16 @@ try:
           nopage.sent.startswith(b"HTTP/1.0 404") and b"deploy.sh" in
           nopage.sent and b"/status.json" in nopage.sent,
           repr(nopage.sent[:200]))
-    check("WEB: /status.json has the same values and the diag tail",
+    check("WEB: /status.json has the same values; the diag tail only on "
+          "/status.json?diag (the page reads the whole log from /diag: "
+          "every poll read the tail for nothing)",
           jhead.startswith(b"HTTP/1.0 200 OK") and jd.get("points") == 42
           and jd.get("left") == 7 and jd.get("sent") == 35
           and "fix" in jd and "sats" in jd and jd.get("refresh_s") == 15
-          and jd.get("wifi") == "connected <b>home"
-          and jd.get("diag", [""])[-1].startswith("up 60"), repr(jd)[:300])
+          and jd.get("wifi") == "connected <b>home" and "diag" not in jd
+          and jdd.get("points") == 42 and "satellites" in jdd
+          and jdd.get("diag", [""])[-1].startswith("up 60"),
+          repr((jd, jdd))[:400])
     check("WEB: unknown path 404, a failing client is closed, no raise",
           reqs[2].sent.startswith(b"HTTP/1.0 404") and reqs[3].closed
           and reqs[3].sent == b"")
@@ -6180,7 +6189,7 @@ try:
     gl.WEB = True
     gl.WEB_PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "..", "web.html")
-    gl.wifi.update(state="connected", ip="192.168.1.60")
+    gl.wifi.update(state="connected", ip="192.168.1.60", home=True)
     good = b"GET / HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n"
 
     def serve(c):
@@ -8756,8 +8765,11 @@ try:
     dw_bad = [_dget(q)[0] for q in (b"f=2&o=0", b"f=x&o=0", b"f=0&o=-1",
                                     b"f=0&o=x", b"o=0", b"f=0&o=1x")]
     dw_host = _dget(b"f=0&o=0", b"Host: evil.example\r\n")[0]
+    dw_xold = [_dget(b"f=0&o=999999")[1].get("X-Diag-Old"),
+               _dget(b"f=1&o=0")[1].get("X-Diag-Old")]
     os.remove(gl.DIAG_OLD)
     dw_missing = _dget(b"f=1&o=0")[0]
+    dw_xold.append(_dget(b"f=0&o=0")[1].get("X-Diag-Old"))
 finally:
     gl._rcv.read_uart = dw_real_uart
 check("DIAG-WEB: /diag?f=1 and f=0 paged from o are the files byte for "
@@ -8780,6 +8792,10 @@ check("DIAG-WEB: a bad f or o, or a missing file, is a 404; a foreign Host "
       and dw_missing == b"HTTP/1.0 404 Not Found"
       and dw_host == b"HTTP/1.0 403 Forbidden",
       repr((dw_bad, dw_missing, dw_host)))
+check("DIAG-WEB-OLD: f=0 also says X-Diag-Old, diag.1's size (0 without "
+      "one): a rotation the page missed while its diag.log grew past the "
+      "page's offset again is seen by it; f=1 has none",
+      dw_xold == [str(len(dw_old)), None, "0"], repr(dw_xold))
 diag_clear()
 
 # GPS-20: a cut-off sentence glued to a whole one keeps the whole one
@@ -12576,7 +12592,7 @@ class LinesOnly(object):
 real_open = open
 gl.open = lambda p, *a, **k: LinesOnly(real_open(p, *a, **k))
 try:
-    pieces = list(gl._web_json_parts(gl._web_rows(), gl._sv_list()))
+    pieces = list(gl._web_json_parts(gl._web_rows(), gl._sv_list(), True))
 finally:
     del gl.open
     gl.DIAG_FILE = saved_diag_file
@@ -13578,12 +13594,13 @@ else:
           repr(evw.get("evs")))
     evk = evw.get("evk", "")
     check("PAGE-EV: the summary - 3D fix % of the status lines (2 after a "
-          "boot without utc counted), no fix as a duration, boots with "
-          "power-on, updates once each with the failures",
+          "boot without utc counted), no fix as a duration summed from up "
+          "(30 lines a minute apart, the 2 after the boot at up 30: 30 s "
+          "each), boots with power-on, updates once each with the failures",
           ev.get("lines") == 166
           and '<div class="t-ok"><small>3D fix</small><b>81 %</b><em>of minutes'
               '</em></div>' in evk
-          and '<div class="t-warn"><small>No fix / no data</small><b>32<em>'
+          and '<div class="t-warn"><small>No fix / no data</small><b>31<em>'
               'min</em></b></div>' in evk
           and "<small>Boots</small><b>3</b><em>1 power-on</em>" in evk
           and '<div class="t-warn"><small>Updates</small><b>2</b><em>1 failed'
@@ -14254,6 +14271,48 @@ else:
     check("TELE-FROZEN: status lines that repeat a stale GPS time go on "
           "with up: a 3 min drop-out spans 3 min", ft.get("frozen") ==
           [300000, [[180000, 3]]], repr(ft.get("frozen")))
+    # REVIEW-2026-11-14 (the status page): each finding's regression
+    # (tests/web_page_test.js diagRot ... histEnd)
+    check("SP-DIAG-ROT: a rotation missed while the board was away (its "
+          "diag.log grown past the page's offset again): X-Diag-Old, "
+          "diag.1's size in the f=0 answer, differs, both are read anew "
+          "(the old aggregate was kept, the new diag.1 never read)",
+          ft.get("diagRot") == [40, 60, 0, ["/diag?f=0&o=2980",
+                                            "/diag?f=1&o=0",
+                                            "/diag?f=0&o=0"]],
+          repr(ft.get("diagRot")))
+    check("SP-END-PLACE: today's last trip closing (5 min without a point) "
+          "redraws the day: its end place is asked (it never was)",
+          ft.get("endPlace") == [["47.100,18.400"],
+                                 ["47.100,18.400", "47.115,18.400"],
+                                 "47.100,18.400", "47.115,18.400"],
+          repr(ft.get("endPlace")))
+    check("SP-FIX-WORD: \"Fix\" / \"Fix DGPS\" (a valid position of no "
+          "said type) is a fix: amber like 2D, Waiting and no data red; "
+          "in the diag summary no \"no fix\" minute",
+          ft.get("fixWord") == [["ok", "ok", "warn", "warn", "warn", "bad",
+                                 "bad", "bad"], 0], repr(ft.get("fixWord")))
+    _sb = ft.get("sinceBoot") or [[None], [None]]
+    check("SP-SINCE-BOOT: an upload error or GPS loops long ago (counted "
+          "since boot) are shown but turn no row amber",
+          _sb[0][0] == "" and _sb[1][0] == "" and "1 err" in _sb[0][1]
+          and "2 loops" in _sb[1][1], repr(_sb))
+    check("SP-DIAG-STEP: the diag summary in minutes summed from up, for "
+          "any DIAG (10 s said 6 h no fix and 3 h silent, 300 s 12 min "
+          "and no drop-out: over 180 s each line began a new run)",
+          ft.get("diagStep") == [["1 h 00 min", "30 min 1 drop-out"]] * 2
+          + [["56 min", "30 min 1 drop-out"]], repr(ft.get("diagStep")))
+    check("SP-HIST-END: a past local day ending inside its second UTC day "
+          "reads that day only up to the reply past the local day's end "
+          "(it read the whole UTC day)",
+          ft.get("histEnd") == [["/hist?d=20261107&o=0&t=230000",
+                                 "/hist?d=20261107&o=0",
+                                 "/hist?d=20261108&o=0",
+                                 "/hist?d=20261108&o=500"], False, True, 3],
+          repr(ft.get("histEnd")))
+    check("SP-EVD-DEAD: every per-kind detail is for a kind the page has "
+          "(EVD.pvt had none)", ft.get("evdKinds") == [],
+          repr(ft.get("evdKinds")))
     check("WEBR-2: a 500 from the board shows its error, not NO ANSWER",
           ft.get("wr2") == ["off", "BOARD ERROR &middot; "
                                    "TypeError(&#39;row bug&#39;)"],
@@ -16876,7 +16935,7 @@ gl._web_sock, gl.WEB = _Lsn(), True
 gl._web_read = lambda c: b"GET / HTTP/1.0\r\n\r\n"
 gl._web_reply = lambda c, r: (_ for _ in ()).throw(TypeError("bug"))
 gl.wifi_reset()
-gl.wifi["state"] = "connected"
+gl.wifi.update(state="connected", home=True)
 gl._web_errs[0] = 0
 try:
     gl.web_tick()
@@ -16932,7 +16991,7 @@ check("WEBR-2: a bug building status.json is a 500 with the error, not a "
 _wsaved = (gl._web_sock, gl._web_read, gl._web_reply, gl.WEB)
 gl._web_sock, gl.WEB = _Lsn(), True
 gl._web_read = lambda c: b"GET / HTTP/1.0\r\n\r\n"
-gl.wifi["state"] = "connected"
+gl.wifi.update(state="connected", home=True)
 try:
     for e_ in (KeyError("k"), KeyError("k"), ValueError("v")):
         gl._web_reply = lambda c, r, e_=e_: (_ for _ in ()).throw(e_)
@@ -17180,7 +17239,8 @@ def _wj_diag():
 
 gl._web_diag = _wj_diag
 try:
-    wj_text = "".join(gl._web_json_parts(gl._web_rows(), gl._sv_list()))
+    wj_text = "".join(gl._web_json_parts(gl._web_rows(), gl._sv_list(),
+                                         True))
     try:
         wj = json.loads(wj_text)
         wj_ok = (wj["diag"] == ["first line"] and "satellites" in wj)
@@ -17192,6 +17252,75 @@ check("WEB-JSON-TAIL: an error while streaming the diag lines still ends "
       "a valid JSON", wj_ok is True, repr((wj_ok, wj_text[-120:])))
 (gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl._web_rows, gl.WEB_PAGE) = _wr_saved
 shutil.rmtree(_wr_dir, ignore_errors=True)
+
+# WEB-MEMERR: no RAM while building status.json (the rows, the diag tail,
+# the satellites) is no bug: it was booked as one ("Caught bug" on the page
+# for a day, web_errs up); it goes to web_tick, which drops the client
+_me_saved = (gl._web_rows, gl._web_diag, gl._sv_list, gl._web_errs[0],
+             list(gl._bugs))
+_me_calls = []
+
+
+def _me_raise(*a):
+    raise MemoryError("memory allocation failed")
+
+
+def _me_diag():
+    _me_calls.append(1)
+    return ["a line"]
+
+
+class _MeSv(object):
+    def __iter__(self):
+        raise MemoryError("memory allocation failed")
+
+
+def _me_try(f):
+    try:
+        f()
+        return "no raise"
+    except MemoryError:
+        return "MemoryError"
+    except Exception as e:
+        return repr(e)[:60]
+
+
+_me_res = []
+try:
+    gl._web_rows = _me_raise
+    _me_res.append(_me_try(lambda: gl._web_status(_DConn())))
+    gl._web_rows = _me_saved[0]
+    gl._web_diag = _me_raise
+    _me_res.append(_me_try(lambda: "".join(gl._web_json_parts([], [], True))))
+    gl._web_diag = _me_diag
+    _me_res.append(_me_try(lambda: "".join(gl._web_json_parts([], _MeSv()))))
+    "".join(gl._web_json_parts([], []))  # (no diag asked: none read)
+    _me_res.append((gl._web_errs[0] - _me_saved[3],
+                    [b for b in gl._bugs if b not in _me_saved[4]],
+                    len(_me_calls)))
+finally:
+    gl._web_rows, gl._web_diag, gl._sv_list = _me_saved[:3]
+check("WEB-MEMERR: a MemoryError building status.json (its rows, the diag "
+      "tail, the satellites) goes up to web_tick, not booked as a web bug; "
+      "without ?diag the diag log is not read",
+      _me_res == ["MemoryError", "MemoryError", "MemoryError", (0, [], 0)],
+      repr(_me_res))
+
+# SV-STALE: the satellite list two SV_POLL old is none for the page (as
+# sv_used): a silent receiver's last list showed in the Sky box as live
+_sv_saved = (gl.st["svs"], gl.st["svs_at"])
+try:
+    gl.st["svs"] = [(16, 26, 0, 90, True, False, 0, 26, 21)]
+    _sv_now = gl.time.ticks_ms()
+    gl.st["svs_at"] = gl.time.ticks_add(_sv_now, -(2 * gl._rcv.SV_POLL - 5000))
+    _sv_res = [len(gl._sv_list())]
+    gl.st["svs_at"] = gl.time.ticks_add(_sv_now, -2 * gl._rcv.SV_POLL)
+    _sv_res += [gl._sv_list(), json.loads(_web_json())["satellites"]]
+finally:
+    gl.st["svs"], gl.st["svs_at"] = _sv_saved
+check("SV-STALE: a satellite list under 2 SV_POLL old is listed, one older "
+      "is none (the page's empty state, not a stale sky shown as live)",
+      _sv_res == [1, [], []], repr(_sv_res))
 
 # CLOCK-STAMP: a Stamp is whole seconds of uptime that do not wrap: 13 days of
 # 30 s steps on a 2**30 ms clock (12.4 days), a Stamp of day 0 is 13 days old
@@ -21006,8 +21135,9 @@ def _gm_set(name, n):
     gl._guard_mem[name] = [n, gl.time.ticks_ms()]
 
 
-def _rb_web(home=False, away=False):
-    """The server closed, WEB on, connected; home and WEB_AWAY as asked."""
+def _rb_web(home=True, away=False):
+    """The server closed, WEB on, connected; home and WEB_AWAY as asked
+    (home by default: off home without WEB_AWAY nothing is served)."""
     gl._web_close()
     gl.socket = _RbSockMod
     gl.WEB, gl.WEB_AWAY = True, away
@@ -21022,23 +21152,35 @@ def _rb_web(home=False, away=False):
 
 _rb_socket = gl.socket
 
-# RB-WEB-NET: web_tick serves on whatever network the radio is on. WEB_AWAY
-# only keeps the radio on for it off home (README, status page; commit
-# 7276921): the page "up only briefly" off home is this, so it stays
+# RB-WEB-NET: the page has no password: off home it is served only with
+# WEB_AWAY=1 (which also keeps the radio on for it there). Before, a
+# hotspot or a friend's network got the live position, the 7-day track and
+# the diag log's SSIDs whenever the radio was up for the uploads
 _rb_rows = []
 for _h, _a in ((True, False), (False, False), (False, True)):
     _rb_web(_h, _a)
     gl.web_tick()
+    _made = len(_RbListen.made)
     _c = _RbConn(b"GET /nope HTTP/1.1\r\nHost: 192.168.1.60\r\n\r\n")
-    _RbListen.made[-1].waiting.append(_c)
+    if _made:
+        _RbListen.made[-1].waiting.append(_c)
     gl.web_tick()
     _s1 = bytes(_c.sent[:12])
     gl.wifi["state"] = "sleep"           # (asleep, on any network: closed)
     gl.web_tick()
-    _rb_rows.append((_s1, _RbListen.made[-1].closed, gl._web_sock is None))
-check("RB-WEB-NET: connected, home or not, WEB_AWAY or not, the page answers; "
-      "with the radio asleep the socket is closed",
-      _rb_rows == [(b"HTTP/1.0 404", True, True)] * 3, repr(_rb_rows))
+    _rb_rows.append((_made, _s1, gl._web_sock is None))
+_rb_web(True, False)                     # open at home, then on another
+gl.web_tick()                            # network (a roam): closed there
+gl.wifi["home"] = False
+gl.web_tick()
+_rb_rows.append((len(_RbListen.made), _RbListen.made[-1].closed,
+                 gl._web_sock is None))
+check("RB-WEB-NET: at home the page answers, off home only with WEB_AWAY "
+      "(without it no socket, or the open one closed); with the radio "
+      "asleep the socket is closed",
+      _rb_rows == [(1, b"HTTP/1.0 404", True), (0, b"", True),
+                   (1, b"HTTP/1.0 404", True), (1, True, True)],
+      repr(_rb_rows))
 
 # RB-OOM: one MemoryError in the page's accept()/socket setup or a status
 # line went through run()'s crash branch: a reset, a boot-fail and, an OTA

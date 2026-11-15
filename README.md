@@ -176,7 +176,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
-| `WEB_AWAY` | `1`/`0`: with `WEB` on, the radio stays on for the page on the non-home networks too (e.g. a phone hotspot), instead of sleeping once all is uploaded. Default 0. |
+| `WEB_AWAY` | `1`/`0`: with `WEB` on, the page is served on the non-home networks too (e.g. a phone hotspot), to everyone there, without a password, and the radio stays on for it instead of sleeping once all is uploaded. `0`: off home nothing is served, also while the radio is on for an upload. Default 0. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
@@ -612,8 +612,8 @@ h). They take up to 320 KB of the ~12 MB file system; below the 32 KB flash
 reserve nothing is written. Nothing reads a whole file into RAM: the
 rotation only looks at the size, the boot reads the last few lines, and the
 status page reads both files in 16 KB pieces (`/diag?f=1|0&o=<byte>`, see
-the *Event log* below; `/status.json` still carries the last 15 lines,
-`WEB_DIAG`). After a walk, plug the board in and read it:
+the *Event log* below; `/status.json?diag` carries the last 15 lines,
+`WEB_DIAG`, plain `/status.json` no longer reads them). After a walk, plug the board in and read it:
 
 ```bash
 .venv/bin/mpremote resume fs cat :/diag.log
@@ -638,7 +638,9 @@ the *Event log* below; `/status.json` still carries the last 15 lines,
 WiFi it serves a page at `http://<board ip>/` (e.g.
 `http://192.168.1.60/`) and the same data as JSON at
 `/status.json`: fix, satellites seen/used ("used" from the satellite list:
-GGA stops at 12) and the satellite list with its age (system and number,
+GGA stops at 12) and the satellite list with its age (none once it is
+2 min old, two `SV_POLL`, so a silent receiver's last sky is not shown as
+live; system and number,
 e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`; signal in
 dBHz, elevation, azimuth, used), HDOP, GPS time,
 position (`position` to 5 decimals, `pos6` to the track line's 6; both
@@ -655,8 +657,10 @@ last accepted batch, `null` for none since boot), the day history's
 14 s`; seconds in the JSON, `prev_end` the time of its last line), boot
 cause, the build (`fw`, `fw_build`), chip temperature, free Python heap
 and flash,
-WiFi, keep-alive pulses; and the last lines of the diagnostic log (the page
-itself no longer uses them: it reads the whole log, below). The
+WiFi, keep-alive pulses; with `?diag` (`/status.json?diag`) also the last
+lines of the diagnostic log (the page itself reads the whole log, below).
+No RAM while the JSON is built is no bug: the client is dropped (it is not
+counted in `web_errs`, no `web error` line). The
 page follows the phone's light or dark setting in one colour world (green,
 amber and red only for meaning). A thin top bar names the board (`device`),
 says `LIVE` (or `OFFLINE · 12 MIN AGO`, `NO ANSWER`, `BOARD ERROR`) and
@@ -669,7 +673,7 @@ day sit beside the map (on a phone the map comes first):
   and 20 s) with district and city; how long it has been here, the speed,
   the accuracy (HDOP x 2.5 m) and the age of the last fix; the coordinates
   (N/S, E/W) under them;
-- *Day*: a chip a day (today first, then the days the board keeps) and
+- *Day*: a chip a day (the days the board keeps, oldest first, today last) and
   `‹ ›` arrows; on top the km, the moving time and the trips; below, the
   day as a line (as in Maps Timeline): a dot and a solid stretch per trip
   (start time, km, duration, mean km/h) and a dashed stretch per stop (its
@@ -696,8 +700,8 @@ Below, three columns split by hairlines (one under the other on a phone):
   days`, at 7 bytes a `.trb` point), then a row a subsystem with its detail,
   a green, amber or red dot and the word (`Warn`, `Error`) only when it is
   not nominal; the heading counts them (`7/7 OK`). `GPS receiver` (model,
-  fix, satellites used/seen, HDOP; amber without a 3D fix, a failed setup or
-  reset loops), `GPS link` (B/s, the last whole frame, restarts, bytes read,
+  fix, satellites used/seen, HDOP; amber without a 3D fix or after a failed
+  setup; the reset loops since boot are counted in it, not coloured), `GPS link` (B/s, the last whole frame, restarts, bytes read,
   the share of broken NMEA sentences), `Upload` (state, points waiting,
   sent, errors, `.bad` files, the last accepted upload), `Storage` (free MB,
   points logged, track files), `Memory` (the largest IDF block, red under
@@ -742,7 +746,12 @@ Below, three columns split by hairlines (one under the other on a phone):
   file's size; ~16 KB a reply, `HIST_REPLY`), parsing as it goes (only the
   totals are kept, not the lines); after that once a minute `f=0` from
   where it got to. When `/diag.log` is smaller than that, it became
-  `/diag.1`: the page reads both again.
+  `/diag.1`: the page reads both again; so it does when the `f=0` answer's
+  `X-Diag-Old` (the size of `/diag.1`, 0 without one) is not the size it
+  read (a rotation missed while the board was away, its `/diag.log` grown
+  past the page's offset again). The minutes are summed from the status
+  lines' `up` (the time since the line before, so any `DIAG`; after a boot
+  the `up` itself, after a gap one step).
 
 Under the columns the device in one strip: how long it has run and since
 when (local time), the boot cause, the run before it and until when, chip
@@ -834,7 +843,9 @@ answers no lines, only `X-Hist-Next` at the last keyframe before that time,
 found by the keyframes' text without decoding the deltas (`HIST_SEEK_MS`;
 `X-Hist-Seek: 1` when it ran out of time: ask again from there), so a past
 day no longer reads the whole UTC day before it (~16 replies of ~2.4 s for
-its last hour). A day without a file is a `204` (the page asks for today's
+its last hour). A past local day that ends inside a UTC day stops reading
+that day at the first reply whose last point is past the local day's end
+(points in time order), not at the UTC day's own end. A day without a file is a `204` (the page asks for today's
 every minute before its first point). `status.json`'s `day_span` gives each
 `.trb` day's first and last point (seconds into the UTC day; one day read a
 request, kept with its file size), so the day picker offers a UTC day's next
@@ -865,13 +876,13 @@ phone cannot hold the logger's loop (it was up to ~50 s). The free flash is
 measured at most every 30 s and the waiting files are
 counted at most every 10 s. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
-`WEB=0` in `.env` turns both off. On the other networks the page is up
-only while the radio is on anyway (something still to upload, then up to
-`WIFI_IDLE`, 10 s, before it sleeps); with `WEB_AWAY=1` the radio stays
-connected for it there too. `WEB_AWAY` decides how long the radio stays
-on, not who is served: whenever the board is connected, on any network in
-`.env`, the page answers everyone on that network, with no password.
-Those networks use DHCP: find
+`WEB=0` in `.env` turns both off. On the other networks the page is
+served only with `WEB_AWAY=1`, which also keeps the radio connected for it
+there; without it the board serves nothing off home, also while the radio
+is on for an upload (the page has no password: a hotspot or a friend's
+network got the live position, the 7-day track and the diag log with its
+SSIDs). With `WEB_AWAY=1` it answers everyone on those networks, with no
+password. Those networks use DHCP: find
 the board's address in the hotspot or router client list (by its DHCP
 hostname, `HOSTNAME`) or in the `web http://…/`
 console line.
@@ -1486,7 +1497,7 @@ Constants at the top of `gps_logger.py`; most never need changing.
 | `WEB_PAGE_GZ` / `WEB_GZ_WBITS` / `WEB_PAGE` / `WEB_REFRESH` | `/web.html.gz` / 12 / `/web.html` / 15 s | The page on the board, kept only gzipped (as is to clients accepting gzip, inflated for the others); its window (2^12 = 4 KB of heap to inflate; `deploy.sh` and `--publish` use it); an older board's plain page, served while it is there; how often the page polls `/status.json` |
 | `KEY_EVERY` | 64 | Delta records between two keyframes of a `.trb` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply (and bytes at most per `/diag` reply) |
-| `WEB_AWAY` | off | Radio kept on for the page on non-home networks too (`.env` `WEB_AWAY`) |
+| `WEB_AWAY` | off | The page served, and the radio kept on for it, on non-home networks too (`.env` `WEB_AWAY`) |
 | `SV_POLL` | 60 s | A satellite list younger than two of these gives the used count (else GGA) |
 | `GSA_EVERY` / `GSA_MAX` | 5 s / 8 | GSA round interval; more GSA a second means the rate was not taken |
 | `SEEN_WAIT` | 60 s | Least time between home-seen wakes |
