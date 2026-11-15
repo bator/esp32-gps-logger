@@ -202,7 +202,7 @@ for f in $FILES; do
     EXPECT+="$f $(( $(wc -c < "$BUILD/$f") )) $(sha256sum "$BUILD/$f" | cut -d' ' -f1)"$'\n'
 done
 # (from the build directory: the board's names are the files' own)
-GOT=$(cd "$BUILD" && "$MPREMOTE" connect "$PORT" "${CP[@]}" exec "
+GOT=$(cd "$BUILD" || exit 1; "$MPREMOTE" connect "$PORT" "${CP[@]}" exec "
 import os, hashlib, binascii
 b = bytearray(512)
 for n in '$FILES'.split():
