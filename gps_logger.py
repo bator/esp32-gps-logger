@@ -88,13 +88,18 @@ VBAT_DIV = 4.9                           # (390k + 100k) / 100k
 VBAT_N = 32                              # reads a measurement
 VBAT_SWING = 0.5                         # V of 10th-90th percentile spread
                                          # above which there is no battery
+VBAT_AGAIN = 2                           # measurements in a row that turn the
+                                         # verdict (battery / none): one stray
+                                         # one is let go, its values not used
 VBAT_EVERY = 60                          # s between samples of the time left
 VBAT_HIST = 31                           # samples kept: 30 min
 VBAT_SPAN = 600                          # s of samples before a time left
 VBAT_DROP = 2                            # %-points the fit must fall over them
-VBAT_OCV = (4.19, 4.05, 3.99, 3.89, 3.80, 3.72, 3.63, 3.53, 3.42, 3.30, 3.10)
-# V of a 1S LiPo at 100, 90 ... 0 % (Meshtastic's default OCV_ARRAY,
-# src/Power.h), linear between; on USB the charger lifts it (up to 4.2 V)
+VBAT_OCV = (4.19, 4.06, 4.00, 3.92, 3.84, 3.76, 3.68, 3.60, 3.51, 3.41, 3.30)
+# V of a 1S LiPo at 100, 90 ... 0 %, linear between: Meshtastic's default
+# OCV_ARRAY (src/Power.h: 4.19 ... 3.30 V at 10 %, 3.10 V at 0 %) from its
+# 3.30 V on, where the board stops (Heltec's datasheet: 3.3 V at least) as 0 %;
+# on USB the charger lifts it (up to 4.2 V)
 Pin(HELTEC_VBAT_CTL, Pin.OUT, value=1)
 
 # The receiver (gps_receiver.py): its UART, the NMEA, the seconds it publishes
@@ -6785,6 +6790,7 @@ def _web_rows():
         ("vbat_swing", vw),
         ("vbat_pct", _vbat_now()),
         ("vbat_left_s", vl),             # (about, from the last 30 min)
+        ("vbat_err", _vb_err[0]),        # (ADC reads that failed)
         ("battery", _battery(vb, vw, vl)),
         ("mhz", machine.freq() // 1000000),
         ("mem", heap[0]),
@@ -6806,28 +6812,44 @@ def _web_rows():
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
     ]                                    # while the loop was blocked
 
-_vb = [None, None, None, None]           # (V, spread V, Stamp, ADC)
+_vb = [None, None, None, None, None, 0]  # (V, spread V, Stamp, ADC, battery or
+                                         # not, contrary measurements in a row)
+_vb_err = [0]                            # ADC errors since boot (status.json)
+_vb_left = [None]                        # _vbat_fit of the last sample
 
 def _vbat():
     """The battery: (median V, 10th-90th percentile spread V) of VBAT_N
     reads, at most every 30 s (the page asks every WEB_REFRESH, the diag
-    line every DIAG). (None, None) where there is no ADC."""
+    line every DIAG, the display every TFT_STATE). (None, None) without an
+    ADC (a host's tests) or after a failed read: counted (vbat_err), a diag
+    line a kind, the ADC made again next time. A measurement that turns the
+    verdict (battery: spread up to VBAT_SWING, or none) counts only as the
+    VBAT_AGAIN-th in a row: one stray one keeps the values before."""
     if _recent_s(_vb[2], 30):
         return _vb[0], _vb[1]
-    v = w = None
+    _vb[2] = _stamp()
+    adc = getattr(machine, "ADC", None)
+    if adc is None:
+        _vb[0] = _vb[1] = None
+        return None, None
     try:
         if _vb[3] is None:
-            _vb[3] = machine.ADC(Pin(HELTEC_VBAT), atten=machine.ADC.ATTN_2_5DB)
+            _vb[3] = adc(Pin(HELTEC_VBAT), atten=adc.ATTN_2_5DB)
         r = sorted(_vb[3].read_uv() for _ in range(VBAT_N))
-        k = VBAT_N // 10
-        v = round(r[VBAT_N // 2] * VBAT_DIV / 1e6, 2)
-        w = round((r[-1 - k] - r[k]) * VBAT_DIV / 1e6, 2)
-    except MemoryError:
-        raise
-    except Exception:
-        pass
-    _vb[0], _vb[1], _vb[2] = v, w, _stamp()
-    return v, w
+    except (OSError, ValueError) as e:
+        _vb_err[0] += 1
+        _vb[0] = _vb[1] = _vb[3] = None
+        _bug_once("bug vbat %s" % repr(e)[:60], ("vbat", type(e)))
+        return None, None
+    k = VBAT_N // 10
+    v = round(r[VBAT_N // 2] * VBAT_DIV / 1e6, 2)
+    w = round((r[-1 - k] - r[k]) * VBAT_DIV / 1e6, 2)
+    ok = w <= VBAT_SWING
+    if _vb[4] is None or ok == _vb[4] or _vb[5] + 1 >= VBAT_AGAIN or _vb[0] is None:
+        _vb[0], _vb[1], _vb[4], _vb[5] = v, w, ok, 0
+    else:
+        _vb[5] += 1
+    return _vb[0], _vb[1]
 
 def _vbat_pct(v):
     """What is left of the battery at v V, 0-100 % (VBAT_OCV)."""
@@ -6842,30 +6864,39 @@ def _vbat_pct(v):
 _vb_hist = []                            # [(uptime s, %)] on the battery
 
 def vbat_tick(now):
-    """Every VBAT_EVERY s a sample of what is left for _vbat_left. No
-    battery, or one put on the charger (up VBAT_DROP + 1 points since the
-    last sample), starts the history again."""
-    if (_vb_hist and uptime_s(now) - _vb_hist[-1][0] < VBAT_EVERY):
+    """Every VBAT_EVERY s a sample of what is left, and _vbat_fit once (the
+    display asks every TFT_STATE). No battery starts the history again, so
+    does a jump of more than VBAT_DROP points in a sample: put on the
+    charger (it lifts the voltage) or taken off it (the lift gone at once:
+    the samples on the charger made a steep line, half the time left for
+    25 min)."""
+    if _vb_hist and uptime_s(now) - _vb_hist[-1][0] < VBAT_EVERY:
         return
-    v, w = _vbat()
-    if v is None or w > VBAT_SWING:
+    p = _vbat_now()
+    if p is None:
         del _vb_hist[:]
+        _vb_left[0] = None
         return
-    p = _vbat_pct(v)
-    if _vb_hist and p > _vb_hist[-1][1] + VBAT_DROP:
+    if _vb_hist and abs(p - _vb_hist[-1][1]) > VBAT_DROP:
         del _vb_hist[:]
     _vb_hist.append((uptime_s(now), p))
     if len(_vb_hist) > VBAT_HIST:
         del _vb_hist[0]
+    _vb_left[0] = _vbat_fit()
 
 def _vbat_left():
-    """About how long the battery lasts, s: the least-squares slope of the
-    samples (VBAT_HIST, the last 30 min) carried down to 0 %. None until
-    they span VBAT_SPAN and the fit falls VBAT_DROP points over them (on
-    the charger, or too short to tell)."""
+    """About how long the battery lasts, s (_vbat_fit at the last sample),
+    or None."""
+    return _vb_left[0]
+
+def _vbat_fit():
+    """The least-squares slope of the samples (VBAT_HIST, the last 30 min)
+    carried down to 0 %, s, a minute at least. None until they span
+    VBAT_SPAN and the fit falls VBAT_DROP points over them (on the charger,
+    or too short to tell), and at 99 % and up (the charger's lift)."""
     h = _vb_hist
     n = len(h)
-    if n < 2 or h[-1][0] - h[0][0] < VBAT_SPAN:
+    if n < 2 or h[-1][0] - h[0][0] < VBAT_SPAN or h[-1][1] >= 99:
         return None
     mt = sum(t for t, _ in h) / n
     mp = sum(p for _, p in h) / n
@@ -6873,7 +6904,7 @@ def _vbat_left():
     k = sum((t - mt) * (p - mp) for t, p in h) / sxx   # %/s
     if -k * (h[-1][0] - h[0][0]) < VBAT_DROP:
         return None
-    return int(max(0, mp + k * (h[-1][0] - mt)) / -k)
+    return max(60, int(max(0, mp + k * (h[-1][0] - mt)) / -k))
 
 def _left_text(secs):
     """'~45 min', '~2 h 10 min' (to 10 min from an hour), no-break spaces
@@ -6887,7 +6918,7 @@ def _left_text(secs):
 def _vbat_now():
     """What is left of the battery, %, or None without one (or an ADC)."""
     v, w = _vbat()
-    return None if w is None or w > VBAT_SWING else _vbat_pct(v)
+    return None if v is None or w is None or w > VBAT_SWING else _vbat_pct(v)
 
 def _tft_bat():
     """The display's battery: (per cent, about how long it lasts: "2 óra"
@@ -8497,7 +8528,7 @@ GUARD_PEND_MAX = 5                       # with an OTA image pending: this many
 _guard_mem = {"wifi": [0, None], "upload": [0, None],   # name -> [count, Stamp
               "ota": [0, None], "web": [0, None],       # of the last one]:
               "ntp": [0, None], "status": [0, None],    # made here, not under
-              "diag": [0, None]}                        # a MemoryError
+              "diag": [0, None], "vbat": [0, None]}     # a MemoryError
 
 def _guarded(name, fn, arg=None):
     """A side tick of the loop (WiFi, upload, OTA): a bug in it is logged

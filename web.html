@@ -765,7 +765,7 @@ function view(d, prev) {
       pct.toFixed(2) + " % broken", gl.tone || (pct > 1 ? "warn" : "")]);
   if (d.battery)                        // (none: no ADC, or a firmware before it)
     subs.push(["Battery", d.vbat_pct == null ? "none" + MD + "on USB" : batIcon(d.vbat_pct) + d.vbat_pct + " %" +
-      (d.vbat_left_s ? MD + "~" + hms(d.vbat_left_s).replace(/ \d+ s$/, "") + " left" : "") + MD + esc(d.vbat) + " V",
+      (d.vbat_left_s ? MD + "~" + hms(d.vbat_left_s).replace(/ \d+ s$/, "") + " left" : "") + MD + (+d.vbat).toFixed(2) + " V",
       d.vbat_pct == null ? "" : d.vbat_pct <= 10 ? "bad" : d.vbat_pct <= 20 ? "warn" : ""]);
   if (d.fw !== undefined)
     subs.push(["Firmware", (d.fw_build > 0 ? when(d.fw_build * 1000, true) : esc(d.fw)) + MD +

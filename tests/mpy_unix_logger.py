@@ -720,6 +720,35 @@ if sys.implementation.name == "micropython":
           "outside the band allocates nothing",
           len(now_panel) > 50000 and now_panel == all_panel and out_band == 0)
 
+
+
+# the battery's numbers the way the board computes them (single precision on
+# MICROPYTHON_F32): the median of the reads, the per cent, the fit
+class _Adc:
+    ATTN_2_5DB = 1
+
+    def __init__(self, pin, atten=None):
+        pass
+
+    def read_uv(self):
+        return 806000
+
+
+machine.ADC = _Adc
+gl._vb[:] = [None, None, None, None, None, 0]
+vb = gl._vbat()
+gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]
+vb_left = gl._vbat_fit()
+gl._vb_left[0] = vb_left
+print("vbat", vb, gl._vbat_now(), vb_left, gl._tft_bat())
+check("vbat: 3.95 V is 74 %, 0.5 %/min from 65 % about 2 h 10 min, the display's text",
+      vb == (3.95, 0.0) and gl._vbat_now() == 74 and vb_left is not None
+      and 7700 <= vb_left <= 7900 and gl._tft_bat() == (74, "2 óra"))
+del machine.ADC
+gl._vb[:] = [None, None, None, None, None, 0]
+gl._vb_hist[:] = []
+gl._vb_left[0] = None
+
 if fails:
     raise SystemExit("mpy logger smoke FAILED: %s" % ", ".join(fails))
 print("mpy logger smoke passed")

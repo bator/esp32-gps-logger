@@ -8864,144 +8864,242 @@ check("FIX-DIM: after a no-fix GSA round a valid RMC keeps 3D/2D; RMC V waits",
 # VBAT: the battery through the 390k/100k divider on GPIO1 (x4.9), the
 # divider switched on by GPIO2 at import. A steady read is a battery (the
 # median, in status.json and the diag line); the charger's swing without a
-# battery (measured on USB: 3.03-4.12 V in 32 reads) is "none, on USB"; no ADC is None,
-# and the diag line stays as it was.
+# battery (measured on USB: 3.01-4.29 V in 32 reads) is "none, on USB"; no ADC
+# is None, and the diag line stays as it was. Cached for 30 s; one stray
+# measurement does not turn the verdict, the second in a row does; a failed
+# read is counted, one diag line a kind, the ADC made again; a MemoryError and
+# a bug go on.
+import inspect as _vb_insp
 
 
 class _VbAdc(object):
     ATTN_2_5DB = 1
     uv = []
     made = []
+    fail = None
 
     def __init__(self, pin, atten=None):
         _VbAdc.made.append((pin.n, atten))
         self._i = 0
 
     def read_uv(self):
+        if _VbAdc.fail is not None:
+            raise _VbAdc.fail
         v = _VbAdc.uv[self._i % len(_VbAdc.uv)]
         self._i += 1
         return v
 
 
+def _vb_reset():
+    gl._vb[:] = [None, None, None, None, None, 0]
+    gl._vb_hist[:] = []
+    gl._vb_left[0] = None
+
+
 def _vb_read(uvs):
     _VbAdc.uv = uvs
-    gl._vb[:] = [None, None, None, None]
+    _vb_reset()
     return gl._vbat()
 
 
+def _vb_again(uvs):                      # the next measurement, 31 s on
+    _VbAdc.uv = uvs
+    _clock[0] += 31000
+    return gl._vbat()
+
+
+_VB_STEADY = [806000 + (i % 3) * 1000 for i in range(32)]   # 3.95 V
+_VB_SWING = [618000 + (i * 7187) % 223000 for i in range(32)]
 _vb_m = sys.modules["machine"]
 _vb_ctl = [lv for lv in _pin_levels if lv[0] == gl.HELTEC_VBAT_CTL]
 _vb_m.ADC = _VbAdc
+_vb_dw = gl._diag_write
 try:
-    vb_steady = _vb_read([806000 + (i % 3) * 1000 for i in range(32)])
+    vb_steady = _vb_read(_VB_STEADY)
     vb_rows = dict(gl._web_rows())
     vb_said = []
-    _vb_dw = gl._diag_write
     gl._diag_write = vb_said.append
-    try:
-        gl._diag(_clock[0])
-    finally:
-        gl._diag_write = _vb_dw
-    vb_cached = (_VbAdc.uv.__setitem__(0, 1), gl._vbat())[1]
-    vb_swing = _vb_read([618000 + (i * 7187) % 223000 for i in range(32)])
+    gl._diag(_clock[0])
+    gl._diag_write = _vb_dw
+    _VbAdc.uv = [700000]                 # every read changes: 3.43 V
+    _clock[0] += 29000
+    vb_c29 = gl._vbat()
+    _clock[0] += 2000
+    vb_c31 = gl._vbat()
+    vb_swing = _vb_read(_VB_SWING)
     vb_swing_bat = gl._battery(*vb_swing)
+    _vb_read(_VB_STEADY)
+    vb_hy = [_vb_again(u) for u in (_VB_SWING, _VB_SWING, _VB_STEADY, _VB_STEADY)]
+    vb_err0, vb_made0 = gl._vb_err[0], len(_VbAdc.made)
+    vb_said_e = []
+    gl._diag_write = vb_said_e.append
+    _VbAdc.fail = OSError(116)
+    vb_e = [_vb_again(_VB_STEADY), _vb_again(_VB_STEADY)]
+    _VbAdc.fail = None
+    vb_e.append(_vb_again(_VB_STEADY))
+    gl._diag_write = _vb_dw
+    vb_errs, vb_remade = gl._vb_err[0] - vb_err0, len(_VbAdc.made) - vb_made0
+    vb_raised = []
+    for e_ in (MemoryError(), TypeError("x")):
+        _VbAdc.fail = e_
+        try:
+            _vb_again(_VB_STEADY)
+            vb_raised.append(None)
+        except Exception as x_:
+            vb_raised.append(type(x_).__name__)
+        except MemoryError:
+            vb_raised.append("MemoryError")
+    _VbAdc.fail = None
     vb_made = _VbAdc.made[0]
 finally:
     del _vb_m.ADC
+    _VbAdc.fail = None
+    gl._diag_write = _vb_dw
 vb_none = _vb_read([1])
 vb_said0 = []
-_vb_dw = gl._diag_write
 gl._diag_write = vb_said0.append
 try:
     gl._diag(_clock[0])
 finally:
     gl._diag_write = _vb_dw
+vb_sweep = [gl._vbat_pct(2.9 + i / 1000.0) for i in range(1401)]
+_vb_reset()
+check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 74 % (Meshtastic's LiPo "
+      "curve, 0 % at the board's 3.30 V); cached 30 s; the charger's swing 'none, on USB'; "
+      "one stray measurement kept out, the second turns it; a failed read counted, one "
+      "diag line, the ADC made again; MemoryError and bugs go on; no ADC None, diag line "
+      "unchanged",
+      _vb_ctl and _vb_ctl[0][1] == 1
+      and vb_made == (gl.HELTEC_VBAT, _VbAdc.ATTN_2_5DB)
+      and vb_steady == (3.95, 0.01)
+      and (vb_rows["vbat"], vb_rows["vbat_swing"], vb_rows["battery"], vb_rows["vbat_pct"])
+      == (3.95, 0.01, "74 % (3.95 V)", 74) and vb_rows["vbat_err"] == 0
+      and vb_c29 == (3.95, 0.01) and vb_c31 == (3.43, 0.0)
+      and [gl._vbat_pct(x) for x in (4.25, 4.19, 4.12, 3.80, 3.36, 3.30, 3.10, 2.9)]
+      == [100, 100, 95, 55, 5, 0, 0, 0]
+      and [gl._vbat_pct(x) for x in gl.VBAT_OCV] == list(range(100, -1, -10))
+      and all(a <= b for a, b in zip(vb_sweep, vb_sweep[1:])) and vb_sweep[0] == 0
+      and vb_sweep[-1] == 100
+      and len(vb_said) == 1 and vb_said[0].endswith(" vbat 3.95/0.01")
+      and vb_swing[1] > gl.VBAT_SWING and vb_swing_bat == "none, on USB"
+      and vb_hy[0] == (3.95, 0.01) and vb_hy[1] == vb_swing and vb_hy[2] == vb_swing
+      and vb_hy[3] == (3.95, 0.01)
+      and vb_e == [(None, None), (None, None), (3.95, 0.01)] and vb_errs == 2 and vb_remade == 2
+      and len([ln for ln in vb_said_e if ln.startswith("bug vbat OSError")]) == 1
+      and vb_raised == ["MemoryError", "TypeError"]
+      and vb_none == (None, None) and gl._battery(*vb_none) is None
+      and len(vb_said0) == 1 and " vbat " not in vb_said0[0]
+      and '_guarded("vbat", vbat_tick, now)' in _vb_insp.getsource(gl._loop)
+      and "_tft_bat()" in _vb_insp.getsource(gl._tft_state)
+      and gl._guard_mem.get("vbat") == [0, None],
+      "%r %r %r %r %r %r %r %r %r %r %r %r" % (
+          _vb_ctl[:1], vb_made, vb_steady, [vb_rows.get(k) for k in ("vbat", "vbat_swing", "battery", "vbat_pct", "vbat_err")],
+          (vb_c29, vb_c31), vb_said, vb_swing, vb_hy, (vb_e, vb_errs, vb_remade, vb_said_e), vb_raised,
+          vb_said0, gl._guard_mem.get("vbat")))
 
 # VBAT-LEFT: about how long the battery lasts, from the samples vbat_tick
-# takes once a minute (the last 30 min): the least-squares slope carried down
-# to 0 %. Nothing before 10 min of samples, on a flat or rising (charging)
-# line, or without a battery; put on the charger, the history starts again.
+# takes once a minute (the last 30 min, VBAT_HIST): the least-squares slope
+# carried down to 0 %, fitted once a sample, a minute at least. Nothing before
+# 10 min of samples, on a flat or rising (charging) line, at 99 % and up, or
+# without a battery; a jump of more than VBAT_DROP points (on or off the
+# charger) starts the history again, +2 points of noise does not.
 gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]  # 0.5 %/min
-vl_fit = gl._vbat_left()
-vl_txt = [gl._left_text(x) for x in (vl_fit, 2700, 59 * 60 + 40, 3 * 3600 + 4 * 60)]
-gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 541, 60)]
-vl_short = gl._vbat_left()
-gl._vb_hist[:] = [(t, 80) for t in range(0, 1801, 60)]
-vl_flat = gl._vbat_left()
-gl._vb_hist[:] = [(t, 60 + t / 300.0) for t in range(0, 1801, 60)]
-vl_up = gl._vbat_left()
+vl_fit = gl._vbat_fit()
+vl_txt = [gl._left_text(x) for x in (vl_fit, 2700, 59 * 60 + 40, 3 * 3600 + 4 * 60, 3570, 6900, 6840)]
+vl_cases = []
+for h_ in ([(t, 80 - t / 120.0) for t in range(0, 541, 60)],      # under 10 min
+           [(t, 80) for t in range(0, 1801, 60)],                  # flat
+           [(t, 60 + t / 300.0) for t in range(0, 1801, 60)],      # rising
+           [(t, 102 - t / 600.0) for t in range(0, 1801, 60)],     # 99 %: the charger
+           [(t, 10 - t / 180.0) for t in range(0, 1801, 60)],      # down to 0 %
+           [(0, 80), (600, 70)]):                                  # two, 10 min apart
+    gl._vb_hist[:] = h_
+    vl_cases.append(gl._vbat_fit())
 vl_bat = gl._battery(3.95, 0.01, vl_fit)
-_vl_now = gl._vbat_now
-_vl_left = gl._vbat_left
+vl_empty = gl._battery(3.30, 0.01, 60)
+_vl_now, _vl_left = gl._vbat_now, gl._vbat_left
 try:
     gl._vbat_now = lambda: 65
     vl_tft = []
-    for x_ in (7800, 3600, 3569, 2700, 20, None):
+    for x_ in (7800, 3600, 3570, 3569, 2700, 9000, 60, None):
         gl._vbat_left = lambda x_=x_: x_
         vl_tft.append(gl._tft_bat())
     gl._vbat_now = lambda: None
     vl_tft.append(gl._tft_bat())
+    gl._vbat_left = _vl_left
+    # off the charger: 20 min at 100 %, the lift gone (95 %), then 1 % in 6 min:
+    # the history starts at 95 %, the time left ~95 * 6 min once 10 min are in
+    _vb_reset()
+    seq = [100] * 20 + [95 - m // 6 for m in range(16)]
+    vl_off = []
+    for p_ in seq:
+        gl._vbat_now = lambda p_=p_: p_
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        vl_off.append(gl._vbat_left())
+    vl_off_hist = len(gl._vb_hist)
+    # noise: +2 points keeps the history, +3 starts it again
+    _vb_reset()
+    vl_noise = []
+    for p_ in (50, 52, 55):
+        gl._vbat_now = lambda p_=p_: p_
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        vl_noise.append(len(gl._vb_hist))
 finally:
     gl._vbat_now, gl._vbat_left = _vl_now, _vl_left
 _vb_m.ADC = _VbAdc
 try:
-    gl._vb_hist[:] = []
-    gl._vb[:] = [None, None, None, None]
+    _vb_reset()
     vl_seen = []
-    for k_ in range(14):                 # 3.95 V down 10 mV a minute
+    for k_ in range(45):                 # 3.95 V down 10 mV a minute
         _VbAdc.uv = [int((3.95 - 0.01 * k_) / 4.9 * 1e6)]
         _clock[0] += 60000
         gl.vbat_tick(_clock[0])
         gl.vbat_tick(_clock[0] + 20)     # (the next loop: no second sample)
         vl_seen.append(len(gl._vb_hist))
+    vl_span = gl._vb_hist[-1][0] - gl._vb_hist[0][0]
+    vl_cached = (gl._vbat_left(), gl._vbat_fit())
     vl_rows = dict(gl._web_rows())
-    _VbAdc.uv = [int(4.05 / 4.9 * 1e6)]  # on the charger: up 10 points
+    _VbAdc.uv = [int(4.05 / 4.9 * 1e6)]  # on the charger: up
     _clock[0] += 60000
     gl.vbat_tick(_clock[0])
-    vl_charge = list(gl._vb_hist)
-    _VbAdc.uv = [618000, 841000]         # no battery: the charger's swing
-    _clock[0] += 60000
-    gl.vbat_tick(_clock[0])
-    vl_none = list(gl._vb_hist)
+    vl_charge = (len(gl._vb_hist), gl._vbat_left())
+    _VbAdc.uv = [618000, 841000]         # no battery: the charger's swing, twice
+    vl_none = []
+    for _k in range(2):
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        vl_none.append(len(gl._vb_hist))
+    vl_none_left = gl._vbat_left()
 finally:
     del _vb_m.ADC
-    gl._vb_hist[:] = []
-    gl._vb[:] = [None, None, None, None]
-check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min; none under 10 min, flat "
-      "or charging; one sample a minute, the page's text with it, the display's "
-      "'2 óra' / '45 p'; on the "
-      "charger and without a battery the history starts again",
-      vl_fit == 7800 and [x.replace("\u00a0", " ") for x in vl_txt]
-      == ["~2 h 10 min", "~45 min", "~1 h 00 min", "~3 h 00 min"]
+    _vb_reset()
+check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min, rounded to 10 min from an hour; "
+      "none under 10 min, flat, charging or at 99 %; a minute at least, two samples 10 min "
+      "apart enough; the display's '2 óra' / '45 p'; one sample a minute, 31 kept, fitted "
+      "once a sample; off the charger the history starts again (not half the time left); "
+      "+2 points of noise kept, +3 and the charger and no battery start it again",
+      vl_fit == 7800 and [x.replace(" ", " ") for x in vl_txt]
+      == ["~2 h 10 min", "~45 min", "~1 h 00 min", "~3 h 00 min", "~1 h 00 min",
+          "~2 h 00 min", "~1 h 50 min"]
       and " " not in "".join(vl_txt)
-      and vl_short is None and vl_flat is None and vl_up is None
-      and vl_bat == "76 % (3.95 V), ~2\u00a0h\u00a010\u00a0min left"
-      and vl_tft == [(65, "2 óra"), (65, "1 óra"), (65, "59 p"), (65, "45 p"), (65, "1 p"),
-                     (65, None), None]
-      and vl_seen == list(range(1, 15))
-      and vl_rows["vbat_left_s"] is not None and 0 < vl_rows["vbat_left_s"] < 6 * 3600
-      and vl_rows["battery"].endswith(" left")
-      and len(vl_charge) == 1 and vl_none == [],
-      "%r %r %r %r %r %r %r %r %r %r %r" % (vl_tft, vl_fit, vl_txt, vl_short, vl_flat, vl_up, vl_bat,
-                                         vl_seen, [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
-                                         vl_charge, vl_none))
-gl._vb[:] = [None, None, None, None]
-check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 76 % (Meshtastic's LiPo curve); "
-      "the charger's swing 'none, on USB'; no ADC None, diag line unchanged",
-      _vb_ctl and _vb_ctl[0][1] == 1
-      and vb_made == (gl.HELTEC_VBAT, _VbAdc.ATTN_2_5DB)
-      and vb_steady == (3.95, 0.01) and vb_cached == vb_steady
-      and (vb_rows["vbat"], vb_rows["vbat_swing"], vb_rows["battery"],
-           vb_rows["vbat_pct"]) == (3.95, 0.01, "76 % (3.95 V)", 76)
-      and [gl._vbat_pct(x) for x in (4.25, 4.19, 4.12, 3.80, 3.36, 3.10, 2.9)]
-      == [100, 100, 95, 60, 15, 0, 0]
-      and len(vb_said) == 1 and vb_said[0].endswith(" vbat 3.95/0.01")
-      and vb_swing[1] > gl.VBAT_SWING and vb_swing_bat == "none, on USB"
-      and vb_none == (None, None) and gl._battery(*vb_none) is None
-      and len(vb_said0) == 1 and " vbat " not in vb_said0[0],
-      "%r %r %r %r %r %r %r %r" % (_vb_ctl[:1], vb_made, vb_steady, vb_cached,
-                                   [vb_rows.get(k) for k in ("vbat", "vbat_swing", "battery", "vbat_pct")],
-                                   vb_said, vb_swing, vb_said0))
+      and vl_cases == [None, None, None, None, 60, 4200]
+      and vl_bat == "74 % (3.95 V), ~2 h 10 min left"
+      and vl_empty == "0 % (3.30 V), ~1 min left"
+      and vl_tft == [(65, "2 óra"), (65, "1 óra"), (65, "1 óra"), (65, "59 p"), (65, "45 p"),
+                     (65, "3 óra"), (65, "1 p"), (65, None), None]
+      and all(x is None for x in vl_off[:30]) and vl_off_hist == 16
+      and vl_off[-1] is not None and abs(vl_off[-1] - 93 * 360) < 0.2 * 93 * 360
+      and vl_noise == [1, 2, 1]
+      and vl_seen == list(range(1, 32)) + [31] * 14 and vl_span == 1800
+      and vl_cached[0] == vl_cached[1] and vl_cached[0] is not None
+      and vl_rows["vbat_left_s"] == vl_cached[0] and vl_rows["battery"].endswith(" left")
+      and vl_charge == (1, None) and vl_none == [2, 0] and vl_none_left is None,
+      "%r %r %r %r %r %r %r %r %r %r %r %r %r" % (
+          vl_fit, vl_txt, vl_cases, vl_bat, vl_empty, vl_tft, vl_off, vl_off_hist, vl_noise,
+          vl_seen, (vl_span, vl_cached), [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
+          (vl_charge, vl_none, vl_none_left)))
 
 # NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
 # bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
@@ -14994,6 +15092,7 @@ else:
         ("web error KeyError('y')", "bug"),
         ("bug upload ValueError('x')", "bug"),
         ("bug tft OSError(5)", "bug"),
+        ("bug vbat OSError(116)", "bug"),
         ("bug nmea RMC TypeError('x')", "bug"),
         ("bug gps setup TypeError('x')", "bug"),
         ("crash up 3600 MemoryError()", "crash"),
