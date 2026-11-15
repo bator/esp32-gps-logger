@@ -15,17 +15,20 @@ permissions:
 env:
   MICROPYTHON_VERSION: "1.29.0"
 
+# every action by commit SHA (a tag can be moved), every tool by exact
+# version: a run of the same commit uses the same code
+
 jobs:
   lint:
     name: pyflakes
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
-      - run: pip install pyflakes
+      - run: pip install "pyflakes==4.1.0"
       # every Python file of the repo (the board's modules, tools and tests)
       - run: python -m pyflakes gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 
@@ -34,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # preinstalled on the ubuntu-24.04 runner image
       - run: shellcheck --version
       - run: shellcheck deploy.sh tools/build_firmware.sh
@@ -44,11 +47,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
-      - run: pip install "mpy-cross==1.29.*"
+      - run: pip install "mpy-cross==1.29.0.post2"
       # every module the firmware freezes (tools/build_firmware.sh manifest)
       # and main.py: a construct xtensawin bytecode cannot take fails here,
       # not at the next local build
@@ -63,17 +66,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       # the page checks run web.html's script in node (a missing node is a
       # FAIL in CI, see tests/test_gps_logger.py PAGE): a pinned LTS, not
-      # whatever the runner image ships
-      - uses: actions/setup-node@v5
+      # whatever the runner image ships (the minor pinned too: the
+      # WEB-MIN-AST check reaches node's own acorn)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
         with:
-          node-version: "24"
+          node-version: "24.22"
       - run: node --version
+      # TFT-FONT-REGEN regenerates gps_tft_font.py from tools/fonts: the
+      # Pillow (its FreeType) that wrote the committed file
+      - run: pip install "pillow==11.0.0"
 
       # MicroPython unix port: only built on a cache miss (~1-2 min), then
       # restored in a few seconds. Lets the suite run tests/mpy_unix_check.py.
@@ -81,10 +88,11 @@ jobs:
       # tests/mpy_unix_logger.py the way the board computes (MICROPYTHON_F32).
       - name: Cache MicroPython unix port
         id: mpy-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ runner.temp }}/micropython-bin
-          key: micropython-unix-f32-${{ env.MICROPYTHON_VERSION }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+          # (the workflow's hash: a changed build recipe below builds anew)
+          key: micropython-unix-f32-${{ env.MICROPYTHON_VERSION }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ hashFiles('.github/workflows/ci.yml') }}
 
       - name: Build MicroPython unix port
         if: steps.mpy-cache.outputs.cache-hit != 'true'
@@ -110,4 +118,6 @@ jobs:
           export MICROPYTHON="$RUNNER_TEMP/micropython-bin/micropython"
           export MICROPYTHON_F32="$RUNNER_TEMP/micropython-bin/micropython-f32"
           "$MICROPYTHON" -c "import sys; print(sys.version)"
+          # (CI=true: a check that would SKIP is a FAIL here, see the suite's
+          # skip_check() and CI_SKIP_OK)
           python3 tests/test_gps_logger.py

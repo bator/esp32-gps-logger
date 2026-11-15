@@ -91,7 +91,9 @@ firmware R6.0.0.0Build3700.
   WiFi, shows yesterday's. Before the first fix the clock comes from NTP on any WiFi
   (`NTP_SERVER`), and `--:--` without one; while the receiver is silent it runs on
   from the last fix by the board's ticks. `gps_tft.py`, its
-  anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`).
+  anti-aliased fonts `gps_tft_font.py` (`tools/make_tft_font.py`, from Space
+  Grotesk Bold in `tools/fonts/`, SIL Open Font License 1.1: `tools/fonts/OFL.txt`;
+  Pillow 11.0.0 wrote the committed file, and CI checks that it still does).
 - **Antennas:** the one in the box goes on the LoRa socket, which the logger
   does not use. The GNSS works from the board's own antenna, with the GNSS
   socket empty: 22 satellites in use, HDOP under 1, ~3 minutes to the first
@@ -205,16 +207,20 @@ DNS=192.168.1.111
 ### 3. Deploy
 
 ```bash
-./deploy.sh                      # default port /dev/ttyUSB0
-PORT=/dev/ttyACM0 ./deploy.sh    # the board's USB Serial/JTAG
+./deploy.sh                      # default port /dev/ttyACM0, the board's USB Serial/JTAG
+PORT=/dev/ttyACM1 ./deploy.sh    # another port (one that is not there: "No such port")
 VENV=../venv ./deploy.sh         # python, pip and mpremote from another venv
                                  # (default ./.venv; a relative path is
                                  # relative to where you run the script)
 ```
 
-The script asks the board what it is (anything but the Heltec is refused:
-`Unsupported board`), compiles `gps_logger.py`, `gps_clock.py` and `gps_receiver.py` to `.mpy` when the
-firmware has no frozen logger and checks the free flash (it stops with `Not
+The script first makes everything it sends, in a temporary directory and
+before it talks to the board (a local failure, such as a page
+`tools/web_min.py` refuses, then stops it with the board untouched): it
+compiles `gps_logger.py`, `gps_clock.py` and `gps_receiver.py` to `.mpy`
+(sent only when the firmware has no frozen logger). Then it asks the board
+what it is (anything but the Heltec is refused: `Unsupported board`) and
+checks the free flash (it stops with `Not
 enough free flash` when the new files would not fit next to the old ones).
 It makes `web.html.gz` with `tools/web_min.py` (~24 KB instead of the ~80 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
@@ -1530,15 +1536,28 @@ every pull request:
     file in from a `.tmp` and refusing a build not newer than the published
     one, a key file readable by everyone, and an `OTA_DEST` that is not a
     plain path.
-  The page checks run on Node 24 (`actions/setup-node`, pinned). The page's
+  The page checks run on Node 24.22 (`actions/setup-node`, pinned; the
+  stripped page's AST check reaches node's own acorn). The page's
   layout check (headless Chrome at 375 and 800 px) runs where `google-chrome`
   or `chromium` is on the `PATH`, else it is skipped; the workflow installs
-  neither. The suite removes every temporary directory it made when it ends
+  neither (the ubuntu-24.04 runner image has `google-chrome`).
+  `TFT-FONT-REGEN` runs `tools/make_tft_font.py` and compares its output
+  with the committed `gps_tft_font.py` (the workflow installs Pillow 11.0.0;
+  elsewhere it is skipped without that Pillow). A check that cannot run
+  prints `SKIP` and is counted in the summary (`N passed, N failed, N
+  skipped`, then the skipped and the failed ones); with `CI=true` (GitHub
+  Actions) a skip is a FAIL, as the workflow installs all the suite needs
+  (`CI_SKIP_OK` lists the exceptions, none now). The summary is printed also
+  when an uncaught exception ends the run early (`RUN ENDED EARLY`). The
+  suite removes every temporary directory it made when it ends
   (`KEEP_TMP=1` keeps them to look at after a failure).
 - `mpy-cross` 1.29 for `xtensawin` on every frozen module (`gps_logger.py`,
   `gps_clock.py`, `gps_receiver.py`, `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`) and `main.py`. The firmware
   itself (ESP-IDF, `boards/GPS_LOGGER_S3`) is not built in CI: a board or
   freeze-manifest breakage shows at the next local `tools/build_firmware.sh`.
+- Every action pinned by commit SHA, `pyflakes`, `mpy-cross` and Pillow by
+  exact version; the MicroPython cache key includes the workflow's hash (a
+  changed build recipe builds anew).
 - `pyflakes` on every Python file: `gps_logger.py`, `gps_clock.py`, `gps_receiver.py`,
   `gps_boot.py`, `gps_tft.py`, `gps_tft_font.py`, `main.py`, `tools/` and `tests/`.
 - `shellcheck deploy.sh tools/build_firmware.sh`.
@@ -1546,7 +1565,7 @@ every pull request:
 The same locally:
 
 ```bash
-.venv/bin/pip install pyflakes "mpy-cross==1.29.*"
+.venv/bin/pip install "pyflakes==4.1.0" "mpy-cross==1.29.0.post2" "pillow==11.0.0"
 .venv/bin/python -m pyflakes gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py main.py tools tests
 shellcheck deploy.sh tools/build_firmware.sh
 for m in gps_logger gps_clock gps_receiver gps_boot gps_tft gps_tft_font main; do .venv/bin/python -m mpy_cross -O3 -march=xtensawin -o /tmp/$m.mpy $m.py; done

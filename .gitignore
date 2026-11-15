@@ -235,3 +235,11 @@ env.backup
 env.bak
 *.env*
 hist/
+# the README's backup copies the board's /.env to a file named env (in
+# ~/.config/gps-logger, but not if B is the repo), and the OTA signing key
+# (ota.key, made with openssl rand) must never be committed either
+/env
+*.key
+ota.key*
+# Claude Code's local worktrees and settings
+.claude/
