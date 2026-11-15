@@ -17267,20 +17267,18 @@ try:
           and bs[5][0] == [] and "crash boot fail" in str(bs[5][1])
           and bs[5][2] == [1800000] and bs[6] is True,
           repr(bs)[:600])
-    import gps_boot as _gb2
+    def _const(name, k, pat=r"(\S+)"):
+        m_ = re.search(r"^%s = %s" % (k, pat),
+                       _slurp(os.path.join(ROOT, name)), re.M)
+        return m_ and m_.group(1)
+    bss = [(k, _const("main.py", k), _const("gps_boot.py", k))
+           for k in ("SKIP_PIN", "BOOT_FAIL_MAX", "BOOT_FAIL_FILE",
+                     "BOOT_RETRY_MS")]
+    bss.append(("DIAG_FILE", _const("gps_logger.py", "DIAG_FILE", r'"([^"]+)"'),
+                _const("gps_boot.py", "DIAG_FILE", r'"([^"]+)"')))
     check("BOOT-START-SAME: gps_boot's boot constants are main.py's, its "
           "DIAG_FILE gps_logger's",
-          all(re.search(r"^%s = (\S+)" % k, _slurp(os.path.join(ROOT, "main.py")),
-                        re.M).group(1) ==
-              re.search(r"^%s = (\S+)" % k, _slurp(os.path.join(ROOT, "gps_boot.py")),
-                        re.M).group(1)
-              for k in ("SKIP_PIN", "BOOT_FAIL_MAX", "BOOT_FAIL_FILE",
-                        "BOOT_RETRY_MS"))
-          and re.search(r'^DIAG_FILE = "([^"]+)"',
-                        _slurp(os.path.join(ROOT, "gps_logger.py")), re.M).group(1)
-          == re.search(r'^DIAG_FILE = "([^"]+)"',
-                       _slurp(os.path.join(ROOT, "gps_boot.py")), re.M).group(1),
-          repr(_gb2.DIAG_FILE))
+          all(a_ is not None and a_ == b_ for _k, a_, b_ in bss), repr(bss))
     # OTA-DOC: the boot-bypass pin is GPIO7, not GPIO25
     with open(os.path.join(ROOT, "tests", "device_bench.py")) as f:
         bench = f.read()
