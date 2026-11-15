@@ -1037,8 +1037,11 @@ tell a stay from a drive, so the stay filter works on positions.
 - **No drift on flash.** While a stay may still be proven, its windows'
   lines are held in RAM, and they are dropped when it begins, after a boot or
   a new fix too. The way in is kept up to where it first comes within 50 m of
-  the anchor. Closing a file for upload never writes the held lines; they
-  move on to the next file.
+  the anchor, and an excursion out past 150 m that came back (a U-turn past
+  the place, back to park) is never dropped; a multipath spike out there is.
+  A way out already begun is kept too, a car's included (a stop of ~90 s:
+  the first 150-290 m of the drive off went as drift). Closing a file for
+  upload never writes the held lines; they move on to the next file.
 - **Anchor.** The mean of the two windows, refined by fixes within 50 m. If
   the device settles 50–150 m away (out of the car, into the building), three
   consecutive matching window pairs there (about four minutes) move the
@@ -1106,7 +1109,9 @@ tell a stay from a drive, so the stay filter works on positions.
   in RAM only. A window that spread out on its own (its centroid over 75 m
   from both its first and its last fix: an out-and-back turn at driving or
   cycling speed) proves no stay, so a U-turn no longer drops part of the
-  trip. A walk turning back within ~80 m still can: indoor drift looks the
+  trip; nor one whose last two fixes are over 150 m from its centroid (a
+  car stopped for about a minute and a half and off again). A walk turning
+  back within ~80 m still can: indoor drift looks the
   same. A fix back after 5 minutes more than 150 m away writes
   what was held to the old track before it closes.
 - **Leaving home** is accepted only once the home network is out of range:

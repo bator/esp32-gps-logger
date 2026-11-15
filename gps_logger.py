@@ -2970,6 +2970,7 @@ def _still_window(now, pos, fx=None):
     cannot add up 60 latitudes to the metre."""
     sl = log["still"]
     _still_gap(now, pos)
+    q = sl["pos"]                        # (the usable fix before this one)
     sl["last_at"], sl["pos"] = _stamp(), pos
     if sl["win_at"] is None:
         sl.update(win_at=_stamp(), win_tc=_tc(fx), ref=pos, sum=[0.0, 0.0, 0],
@@ -2989,7 +2990,10 @@ def _still_window(now, pos, fx=None):
     c = None
     if sm[2] >= STILL_MIN_FIXES:
         c = (r[0] + sm[0] / sm[2], _dlon(r[1] + sm[1] / sm[2]))
-        if _spread(r, c, pos, STILL_EXIT // 2) or _walking(r, sm, qs):
+        if (_spread(r, c, pos, STILL_EXIT // 2) or _walking(r, sm, qs)
+                or (q is not None
+                    and _dist(c[0], c[1], pos[0], pos[1]) > STILL_EXIT
+                    and _dist(c[0], c[1], q[0], q[1]) > STILL_EXIT)):
             # its ends STILL_EXIT apart through the centroid: a drive (a
             # bike from ~10 km/h) pairs with nothing. Out and back with the
             # turn near a window boundary, the way out and the way back had
@@ -2998,6 +3002,10 @@ def _still_window(now, pos, fx=None):
             # spreads less: its quarters advance steadily (_walking), and
             # one such window of a pair is enough to tell. A walk on, a
             # walk in before a stop: the pair waits for two calm windows.
+            # Nor a window that ends with the board gone, its last two
+            # fixes out past STILL_EXIT: a car stopped for ~90 s and
+            # off again (its centroid at the stop), the stay it proved
+            # dropped the first 150-290 m of the drive as drift.
             c = None
             sl["hold_tc"] = None
     else:
@@ -3185,15 +3193,18 @@ def _still_enter(now, anchor, since_tc, n, c=None, fx=None):
     on, all still in RAM: see _still_hold) is dropped, and the track is
     closed, so the arrival uploads during the stay. Away from home the
     anchor opens a new file, now and then every STILL_HEARTBEAT.
-    Kept: the way in up to where it first comes within STILL_NEAR of c,
+    Kept: an excursion out past STILL_EXIT and back; the way in up to
+    where it first comes within STILL_NEAR of c after that,
     the later window's centroid (the anchor, the mean of both, lies back
     along a way in that the earlier window still held), and on while it
     kept coming closer steadily (each line at most STILL_TOL farther and
     2 * STILL_TOL closer than the one before; drift jumps), when that took
     it STILL_RUN closer over STILL_RUN // 2 lines at least. At walking
     pace the last 50 m were dropped as drift (~36 s). Likewise the newest
-    lines when they recede from c that way: the walk on already began in
-    the later window (a stop of ~90 s), its start no drift either. Then
+    lines when they recede from c that way (each line at most STILL_TOL
+    closer, its step at most 2 * STILL_TOL longer or shorter than the next
+    one's: a car accelerates): the walk or drive on already began in the
+    later window (a stop of ~90 s), its start no drift either. Then
     no anchor point is written now: it would come after them, back at the
     stop."""
     log["still"] = sl = _still_state()
@@ -3208,6 +3219,19 @@ def _still_enter(now, anchor, since_tc, n, c=None, fx=None):
         i += 1
     if c is None:
         c = anchor
+    # Never dropped: an excursion out past STILL_EXIT from c that came back
+    # (a U-turn 240 m past the place, back to park went whole). Out there
+    # by steps a vehicle makes (radially at most STILL_EXIT // 3 a line,
+    # from within STILL_NEAR): a multipath spike out and back is drift.
+    e, y, ok = i, None, True
+    for q in range(i, len(b)):
+        z = _line_m(c, b[q])
+        if y is not None:
+            if ok and y > STILL_EXIT >= z:
+                e = q                    # (the first line back)
+            ok = z <= STILL_NEAR or (ok and abs(z - y) <= STILL_EXIT // 3)
+        y = z
+    i = e
     x = None
     while i < len(b):
         x = _line_m(c, b[i])
@@ -3244,10 +3268,16 @@ def _still_enter(now, anchor, since_tc, n, c=None, fx=None):
     if i < k:                            # the way out, already begun
         j = k - 1
         y = hi = lo = _line_m(c, b[j])
+        # (g: the step of the line after. A car's step changes by less than
+        # 2 * STILL_TOL a second, drift jumps. Each step at most 10 m, as
+        # before, dropped the drive off a car stop.)
+        g = None
         while j > i:
             z = _line_m(c, b[j - 1])
-            if z > y + STILL_TOL or z < y - 2 * STILL_TOL:
+            if z > y + STILL_TOL or (g is not None
+                                     and abs(y - z - g) > 2 * STILL_TOL):
                 break
+            g = y - z
             j -= 1
             y = z
             if z < lo:

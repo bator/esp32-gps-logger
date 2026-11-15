@@ -4688,6 +4688,69 @@ try:
     check("STAY-WALK: walking in to a stop and on, at most a few seconds of "
           "the walk are lost on either side", ws_bad == [], repr(ws_bad))
     rv_sec[0] = ws_sec0
+    # STOP-DRIVE: a car stopped 90-150 s and driving off (1.5 m/s² to 14
+    # m/s): the later window's centroid lay at the stop with the drive off
+    # already in it, the pair proved a stay, and the drive off (over 10 m a
+    # line) was dropped as drift: 15-26 s, 150-290 m of it. UTURN-PARK: 240
+    # m past the place, a U-turn and back to park there: the stay dropped
+    # the whole loop in some window alignments. (Own random numbers and
+    # times, as above.)
+    sd_sec0 = rv_sec[0]
+    srnd = random.Random(1115)
+    sd_bad = []
+    for stop, pre in ((90, 200), (90, 255), (110, 235), (110, 240),
+                      (150, 205), (150, 210)):
+        sv_reset()
+        rv_sec[0] = 0
+        e = 0.0
+        for i in range(pre):
+            e += 14.0
+            sv_fix(e, 0, 50.0)
+        e0, v, off = e, 0.0, {}
+        for i in range(stop):
+            sv_fix(e0 + srnd.uniform(-0.5, 0.5), srnd.uniform(-0.5, 0.5), 1.0)
+        for i in range(120):
+            v = min(14.0, v + 1.5)
+            e += v
+            off[rv_sec[0]] = e - e0
+            sv_fix(e, 0, v * 3.6)
+        gl.flush()
+        have = set(ws_secs(l, 0) for l in sv_lines())
+        far = max([m for t, m in off.items() if t not in have] or [0])
+        if far > gl.STILL_NEAR:
+            sd_bad.append((stop, pre, round(far)))
+    check("STOP-DRIVE: a car stopped 90-150 s and off again keeps its drive "
+          "off (nothing farther than STILL_NEAR from the stop dropped)",
+          sd_bad == [], repr(sd_bad))
+    sd_bad = []
+    for over, pre in ((240, 200), (240, 205), (240, 210), (360, 200)):
+        sv_reset()
+        rv_sec[0] = 0
+        e, loop = 0.0, {}
+        for i in range(pre):
+            e += 12.0
+            sv_fix(e, 0, 43.0)
+        dest = e
+        for i in range(over // 12):
+            e += 12.0
+            loop[rv_sec[0]] = e - dest
+            sv_fix(e, 0, 43.0)
+        for i in range(over // 12):
+            e -= 12.0
+            loop[rv_sec[0]] = e - dest
+            sv_fix(e, 4.0, 43.0)
+        for i in range(400):
+            sv_fix(e + srnd.uniform(-0.5, 0.5), 4.0 + srnd.uniform(-0.5, 0.5),
+                   1.0)
+        gl.flush()
+        have = set(ws_secs(l, 0) for l in sv_lines())
+        far = max([abs(m) for t, m in loop.items() if t not in have] or [0])
+        if far > gl.STILL_NEAR:
+            sd_bad.append((over, pre, round(far)))
+    check("UTURN-PARK: 240-360 m past the place, a U-turn and back to park "
+          "there keeps the loop (nothing farther than STILL_NEAR dropped)",
+          sd_bad == [], repr(sd_bad))
+    rv_sec[0] = sd_sec0
 
     # home network: arrive, stay, leave
     sv_reset(home=True)
