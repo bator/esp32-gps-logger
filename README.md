@@ -177,10 +177,11 @@ HOSTNAME=Dawarich-GPS-tracker
 | `DIAG` | Seconds between [diagnostic log](#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](#status-page), and the radio staying on at home for it. Default 1. |
 | `WEB_AWAY` | `1`/`0`: with `WEB` on, the radio stays on for the page on the non-home networks too (e.g. a phone hotspot), instead of sleeping once all is uploaded. Default 0. |
+| `UPLOAD_AWAY_UNVERIFIED` | `1`/`0`: `0` uploads only over verified TLS (`https://` with `/ca.der`) on a non-home network; without the certificate, or with an `http://` `GEO_URL`, the tracks wait for a home network (state `err unverified`, the radio sleeps meanwhile), so an evil-twin hotspot never sees the API key. Default 1 (uploads everywhere, as before). |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`). SSIDs, passwords, `GEO_URL` and
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `UPLOAD_AWAY_UNVERIFIED`). SSIDs, passwords, `GEO_URL` and
   `API_KEY` are taken verbatim, since they may contain `#`.
 - Values may be quoted. On the keys above the comment goes first, then the
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
@@ -608,7 +609,9 @@ segment),
 `upload err …`
 and `upload aborted …` lines, `upload low idf N KB` / `upload low mem N B`
 when a POST waits for memory, `upload ca err …` when `/ca.der` cannot be
-used, `clock set <UTC>` once a boot when the board clock is set from the
+used, `upload GEO_URL https without /ca.der: …` at the start when the server
+is not verified, `upload: <file> unreadable, parked as .err` (or `… not
+parked <error>`), `clock set <UTC>` once a boot when the board clock is set from the
 GPS (`clock set <UTC> gps`: the last fix's clock run on, the fix gone;
 `clock set <UTC> ntp`: from NTP, no fix since the boot), `clock ntp
 <UTC>` when NTP tells the display the time before a fix, `heap grew in <step> to N KB` when the
@@ -665,7 +668,8 @@ wrapping at 2^30,
 `rx_age_s` / `good_age_s`: seconds since the last byte / the last whole
 NMEA sentence, `null` for none yet), the receiver model,
 receiver restarts; points logged, waiting and uploaded,
-quarantined `.bad` files, upload state, `upload_age_s` (seconds since the
+quarantined `.bad` files, parked `.err` files (`err_files`), upload state,
+whether the upload's TLS is verified (`tls`), `upload_age_s` (seconds since the
 last accepted batch, `null` for none since boot), the day history's
 `days`, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON, `prev_end` the time of its last line), boot
@@ -1269,12 +1273,15 @@ home.
   body is the same as before.
 - Progress is a `<file>.pos` byte offset, written atomically. It advances
   only after HTTP 2xx or a durable copy to `<file>.bad`, so an interrupted
-  POST is resent (Dawarich deduplicates). A 2xx that is not JSON (an HTML
-  or plain-text body, or a `204 No Content`) is a captive portal or proxy
-  answering, not Dawarich: it counts as a failed POST (`upload err html …`
-  or `upload err not json … (captive portal?)` in the diagnostic log). A
-  2xx whose headers could not be read stays a success (a resend would
-  duplicate). A file that cannot be deleted after its
+  POST is resent (Dawarich deduplicates). Only a 2xx with a JSON
+  `Content-Type` commits. One that is not JSON (an HTML or plain-text
+  body, no `Content-Type` at all, or a `204 No Content`) is a captive
+  portal or proxy answering, not Dawarich: it counts as a failed POST
+  (`upload err html …` or `upload err not json … (captive portal?)` in the
+  diagnostic log). So does a 2xx whose headers could not be read to their
+  end (a reset, a timeout, the guard: `upload err head not read …`): it is
+  resent and Dawarich drops the duplicate points; a portal's bare `200`
+  used to delete the track as sent. A file that cannot be deleted after its
   last batch is parked as `.err` after 3 tries.
 - 400 / 413 / 422 quarantine the batch to `<file>.bad`. Three in a row
   without a success count as a server problem: backoff, no more quarantine
@@ -1285,12 +1292,24 @@ home.
   (the flash reserve, an I/O error) is `fs err` and is tried again.
   Points moved to a `.bad` leave `left` once (a `.bad` is not counted).
 - Other errors back off from 15 s up to 30 minutes (`Retry-After` is
-  honoured); 401 waits 30 minutes. Between POSTs it pauses 5 s at home, 30 s
+  honoured); 401 waits 30 minutes. The same batch answered 3 times in a
+  row with a server error (5xx, or a proxy's 404 / 403) holds its track
+  for 30 minutes while the others go; the first such hold ends with any
+  track's 2xx (the server is back, e.g. after a Dawarich restart), a
+  second one for that batch only when it runs out. Holds for payload
+  errors stay. Between POSTs it pauses 5 s at home, 30 s
   elsewhere. Flash and memory errors back off too, and with every waiting
   track held back (state `held`) the radio sleeps until the first is due.
 - An unreadable track (`OSError` on read) is held back so the newer ones
-  still go; after three tries it is parked as `<file>.err`. A `.pos` that
+  still go; after three tries it is parked as `<file>.err`
+  (`upload: <file> unreadable, parked as .err` in the diagnostic log, or
+  `… not parked <error>` when even the rename fails; `err_files` in
+  `/status.json` counts the `.err` files). A `.pos` that
   cannot be written is a flash error (`fs err`, retried), not a read error.
+- A batch in which no point is valid (an erased flash block reads `0xFF`:
+  a damaged 1-byte record each byte) reads on past 50 records, up to 4 KB
+  (`UPLOAD_SCAN`), and the next round follows at once: a 4 KB bad block
+  costs one round, not ~80 rounds of 50 bytes, 5 s and a `.pos` write each.
 - **Reading:** track lines are read with `readinto` into one 512-byte
   buffer (`LINE_MAX`) and a `.trk` point is parsed there and written
   straight into the JSON buffer, so a 50-point batch makes only small,
@@ -1304,7 +1323,8 @@ home.
   console ends with the POST time. Answer lines are read 256 bytes at a
   time (`HTTP_LINE`); once the status line is in, an error while reading
   the headers (reset, timeout, the guard closing the socket) keeps the
-  status, so an accepted batch is not sent twice.
+  status, but the head is not whole: a 2xx then is resent (see above), a
+  5xx stays a 5xx.
 - **POST guard:** a hardware timer feeds the watchdog during a POST (it
   also runs while a socket or TLS call blocks) and closes the socket after
   60 s (`HTTP_MAX`, `upload aborted after 60 s` in the diagnostic log), so a
@@ -1320,7 +1340,13 @@ home.
   `https://` encrypts, but a MITM can still see the key and the points. A
   DER root certificate at `/ca.der` (`CA_FILE`; the one your server's chain
   ends in) turns verification on. With an `http://` `GEO_URL` the logger
-  warns that everything goes in the clear. The `SSLContext` (and the
+  warns that everything goes in the clear. Without `/ca.der` the start
+  writes `upload GEO_URL https without /ca.der: the server is not verified,
+  uploads away on|off` to the diagnostic log, and `/status.json` has `tls`:
+  `verified`, `unverified`, `off` (http) or `ca err`. On a phone hotspot an
+  unverified upload shows the Bearer key to whoever runs the access point:
+  `UPLOAD_AWAY_UNVERIFIED=0` in `.env` keeps such uploads to the home
+  networks. The `SSLContext` (and the
   certificate) is made once at boot, before the WiFi starts (made at the
   first POST it could grow the Python heap and keep that area), and reused.
   Only a missing `/ca.der` means no verification: one that cannot be read,
@@ -1471,6 +1497,7 @@ Constants at the top of `gps_logger.py`; most never need changing.
 |----------|---------|---------|
 | `UPLOAD_BATCH` | 50 | Points per POST |
 | `UPLOAD_GAP` / `UPLOAD_GAP_AWAY` | 5 s / 30 s | Pause between POSTs at home / elsewhere |
+| `UPLOAD_SCAN` | 4096 | Bytes a batch with no valid point yet reads on past `UPLOAD_BATCH` records (a damaged stretch) |
 | `BACKOFF_START` / `BACKOFF_MAX` | 15 s / 30 min | Upload backoff (and `Retry-After` cap) |
 | `AUTH_BACKOFF` | 30 min | Wait after HTTP 401 |
 | `HTTP_TIMEOUT` | 15 s | Per-socket HTTP timeout (connect, TLS) |
