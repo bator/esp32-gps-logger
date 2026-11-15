@@ -1,8 +1,10 @@
 from machine import Pin, RTC
-import machine, time
+import machine, sys, time
 
-# Hold GPIO7 low at reset to skip the logger (REPL + mpremote, no WDT). (The
-# Heltec Wireless Tracker's button, GPIO0, is the download mode.)
+# The start is gps_boot.start() (frozen: an OTA updates it, this file only
+# deploy.sh); below it is for a plain firmware and an older gps_boot without
+# start() (after a rollback). GPIO7 low at reset skips the logger (REPL, no
+# WDT; the board's button, GPIO0, is the download mode).
 SKIP_PIN = 7
 BOOT_FAIL_MAX = 5
 BOOT_FAIL_FILE = "/boot_fail"
@@ -37,24 +39,33 @@ def _boot_fail_get():
             return 0
 
 def _boot_fail_set(n):
-    raw = ("%d" % n).encode()
+    """-> whether the count was stored."""
     try:
-        RTC().memory(raw)
-        return
+        RTC().memory(("%d" % n).encode())
+        return True
     except Exception:
         pass
     try:
-        f = open(BOOT_FAIL_FILE, "w")
-        f.write("%d" % n)
-        f.close()
+        with open(BOOT_FAIL_FILE, "w") as f:
+            f.write("%d" % n)
+        return True
     except Exception:
-        pass
+        return False
 
 def _boot_fail_delay(n):
     d = 5 * n
     if d > 30:
         d = 30
     return d
+
+DIAG_FILE = getattr(gps_boot, "DIAG_FILE", "/diag.log")  # (gps_logger's)
+
+def _diag(line):
+    try:
+        with open(DIAG_FILE, "a") as f:
+            f.write(line[:200] + "\n")
+    except Exception:
+        pass
 
 def _boot_retry():
     _boot_fail_set(BOOT_FAIL_MAX - 1)
@@ -63,32 +74,31 @@ def _boot_retry():
 def _boot_safe(n):
     """BOOT_FAIL_MAX failed starts: the REPL, and on a frozen firmware one
     more start after BOOT_RETRY_MS (gps_boot.safe)."""
+    _diag("crash boot fail %d: REPL" % n)
     if gps_boot is None:
         print("boot fail", n, "- REPL")
     else:
         gps_boot.safe(n, BOOT_RETRY_MS, _boot_retry)
 
 def _boot_handle_error():
-    """Record a boot/import/run failure. True → sleep + caller should reset."""
+    """Count a failed start. True: slept, reset. A count not stored: the
+    REPL and its retry (no reset every 5 s for good)."""
     n = _boot_fail_get() + 1
-    _boot_fail_set(n)
+    kept = _boot_fail_set(n)
     if gps_boot is not None:
         gps_boot.crash()                 # (an OTA pending: the build's fault)
-    if n >= BOOT_FAIL_MAX:
+    if n >= BOOT_FAIL_MAX or not kept:
         _boot_safe(n)
         return False
     time.sleep(_boot_fail_delay(n))
     return True
 
 def _boot_note_wdt():
-    """A WDT reset never hits the Python except path; count it here.
-    A panic is not counted: MicroPython 1.29 reports it as HARD_RESET, the
-    same as machine.reset() (gps_logger's own crash reset, which counted
-    already, its TLS memory reboot, mpremote reset)."""
+    """A WDT reset never hits the except path: counted here (a panic reads
+    as HARD_RESET, as machine.reset(): not counted)."""
     try:
         if machine.reset_cause() == machine.WDT_RESET:
-            n = _boot_fail_get() + 1
-            _boot_fail_set(n)
+            _boot_fail_set(_boot_fail_get() + 1)
     except Exception:
         pass
 
@@ -102,18 +112,20 @@ def _boot_start():
         if gps_boot is not None:
             gps_boot.unshadow()          # before the import
         import gps_logger
-        # Do not clear the counter here: wifi_start / run() can still crash
-        # (e.g. a missing str method). gps_logger clears it after BOOT_OK_MS
-        # of a healthy _loop.
-        gps_logger.run()
+        gps_logger.run()                 # (it clears the count: BOOT_OK_MS)
     except KeyboardInterrupt:
         raise
-    except Exception:
+    except Exception as e:
+        if hasattr(sys, "print_exception"):
+            sys.print_exception(e)
+        _diag("crash boot %s" % repr(e)[:120])
         if _boot_handle_error():
             machine.reset()
 
 # MicroPython runs this file as __main__. Tests import it under another name
 # so the auto-start (and a possible reset loop) does not run in the harness.
 if __name__ == "__main__":
-    if Pin(SKIP_PIN, Pin.IN, Pin.PULL_UP).value():
+    if hasattr(gps_boot, "start"):
+        gps_boot.start()
+    elif Pin(SKIP_PIN, Pin.IN, Pin.PULL_UP).value():
         _boot_start()

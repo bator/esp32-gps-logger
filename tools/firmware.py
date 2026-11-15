@@ -11,6 +11,11 @@ board checks the same string: gps_logger._ota_signed).
                                   nothing; SHA is always compared
   firmware.py manifest DIR KEY_FILE BUILD COMMIT BOARD
                                   DIR/manifest.json for DIR's image and page
+  firmware.py key KEY_FILE        exit 1 (a message, never the key) when the
+                                  key is not one the board takes
+  firmware.py old KEEP... < manifest.json
+                                  the files the published manifest names that
+                                  are not KEEP (plain names only), a line each
 
 Run from the repository root (the scripts cd there)."""
 import hashlib
@@ -71,12 +76,45 @@ def signed(m):
     return t
 
 
+def read_key(key_file):
+    """The key as the manifest is signed with it: the file stripped. It must
+    be one line of 16+ printable ASCII without quotes or spaces (the board
+    reads it from .env): the shell's check dropped the newlines first, so a
+    two-line file passed and signed with the newline in it (bad hmac on
+    every board). ValueError otherwise (its text holds no key)."""
+    with open(key_file, "rb") as f:
+        key = f.read().strip()
+    if len(key) < 16 or any(b < 33 or b > 126 or b in (34, 39) for b in key):
+        raise ValueError("the OTA key in %s must be one line of 16+ printable "
+                         "ASCII characters without quotes or spaces (e.g. "
+                         "openssl rand -hex 32)" % key_file)
+    return key
+
+
+def old_files(live, keep):
+    """The files the published manifest live (its JSON text) names that are
+    not in keep: what publish removes once the new manifest is up (an older
+    signed manifest and its image could be served again otherwise). Plain
+    names only (no "/", no URL): nothing outside the folder."""
+    try:
+        m = json.loads(live)
+        names = [m.get("url")] + [f.get("url") for f in m.get("files") or ()]
+    except (ValueError, AttributeError, TypeError):
+        return []
+    out = []
+    for n in names:
+        if (isinstance(n, str) and n and n not in keep and n not in out
+                and n not in (".", "..", "manifest.json")
+                and all(c.isascii() and (c.isalnum() or c in "._-") for c in n)):
+            out.append(n)
+    return out
+
+
 def manifest(d, key_file, build, commit, board):
     """d/manifest.json for d's micropython-<commit>.bin and web-<commit>.html.gz,
     signed with the key in key_file (the page only gzipped: an older firmware
     after a rollback takes this too)."""
-    with open(key_file, "rb") as f:
-        key = f.read().strip()
+    key = read_key(key_file)
 
     def meta(name):
         with open(os.path.join(d, name), "rb") as f:
@@ -105,8 +143,22 @@ def main(a):
         if s:
             print(s)
     elif a[:1] == ["manifest"] and len(a) == 6:
-        m = manifest(a[1], a[2], int(a[3]), a[4], a[5])
+        try:
+            m = manifest(a[1], a[2], int(a[3]), a[4], a[5])
+        except ValueError as e:
+            sys.stderr.write("%s\n" % e)
+            return 1
         print("manifest: build", m["build"], "commit", m["commit"], "size", m["size"])
+    elif a[:1] == ["key"] and len(a) == 2:
+        try:
+            read_key(a[1])
+        except (OSError, ValueError) as e:
+            sys.stderr.write("%s\n" % (e if isinstance(e, ValueError)
+                                       else "cannot read %s" % a[1]))
+            return 1
+    elif a[:1] == ["old"]:
+        for n in old_files(sys.stdin.read(), a[1:]):
+            print(n)
     else:
         sys.stderr.write(__doc__ or "")
         return 2

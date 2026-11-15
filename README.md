@@ -309,10 +309,14 @@ The firmware also freezes `gps_clock.py`, the Clock (date maths, the one test
 of a real UTC time, Stamps and Anchors), `gps_receiver.py`, the Receiver (the
 UC6580's UART, the NMEA, the seconds it publishes in `st`; the logger imports
 both, so a plain board gets a `gps_clock.mpy` and a `gps_receiver.mpy` beside
-`gps_logger.mpy`), and `gps_boot.py`: what `main.py`
-does around the logger's start for OTA and the boot-fail retry. Frozen, its
-code is not compiled into the heap at every boot; `main.py` runs without it
-on a plain firmware. And it carries a small `gps_frozen` module with the
+`gps_logger.mpy`), and `gps_boot.py`: the logger's start itself
+(`gps_boot.start()`: the boot-bypass pin, the boot-fail counter and retry,
+the OTA glue before the import), which `main.py` only calls. Frozen, its
+code is not compiled into the heap at every boot, and an OTA brings a new
+one; `main.py` is a file an OTA does not touch, so a change to `main.py`
+needs `./deploy.sh`. `main.py` starts the logger itself on a plain
+firmware and with an older frozen `gps_boot` without `start()` (the old
+firmware after a rollback). And it carries a small `gps_frozen` module with the
 commit (`-dirty` when the tree had uncommitted changes), the BUILD time and
 five SHA-256s: `SHA` of the frozen `gps_logger.py`, `TFT` of `gps_tft.py` +
 `gps_tft_font.py` (cat'ed in that order), `BOOT` of `gps_boot.py`, `CLOCK`
@@ -379,11 +383,14 @@ not newer than the published manifest's is refused (a board only takes a
 newer one; `FORCE=1` publishes it anyway). The
 manifest carries the build (the commit time), the commit, size and SHA-256
 of each file, and an HMAC-SHA256 over them with the key in `OTA_KEY_FILE`
-(default `~/.config/gps-logger/ota.key`). The key is printable ASCII without
-quotes or spaces, 16 characters or more (the board reads it from `.env`):
-`openssl rand -hex 32 > ~/.config/gps-logger/ota.key`. A key file readable
-by everyone is refused (`chmod 600` it), one readable by its group is
-warned about; the key itself is never printed. Only a clean,
+(default `~/.config/gps-logger/ota.key`). The key is one line of printable
+ASCII without quotes or spaces, 16 characters or more (the board reads it
+from `.env`): `openssl rand -hex 32 > ~/.config/gps-logger/ota.key`; it is
+checked as `tools/firmware.py` signs with it, the file stripped (a
+two-line key passed the old check and signed with the newline in it: bad
+hmac on every board). A key file readable by everyone is refused (`chmod
+600` it), one readable by its group is warned about (the mode of the file
+a symlink points to); the key itself is never printed. Only a clean,
 committed tree is published. A `--flash` or dirty build carries the build
 time instead of the commit time, so the OTA does not replace what was just
 flashed by hand with an older published build.
@@ -391,6 +398,15 @@ flashed by hand with an older published build.
 ```bash
 OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 ```
+
+Once the new manifest is up, the files only the replaced manifest named
+are removed from `OTA_DEST` (plain names only, never one the new manifest
+names, nothing else in the folder). The HMAC binds no freshness: anyone
+who kept an older signed manifest and its image can serve them again (a
+spoofed server on the LAN), and a board behind that build installs it.
+The board refuses a build not newer than its own, and the removal keeps
+the server itself from serving old builds; a signed minimum build would
+need a new HMAC string, which the boards in the field do not check.
 
 The `OTA_DEST` path is a plain one: only letters, digits and `_ . / -` (no
 `~`, spaces or shell specials; `scp` takes it as it is, the `ssh` rename
@@ -421,7 +437,10 @@ runs to ~220). A `/gps_logger.mpy` or `.py`
 (or `/gps_clock.mpy`, `/gps_receiver.mpy`, `.py`) on flash (`FORCE_MPY=1`) would shadow the new firmware's frozen logger
 (`''` comes first in `sys.path`): on a frozen firmware the install moves
 it aside as `<name>.ota-old`, the valid new firmware deletes it, and
-after a rollback `main.py` puts it back before the import. A Ctrl-C
+after a rollback `main.py` puts it back before the import. One that does
+not move aside stops the install before `set_boot` (`ota cannot move
+aside <path>`, waits `OTA_RETRY` as `shadow err`): it went on, and the old
+module ran on the new image. A Ctrl-C
 between `set_boot` and the reset no longer skips the reset (left there,
 the next reset booted the new slot with no pending note, valid without a
 health check); a boot slot that is set but not the running one at boot
@@ -430,7 +449,13 @@ health check); a boot slot that is set but not the running one at boot
 once more (HTTP 200, the fields and the HMAC as above, every minute until
 it is: `OTA_PROBE`; a build whose update path is broken would otherwise
 only get the next one over USB, and a manifest signed with another key no
-longer makes it valid), mark it valid, and only then do the
+longer makes it valid), mark it valid (`/ota.mark` says `valid` first: a
+power cut between the confirmation and the note's removal booted the
+valid image as pending again, and the next boot now ends the confirmation
+at once; a confirmation that fails keeps the image pending, one diag line
+`ota <commit> not confirmed`, is tried again each tick and ends in the
+health reset, where the steps below ran over an unconfirmed image with
+`ota ok` in the log), and only then do the
 staged page files replace the old ones (on a file system that does not
 rename over a file, the old one is moved aside first and back if the new
 one still does not go up; a page that does not go up is a diag line,
@@ -443,13 +468,15 @@ the bootloader boots the old slot; no WiFi or no manifest within 10 minutes
 the old slot to boot itself: that left the old image pending, and the next
 reset fell back to `ota_0`). A download that fails its SHA-256 or is cut
 short (a network error, a short body), or a page file that fails its
-SHA-256 or cannot be written, is tried again an hour later (`OTA_RETRY`),
+SHA-256 or cannot be written, a flash error writing or reading the slot
+back, is tried again an hour later (`OTA_RETRY`),
 not every check (the image came again every 10 minutes, the loop blocked
 for it); an error (server down) goes to the diagnostic log once per kind.
 Points waiting for upload hold the check back only with a `GEO_URL` and
 `API_KEY` to send them to (without, they would hold it for good). A build that crashed (the logger's crash
 branch notes it in `/ota.mark`) or whose watchdog fired while the logger
-ran is noted in `/ota.bad` and not tried again. Any other rollback may
+ran is noted in `/ota.bad` and not tried again (the page then says `ota bad
+<commit>`, not `up to date`). Any other rollback may
 not be the build's fault and is a try instead, counted per build in
 `/ota.tries`: at power-on (the cable pulled; MicroPython 1.29 reports a
 brownout as a power-on too, and a build that browned out on a weak supply
@@ -458,9 +485,17 @@ router or server outage), and a reset from outside (`mpremote reset`, a
 USB-JTAG reset, the watchdog after an `mpremote` session stopped the
 logger: Ctrl-C notes `stop`; each of these marked a good build bad at
 once). A panic is a try too: it reads as a hard reset, like `mpremote
-reset`, and no Python code runs to note it. The build is tried again an
-hour after the next boot (`OTA_RETRY`) and is bad after 2 tries
-(`OTA_TRIES_MAX`); the health reset removes the note before it counts its
+reset`, and no Python code runs to note it. The rollback's cause is the
+old firmware's first boot after it: `gps_boot` notes it in `/ota.mark`
+(`cause <n>`) before the import, so a reset of the old firmware before it
+read the note (a Ctrl-C, a stall and its watchdog) is not taken for the
+new build's. The build is tried again an
+hour after the next boot (`OTA_RETRY`); after 2 tries (`OTA_TRIES_MAX`)
+it is held a day (`OTA_HOLD`, UTC from the first check with a clock; twice
+as long each further round, at most 32 days) and then tried again: never
+bad for good, as two power cuts in the 2-minute pending window made a good
+build (a build in `/ota.bad` from an older firmware's tries stays there:
+remove the file to try it again); the health reset removes the note before it counts its
 try, so a power cut between them cannot count one attempt twice, and it
 writes the points in RAM first. A boot without a pending note confirms
 the running image. A note that is there but cannot be read or parsed is
@@ -478,7 +513,7 @@ Each step is in the
 diagnostic log (`ota … installed`, `booted, checking`, `ok`, `rolled back`).
 The status page shows the running build under *Logger*: the `Firmware` row
 gives the build's date (the commit time, `fw_build` in the JSON, local
-time) and the OTA state (`up to date`, `updated`, `checking`, `rolled back`,
+time) and the OTA state (`up to date`, `updated`, `checking`, `rolled back`, `ota bad <commit>`,
 …); the commit is in the top bar (`FW 02e4317`).
 
 After the migration, `--flash` over USB still works. It backs up both slots
@@ -529,7 +564,11 @@ What counts, and what follows:
 
 - an import failure of `gps_logger`, or an exception escaping `run()`: the
   count goes up, then `main.py` waits 5 s per failure so far (5 s, 10 s, …
-  at most 30 s) and resets;
+  at most 30 s) and resets; the error is printed and a `crash boot <n>
+  <error>` line goes to the diagnostic log (it was silent), and so does
+  `crash boot fail <n>` when the REPL takes over. A count that can be
+  stored neither in RTC memory nor in `/boot_fail` goes to the REPL and
+  its retry too (it reset every 5 s for good);
 - a crash inside `run()` (the main loop): the count goes up, the batch is
   flushed, a `crash` line goes to the diagnostic log and the board resets
   after 1 s (no growing delay);
@@ -1546,7 +1585,7 @@ Constants at the top of `gps_logger.py`; most never need changing.
 | `WEB` / `WEB_PORT` | on / 80 | Status page (`.env` `WEB`), its port |
 | `WEB_TIMEOUT` / `WEB_DEADLINE` / `WEB_HEAD_WAIT` | 2 s / 5 s / 1 s | How long one receive or send may wait; how long a whole request may take; how long its head may take |
 | `OTA_FIRST` / `OTA_CHECK` / `OTA_RETRY` / `OTA_VALID_AFTER` / `OTA_HEALTH` / `OTA_MAX` | 2 min / 10 min / 1 h / 2 min / 10 min / 5 min | First update check after boot, then between checks; before a build whose download failed (or that was rolled back as a try) is downloaded again; how long a new firmware runs with WiFi connected before it is valid; how long it may take to get WiFi and read the manifest; wall clock for one download |
-| `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_STUCK` | 1 min / 2 / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is bad; how long without a successful upload before waiting points stop holding the update check back |
+| `OTA_PROBE` / `OTA_TRIES_MAX` / `OTA_HOLD` / `OTA_STUCK` | 1 min / 2 / 24 h / 24 h | How often a pending firmware reads the manifest until it did; rollbacks that are not a crash (power-on, no WiFi / manifest, a reset from outside, a panic) before a build is held; how long it is held then (UTC, doubled each round, 32 times at most); how long without a successful upload before waiting points stop holding the update check back |
 | `WEB_PAGE_GZ` / `WEB_GZ_WBITS` / `WEB_PAGE` / `WEB_REFRESH` | `/web.html.gz` / 12 / `/web.html` / 15 s | The page on the board, kept only gzipped (as is to clients accepting gzip, inflated for the others); its window (2^12 = 4 KB of heap to inflate; `deploy.sh` and `--publish` use it); an older board's plain page, served while it is there; how often the page polls `/status.json` |
 | `KEY_EVERY` | 64 | Delta records between two keyframes of a `.trb` |
 | `HIST_DIR` / `HIST_DAYS` / `HIST_REPLY` | `/hist` / 7 / 16 KB | The day history for the page's map (a `.trb` per UTC day), days kept, text bytes about per `/hist` reply (and bytes at most per `/diag` reply) |

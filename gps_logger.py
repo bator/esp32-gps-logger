@@ -5707,7 +5707,11 @@ def _low_mem(now):
 # (mpremote reset, a USB-JTAG reset, the watchdog after a Ctrl-C stopped
 # the logger: OTA_MARK "stop"), and a panic too (MicroPython 1.29 reports
 # it as a hard reset, like mpremote's; no Python code ran to note it).
-# Tried again after OTA_RETRY, bad after OTA_TRIES_MAX. No set_boot() back:
+# Tried again after OTA_RETRY; after OTA_TRIES_MAX held for OTA_HOLD of
+# UTC (doubling each round), not bad for good: two power cuts in the
+# pending window banned a good build forever. The old firmware's own
+# reset before ota_boot read the note is not the new build's: gps_boot
+# notes the first boot's cause in OTA_MARK ("cause <n>"). No set_boot() back:
 # that left the old image pending, and the next reset fell back to ota_0,
 # the failed build. A Ctrl-C between set_boot and the reset still resets
 # (otadata names the new slot already: left there, the next reset booted
@@ -5736,12 +5740,18 @@ OTA_PENDING = "/ota.pending"             # "<build> <commit>" just installed,
 OTA_BAD = "/ota.bad"                     # builds that failed their health
 OTA_TRIES = "/ota.tries"                 # "<build> <n>": its rollbacks after
                                          # a power-on or with no WiFi/manifest
-OTA_TRIES_MAX = 2                        # such rollbacks before it is bad
+OTA_TRIES_MAX = 2                        # such rollbacks before it is held
+OTA_HOLD = 86400                         # s of UTC a build is held after
+                                         # OTA_TRIES_MAX tries (doubled each
+                                         # round, up to 32 times)
 OTA_PROBE = 60000                        # ms between manifest reads of a
                                          # pending firmware
 OTA_MARK = "/ota.mark"                   # what ended the pending run: crash,
                                          # stop (Ctrl-C), boot (ota_boot's
-                                         # reset into a slot not run yet)
+                                         # reset into a slot not run yet),
+                                         # valid (being confirmed), cause <n>
+                                         # (gps_boot: the old firmware's
+                                         # first reset cause after it)
 OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py",
               "/gps_clock.mpy", "/gps_clock.py",
               "/gps_receiver.mpy", "/gps_receiver.py")  # moved aside (.ota-old)
@@ -5988,34 +5998,69 @@ def _ota_mark_bad(build):
     except OSError as e:
         _diag_write("ota bad mark %d %r" % (build, e))
 
-def _ota_tries():
-    """(build, n) of OTA_TRIES, or (None, 0)."""
+def _ota_tries_raw():
+    """The ints of OTA_TRIES: [build, n] or [build, n, UTC the hold began],
+    or None."""
     try:
         with open(OTA_TRIES) as f:
-            b, n = f.read().split()
-        return int(b), int(n)
+            v = [int(x) for x in f.read().split()]
+        return v if 2 <= len(v) <= 3 else None
     except (OSError, ValueError):
-        return None, 0
+        return None
+
+def _ota_tries():
+    """(build, n) of OTA_TRIES, or (None, 0)."""
+    v = _ota_tries_raw()
+    return (v[0], v[1]) if v else (None, 0)
+
+def _ota_tries_put(v):
+    """OTA_TRIES as "<build> <n>[ <utc>]" (the two words an older firmware
+    reads, after a rollback, until a hold begins). A failed write is a
+    diag line: the count is lost, the build installed again sooner."""
+    try:
+        with open(OTA_TRIES, "w") as f:
+            f.write(" ".join("%d" % x for x in v) + "\n")
+    except OSError as e:
+        _diag_write("ota tries %d not written: %r" % (v[0], e))
 
 def _ota_try(build):
     """A rollback that may not be the build's fault: at power-on (MicroPython
     1.29 reports a brownout as one: a weak supply), or no WiFi or manifest
-    in OTA_HEALTH (the router, the server). The OTA_TRIES_MAX-th of one
-    build marks it bad: never blamed, a brownout reinstalled it after every
-    boot; blamed at once, a router outage excluded a good build for good.
-    -> True: now bad."""
+    in OTA_HEALTH (the router, the server). Every OTA_TRIES_MAX-th of one
+    build holds it (_ota_held): never blamed, a brownout reinstalled it
+    after every boot; blamed for good (OTA_BAD, as before), two power cuts
+    in the pending window or a router outage excluded a good build forever.
+    -> its tries now (held at each multiple of OTA_TRIES_MAX)."""
     b, n = _ota_tries()
     n = n + 1 if b == build else 1
-    if n >= OTA_TRIES_MAX:
-        _ota_mark_bad(build)
-        _rm(OTA_TRIES)
-        return True
-    try:
-        with open(OTA_TRIES, "w") as f:
-            f.write("%d %d\n" % (build, n))
-    except OSError:
-        pass
-    return False
+    _ota_tries_put([build, n])
+    return n
+
+def _ota_hold_s(n):
+    """The hold after n tries: OTA_HOLD, doubled each round (32x at most)."""
+    return OTA_HOLD << min(n // OTA_TRIES_MAX - 1, 5)
+
+def _ota_held(build):
+    """Seconds the build is still held after OTA_TRIES_MAX tries (0: not
+    held): OTA_HOLD, doubled each round (up to 32 times). On UTC, the
+    Clock's: Stamps start again at each boot, and a board on an hour a day
+    would hold it for good. The hold begins at the first check with a
+    clock (the rollback is at boot, the clock not known yet); without one
+    it holds. A start in the future (a clock that went back) begins
+    again."""
+    v = _ota_tries_raw()
+    if (not v or v[0] != build or v[1] < OTA_TRIES_MAX
+            or v[1] % OTA_TRIES_MAX):
+        return 0
+    hold = _ota_hold_s(v[1])
+    now = _utc_s(log["clock"] or _ntp[0])
+    if now is None:
+        return hold
+    if len(v) < 3 or v[2] > now:
+        _ota_tries_put([build, v[1], now])
+        return hold
+    left = v[2] + hold - now
+    return left if left > 0 else 0
 
 def _ota_wait_tried():
     """A build with a try behind it is installed again OTA_RETRY after
@@ -6090,15 +6135,23 @@ def _ota_shadow(aside):
     "ota <new> ok" while the old code ran. aside: moved to <name>.ota-old
     (before set_boot); else put back (an install that failed; after a
     rollback main.py does it, before the import). Only on a frozen
-    firmware (FW_BUILD): a plain one needs its .mpy to boot."""
+    firmware (FW_BUILD): a plain one needs its .mpy to boot. A module that
+    is there and does not move (not ENOENT) is a diag line, and aside it
+    raises: the install stops before set_boot (it went on, and the old
+    module ran on the new image)."""
     for p in OTA_SHADOW:
         try:
             if aside:
                 os.rename(p, p + ".ota-old")
             elif _file_size(p) is None:
                 os.rename(p + ".ota-old", p)
-        except OSError:
-            pass
+        except OSError as e:
+            if _enoent(e):
+                continue
+            _diag_write("ota %s %s: %r" % (
+                "cannot move aside" if aside else "cannot put back", p, e))
+            if aside:
+                raise
 
 def _ota_mark(what):
     """What ended a run while an OTA note is there, for the firmware that
@@ -6110,15 +6163,19 @@ def _ota_mark(what):
     running (gps_boot.crash() checks the same): the old firmware back after
     a rollback for no fault of the new one, crashing before ota_boot read
     the note, marked the new build bad for good (a Ctrl-C there turned a
-    watchdog verdict on it into a try)."""
+    watchdog verdict on it into a try). A write that fails is a diag
+    line (the old firmware then misreads the rollback)."""
     try:
         p = _ota_pending()
         if p is None or (what != "boot" and p[0] != FW_BUILD):
             return
         with open(OTA_MARK, "w") as f:
             f.write(what)
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            _diag_write("ota mark %s not written: %r" % (what, e))
+        except Exception:
+            pass
 
 def _ota_mark_get():
     try:
@@ -6166,8 +6223,13 @@ def _ota_check():
         _ota_say("ota: manifest fields refused")
         return
     build = m["build"]
-    if build <= FW_BUILD or build in _ota_bad():
+    if build <= FW_BUILD:
         ota["state"] = "current"
+        return
+    if build in _ota_bad():
+        # (its own state: "current", the page said "up to date" over a
+        # newer build that is never installed; the commit is checked hex)
+        ota["state"] = "bad " + m["commit"]
         return
     if not FW_BUILD:
         # a plain firmware (no gps_frozen): the modules deployed as files
@@ -6187,6 +6249,9 @@ def _ota_check():
         _ota_say("ota build %d: manifest hmac does not match" % build)
         return
     ota["said"] = None
+    if _ota_held(build):                 # (OTA_TRIES_MAX tries: a while)
+        ota["state"] = "rolled back"
+        return
     try:
         part = esp32.Partition(esp32.Partition.RUNNING).get_next_update()
     except (OSError, AttributeError):
@@ -6199,29 +6264,34 @@ def _ota_check():
     w = _SlotWriter(part)
     try:
         code = HTTP_GET(_ota_url(m["url"]), w, m["size"])
+        got = w.close()                  # (the last block's write and the
+        ok = (code == 200 and got == m["sha256"]  # read-back: a flash
+              and _slot_sha(part, m["size"]) == m["sha256"])  # error too)
     except Exception:
         # a download cut short waits OTA_RETRY like a bad one: it came
         # again (2 MB, the loop blocked) every OTA_CHECK (whatever it
-        # raised: an empty status line, a MemoryError)
+        # raised: an empty status line, a MemoryError, the slot's flash)
         ota["failed"] = (build, _stamp(), "download err")
         raise
-    got = w.close()
-    if (code != 200 or got != m["sha256"]
-            or _slot_sha(part, m["size"]) != m["sha256"]):
+    if not ok:
         ota["failed"] = (build, _stamp(), "bad image")
         ota["state"] = "bad image"
         _diag_write("ota %s: download %s, sha256 mismatch" % (m["commit"],
                                                              code))
         return
     paths = []
-    try:
+    why = "bad page"                     # (the step that failed, for the
+    try:                                 # state while it waits OTA_RETRY)
         for f in m.get("files") or ():
             _ota_file(f)
             paths.append(f["path"])
+        why = "note err"
         with open(OTA_PENDING, "w") as f:
             f.write("%d %s\n%s" % (build, m["commit"], "\n".join(paths)))
         if FW_BUILD:
+            why = "shadow err"           # (raises: the old module stayed)
             _ota_shadow(True)
+        why = "set_boot err"
         part.set_boot()
     except BaseException:
         # (a Ctrl-C too: it is no Exception) nothing boots: no pending note
@@ -6233,7 +6303,7 @@ def _ota_check():
             _rm(OTA_PENDING)
             _ota_drop(paths)
             _ota_shadow(False)
-            ota["failed"] = (build, _stamp(), "bad page")
+            ota["failed"] = (build, _stamp(), why)
             raise
     try:
         _diag_final()
@@ -6249,11 +6319,15 @@ def _ota_check():
 
 def _ota_valid():
     """Confirm the running image (the bootloader's rollback then keeps it).
-    A non-OTA or never-pending image raises: nothing to confirm."""
+    -> None, or why it failed (repr). On a boot without a note that is
+    nothing (a non-OTA or never-pending image raises: nothing to confirm);
+    for a pending image it is: the confirmation steps ran over an image
+    the next reset rolled back, "ota ok" in the diag."""
     try:
         esp32.Partition.mark_app_valid_cancel_rollback()
-    except (OSError, AttributeError):
-        pass
+        return None
+    except (OSError, AttributeError) as e:
+        return repr(e)[:60]
 
 def _ota_pending():
     """(build, commit, staged paths) of OTA_PENDING, None without one. A
@@ -6278,7 +6352,10 @@ def ota_boot():
     a try otherwise (a power-off, a reset from outside, a panic). A boot
     slot set but not run yet (a Ctrl-C between set_boot and the reset) is
     booted, once. Without a pending note the running image is confirmed:
-    an image left pending would be aborted at the next reset."""
+    an image left pending would be aborted at the next reset. The new build
+    with OTA_MARK "valid" (a power cut while it was being confirmed) ends
+    the confirmation at once, without the health checks: held pending, the
+    staged page was dropped and a good image reset as a try."""
     p = _ota_pending()
     if p is None:
         _ota_wait_tried()
@@ -6303,12 +6380,34 @@ def ota_boot():
         _diag_write("ota note unreadable, dropped (running %s)" % FW_COMMIT)
         return
     mark = _ota_mark_get()
+    try:
+        cause = machine.reset_cause()
+    except Exception:
+        cause = None
+    if mark and mark.startswith("cause "):
+        # gps_boot's note of this firmware's first boot after the rollback:
+        # a reset of the old firmware before it got here (a Ctrl-C, a
+        # stall and its watchdog) was taken for the new build's
+        try:
+            cause = int(mark[6:])
+        except ValueError:
+            pass
+        mark = None
     if build == FW_BUILD:
-        _rm(OTA_MARK)                    # (a run before this one stopped)
+        valid = mark == "valid"          # (a power cut while confirming)
+        if not valid:
+            _rm(OTA_MARK)                # (a run before this one stopped)
         ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
                    probed=False, probe_at=None, probe_err=None,
-                   state="pending", paths=paths)
-        _diag_write("ota %s booted, checking" % c)
+                   state="pending", paths=paths, valid=valid,
+                   valid_err=None)
+        _diag_write("ota %s booted, %s" % (
+            c, "confirming again" if valid else "checking"))
+        if valid:                        # (no health check again: it
+            try:                         # passed before the cut; a step
+                _ota_health(time.ticks_ms())  # that fails: the next tick)
+            except Exception:
+                pass
         return
     if esp32 is not None and mark != "boot" and _ota_unbooted():
         # never run (blamed here, a build that never booted went bad):
@@ -6324,11 +6423,10 @@ def ota_boot():
     _rm(OTA_MARK)
     ota["state"] = "rolled back"
     try:
-        cause = machine.reset_cause()
         wdt = cause == machine.WDT_RESET
         power = cause == machine.PWRON_RESET
     except Exception:
-        cause, wdt, power = None, False, False
+        wdt, power = False, False
     if mark == "crash" or (wdt and mark != "stop"):
         _ota_mark_bad(build)
         _diag_write("ota %s %s, rolled back by the bootloader: bad (running "
@@ -6336,11 +6434,13 @@ def ota_boot():
                              "watchdog reset", FW_COMMIT))
     else:
         why = "a power-off" if power else "a reset (cause %s)" % cause
-        if _ota_try(build):
-            _diag_write("ota %s rolled back after %s, %d times: bad "
-                        "(running %s)" % (c, why, OTA_TRIES_MAX, FW_COMMIT))
+        n = _ota_try(build)
+        _ota_wait_tried()
+        if n % OTA_TRIES_MAX == 0:
+            _diag_write("ota %s rolled back after %s, %d times: held %d h "
+                        "(running %s)" % (c, why, n, _ota_hold_s(n) // 3600,
+                                          FW_COMMIT))
         else:
-            _ota_wait_tried()
             _diag_write("ota %s rolled back after %s, tried again in %d min "
                         "(running %s)" % (c, why, OTA_RETRY // 60000,
                                           FW_COMMIT))
@@ -6382,49 +6482,77 @@ def _ota_health(now):
     """The pending firmware: valid after OTA_VALID_AFTER with WiFi connected
     and the manifest read (without OTA_URL WiFi only; then the staged page
     goes up); neither in OTA_HEALTH and it resets, the bootloader then
-    boots the old image (a try: _ota_try)."""
+    boots the old image (a try: _ota_try). OTA_MARK "valid" goes first: a
+    power cut between the confirmation and the note's removal booted a
+    valid image as pending again (ota_boot finishes it now). A confirmation
+    that fails keeps the pending state, the notes and the staged page (one
+    diag line), and is tried again each tick until the OTA_HEALTH reset:
+    the steps ran over an unconfirmed image, "ota ok" in the diag, and the
+    next reset rolled it back."""
     if wifi["state"] == "connected":
         ota["wifi_seen"] = True
         if OTA_URL and not ota.get("probed"):
             _ota_probe(now)
     age = _age(now, ota["pend_at"])
-    if (ota["wifi_seen"] and (ota.get("probed") or not OTA_URL)
-            and age >= OTA_VALID_AFTER):
-        _ota_valid()
-        _ota_promote(ota.get("paths") or ())
-        for p in OTA_SHADOW:             # (before the note: main.py puts
-            _rm(p + ".ota-old")          # back what has no note)
-        _rm(OTA_PENDING)
-        _rm(OTA_TRIES)
-        _rm(OTA_MARK)
-        # the pending state ends last: a MemoryError in a step above (the
-        # guard swallows it) leaves it set, and the next tick runs the
-        # steps again (they are safe to), not a RAM state of "done" over
-        # a note, staged pages and .ota-old still on flash
-        ota["pend"] = None
-        ota["state"] = "ok"
-        _diag_write("ota %s ok" % FW_COMMIT)
-        return
+    if ota.get("valid") or (ota["wifi_seen"]
+                            and (ota.get("probed") or not OTA_URL)
+                            and age >= OTA_VALID_AFTER):
+        if not ota.get("valid"):
+            _ota_mark("valid")
+            ota["valid"] = True          # (written once, not every tick)
+        err = _ota_valid()
+        if err is not None:
+            if not ota.get("valid_err"):
+                ota["valid_err"] = err
+                _diag_write("ota %s not confirmed: %s" % (FW_COMMIT, err))
+            if age < OTA_HEALTH:
+                return
+        else:
+            _ota_done()
+            return
     if age < OTA_HEALTH:
         return
     build = ota["pend"]
     ota["pend"] = None
+    ota["valid"] = False
     try:                                 # (the reset whatever fails: the
         _ota_drop(ota.get("paths") or ())   # image ran on unconfirmed)
         _ota_shadow(False)
         # the note first: a power cut between the two then loses the try;
         # the other way round the old firmware found it and counted again
         _rm(OTA_PENDING)
-        bad = _ota_try(build)
+        n = _ota_try(build)
         _diag_final()
         what = "wifi"
-        if ota["wifi_seen"]:
+        if ota.get("valid_err"):
+            what = "confirmation (%s)" % ota["valid_err"]
+        elif ota["wifi_seen"]:
             what = "manifest (%s)" % ota.get("probe_err")
         _diag_write("ota %s no %s in %d s, rolling back%s" % (
-            FW_COMMIT, what, OTA_HEALTH // 1000, ", bad" if bad else ""))
+            FW_COMMIT, what, OTA_HEALTH // 1000,
+            ", held" if n % OTA_TRIES_MAX == 0 else ""))
         flush(_still_hold())             # (as before the other reboots)
     finally:
         machine.reset()
+
+def _ota_done():
+    """The confirmed image's steps: the staged page up, the moved-aside
+    modules, the notes gone (OTA_MARK "valid" last of them), then the
+    pending state ends."""
+    _ota_promote(ota.get("paths") or ())
+    for p in OTA_SHADOW:                 # (before the note: main.py puts
+        _rm(p + ".ota-old")              # back what has no note)
+    _rm(OTA_PENDING)
+    _rm(OTA_TRIES)
+    _rm(OTA_MARK)
+    # the pending state ends last: a MemoryError in a step above (the
+    # guard swallows it) leaves it set, and the next tick runs the steps
+    # again (they are safe to), not a RAM state of "done" over a note,
+    # staged pages and .ota-old still on flash
+    ota["pend"] = None
+    ota["valid"] = False
+    ota["state"] = "ok"
+    _diag_write("ota %s ok" % FW_COMMIT)
 
 def ota_tick(now):
     if ota["pend"] is not None:
