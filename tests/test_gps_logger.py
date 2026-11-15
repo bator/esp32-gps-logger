@@ -14620,12 +14620,18 @@ else:
            % time.strftime("%Y-%m-%d %H:%M", time.localtime(1793548800)))
     check("PAGE-BOOT: the device strip shows the uptime with the boot's local "
           "time, the cause and the previous run up to when; Firmware the build "
-          "date and 'up to date', the commit in the top bar; the battery",
+          "date and 'up to date', the commit in the top bar; the battery with its icon (amber to 20 %, red to 10 %)",
           any(b_ in dlb for b_ in boots) and fwl in syb
-          and '<div class=""><small>Battery</small><b>76 % (3.95 V)</b></div>' in dlb
+          and '<div class=""><small>Battery</small><b><svg class="bi ok" viewBox="0 0 26 13">' in dlb
+          and 'width="12.9" height="7" rx="1"/></svg>76 % (3.95 V)</b></div>' in dlb
+          and rbj.get("bq") == ["ok 17.0", "ok 12.9", "ok 3.6", "warn 3.4", "warn 2.0",
+                                "bad 2.0", "bad 2.0"]
+          and rbj.get("bdl", [""])[0]
+          == '<div class=""><small>Battery</small><b>none, on USB</b></div>'
+          and rbj["bdl"][1].startswith('<div class="warn"><small>Battery</small><b><svg class="bi warn"')
           and upb.endswith("&middot; FW 86fb9c8")
           and rbj.get("unlabeled") == [],
-          repr((dlb[:400], syb[syb.find("Firmware") - 40:])))
+          repr((dlb[:900], rbj.get("bq"), rbj.get("bdl"), syb[syb.find("Firmware") - 40:])))
     check("PAGE: the Logger labels every row, no UBX or fix source",
           v3.get("unlabeled") == [] and " ubx" not in sy3
           and "NAV-PVT" not in sy3, sy3[:1500])
@@ -15623,11 +15629,11 @@ if os.path.exists(_wm_gz):
         _wm_data = f.read()
 _wm_w = gl.WEB_GZ_WBITS
 check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
-      "mtime, not over 25 KB (35.7, then 28.5 before A+C); the CSS and the markup only lose comments and "
+      "mtime, not over 25400 B (35.7 KB, then 28.5 before A+C; 25000 until the battery icon); the CSS and the markup only lose comments and "
       "white space; stripping again changes nothing; web.html itself keeps its comments",
       web_min and _wm_r.returncode == 0
       and _gunzip_w(_wm_data, _wm_w) == _wm_page.encode("utf-8") and _wm_data[4:8] == b"\0\0\0\0"
-      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25000
+      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25400
       and web_min.minify(_wm_page) == _wm_page and "<!--" not in _wm_page
       and "/*" not in _wm_page[_wm_page.index("<style>"):_wm_page.index("</style>")]
       and _wm_css(_wm_page) == _wm_css(page_src) and _wm_html(_wm_page) == _wm_html(page_src)

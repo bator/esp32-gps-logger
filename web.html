@@ -121,6 +121,7 @@ h3 b{letter-spacing:.04em;color:var(--t)}
 .kv em{font-style:normal;font-weight:600;font-size:12px}.kv .warn em{color:var(--warn)}.kv .bad em{color:var(--bad)}
 .wi{width:16px;height:12px;margin-right:6px;vertical-align:-1px;color:var(--t);fill:none;stroke-width:2.4;stroke-linecap:round}
 .wi path{stroke:var(--l)}.wi .on{stroke:currentColor}.wi circle{fill:currentColor;stroke:none}
+.bi{width:24px;height:12px;margin-right:6px;vertical-align:-1px;fill:none;stroke:var(--m);stroke-width:1.5}.bi .f{fill:currentColor;stroke:none}
 /* sky: the plot (elevation rings, a dot a satellite: its system's colour,
    bigger = clearer, hollow when not in use) and the ones in use as bars */
 .skg{display:grid;grid-template-columns:170px 1fr;gap:16px;align-items:center}
@@ -278,6 +279,10 @@ function wifiIcon(n) {                  // a dot and three arcs, n lit
   var h = '<svg class="wi" viewBox="0 0 24 18"><circle cx="12" cy="15.5" r="2"/>';
   for (var i = 0; i < 3; i++) h += '<path' + (i < n ? ' class="on"' : "") + ' d="' + ARCS[i] + '"/>';
   return h + "</svg>";
+}
+function batIcon(p) {                  // outline, nub, the charge p % wide (2 at least; red to 10, amber to 20)
+  return '<svg class="bi ' + (p > 20 ? "ok" : p > 10 ? "warn" : "bad") + '" viewBox="0 0 26 13"><rect x="1" y="1" width="21" height="11" rx="2"/>' +
+    '<path d="M24 4.5v4" stroke-width="2"/><rect class="f" x="3" y="3" width="' + Math.max(2, 17 * p / 100).toFixed(1) + '" height="7" rx="1"/></svg>';
 }
 // Event log: the whole diag log on the board (DIAG_OLD, then DIAG_FILE, read
 // with /diag; ~26 h), aggregated as it is read: status lines (one a minute)
@@ -783,7 +788,7 @@ function view(d, prev) {
       (typeof d.uptime === "number" ? MD + when(Date.now() - d.uptime * 1000) : ""), d.boot_cause === 3 ? "warn" : "") +
     (pr ? dl("Previous run", esc(prevText(d)), /crash/.test(pr) ? "warn" : "") : "") +
     dl("Chip", esc(d.temp) + " &deg;C" + MD + esc(d.mhz) + " MHz") +
-    (d.battery ? dl("Battery", esc(d.battery)) : "") +
+    (d.battery ? dl("Battery", (d.vbat_pct == null ? "" : batIcon(d.vbat_pct)) + esc(d.battery), d.vbat_pct != null && d.vbat_pct <= 20 ? "warn" : "") : "") +
     (d.utc ? dl("GPS time", esc(String(d.utc).slice(11, 19)) + " UTC") : "");
   return v;
 }
