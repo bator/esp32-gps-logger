@@ -120,7 +120,10 @@ New tracks are binary `.trb` files (see Format), older ones `.trk` text;
 (upload progress) and `<file>.bad` (batches the server rejected; retried
 until 8 more rejections per boot), and `<file>.err` (a track that could not
 be read three times, parked so the newer ones upload). `trk2gpx.py`
-converts `.bad` and `.err` files the same way. A `.trb.bad` holds the
+converts `.bad` and `.err` files the same way (a parked `.bad`, `.trk.bad.err`
+or `.trb.bad.err`, is text). It exits 1 with a line on stderr when a file
+gives no point or is empty; after a damaged record of a `.trb` the GPX starts
+a new segment at the next keyframe (no straight line over the lost points). A `.trb.bad` holds the
 rejected points as text lines, like a `.trk`.
 To queue a `.bad` again (a `.trb.bad` becomes a `.trk`):
 

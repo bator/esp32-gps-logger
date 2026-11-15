@@ -3502,7 +3502,15 @@ def _ring_add(sl, now, pos, d, fx=None):
         k = 3 * j
         if (d + STILL_TOL < _RF[k + 2] or d <= STILL_TOL
                 or (d <= STILL_NEAR
-                    and s - sl["rt0"] - _RT[j] > STILL_GAP // 1000)):
+                    and s - sl["rt0"] - _RT[j] > STILL_GAP // 1000)
+                # still near, the ring older than STILL_GAP and not going
+                # away: the jitter of a board sitting 5-50 m from the
+                # anchor (a terrace, a car waiting), not a way out. The
+                # samples it keeps (> STILL_DEP_STEP apart) never let the
+                # gap above end it: 13-73 points of it began the drive
+                or (d <= STILL_NEAR
+                    and s - sl["rt0"] - _RT[i] > STILL_GAP // 1000
+                    and d < _RF[3 * i + 2] + STILL_RUN)):
             n = 0
         elif _dist(_RF[k], _RF[k + 1], pos[0], pos[1]) <= STILL_DEP_STEP:
             return
@@ -3682,7 +3690,10 @@ def _still_active(now, pos, fx=None):
     home = bool(at_home())
     if home != sl["home"]:
         sl["home"] = home
-        sl["hb_at"] = None
+        # (as if the last anchor were STILL_BACK ago: None let the next one
+        # go at once, past far_at and STILL_RUN, and a home stay flipped
+        # by a phone hotspot put an anchor in the first metres walked)
+        sl["hb_at"] = _stamp() - (STILL_HEARTBEAT - STILL_BACK) // 1000
 
 def log_tick():
     """Sample a position every SAMPLE ms and record it if it is more than
@@ -4418,10 +4429,32 @@ def _tail():
     return _dev[1]
 
 def _fnum(a, b):
+    """_rbuf[a:b] as a float, None if it is none. A field without a digit
+    is none: MicroPython's float() reads ".", "+." and ".e1" as 0.0 (a
+    point on the equator or at 0,0 went up; trk2gpx dropped it)."""
+    i = a
+    while i < b and not 48 <= _rbuf[i] <= 57:
+        i += 1
+    if i == b:
+        return None
     try:
         return float(_rmv[a:b])
     except ValueError:
         return None
+
+def _past(a, b):
+    """A digit other than 0 after the point of _rbuf[a:b]: a value that a
+    single-precision float rounds onto its limit (90.000003 is 90.0 on the
+    board) is still past it."""
+    i = _rbuf.find(b".", a, b)
+    if i < 0:
+        return False
+    i += 1
+    while i < b and 48 <= _rbuf[i] <= 57:
+        if _rbuf[i] != 48:
+            return True
+        i += 1
+    return False
 
 def _canon(a, b, dec, imax):
     """_rbuf[a:b] reads exactly as "%.<dec>f" prints it, with at most imax
@@ -4502,7 +4535,9 @@ def _trk_point(a, b):
         return 0                         # not take is passed here too)
     lat, lon = _fnum(a, c1), _fnum(c1 + 1, c2)
     if (lat is None or lon is None or not math.isfinite(lat) or not math.isfinite(lon)
-            or abs(lat) > 90 or abs(lon) > 180):
+            or abs(lat) > 90 or abs(lon) > 180
+            or (abs(lat) == 90 and _past(a, c1))
+            or (abs(lon) == 180 and _past(c1 + 1, c2))):
         return 0
     _pt[6] = t
     need = (_J_FIX + len(_tail()) + _ptnum(0, c1 + 1, c2, lon, b"%.6f", 6, 3)

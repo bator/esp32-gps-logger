@@ -4,7 +4,8 @@
 Needs Pillow (11.0.0 wrote the committed file: another FreeType anti-aliases a few
 pixels differently) and Space Grotesk Bold, vendored in tools/fonts (SIL OFL 1.1,
 tools/fonts/OFL.txt); the output is committed, the build does not run this, CI
-checks that it is what this writes (TFT-FONT-REGEN).
+checks that it is what this writes (TFT-FONT-REGEN). Usage: make_tft_font.py
+[OUT] (default: gps_tft_font.py next to the firmware, wherever it is run from).
 
 Each font: CHARS, the WIDTHS (advance, bytes), OFFS (2 bytes each, little
 endian) into DATA, rows top down of GS4_HMSB (16 levels, 2 pixels a byte, a row
@@ -17,6 +18,7 @@ a string stays on the same rows (it can reach below HEIGHT: no descender).
 """
 
 import os
+import sys
 
 # (the Zorin OS package's copy, Space Grotesk 2.000)
 D = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts",
@@ -73,7 +75,11 @@ def main():
              ("UP", font("Bold", 14, "0123456789kész")),
              ("WORD", font("Bold", 12, "nicsgyekzpörő")),
              ("SMALL", font("Bold", 10, "0123456789% napóratel<km,icsú")))
-    with open("gps_tft_font.py", "w", encoding="utf-8") as out:
+    # (next to the firmware, wherever it is run from: from tools/ it was
+    # written there, and the board kept the old fonts)
+    dest = (sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "gps_tft_font.py"))
+    with open(dest, "w", encoding="utf-8") as out:
         out.write("# Written by tools/make_tft_font.py (Space Grotesk): see there.\n")
         for name, (chars, widths, offs, data, height, base) in fonts:
             out.write("%s = (%r,\n    %r,\n    %r,\n    %r,\n    %d, %d)\n"

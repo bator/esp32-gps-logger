@@ -4643,6 +4643,62 @@ try:
           bad == 0, "mismatches=%d" % bad)
     gl.log_reset()
 
+    # RING-JITTER: a board sitting 9-15 m from the anchor in good reception
+    # (a terrace, a car waiting): its jitter neither fell back past STILL_TOL
+    # nor came within it, and the samples kept (> STILL_DEP_STEP apart) never
+    # let the STILL_GAP rule end the ring: up to STILL_DEP_MAX samples of it
+    # began the drive. Near the anchor and no farther than the ring's first
+    # sample + STILL_RUN for over STILL_GAP, the ring starts over
+    gl.log_reset()
+    gl.log["still"] = sl = gl._still_state()
+    sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10)
+    gl.st.update(valid=True, date="2026-10-18", alt=None, hdop=None, fixtype=3)
+    for k in range(260):
+        if k < 200:
+            dd = 12 + 3 * math.sin(k / 10.0)         # the jitter, ~2.4 m a step
+        else:
+            dd = 15 + 10 * (k - 200)                  # the drive: 10 m/s out
+        gl.st["time"] = "%02d:%02d:%02d" % (10 + k // 3600, k // 60 % 60, k % 60)
+        gl._ring_add(sl, _clock[0], (47.5 + k * 1e-4, 19.0), dd)
+    gl._still_leave()
+    rj = [l.split(",")[4][9:15] for l in gl.log["batch"]]
+    check("RING-JITTER: the way out after 200 s of jitter 9-15 m from the anchor starts "
+          "with the drive (10:03:20), not with the jitter",
+          rj and rj[0] >= "100300" and rj[-1] == "100419", repr(rj[:3] + rj[-1:]))
+    gl.log_reset()
+
+    # HOME-FLIP: a home stay that a phone hotspot (not home) turns into an
+    # away one: hb_at None let an anchor go at once, past far_at and
+    # STILL_RUN, in the first metres walked out of the house. Now the first
+    # one waits STILL_BACK, and those checks hold meanwhile
+    gl.log_reset()
+    gl.log["still"] = sl = gl._still_state()
+    sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10, home=True)
+    _hf_hb = gl._still_heartbeat
+    _hf_beats = []
+    gl._still_heartbeat = lambda now: _hf_beats.append(now)
+    _hf_w = dict(gl.wifi)
+    try:
+        gl.wifi.update(state="connected", home=False, ssid="phone")
+        gl.st.update(valid=True, date="2026-10-18", time="10:00:00", alt=None,
+                     hdop=None, fixtype=3)
+        gl._still_active(_clock[0], (47.50005, 19.0))
+        _hf_flip = (sl["home"], sl["hb_at"] is not None)
+        gl._still_beat(_clock[0])
+        _hf_now = len(_hf_beats)
+        _clock[0] += gl.STILL_BACK + 2000
+        gl._still_beat(_clock[0])
+        _hf_later = len(_hf_beats)
+    finally:
+        gl._still_heartbeat = _hf_hb
+        gl.wifi.clear()
+        gl.wifi.update(_hf_w)
+        gl.log_reset()
+    check("HOME-FLIP: a home stay turned away by a hotspot writes no anchor at once; the "
+          "first comes after STILL_BACK",
+          _hf_flip == (False, True) and _hf_now == 0 and _hf_later == 1,
+          repr((_hf_flip, _hf_now, _hf_later)))
+
     # walking (1.4 m/s) is never a stay, even with the speed reading low
     sv_reset()
     for i in range(10 * 60):
@@ -23506,7 +23562,8 @@ if _mf_pv != "11.0.0" or not _mf_font:
                % (_mf_pv, _mf_font))
 else:
     _mf_td = tempfile.mkdtemp(prefix="font-")
-    _mf_r = subprocess.run([sys.executable, _mf_path], cwd=_mf_td, capture_output=True, text=True)
+    _mf_r = subprocess.run([sys.executable, _mf_path, os.path.join(_mf_td, "gps_tft_font.py")],
+                           cwd=_mf_td, capture_output=True, text=True)
     with open(os.path.join(ROOT, "gps_tft_font.py"), "rb") as f:
         _mf_a = f.read()
     with open(os.path.join(_mf_td, "gps_tft_font.py"), "rb") as f:
@@ -26018,10 +26075,92 @@ try:
                       re.search(r"<name>([^<]*)</name>", r_.stdout).group(1),
                       r_.stdout.count("<trkpt")))
     check("RV14-14: trk2gpx warns on stderr when a non-empty file gives no "
-          "point (CRLF line ends named); the track's name loses only the "
+          "point (CRLF line ends named) and exits 1; the track's name loses only the "
           "suffix",
-          r3_14 == [(0, True, True, "my.trip", 0),
+          r3_14 == [(1, True, True, "my.trip", 0),
                     (0, False, False, "2026.track1", 1)], repr(r3_14))
+
+    # T2G-EDGES: a parked .bad (.trk.bad.err, .trb.bad.err: text) is taken;
+    # a longitude that rounds to 180.000000 is written -180.000000 (GPX 1.1:
+    # under 180); the name has no control character, no surrogate (a file
+    # name that is not UTF-8) and no directory (a Windows path); a line over
+    # LINE_MAX is skipped as the logger skips it; an empty file exits 1;
+    # after a damaged .trb record the next keyframe starts a segment
+    _t2 = []
+    for nm_, body_ in (("a.trb.bad.err", HEADER + trk_line(47.5, 179.9999997, "2026-10-18T08:00:00Z")),
+                       ("b\x01c.trk", HEADER + trk_line(47.5, 19.0, "2026-10-18T08:00:01Z")
+                        + "47.5,19.0," + "0" * 600 + ",1.5,20261018T080002Z\n")):
+        p_ = os.path.join(_r3_dir, nm_)
+        with builtins.open(p_, "w") as f:
+            f.write(body_)
+        r_ = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"), p_],
+                            capture_output=True, text=True)
+        _t2.append((r_.returncode, r_.stdout.count("<trkpt"),
+                    re.findall(r'lon="([^"]+)"', r_.stdout),
+                    (re.search(r"<name>([^<]*)</name>", r_.stdout) or [None, None])[1]))
+    _t2_nu = os.path.join(os.fsencode(_r3_dir), b"x\xff.trk")
+    with builtins.open(_t2_nu, "wb") as f:
+        f.write((HEADER + trk_line(47.5, 19.0, "2026-10-18T08:00:03Z")).encode())
+    r_ = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"),
+                         _t2_nu], capture_output=True)
+    _t2.append((r_.returncode, b"<name>x?</name>" in r_.stdout))
+    _t2_e = os.path.join(_r3_dir, "empty.trk")
+    builtins.open(_t2_e, "w").close()
+    _t2.append(subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"),
+                               _t2_e], capture_output=True, text=True).returncode)
+    # a .trb: keyframe, deltas, a damaged record, the next keyframe
+    _t2_lines = [trk_line(47.5 + k * 1e-5, 19.0, "2026-10-18T08:%02d:%02dZ" % (k // 60, k % 60))
+                 for k in range(3 * gl.KEY_EVERY)]
+    gl._kb_start()
+    _t2_b = bytearray()
+    while True:                          # (KB_CHUNK at a time, as flush)
+        _t2_b += gl._kb_part(_t2_lines, len(_t2_lines), [])
+        if gl._kq[0] >= len(_t2_lines):
+            break
+    _t2_hit = next(i_ for i_ in range(5, len(_t2_b)) if _t2_b[i_] >= 0x80 and _t2_b[i_ - 1] < 0x80)
+    _t2_b[_t2_hit] = 0x41                      # a flag byte below 0x80: damaged
+    _t2_out = list(trk2gpx.trb_lines(bytes(_t2_b), "surrogateescape"))
+    _t2_seg = "-\n" in _t2_out[1:]
+    check("T2G-EDGES: .trb.bad.err taken, lon 180 written -180, a control character and a "
+          "non-UTF-8 byte out of the name, an over-long line skipped, an empty file exits 1, a "
+          "segment after a damaged record",
+          _t2[0][:3] == (0, 1, ["-180.000000"]) and _t2[1] == (0, 1, ["19.000000"], "b?c")
+          and _t2[2] == (0, True) and _t2[3] == 1 and _t2_seg,
+          repr((_t2, _t2_seg, _t2_out[:3])))
+
+    # FW-MANIFEST-FIELDS: firmware.py refuses a commit or a board the
+    # board's _ota_manifest_ok refuses (a 22-character hash with
+    # core.abbrev: signed, published, "bad manifest" on every board for
+    # good, and the publish removed the previous build's files)
+    _fm = []
+    for c_, b_ in (("abcdef0123456789abcdef", "GPS_LOGGER_S3"), ("ABC1234", "GPS_LOGGER_S3"),
+                   ("abc1234", ""), ("abc1234", "A|B")):
+        try:
+            _fw.manifest(_r3_dir, "/nonexistent", 1, c_, b_)
+            _fm.append("written")
+        except ValueError:
+            _fm.append("refused")
+        except OSError:
+            _fm.append("os")
+    check("FW-MANIFEST-FIELDS: a commit over 20 hex, uppercase, an empty board or one with "
+          "a | is refused before anything is signed",
+          _fm == ["refused"] * 4, repr(_fm))
+
+    # F32-FIELDS: MicroPython's float() reads ".", "+." and ".e1" as 0.0 (a
+    # ghost point at the equator went up); a single-precision float rounds
+    # 90.000003 onto 90.0 (past the limit, uploaded)
+    _ff = []
+    for txt_ in (b".", b"+.", b".e1", b"-", b"47.5"):
+        gl._rbuf[0:len(txt_)] = txt_
+        _ff.append(gl._fnum(0, len(txt_)))
+    _fp = []
+    for txt_ in (b"90.000003", b"90.000000", b"90", b"-180.000007", b"180.0"):
+        gl._rbuf[0:len(txt_)] = txt_
+        _fp.append(gl._past(0, len(txt_)))
+    check("F32-FIELDS: a field without a digit is no number; a digit past the point of a "
+          "value on its limit is past it",
+          _ff == [None, None, None, None, 47.5] and _fp == [True, False, False, True, False],
+          repr((_ff, _fp)))
 finally:
     gl.LOG_DIR, gl.DIAG = _r3_saved
     gl.wifi_reset()

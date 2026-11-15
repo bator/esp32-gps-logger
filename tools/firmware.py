@@ -114,6 +114,15 @@ def manifest(d, key_file, build, commit, board):
     """d/manifest.json for d's micropython-<commit>.bin and web-<commit>.html.gz,
     signed with the key in key_file (the page only gzipped: an older firmware
     after a rollback takes this too)."""
+    # what the board's _ota_manifest_ok takes, checked here: a manifest it
+    # refuses ("bad manifest" on every board, for good) was signed, written
+    # and published, and the publish removed the previous build's files
+    c = commit[:-6] if commit.endswith("-dirty") else commit
+    if not (0 < len(c) <= 20 and all(ch in "0123456789abcdef" for ch in c)):
+        raise ValueError("commit %r: the board takes 1-20 lowercase hex"
+                         " (git's short hash), maybe -dirty" % commit)
+    if not board or "|" in board:
+        raise ValueError("board %r: empty or with a |" % board)
     key = read_key(key_file)
 
     def meta(name):
