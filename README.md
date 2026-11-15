@@ -49,6 +49,7 @@ firmware R6.0.0.0Build3700.
 |----------|------|
 | UC6580 TX → ESP RX / ESP TX → UC6580 RX, 115200 baud (UART1) | 33 / 34 |
 | Vext: high powers the UC6580, its LNA and the TFT | 3 |
+| Battery voltage: VBAT through 390k/100k (×4.9) / divider on (high) | 1 / 2 |
 | TFT (ST7735S, 160×80): SCK / MOSI / CS / DC / RST / backlight | 41 / 42 / 38 / 40 / 39 / 21 |
 | Boot bypass → GND (GPIO0, the button, is the download mode) | 7 |
 | USER button (full backlight for a minute; held at a reset it is the download mode) | 0 |
@@ -696,6 +697,7 @@ the *Event log* below; `/status.json?diag` carries the last 15 lines,
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
 | `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`); at home, if it stays low for 5 minutes with tracks waiting, the board reboots cleanly (at most once per 30 minutes) |
+| `vbat V/S` | The battery: median of 32 reads and their 10th-90th percentile spread, V (a spread over 0.5 V is no battery: the charger's swing on USB) |
 | `bugs`, `diag_errs` | Only when there are any: each guarded tick's bugs since boot (`bugs upload:12,wifi:1`), diag lines that failed to write (`diag_errs 3`; also in `/status.json`) |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
@@ -720,7 +722,11 @@ whether the upload's TLS is verified (`tls`), `upload_age_s` (seconds since the
 last accepted batch, `null` for none since boot), the day history's
 `days`, stay; uptime and how long the previous run lasted (e.g. `58 min
 14 s`; seconds in the JSON, `prev_end` the time of its last line), boot
-cause, the build (`fw`, `fw_build`), chip temperature, free Python heap
+cause, the build (`fw`, `fw_build`), chip temperature, the battery
+(`vbat`: median of 32 reads in V, `vbat_swing`: their 10th-90th
+percentile spread; `battery`: the page's text, `3.95 V`, or `none, on USB`
+when the spread is over `VBAT_SWING` 0.5 V: without a battery the
+charger's output swings, measured 0.84-0.94 V on USB), free Python heap
 and flash,
 WiFi, keep-alive pulses; with `?diag` (`/status.json?diag`) also the last
 lines of the diagnostic log (the page itself reads the whole log, below).

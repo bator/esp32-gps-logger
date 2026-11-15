@@ -8861,6 +8861,77 @@ check("FIX-DIM: after a no-fix GSA round a valid RMC keeps 3D/2D; RMC V waits",
       (fd3, fd2, fdv) == ("3D fix", "2D fix", "Waiting fix"),
       "%r %r %r" % (fd3, fd2, fdv))
 
+# VBAT: the battery through the 390k/100k divider on GPIO1 (x4.9), the
+# divider switched on by GPIO2 at import. A steady read is a battery (the
+# median, in status.json and the diag line); the charger's swing without a
+# battery (measured on USB: 3.03-4.12 V in 32 reads) is "none, on USB"; no ADC is None,
+# and the diag line stays as it was.
+
+
+class _VbAdc(object):
+    ATTN_2_5DB = 1
+    uv = []
+    made = []
+
+    def __init__(self, pin, atten=None):
+        _VbAdc.made.append((pin.n, atten))
+        self._i = 0
+
+    def read_uv(self):
+        v = _VbAdc.uv[self._i % len(_VbAdc.uv)]
+        self._i += 1
+        return v
+
+
+def _vb_read(uvs):
+    _VbAdc.uv = uvs
+    gl._vb[:] = [None, None, None, None]
+    return gl._vbat()
+
+
+_vb_m = sys.modules["machine"]
+_vb_ctl = [lv for lv in _pin_levels if lv[0] == gl.HELTEC_VBAT_CTL]
+_vb_m.ADC = _VbAdc
+try:
+    vb_steady = _vb_read([806000 + (i % 3) * 1000 for i in range(32)])
+    vb_rows = dict(gl._web_rows())
+    vb_said = []
+    _vb_dw = gl._diag_write
+    gl._diag_write = vb_said.append
+    try:
+        gl._diag(_clock[0])
+    finally:
+        gl._diag_write = _vb_dw
+    vb_cached = (_VbAdc.uv.__setitem__(0, 1), gl._vbat())[1]
+    vb_swing = _vb_read([618000 + (i * 7187) % 223000 for i in range(32)])
+    vb_swing_bat = gl._battery(*vb_swing)
+    vb_made = _VbAdc.made[0]
+finally:
+    del _vb_m.ADC
+vb_none = _vb_read([1])
+vb_said0 = []
+_vb_dw = gl._diag_write
+gl._diag_write = vb_said0.append
+try:
+    gl._diag(_clock[0])
+finally:
+    gl._diag_write = _vb_dw
+gl._vb[:] = [None, None, None, None]
+check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V; "
+      "the charger's swing 'none, on USB'; no ADC None, diag line unchanged",
+      _vb_ctl and _vb_ctl[0][1] == 1
+      and vb_made == (gl.HELTEC_VBAT, _VbAdc.ATTN_2_5DB)
+      and vb_steady == (3.95, 0.01) and vb_cached == vb_steady
+      and (vb_rows["vbat"], vb_rows["vbat_swing"], vb_rows["battery"])
+      == (3.95, 0.01, "3.95 V")
+      and len(vb_said) == 1 and vb_said[0].endswith(" vbat 3.95/0.01")
+      and vb_swing[1] > gl.VBAT_SWING and vb_swing_bat == "none, on USB"
+      and vb_none == (None, None) and gl._battery(*vb_none) is None
+      and len(vb_said0) == 1 and " vbat " not in vb_said0[0],
+      "%r %r %r %r %r %r %r %r" % (_vb_ctl[:1], vb_made, vb_steady, vb_cached,
+                                   [vb_rows.get(k) for k in ("vbat", "vbat_swing", "battery")],
+                                   vb_said, vb_swing, vb_said0))
+
 # NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
 # bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
 # line "20A6-10-29T12:00:01Z" went into the track and became last_t, which no
@@ -14520,7 +14591,8 @@ else:
                   prev_run="2 min 30 s (last line x)",
                   prev_end=time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                          time.gmtime(now_ - 10492 - 30)),
-                  fw="86fb9c8", fw_build=1793548800, ota="current")
+                  fw="86fb9c8", fw_build=1793548800, ota="current",
+                  battery="3.95 V", vbat=3.95, vbat_swing=0.01)
         rb_ = subprocess.run([node, os.path.join(here, "web_page_test.js"),
                               os.path.join(here, "..", "web.html")],
                              input=json.dumps(jb), capture_output=True,
@@ -14546,8 +14618,9 @@ else:
            % time.strftime("%Y-%m-%d %H:%M", time.localtime(1793548800)))
     check("PAGE-BOOT: the device strip shows the uptime with the boot's local "
           "time, the cause and the previous run up to when; Firmware the build "
-          "date and 'up to date', the commit in the top bar",
+          "date and 'up to date', the commit in the top bar; the battery",
           any(b_ in dlb for b_ in boots) and fwl in syb
+          and '<div class=""><small>Battery</small><b>3.95 V</b></div>' in dlb
           and upb.endswith("&middot; FW 86fb9c8")
           and rbj.get("unlabeled") == [],
           repr((dlb[:400], syb[syb.find("Firmware") - 40:])))

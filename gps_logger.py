@@ -76,6 +76,19 @@ HELTEC_VEXT = 3                          # high: the rail of the UC6580
 HELTEC_TFT_BL = 21                       # the TFT's backlight (given to gps_tft.start)
 Pin(HELTEC_VEXT, Pin.OUT, value=1)
 Pin(HELTEC_TFT_BL, Pin.OUT, value=0)
+# The battery (SH1.25-2; the board charges it and switches between USB and
+# it): VBAT through 390k/100k to GPIO1 (ADC1_CH0), GPIO2 high switches the
+# divider on (left on: 8.6 uA at 4.2 V). Measured on USB without a battery
+# (2026-11-15, 12 rounds): the charger's output swings, 32 reads 3.01-4.29 V,
+# median 3.50-3.60 V, 10th-90th percentile spread 0.84-0.94 V, so a wide
+# spread is no battery, not its voltage (_vbat). A round takes ~5 ms.
+HELTEC_VBAT = 1                          # ADC1_CH0: VBAT / VBAT_DIV
+HELTEC_VBAT_CTL = 2                      # high: the divider on
+VBAT_DIV = 4.9                           # (390k + 100k) / 100k
+VBAT_N = 32                              # reads a measurement
+VBAT_SWING = 0.5                         # V of 10th-90th percentile spread
+                                         # above which there is no battery
+Pin(HELTEC_VBAT_CTL, Pin.OUT, value=1)
 
 # The receiver (gps_receiver.py): its UART, the NMEA, the seconds it publishes
 # in st. It writes diag lines and feeds the watchdog through what is bound here.
@@ -588,14 +601,17 @@ def _heap_note(phase):
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
-    then _words; with a guarded tick's bug since boot "bugs upload:12" (the
+    then _words, the battery "vbat 3.95/0.04" (median/spread V); with a
+    guarded tick's bug since boot "bugs upload:12" (the
     count each, _tick_bugs) and with a failed diag write "diag_errs 3"."""
     b = _tick_bugs(",", False)
+    vb, vw = _vbat()
     _diag_write(
-        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s%s%s" % (
+        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s%s%s%s" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
             st["loops"], _rcv.sv_seen(), _rcv.sv_used(), status().replace(" ", "_"),
-            _words(), "" if b is None else " bugs " + b,
+            _words(), "" if vb is None else " vbat %.2f/%.2f" % (vb, vw),
+            "" if b is None else " bugs " + b,
             " diag_errs %d" % _diag_errs[0] if _diag_errs[0] else ""))
 
 def _diag_final():
@@ -6718,6 +6734,7 @@ def _web_rows():
     files, bad = _file_counts()
     heap = py_heap()
     still = log["still"]
+    vb, vw = _vbat()
     return [
         ("fix", status()),
         ("sats", "%d / %s" % (view, _rcv.sv_used())),
@@ -6756,6 +6773,9 @@ def _web_rows():
          else prev_run["end"].replace(" ", "T")),
         ("boot_cause", cause),
         ("temp", _temp()),
+        ("vbat", vb),                    # (V; the charger's without one)
+        ("vbat_swing", vw),
+        ("battery", _battery(vb, vw)),
         ("mhz", machine.freq() // 1000000),
         ("mem", heap[0]),
         ("heap_kb", heap[1]),
@@ -6775,6 +6795,35 @@ def _web_rows():
         ("write_errs", log["err"]),    # MAX_BATCH, time back), track
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
     ]                                    # while the loop was blocked
+
+_vb = [None, None, None, None]           # (V, spread V, Stamp, ADC)
+
+def _vbat():
+    """The battery: (median V, 10th-90th percentile spread V) of VBAT_N
+    reads, at most every 30 s (the page asks every WEB_REFRESH, the diag
+    line every DIAG). (None, None) where there is no ADC."""
+    if _recent_s(_vb[2], 30):
+        return _vb[0], _vb[1]
+    v = w = None
+    try:
+        if _vb[3] is None:
+            _vb[3] = machine.ADC(Pin(HELTEC_VBAT), atten=machine.ADC.ATTN_2_5DB)
+        r = sorted(_vb[3].read_uv() for _ in range(VBAT_N))
+        k = VBAT_N // 10
+        v = round(r[VBAT_N // 2] * VBAT_DIV / 1e6, 2)
+        w = round((r[-1 - k] - r[k]) * VBAT_DIV / 1e6, 2)
+    except MemoryError:
+        raise
+    except Exception:
+        pass
+    _vb[0], _vb[1], _vb[2] = v, w, _stamp()
+    return v, w
+
+def _battery(v, w):
+    """The page's text: "3.95 V", "none, on USB" (the charger's swing
+    without a battery), None without a measurement."""
+    return None if v is None or w is None else (
+        "none, on USB" if w > VBAT_SWING else "%.2f V" % v)
 
 _fl = [None, None]                       # (KB, Stamp) of the last statvfs
 
