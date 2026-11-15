@@ -162,7 +162,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `SSID`, `WPA2` / `SSID2`, `WPA2_2` / `SSID3`, `WPA2_3` | Networks #1–#3 |
 | `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` | `1`/`0` (or `true`/`false`): treat as home. #1 is home by default, #2 and #3 are not. |
 | `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried although the scan never lists it by name: in every round whose scan shows an AP with an empty SSID (a hidden network still beacons), and in the first round after a link loss, a wake or an arrival and every 4th round otherwise. Set it for every hidden network: without it a hidden SSID is tried only in those first and 4th rounds (up to ~40 minutes apart). |
-| `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a console message. |
+| `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a line in the [diagnostic log](#diagnostic-log) (`env IP needs a valid IP and GW, using DHCP`). |
 | `GEO_URL` | Dawarich origin. Use `https://`; see [Upload](#upload). |
 | `API_KEY` | Dawarich API key, sent as `Authorization: Bearer <key>` |
 | `DEVICE_ID` | Overland tracker id, `[A-Za-z0-9._-]{1,32}` |
@@ -186,8 +186,13 @@ HOSTNAME=Dawarich-GPS-tracker
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored. A file saved as ANSI does not stop the boot: an SSID or password
-  that is not UTF-8 is used byte for byte, any other such value is skipped
-  with a console line.
+  that is not UTF-8 is used byte for byte, any other such value (or a key
+  that is not UTF-8) is skipped with a line in the diagnostic log.
+- A value out of range or unreadable keeps the default and says so in the
+  [diagnostic log](#diagnostic-log), on the console too (in the field there
+  is none): `env KEEPALIVE not 0 or 5-600 s, using 5 s`, the key named,
+  never the value. `DIAG` is read first, right after the boot line, so the
+  other keys' lines land in the log.
 
 A static IP for network #1 (a network without `IP` stays on DHCP, and moving
 from a static network to a DHCP one hands the interface back to DHCP):
@@ -536,9 +541,14 @@ exception type a boot; an exception in the receiver setup writes `bug gps
 setup <error>` the same way.
 A bug in the WiFi, upload or OTA tick, the status page's or a status
 line's, no longer resets the board: it is
-one diagnostic line a kind (`bug <tick> <error>`), that tick pauses 5 s
+one diagnostic line a kind (`bug <tick> <error>`; a kind is the tick and
+the exception type, so a message that varies is one kind, and one that
+goes on is written again every hour, `BUG_AGAIN`: the one line a boot
+rotated out of the log in a day or two), that tick pauses 5 s
 (`TICK_PAUSE`) and logging goes on; an upload bug also backs the upload
-off. Ten MemoryErrors of one tick, each within 40 minutes of the one before
+off. Each tick's bugs since boot are counted: `tick_bugs` in
+`/status.json` (`upload:1234 ValueError('x')`, the last one each) and
+`bugs upload:1234,wifi:2` at the end of the diag status line. Ten MemoryErrors of one tick, each within 40 minutes of the one before
 (`GUARD_MEM_MAX`, `GUARD_MEM_QUIET`: over the longest upload backoff, so a
 lasting one in a backed-off tick keeps counting; counted per tick, and a
 pass that runs through between them, an upload in its backoff or an idle
@@ -628,7 +638,7 @@ the *Event log* below; `/status.json` still carries the last 15 lines,
 | Field | Meaning |
 |-------|---------|
 | `boot cause N` | Why the chip started (`machine.reset_cause()` of MicroPython 1.29): 1 power-on (also a brownout, or a power bank switching back on), 2 hard reset (the logger's own reset after a crash or for TLS memory, `mpremote reset`, a panic), 3 watchdog, 4 deep sleep, 5 soft reset (Ctrl-D), 0 other (e.g. a reset over USB-JTAG) |
-| `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; exact before a deliberate reset, which writes a status line first; `0` = under a minute, `-` = no log) |
+| `prev_up` | On the boot line: how long the run before lasted, in seconds, from its last lines (to within a minute; exact before a deliberate reset, which writes a status line first; `0` = under a minute, `-` = no log, or more than 40 event lines after its last status line). `/diag.1` only when the whole of `/diag.log` has no status, crash or boot line (just rotated) |
 | `up` | Seconds since boot (summed from tick differences, so it does not wrap after 12.4 days) |
 | `utc` | GPS time, `-` until the receiver has one |
 | `nmea ok/bad` | Valid and broken NMEA sentences so far |
@@ -638,6 +648,7 @@ the *Event log* below; `/status.json` still carries the last 15 lines,
 | `hdop`, `points`, `sent` | Last HDOP, points logged and uploaded since boot |
 | `wifi`, `pulses`, `mem` | WiFi state (spaces as `_`), keep-alive pulses so far, free Python heap in bytes |
 | `idf F/L` / `heap` | ESP-IDF heap free and its largest block, KB, then the Python heap size, KB. TLS needs ~40 KB in one block; below 48 KB (`TLS_MIN_KB`) no POST is tried (`upload low idf`); at home, if it stays low for 5 minutes with tracks waiting, the board reboots cleanly (at most once per 30 minutes) |
+| `bugs`, `diag_errs` | Only when there are any: each guarded tick's bugs since boot (`bugs upload:12,wifi:1`), diag lines that failed to write (`diag_errs 3`; also in `/status.json`) |
 
 **Status page:** <a id="status-page"></a>while the board is connected to
 WiFi it serves a page at `http://<board ip>/` (e.g.
@@ -1117,8 +1128,8 @@ tell a stay from a drive, so the stay filter works on positions.
   what was held to the old track before it closes.
 - **Leaving home** is accepted only once the home network is out of range:
   below −85 dBm (`SEEN_MIN_RSSI`) on the home link or in a ~2 s scan while
-  the radio sleeps after it, below −75 dBm (`ROAM_MIN_RSSI`) in a scan
-  otherwise. While it is in
+  the radio sleeps after it (a hidden home's learned BSSIDs too), below
+  −75 dBm (`ROAM_MIN_RSSI`) in a scan otherwise. While it is in
   range the departure is a GPS jump (measured: a 194 m jump at a desk) and
   further departures wait 60 s.
 - **After a fix gap** (over 30 s): fixes more than 150 m from the open window

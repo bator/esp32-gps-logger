@@ -334,13 +334,13 @@ def _mhz_env(env, key, default):
     try:
         n = int(v)
     except ValueError:
-        print(key, "invalid, using", default)
+        _env_refused(key, "invalid", default)
         return default
     allowed = (20, 40, 80, 160, 240)
     if n == 0 or n in allowed:
         return n
-    print(key, "not 0 or", "/".join(str(m) for m in allowed), "on this",
-          "board, using", default)
+    _env_refused(key, "not 0 or %s on this board" % "/".join(
+        str(m) for m in allowed), default)
     return default
 
 def _words():
@@ -376,7 +376,7 @@ def _diag_env(env):
     elif 10 <= n <= 3600:
         DIAG = n * 1000
     else:
-        print("DIAG not 0 or 10-3600 s, using", DIAG // 1000, "s")
+        _env_refused("DIAG", "not 0 or 10-3600 s", "%d s" % (DIAG // 1000))
 
 def _diag_write(line):
     """Append one line to DIAG_FILE (closed again, so a power-off loses at
@@ -404,7 +404,10 @@ def _diag_write(line):
         finally:
             f.close()
     except Exception as e:
+        _diag_errs[0] += 1               # (status.json, the next diag line)
         print("diag", repr(e))
+
+_diag_errs = [0]                         # diag lines that failed to write
 
 def _diag_utc(fx=None):
     t = _fix_s(fx)
@@ -460,11 +463,30 @@ uptime_s = _stamp
 # ("status", "crash" or "short"). Read once at boot.
 prev_run = {"up": None, "end": None, "how": None}
 
+DIAG_PREV = (8, 40)                      # last lines of DIAG_FILE searched
+                                         # for the run's end, then more
+
 def _diag_prev():
     prev_run.update(up=None, end=None, how=None)
-    # a rotation leaves the new file with the line that caused it, which
-    # need not be a status line: then the older file holds the run's end
-    lines = (_diag_tail(DIAG_OLD, 8) or []) + (_diag_tail(DIAG_FILE, 8) or [])
+    # DIAG_OLD only when DIAG_FILE was read whole without the run's end (a
+    # rotation leaves the new file with the line that caused it, which need
+    # not be a status line): its tail is older than all of DIAG_FILE, and
+    # behind 8 event lines a run's last status line read as a run of days
+    # before. More events than DIAG_PREV's last: unknown
+    size = _file_size(DIAG_FILE) or 0
+    for n in DIAG_PREV:
+        lines = _diag_tail(DIAG_FILE, n) or []
+        if _diag_prev_in(lines):
+            return
+        if len(lines) < n and size <= DIAG_LINE * n:
+            break                        # (all of it was read)
+    else:
+        return
+    _diag_prev_in(_diag_tail(DIAG_OLD, DIAG_PREV[0]) or [])
+
+def _diag_prev_in(lines):
+    """prev_run from the last status, crash or boot line in lines: True
+    when one was found."""
     for line in reversed(lines):
         f = line.split()
         try:
@@ -474,15 +496,16 @@ def _diag_prev():
                 if len(t) == 16:
                     prev_run["end"] = "%s-%s-%s %s:%s:%sZ" % (
                         t[0:4], t[4:6], t[6:8], t[9:11], t[11:13], t[13:15])
-                return
+                return True
             if line.startswith("crash up "):
                 prev_run["up"], prev_run["how"] = int(f[2]), "crash"
-                return
+                return True
             if line.startswith("boot "):
                 prev_run["up"], prev_run["how"] = 0, "short"
-                return
+                return True
         except (ValueError, IndexError):
             continue
+    return False
 
 def _hms(secs):
     """Seconds as '45 s', '12 min 05 s', '3 h 04 min', '2 d 03 h'."""
@@ -565,12 +588,15 @@ def _heap_note(phase):
 def _diag(now):
     """One line every DIAG ms: uptime, GPS time, NMEA sentences good/bad,
     receiver restarts and reset-loop warnings, satellites seen/used, fix,
-    then _words."""
+    then _words; with a guarded tick's bug since boot "bugs upload:12" (the
+    count each, _tick_bugs) and with a failed diag write "diag_errs 3"."""
+    b = _tick_bugs(",", False)
     _diag_write(
-        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s" % (
+        "up %d utc %s nmea %d/%d gpsboots %d loops %d sats %d/%s fix %s %s%s%s" % (
             uptime_s(now), _diag_utc(), st["ok"], st["err"], st["gps_boots"],
             st["loops"], _rcv.sv_seen(), _rcv.sv_used(), status().replace(" ", "_"),
-            _words()))
+            _words(), "" if b is None else " bugs " + b,
+            " diag_errs %d" % _diag_errs[0] if _diag_errs[0] else ""))
 
 def _diag_final():
     """A status line right before a deliberate reset: the next boot reads
@@ -699,18 +725,22 @@ def load_env(path):
                 try:
                     k = k.decode()
                 except UnicodeError:
+                    _say("env a key not UTF-8, its line skipped")
                     continue
                 try:
                     v = v.decode()
                 except UnicodeError:
                     if k[:4] not in ("SSID", "WPA2"):
-                        print("env", k, "not UTF-8, skipped")
+                        _say("env %s not UTF-8, skipped" % k)
                         continue
                 env[k] = v
     except OSError:
         pass                             # no .env on the device
-    except Exception as e:
-        print("env", repr(e))
+    except Exception as e:               # (the type only: no value)
+        try:
+            _say("env read stopped by %s, the rest skipped" % type(e).__name__)
+        except Exception:
+            pass
     return env
 
 def _plain(v):
@@ -784,14 +814,14 @@ def _static_ip(env, keys):
     ip = _ipv4(raw)
     gw = _ipv4(_plain(env.get(gk)))
     if not ip or not gw:
-        print("static ip", ipk, "needs a valid", ipk, "and", gk, "- using DHCP")
+        _env_refused(ipk, "needs a valid %s and %s" % (ipk, gk), "DHCP")
         return None
     mask_raw, dns_raw = _plain(env.get(mk)), _plain(env.get(dk))
     mask, dns = _ipv4(mask_raw), _ipv4(dns_raw)
     if mask_raw and not mask:
-        print("static ip", mk, "invalid - using 255.255.255.0")
+        _env_refused(mk, "invalid", "255.255.255.0")
     if dns_raw and not dns:
-        print("static ip", dk, "invalid - using", gk)
+        _env_refused(dk, "invalid", gk)
     return (ip, mask or "255.255.255.0", gw, dns or gw)
 
 def _say(line):
@@ -799,6 +829,11 @@ def _say(line):
     SSID or a password never goes into either), a GPS or heap note."""
     print(line)
     _diag_write(line)
+
+def _env_refused(key, why, used):
+    """A .env value refused (_say: in the field there is no console): the
+    key, why, and what is used instead, never the value itself."""
+    _say("env %s %s, using %s" % (key, why, used))
 
 def _load_nets(env):
     """Up to three networks from .env. The same SSID twice: the first entry
@@ -947,7 +982,7 @@ def _scan_empty(aps, k="empty"):
     n = wifi[k] = wifi[k] + 1
     return n == 1
 
-def _scan_known(w, fx=None):
+def _scan_known(w, fx=None, lim=None):
     """Visible known nets, strongest BSSID per SSID, or None if scan fails.
     Hidden APs are listed with an empty SSID; the strongest blank RSSI is
     a hint that *some* hidden AP is nearby (not necessarily ours). One of
@@ -958,18 +993,23 @@ def _scan_known(w, fx=None):
     whose hidden-home try failed lately (blank_bad) is skipped. A
     MemoryError after the scan (the stay check, the copies below) is a
     failed scan too: it escaped wifi_tick and reset the board. The UART is
-    read first, and the scan counts as a keep-alive pulse (pb_at): a round
-    that found nothing was followed by a pulse's scan in the same pass, ~4 s
-    with no read, more than the UART buffer holds."""
+    read first and again after it (~2 s; the 8 KB buffer holds ~3.5 s, and
+    the connect or the clear that follows can take 500 ms more), and the
+    scan counts as a keep-alive pulse (pb_at): a round that found nothing
+    was followed by a pulse's scan in the same pass, ~4 s with no read,
+    more than the UART buffer holds. lim: the RSSI a learned BSSID of the
+    hidden home needs to be taken first (home_in_range's bar; default
+    ROAM_MIN_RSSI)."""
     _rcv.read_uart()
     try:
         aps = w.scan()
     except SCAN_ERR:
         aps = None
+    _rcv.read_uart()
     wifi["pb_at"] = time.ticks_ms()
     if aps is not None and not _scan_empty(aps):
         try:
-            return _scan_found(aps, fx)
+            return _scan_found(aps, fx, lim)
         except MemoryError:
             gc.collect()
     wifi["blank_rssi"] = None
@@ -978,8 +1018,10 @@ def _scan_known(w, fx=None):
     wifi["blank_any"] = False
     return None
 
-def _scan_found(aps, fx=None):
+def _scan_found(aps, fx=None, lim=None):
     """_scan_known's list from a good scan (aps)."""
+    if lim is None:
+        lim = ROAM_MIN_RSSI
     by = {}
     for n in wifi["nets"]:
         by[_ssid_b(n)] = n
@@ -1011,7 +1053,7 @@ def _scan_found(aps, fx=None):
         prev = best.get(ssid)
         if prev is None or rssi > prev[0]:
             best[ssid] = (rssi, bssid, by[ssid])
-    if own_rssi is not None and own_rssi >= ROAM_MIN_RSSI:
+    if own_rssi is not None and own_rssi >= lim:
         blank_rssi, blank_bssid = own_rssi, own_bssid
     wifi["blank_rssi"] = blank_rssi
     wifi["blank_bssid"] = blank_bssid
@@ -1056,7 +1098,7 @@ def home_in_range(fx=None):
     try:
         if off:
             w.active(True)
-        found = _scan_known(w, fx)
+        found = _scan_known(w, fx, lim)
     except SCAN_ERR:
         found = None
     finally:
@@ -1070,7 +1112,7 @@ def home_in_range(fx=None):
     for n in found:
         if n.get("home") and n.get("rssi", -100) >= lim:
             return True
-    return bool(_blank_home_ok(True))
+    return bool(_blank_home_ok(True, lim))    # (a hidden home: the same bar)
 
 def _home_veto(now, sl, fx=None):
     """A departure from a home stay while the home WiFi is still in range
@@ -1094,12 +1136,13 @@ def _has_home():
         c = wifi["hh"] = (nets, any(n.get("home") for n in nets))
     return c[1]
 
-def _blank_home_ok(strict=False):
-    """True if a hidden home is configured and a strong empty-SSID AP was
-    seen. strict ("home in range"): once BSSIDs are learned, only one of
-    them counts (_scan_known); else any strong blank AP does."""
+def _blank_home_ok(strict=False, lim=None):
+    """True if a hidden home is configured and a strong empty-SSID AP (at
+    lim, ROAM_MIN_RSSI by default) was seen. strict ("home in range"): once
+    BSSIDs are learned, only one of them counts (_scan_known); else any
+    strong blank AP does."""
     r = wifi["blank_rssi"]
-    if r is None or r < ROAM_MIN_RSSI:
+    if r is None or r < (ROAM_MIN_RSSI if lim is None else lim):
         return False
     if _blank_bad(wifi["blank_bssid"]):
         return False                     # a hidden-home try there failed
@@ -1707,7 +1750,7 @@ def _gps_sys_env(env):
     try:
         _rcv.UC_SYS = int(v[1:] if v[0] in "hH" else v, 16)
     except ValueError:
-        print("GPS_SYS invalid, using the receiver's own")
+        _env_refused("GPS_SYS", "invalid", "the receiver's own")
 
 def _min_move_env(env):
     """MIN_MOVE=<metres> in .env, 0-50 (decimals allowed): how far from the
@@ -1723,7 +1766,7 @@ def _min_move_env(env):
     if 0 <= m <= 50:
         MIN_MOVE = m
     else:
-        print("MIN_MOVE not 0-50 m, using", MIN_MOVE)
+        _env_refused("MIN_MOVE", "not 0-50 m", MIN_MOVE)
 
 def _keepalive_env(env):
     """KEEPALIVE=<seconds> in .env: 0 turns the keep-alive off, otherwise
@@ -1738,10 +1781,10 @@ def _keepalive_env(env):
             elif 5 <= n <= 600:
                 PB_KEEPALIVE = n * 1000
             else:
-                print("KEEPALIVE out of 0 or 5-600 s, using",
-                      PB_KEEPALIVE // 1000, "s")
+                _env_refused("KEEPALIVE", "not 0 or 5-600 s",
+                             "%d s" % (PB_KEEPALIVE // 1000))
         except ValueError:
-            print("KEEPALIVE invalid, using", PB_KEEPALIVE // 1000, "s")
+            _env_refused("KEEPALIVE", "invalid", "%d s" % (PB_KEEPALIVE // 1000))
 
 def _pb_pulse_radio(w):
     """Radio on, one scan (it holds ~100 mA ~2 s, and watches the stay's access
@@ -1858,10 +1901,10 @@ def wifi_start(env=None):
         # needs 80 MHz or more (_set_freq); 20 / 40 are for a board with
         # the radio never on
         if 0 < CPU_MHZ < 80:
-            print("CPU_MHZ", CPU_MHZ, "too slow for WiFi, using 80")
+            _env_refused("CPU_MHZ", "too slow for WiFi", 80)
             CPU_MHZ = 80
         if 0 < CPU_MHZ_UPLOAD < 80:
-            print("CPU_MHZ_UP", CPU_MHZ_UPLOAD, "too slow for WiFi, using 80")
+            _env_refused("CPU_MHZ_UP", "too slow for WiFi", 80)
             CPU_MHZ_UPLOAD = 80
     _set_freq(CPU_MHZ)
     _web_env(env)
@@ -5554,7 +5597,7 @@ def _ota_env(env):
         if ota["state"] == "off":        # (not over "pending", "rolled back")
             ota["state"] = "idle"
     elif url or key:
-        print("OTA_URL / OTA_KEY: both needed, http(s) URL - no updates")
+        _env_refused("OTA_URL/OTA_KEY", "need both and an http(s) URL", "no updates")
 
 def _hmac_hex(key, msg):
     """HMAC-SHA256 of msg as hex (no hmac module in MicroPython)."""
@@ -6277,14 +6320,14 @@ def _web_env(env):
     if v:
         t = _truthy(v)
         if t is None:
-            print("WEB not 1/0, using", 1 if WEB else 0)
+            _env_refused("WEB", "not 1/0", 1 if WEB else 0)
         else:
             WEB = t
     v = _plain(env.get("WEB_AWAY"))
     if v:
         t = _truthy(v)
         if t is None:
-            print("WEB_AWAY not 1/0, using", 1 if WEB_AWAY else 0)
+            _env_refused("WEB_AWAY", "not 1/0", 1 if WEB_AWAY else 0)
         else:
             WEB_AWAY = t
 
@@ -6420,6 +6463,8 @@ def _web_rows():
         ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
         ("web_errs", _web_errs[0]),      # page requests that hit a bug
+        ("tick_bugs", _tick_bugs()),     # guarded ticks' bugs: count, last
+        ("diag_errs", _diag_errs[0]),    # diag lines that failed to write
         ("track_drop", log["drop"]),   # points lost (full flash,
         ("write_errs", log["err"]),    # MAX_BATCH, time back), track
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned
@@ -7099,15 +7144,28 @@ def _hist_lines(f, o, end, c):
     return n, end
 
 _web_errs = [0]                          # page requests that raised a bug
-_bugs = []                               # the kinds of caught bugs in diag
+_bugs = {}                               # a caught bug's kind -> Stamp of its
+                                         # last diag line
 BUG_KINDS = 8                            # at most this many kinds a boot
+BUG_AGAIN = 3600                         # s: a kind still happening is
+                                         # written again
 
-def _bug_once(line):
+def _bug_once(line, kind=None):
     """A caught bug's diag line, once a kind (a bug every request or every
-    loop must not fill the log), BUG_KINDS kinds at most."""
-    if line in _bugs or len(_bugs) >= BUG_KINDS:
+    loop must not fill the log), BUG_KINDS kinds at most. The kind is the
+    tick and the exception type (kind), not the text: a message that
+    varies (an index, a key) filled BUG_KINDS with one bug, and no later
+    one was logged. Written again every BUG_AGAIN while it keeps coming:
+    the one line a boot rotated out of the diag in a day or two while the
+    bug went on every 5 s."""
+    if kind is None:
+        kind = line
+    at = _bugs.get(kind)
+    if at is not None and _recent_s(at, BUG_AGAIN):
         return
-    _bugs.append(line)
+    if at is None and len(_bugs) >= BUG_KINDS:
+        return
+    _bugs[kind] = _stamp()
     _diag_write(line)
 
 def _web_bug(e):
@@ -7116,7 +7174,7 @@ def _web_bug(e):
     logger (run()'s handler)."""
     print("web error", repr(e))
     _web_errs[0] += 1
-    _bug_once("web error %s" % repr(e)[:60])
+    _bug_once("web error %s" % repr(e)[:60], ("web error", type(e)))
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
@@ -7207,7 +7265,7 @@ def _tft_env(env):
         if 0 <= n <= 100:
             TFT_LIGHT = n
         else:
-            print("TFT_LIGHT not 0-100, using", TFT_LIGHT)
+            _env_refused("TFT_LIGHT", "not 0-100", TFT_LIGHT)
     v = _plain(env.get("TFT_IDLE"))
     if v:
         try:
@@ -7217,7 +7275,7 @@ def _tft_env(env):
         if 0 <= n <= 86400:
             TFT_IDLE = n * 1000
         else:
-            print("TFT_IDLE not 0-86400 s, using", TFT_IDLE // 1000)
+            _env_refused("TFT_IDLE", "not 0-86400 s", TFT_IDLE // 1000)
 
 def _tft_light(now):
     """The backlight: full for TFT_WAKE after the USER button, else dark once a
@@ -7902,12 +7960,12 @@ def run():
         wifi_reset()
         up_reset()
         env = load_env(ENV_FILE)
+        _diag_env(env)                   # (first: the other readers' .env
+        _diag_boot()                     # mistakes go to the diag, _env_refused)
         _gps_sys_env(env)
         _min_move_env(env)
         _tft_env(env)
         _tft_start()                     # (at its light: .env is read)
-        _diag_env(env)
-        _diag_boot()
         ota_boot()
         _rcv.gps_setup()
         wifi_start(env)                  # (the one read of .env)
@@ -7945,6 +8003,17 @@ def run():
 
 TICK_PAUSE = 5000                        # ms a side tick that raised sits out
 _tick_bug = {}                           # its name -> ticks of the bug
+_tick_errs = {}                          # its name -> [bugs since boot, the
+                                         # last one] (status.json, diag)
+
+def _tick_bugs(sep=", ", full=True):
+    """The guarded ticks' bugs since boot, "upload:1234 ValueError('x')"
+    (full) or "upload:1234" each, None for none: the diag has one line a
+    kind an hour, these say how often and what came last."""
+    if not _tick_errs:
+        return None
+    return sep.join("%s:%d%s" % (k, v[0], " " + v[1] if full else "")
+                    for k, v in sorted(_tick_errs.items()))
 
 GUARD_MEM_MAX = 10                       # a tick's guarded MemoryErrors
 GUARD_MEM_QUIET = 2400000                # within this gap of each other: a
@@ -8026,8 +8095,13 @@ def _guarded(name, fn, arg=None):
             _schedule(now)
         try:                             # (the telling allocates: it must not
             _tick_bug[name] = now        # turn a MemoryError into a crash)
-            print("bug", name, repr(e))
-            _bug_once("bug %s %s" % (name, repr(e)[:60]))
+            c = _tick_errs.get(name)
+            if c is None:
+                c = _tick_errs[name] = [0, ""]
+            c[0] += 1
+            c[1] = repr(e)[:60]
+            print("bug", name, c[1])
+            _bug_once("bug %s %s" % (name, c[1]), (name, type(e)))
         except MemoryError:
             pass
 
