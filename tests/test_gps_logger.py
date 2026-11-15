@@ -552,10 +552,13 @@ WLAN.instances = []
 
 def FakeResp(code, headers=None):
     """What HTTP_POST returns: (code, Retry-After, Content-Type), the headers
-    bytes as they came."""
+    bytes as they came. Dawarich answers JSON: a test that wants no
+    Content-Type sets it None (a whole head without one: "")."""
     headers = headers or {}
-    retry, ctype = headers.get("Retry-After"), headers.get("Content-Type")
-    return code, retry and retry.encode(), ctype and ctype.encode()
+    retry = headers.get("Retry-After")
+    ctype = headers.get("Content-Type", "application/json; charset=utf-8")
+    return (code, retry and retry.encode(),
+            None if ctype is None else ctype.encode())
 
 
 def _post(url, data=None, headers=None, timeout=None):
@@ -2238,6 +2241,26 @@ try:
     check("UPL-6: a point time out of range (month, day, hour, minute, "
           "second) is skipped",
           (n, n_ok) == (9, 2) and got_t == want_t, repr((n, n_ok, got_t)))
+
+    # UPL-LATLON: a latitude past +-90 or a longitude past +-180 is a line
+    # counted but no point; +-90 and +-180 themselves are points
+    ll_p = os.path.join(end_dir, "20261005_190000.trk")
+    with open(ll_p, "wb") as f:
+        f.write((HEADER + "".join(
+            "%s,%s,1.0,1.0,20261101T1000%02dZ\n" % (la_, lo_, i_)
+            for i_, (la_, lo_) in enumerate(
+                (("91.000000", "19.100000"), ("-90.500000", "19.100000"),
+                 ("47.100000", "181.000000"), ("47.100000", "-180.000001"),
+                 ("90.000000", "-180.000000"))))
+            + gl.FOOTER).encode())
+    n, n_ok, size, new_off, eof = gl.read_batch(ll_p, 0)
+    j_ll = _strict_json(bytes(gl._body[:size]))
+    got_ll = ([x["geometry"]["coordinates"] for x in j_ll["locations"]]
+              if isinstance(j_ll, dict) else j_ll)
+    check("UPL-LATLON: lat 91 / -90.5, lon 181 / -180.000001 are no points; "
+          "90, -180 is",
+          (n, n_ok) == (5, 1) and got_ll == [[-180.0, 90.0]],
+          repr((n, n_ok, got_ll)))
 
     gl.LOG_DIR = saved_dir
 
@@ -11331,6 +11354,149 @@ check("UPL-4: SRV_ERR_MAX server errors on one batch hold that track, the "
       u4 == [(500, True, 4, True, False, False),
              (404, True, 4, True, False, False)], repr(u4))
 
+# UPL-SRV: a server-error hold is lifted by a 2xx of another track (the
+# server is back: after a 2-minute Dawarich restart the oldest track
+# waited BACKOFF_MAX); the same batch failing again is held by a hold no
+# 2xx lifts; a payload hold stays through another track's 2xx
+c_p = os.path.join(up_td, "20261003_100000.trk")
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+make_trk(ok_p, 4)
+make_trk(c_p, 2)
+_post_code[0] = 502
+for _ in range(gl.SRV_ERR_MAX):
+    pump()
+    _clock[0] += 1000
+us = [bad_p in gl.up["hold"]]
+_post_code[0] = 201
+pump()                                   # ok_p goes: bad_p's hold lifted
+us.append((os.path.exists(ok_p), bad_p in gl.up["hold"]))
+_post_code[0] = 502
+pump()                                   # bad_p's batch fails once more
+us.append(bad_p in gl.up["hold"])
+_post_code[0] = 201
+pump()                                   # c_p goes, bad_p stays held
+us.append((os.path.exists(c_p), bad_p in gl.up["hold"]))
+gl.up["hold"] = {}
+pump()
+us.append(os.path.exists(bad_p))
+check("UPL-SRV: a 2xx of another track lifts a server-error hold once; the "
+      "batch failing again stays held through the next 2xx",
+      us == [True, (False, False), True, (False, True), False], repr(us))
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+make_trk(ok_p, 4)
+gl.up["fail4"] = gl.MAX_GLOBAL_PAYLOAD - 1
+_post_code[0] = 422
+pump()                                   # "err payload": bad_p held
+us2 = [bad_p in gl.up["hold"], gl.up["state"]]
+_post_code[0] = 201
+pump()
+us2 += [os.path.exists(ok_p), bad_p in gl.up["hold"]]
+check("UPL-SRV: a payload hold stays through another track's 2xx",
+      us2 == [True, "err payload", False, True], repr(us2))
+for x_ in (bad_p, c_p, bad_p + ".pos"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-FAIL4: a 2xx ends a run of payload errors: two 422s, a 201, then a
+# 422 still quarantines (without the reset the third one was "err payload",
+# its track held BACKOFF_MAX)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+f4_p = os.path.join(up_td, "20261004_100000.trk")
+make_trk(f4_p, 4 * gl.UPLOAD_BATCH + 5)
+f4 = []
+for code_ in (422, 422, 201, 422):
+    _post_code[0] = code_
+    pump()
+    f4.append((gl.up["state"], gl.up["fail4"]))
+_post_code[0] = 201
+check("UPL-FAIL4: 422, 422, 201, 422: the last one is quarantined too",
+      f4 == [("quarantine", 1), ("quarantine", 2), ("ok", 0),
+             ("quarantine", 1)] and pts_in(f4_p + ".bad")
+      == 3 * gl.UPLOAD_BATCH, repr((f4, pts_in(f4_p + ".bad"))))
+for x_ in (f4_p, f4_p + ".pos", f4_p + ".bad"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-GATE: right after a quarantine (allow_bad off) the new .bad is not
+# sent in the next round (only after a 2xx or at the next boot)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+g_p = os.path.join(up_td, "20261004_110000.trk")
+make_trk(g_p, 3)
+_post_code[0] = 422
+pump()
+g1 = (os.path.exists(g_p), os.path.exists(g_p + ".bad"),
+      gl.up["allow_bad"], len(_posts))
+_post_code[0] = 201
+pump()
+g2 = (len(_posts), os.path.exists(g_p + ".bad"))
+check("UPL-GATE: a .bad is not retried in the round after its quarantine",
+      g1 == (False, True, False, 1) and g2 == (1, True), repr((g1, g2)))
+for x_ in (g_p, g_p + ".bad"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-EOFPOS: the commit at the end of a track takes its .pos with it, not
+# up_reset's orphan cleanup at the next boot
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+e_p = os.path.join(up_td, "20261004_120000.trk")
+make_trk(e_p, gl.UPLOAD_BATCH + 5)
+pump()
+e1 = (os.path.exists(e_p), os.path.exists(e_p + ".pos"))
+pump()
+e2 = (os.path.exists(e_p), os.path.exists(e_p + ".pos"))
+check("UPL-EOFPOS: a .pos is there between batches and goes with the last",
+      e1 == (True, True) and e2 == (False, False), repr((e1, e2)))
+for x_ in (e_p, e_p + ".pos"):
+    if os.path.exists(x_):
+        os.remove(x_)
+
+# UPL-ERR: a track parked as .err after read errors says so in the diag
+# log, so does a rename that fails too (it was a bare pass), and the JSON
+# counts .err files (err_files: at boot, and as they are parked)
+online(up_td)
+gl.up["url"], gl.up["key"] = "https://d.example", "k"
+make_trk(bad_p, 3)
+diag_clear()
+_ue_dg, gl.DIAG = gl.DIAG, 60000
+_ue_rn = os.rename
+ue = []
+gl.read_batch = rb_fail
+try:
+    os.rename = lambda a_, b_: ((_ for _ in ()).throw(OSError(5))
+                                if a_ == bad_p else _ue_rn(a_, b_))
+    for _ in range(gl.READ_ERR_MAX):
+        gl.up["hold"] = {}
+        pump()
+    ue.append((os.path.exists(bad_p), gl.up.get("err_files")))
+    os.rename = _ue_rn
+    for _ in range(gl.READ_ERR_MAX):
+        gl.up["hold"] = {}
+        pump()
+    ue.append((os.path.exists(bad_p + ".err"), gl.up.get("err_files"),
+               dict(gl._web_rows()).get("err_files")))
+    gl.up_reset()
+    ue.append(gl.up.get("err_files"))
+finally:
+    os.rename = _ue_rn
+    gl.read_batch = real_rb
+    gl.DIAG = _ue_dg
+ue_d = [l for l in diag_lines() if l.startswith("upload: ")]
+check("UPL-ERR: parking an unreadable track and failing to are diag lines; "
+      "err_files counts the .err files",
+      ue == [(True, 0), (True, 1, 1), 1]
+      and ue_d == ["upload: %s unreadable, not parked OSError(5)" % bad_p,
+                   "upload: %s unreadable, parked as .err" % bad_p],
+      repr((ue, ue_d)))
+os.remove(bad_p + ".err")
+diag_clear()
+
 # UPL-SKIP: one passing MemoryError on a track set up["skip"], cleared only
 # by a 2xx: the other track answered 500 for ever (and never held, the
 # filtered list was 1 long), the skipped one was never tried again this boot
@@ -11372,10 +11538,11 @@ check("UPL-SKIP: a track skipped after one MemoryError is tried again while "
 
 # POS-ERR: a batch with nothing to send whose .pos write fails is a flash
 # error, not an unreadable track: READ_ERR_MAX of them must not park it
+# (more than UPLOAD_SCAN bytes of them: the batch ends before the end)
 pe_p = os.path.join(up_td, "20261002_100000.trk")
-make_trk(pe_p, gl.UPLOAD_BATCH + 10,
-         times=["2026-10-05T00:00:%02dX" % (i % 60)
-                for i in range(gl.UPLOAD_BATCH + 10)])
+pe_n = gl.UPLOAD_SCAN // 30
+make_trk(pe_p, pe_n, times=["2026-10-05T00:00:%02dX" % (i % 60)
+                            for i in range(pe_n)])
 real_wo = gl.write_offset
 gl.write_offset = lambda path, off: (_ for _ in ()).throw(OSError(28))
 _posts[:] = []
@@ -11959,6 +12126,82 @@ check("TLS-CTX: a context that failed to be made is made on the next POST",
 check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
       to is not None and _clock[0] - t0 >= gl.HTTP_WAIT, repr(to))
 
+# TLS-AWAY: https without CA_FILE is "tls": "unverified" in the JSON and a
+# diag line at the start; UPLOAD_AWAY_UNVERIFIED=0 keeps such an upload
+# (and plain http) to home networks, verified TLS goes anywhere; the
+# default (1) uploads unverified away as before
+ta_td = tempfile.mkdtemp(prefix="tlsaway-")
+ta_tls = sys.modules.get("tls")
+sys.modules["tls"] = RvTls
+ta = []
+ta_d = []
+ta_dg = gl.DIAG
+ta_p = os.path.join(ta_td, "20261005_120000.trk")
+try:
+    gl.DIAG = 60000
+    gl.CA_FILE = os.path.join(ta_td, "ca.der")       # (none yet)
+    online(ta_td)
+    tls_ctx_reset()
+    gl._tls_context()
+    diag_clear()
+    gl._up_env({"UPLOAD_AWAY_UNVERIFIED": "0"})
+    ta_d = [l for l in diag_lines() if "not verified" in l]
+    ta.append((gl._tls_state(), dict(gl._web_rows()).get("tls"),
+               gl.UPLOAD_AWAY_UNVERIFIED))
+    make_trk(ta_p, 3)
+    gl.wifi["home"] = False
+    pump()
+    ta.append((len(_posts), gl.up["state"], os.path.exists(ta_p)))
+    gl.wifi["home"] = True
+    pump()
+    ta.append((len(_posts), os.path.exists(ta_p)))
+    with open(gl.CA_FILE, "wb") as f:
+        f.write(b"\x30\x82der")
+    tls_ctx_reset()
+    gl._tls_context()
+    make_trk(ta_p, 3)
+    gl.wifi["home"] = False
+    _posts[:] = []
+    pump()
+    ta.append((gl._tls_state(), len(_posts), os.path.exists(ta_p)))
+    gl.up["url"] = "http://d.example"
+    make_trk(ta_p, 3)
+    _posts[:] = []
+    pump()
+    ta.append((gl._tls_state(), len(_posts), gl.up["state"]))
+    gl._up_env({})                       # (no key: the setting stays)
+    ta.append(gl.UPLOAD_AWAY_UNVERIFIED)
+    gl.UPLOAD_AWAY_UNVERIFIED = True
+    os.remove(gl.CA_FILE)
+    gl.up["url"] = "https://d.example"
+    tls_ctx_reset()
+    gl._tls_context()
+    pump()
+    ta.append((gl._tls_state(), len(_posts), os.path.exists(ta_p)))
+finally:
+    gl.UPLOAD_AWAY_UNVERIFIED = True
+    gl.CA_FILE = "/ca.der"
+    gl.DIAG = ta_dg
+    gl.wifi["home"] = False
+    if ta_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = ta_tls
+    tls_ctx_reset()
+    diag_clear()
+check("TLS-AWAY: https without CA_FILE: 'tls' unverified and a diag line at "
+      "the start",
+      ta[:1] == [("unverified", "unverified", False)]
+      and ta_d == ["upload GEO_URL https without %s: the server is not "
+                   "verified, uploads away off"
+                   % os.path.join(ta_td, "ca.der")], repr((ta, ta_d)))
+check("TLS-AWAY: UPLOAD_AWAY_UNVERIFIED=0: an unverified or plain http "
+      "upload waits for a home network, a verified one goes away too; the "
+      "default sends unverified away",
+      ta[1:] == [(0, "err unverified", True), (1, False),
+                 ("verified", 1, False), ("off", 0, "err unverified"),
+                 False, ("unverified", 1, False)], repr(ta))
+
 # HEAD-ERR: once the status line is in, an error in the header loop keeps
 # the 2xx (a reset there resent the batch: a duplicate); bounded reads
 gl.socket, gl.select = fake_sockmod, fake_sel
@@ -12020,6 +12263,56 @@ check("HEAD-NAMES: _raw_post gives Retry-After and Content-Type by name, any cas
 check("HEAD-LINES: a head over HTTP_LINES lines stops there, the 200 stands",
       r_lines == (200, None, None) and n_lines == gl.HTTP_LINES + 1,
       "%r %d" % (r_lines, n_lines))
+
+# UPL-HEAD: _raw_post tells a whole head without a Content-Type (b"") from
+# one not read to its blank line (None); through upload_tick neither is a
+# commit: a captive portal's bare 200 (HTTP/1.0, no headers) deleted the
+# track as sent
+gl.socket, gl.select = fake_sockmod, fake_sel
+sys.modules["tls"] = RvTls
+uh_res = []
+uh_tick = []
+real_hp = gl.HTTP_POST
+uh_ru = gl._rcv.read_uart
+gl._rcv.read_uart = lambda: None
+try:
+    for resp_ in (b"HTTP/1.0 200 OK\r\n\r\n<html>login</html>",
+                  b"HTTP/1.1 201 Created\r\nServer: x\r\n",
+                  b"HTTP/1.1 201 Created\r\nContent-Type: application/json"
+                  b"\r\n\r\n{}"):
+        rv_sock[0] = RvSock(resp_, polls=0)
+        uh_res.append(gl._raw_post("https://d.example", b"{}", {}, 15))
+    uh_p = os.path.join(up_td, "20261005_101500.trk")
+    for resp_ in (b"HTTP/1.0 200 OK\r\n\r\n<html>login</html>",
+                  b"HTTP/1.1 200 OK\r\nServer: portal\r\nContent-Length: 20"
+                  b"\r\n\r\n<html>login</html>",
+                  b"HTTP/1.1 201 Created\r\nContent-Type: application/json"
+                  b"\r\n\r\n{}"):
+        online(up_td)
+        tls_ctx_reset()
+        gl.HTTP_POST = gl._raw_post
+        make_trk(uh_p, 5)
+        rv_sock[0] = RvSock(resp_, polls=0)
+        pump()
+        uh_tick.append((os.path.exists(uh_p), gl.up["sent"], gl.up["state"]))
+finally:
+    gl.HTTP_POST = real_hp
+    gl._rcv.read_uart = uh_ru
+    gl.socket, gl.select = real_mods[0], real_mods[1]
+    if real_mods[2] is None:
+        sys.modules.pop("tls", None)
+    tls_ctx_reset()
+    for x_ in (uh_p, uh_p + ".pos"):
+        if os.path.exists(x_):
+            os.remove(x_)
+check("UPL-HEAD: _raw_post gives b\"\" for a whole head without a "
+      "Content-Type, None for one not read to its end",
+      [r_[2] for r_ in uh_res] == [b"", None, b"application/json"]
+      and [r_[0] for r_ in uh_res] == [200, 201, 201], repr(uh_res))
+check("UPL-HEAD: a bare 200 (no Content-Type) keeps the track unsent; only "
+      "a JSON 201 sends it",
+      uh_tick == [(True, 0, "err net"), (True, 0, "err net"),
+                  (False, 5, "ok")], repr(uh_tick))
 
 # HOST-PORT: the Host header names a port that is not the scheme's default
 # (RFC 7230 5.4: a proxy or virtual host on :8443 routes by it)
@@ -13193,7 +13486,8 @@ tls_ctx_reset()
 real_hp = gl.HTTP_POST
 gl.HTTP_POST = gl._raw_post
 try:
-    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    rv_sock[0] = RvSock(b"HTTP/1.1 201 Created\r\n"
+                        b"Content-Type: application/json\r\n\r\n", polls=0)
     make_trk(hg_p, 3)
     pump()
 finally:
@@ -13243,7 +13537,8 @@ gl.HTTP_POST = gl._raw_post
 diag_clear()
 gl.DIAG = 60000
 try:
-    rv_sock[0] = RvSockGrow(b"HTTP/1.1 201 Created\r\n\r\n", polls=0)
+    rv_sock[0] = RvSockGrow(b"HTTP/1.1 201 Created\r\n"
+                            b"Content-Type: application/json\r\n\r\n", polls=0)
     make_trk(hg_p, 3)
     pump()
 finally:
@@ -13744,6 +14039,13 @@ else:
         ("tft light 100", "disp"),
         ("upload err html 403 (captive portal?)", "upl"),
         ("upload err not json 204 (captive portal?)", "upl"),
+        ("upload err head not read 201", "upl"),
+        ("upload: /gpx/20261102_100000.trk unreadable, parked as .err",
+         "track"),
+        ("upload: /gpx/20261102_100000.trk unreadable, not parked "
+         "OSError(5)", "track"),
+        ("upload GEO_URL https without /ca.der: the server is not "
+         "verified", "env"),
         ("upload aborted after 120 s", "upl"),
         ("upload err OSError(113)", "upl"),
         ("reboot tls memory 3", "reboot"),
@@ -18035,6 +18337,8 @@ try:
 
     # no keyframe in the first batch (its "=" damaged): the upload goes on
     # from the .pos "offset -1", it does not send the same batch forever
+    # (UPLOAD_SCAN 0: the empty batch ends at UPLOAD_BATCH records, before
+    # the next keyframe, so the "-1" is what is committed)
     online(_tb)
     gl.LOG_DIR = _tb
     _tb_write(pr, rl[:120], per=120)
@@ -18043,12 +18347,16 @@ try:
     with builtins.open(pr, "wb") as f:
         f.write(raw)
     poss = []
-    for _ in range(6):
-        if os.path.exists(pr):
-            pump()
-            if os.path.exists(pr + ".pos"):
-                with builtins.open(pr + ".pos") as f:
-                    poss.append(f.read().split())
+    _tb_scan, gl.UPLOAD_SCAN = gl.UPLOAD_SCAN, 0
+    try:
+        for _ in range(6):
+            if os.path.exists(pr):
+                pump()
+                if os.path.exists(pr + ".pos"):
+                    with builtins.open(pr + ".pos") as f:
+                        poss.append(f.read().split())
+    finally:
+        gl.UPLOAD_SCAN = _tb_scan
     ts = [x["properties"]["timestamp"] for x in locations()]
     check("TRKB: a first batch without a keyframe is passed ('offset -1'), "
           "the rest goes up once",
@@ -18291,6 +18599,100 @@ try:
           and len(ts) >= 190 and gl.up["left"] == 0,
           repr((os.path.exists(pr), len(ts), len(set(ts)), left_,
                 gl.up["left"])))
+
+    # UPL-SCAN: an erased block inside a .trb (a damaged 1-byte record each
+    # byte) went UPLOAD_BATCH bytes an upload round: ~160 rounds for 8 KB,
+    # a .pos write and UPLOAD_GAP each. While no point is valid a batch
+    # reads on to UPLOAD_SCAN bytes, and the next round follows at once
+    online(_tb)
+    gl.LOG_DIR = _tb
+    _tb_write(pr, rl[:200], per=200)
+    raw = _tb_raw(pr)
+    q_ = [i_ for i_ in _tb_starts(raw) if raw[i_] >= 0x80][20]
+    with builtins.open(pr, "wb") as f:
+        f.write(raw[:q_] + b"\xff" * 8192 + raw[q_:])
+    _posts[:] = []
+    us_w = []
+    us_wo = gl.write_offset
+
+    def _us_wo(path, off, key=None):
+        us_w.append(off)
+        return us_wo(path, off, key)
+    gl.write_offset = _us_wo
+    us_gap = []
+    try:
+        for _ in range(600):
+            if not os.path.exists(pr):
+                break
+            n0_, w0_ = len(_posts), len(us_w)
+            gl.upload_tick()
+            if len(us_w) > w0_ and len(_posts) == n0_:   # no POST: a commit
+                us_gap.append(gl.up["next_at"] - _clock[0])  # of nothing
+            _clock[0] += 1000
+    finally:
+        gl.write_offset = us_wo
+    ts = [x["properties"]["timestamp"] for x in locations()]
+    check("UPL-SCAN: an 8 KB erased block in a .trb takes 2-3 rounds "
+          "without a POST (not ~160), each followed at once; the points "
+          "around it up once",
+          not os.path.exists(pr) and 2 <= len(us_gap) <= 3
+          and all(g_ == 0 for g_ in us_gap) and len(ts) == len(set(ts))
+          and len(ts) >= 100, repr((os.path.exists(pr), us_gap, len(ts))))
+
+    # UPL-LEFT: flush adds the points it wrote to "left", a commit takes
+    # its batch's off again: a track written and uploaded ends at 0
+    online(_tb)
+    gl.LOG_DIR = _tb
+    gl.up["left"] = 0
+    _tb_write(pr, rl[:120], per=40)
+    ul = [gl.up["left"]]
+    pump()
+    ul.append(gl.up["left"])
+    for _ in range(5):
+        if os.path.exists(pr):
+            pump()
+    ul.append(gl.up["left"])
+    check("UPL-LEFT: three flushes of 40 make 'left' 120, a 50-point batch "
+          "takes 50 off, the last one leaves 0",
+          ul == [120, 70, 0] and not os.path.exists(pr), repr(ul))
+
+    # UPL-POS0: a .pos whose offset is inside a record (its keyframe good)
+    # is read from 0: the day history and a quarantine take the batch from
+    # 0 too (from the bad offset they got none of its lines: an empty .bad
+    # and the batch dropped)
+    p0 = []
+    p0_hd, p0_days = gl.HIST_DIR, gl.HIST_DAYS
+    try:
+        for code_ in (201, 422):
+            online(_tb)
+            gl.LOG_DIR = _tb
+            gl.HIST_DIR = tempfile.mkdtemp(prefix="pos0h-")
+            gl.HIST_DAYS = 7
+            _tb_write(pr, rl[:40], per=40)
+            raw = _tb_raw(pr)
+            st_ = _tb_starts(raw)
+            k_ = [i_ for i_ in st_ if raw[i_:i_ + 1] == b"="][0]
+            o_ = [a_ + 1 for a_, b_ in zip(st_, st_[1:])
+                  if a_ > k_ and b_ - a_ >= 2 and raw[a_] >= 0x80][3]
+            with builtins.open(pr + ".pos", "w") as f:
+                f.write("%d %d\n" % (o_, k_))
+            _post_code[0] = code_
+            pump()
+            _post_code[0] = 201
+            hist_n = sum(pts_in(os.path.join(gl.HIST_DIR, h_))
+                         for h_ in os.listdir(gl.HIST_DIR))
+            bad_n = pts_in(pr + ".bad") if os.path.exists(pr + ".bad") else 0
+            p0.append((code_, gl.read_pos(pr)[0] if os.path.exists(pr)
+                       else None, hist_n, bad_n))
+            for x_ in (pr, pr + ".pos", pr + ".bad"):
+                if os.path.exists(x_):
+                    os.remove(x_)
+    finally:
+        gl.HIST_DIR, gl.HIST_DAYS = p0_hd, p0_days
+        _post_code[0] = 201
+    check("UPL-POS0: a .pos inside a record, read from 0: the day history "
+          "(2xx) and the .bad (422) get every line of the batch",
+          p0 == [(201, None, 40, 0), (422, None, 40, 40)], repr(p0))
 
     # out of memory while encoding is no write failure: the batch waits
     online(_tb)
@@ -21850,7 +22252,7 @@ try:
           and not _rn_out and rn5b == (201, None, None), repr((rn5, rn5b)))
     check("RN-8: the status line's timeout is what is left of HTTP_WAIT "
           "after the poll, set on the raw socket",
-          rn8a == (204, None, None) and len(rn8) == 2 and rn8[0] == 15
+          rn8a == (204, None, b"") and len(rn8) == 2 and rn8[0] == 15
           and gl.HTTP_WAIT // 1000 - 1 <= rn8[1] <= gl.HTTP_WAIT // 1000,
           repr((rn8a, rn8)))
     # RN-6: with /ca.der and no fix since the boot (indoors, at home) every
@@ -22692,20 +23094,34 @@ try:
     try:
         gl.up_reset()
         gl.up.update(url="https://d.example", key="k")
+        diag_clear()
+        _r3_dg, gl.DIAG = gl.DIAG, 60000
         for ans in ((204, None, None), (200, None, b"text/plain"),
                     (200, None, b"text/html; charset=utf-8"),
                     (201, None, b"application/json; charset=utf-8"),
-                    (201, None, None)):
+                    (201, None, None), (200, None, b""),
+                    (503, None, None)):
             gl.HTTP_POST = lambda *a, _r=ans: _r
             r3_10.append(gl._http_post(2)[0])
+        r3_10d = [l for l in diag_lines() if l.startswith("upload err")]
+        gl.DIAG = _r3_dg
     finally:
         gl.HTTP_POST = _r3_hp
         gl.up_reset()
         diag_clear()
     check("RV14-10: a 204, a plain-text or HTML 2xx is no Dawarich answer "
-          "(a failed POST, the batch kept); JSON or no Content-Type (a head "
-          "not read) stays a success",
-          r3_10 == [None, None, None, 201, 201], repr(r3_10))
+          "(a failed POST, the batch kept); only a JSON 2xx is a success",
+          r3_10[:4] == [None, None, None, 201], repr(r3_10))
+    # UPL-JSON: a 2xx whose head was not read whole (no Content-Type known)
+    # or a whole head without a Content-Type is a failed POST with a diag
+    # line, not a commit (a portal's bare 200 deleted the track); a 503
+    # with no head read stays a 503
+    check("UPL-JSON: a 2xx with no head read or no Content-Type is a failed "
+          "POST and a diag line; other codes keep theirs",
+          r3_10[4:] == [None, None, 503]
+          and r3_10d[-2:] == ["upload err head not read 201",
+                              "upload err not json 200 (captive portal?)"],
+          repr((r3_10, r3_10d)))
 
     # RV14-11: a hold that ran out goes, whichever list is due
     gl.up_reset()

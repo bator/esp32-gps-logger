@@ -1867,6 +1867,7 @@ def wifi_start(env=None):
     _web_env(env)
     _ota_env(env)
     _ntp_env(env)
+    _up_env(env)                         # (after GEO_URL: its TLS note)
     DEVICE_ID = _safe_name(_plain(env.get("DEVICE_ID")), DEFAULT_DEVICE_ID)
     HOSTNAME = _safe_name(_plain(env.get("HOSTNAME"))
                           or _plain(env.get("DEVICE_ID")),
@@ -3647,7 +3648,8 @@ def _sample(now, fx=None):
 # problem: backoff, no further quarantine. .bad retries that still 4xx
 # never delete the quarantined data. The same batch answered SRV_ERR_MAX
 # times in a row with another code (5xx, 404, 403) holds its track while
-# others wait.
+# others wait; any track's 2xx lifts the first such hold. Only a 2xx with a
+# JSON Content-Type and a head read whole commits.
 #
 # TLS (mbedTLS) needs ~40 kB contiguous from the ESP-IDF heap, outside the
 # Python heap. If the Python heap ever grows (see gc.threshold at the top) it
@@ -3679,6 +3681,7 @@ def _rm_done(path):
             os.rename(path, path + ".err")
         except OSError:
             raise e
+        up["err_files"] += 1
         print("upload: cannot delete, parked", path + ".err")
         _diag_write("upload: %s cannot be deleted, parked as .err" % path)
         return
@@ -3759,7 +3762,8 @@ def up_reset():
               guard_hits=_guard["hits"], lowidf_at=None, lowidf_seen=None,
               lowpy_at=None, lowpy_seen=None, ok_at=None,
               lowidf_boot=lowboot, next_at=time.ticks_ms(),
-              rm_err={}, env_u=None, env_k=None, srv=None, err_ssid=None)
+              rm_err={}, env_u=None, env_k=None, srv=None, err_ssid=None,
+              srv_hold={}, err_files=0)
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
     _tls_ctx[0] = None
@@ -3777,6 +3781,8 @@ def up_reset():
             _rm(LOG_DIR + "/" + n)
         elif n.endswith(".pos") and n[:-4] not in have:
             _rm(LOG_DIR + "/" + n)       # orphan .pos or .bad.pos
+        elif n.endswith(".err"):
+            up["err_files"] += 1         # (parked: the page counts them)
     try:
         up["left"] = count_points()
     except MemoryError:
@@ -3936,9 +3942,10 @@ def _rd_rec(f):
         return _rd_line(f)
     j = a + 1
     i = 0
-    while i < 6 and j < n:
-        if m & (1 << i):
-            while j < n and _rbuf[j] >= 128:
+    e = a + 32 if a + 32 < n else n      # (past 31 bytes it is damaged
+    while i < 6 and j < n:               # whatever follows: a run of 0xFF
+        if m & (1 << i):                 # was scanned to _rbuf's end for
+            while j < e and _rbuf[j] >= 128:    # each of its bytes)
                 j += 1
             j += 1
         i += 1
@@ -4376,10 +4383,16 @@ def _trk_put(pos):
         pos += 1
     return _put(pos, _tail())
 
+UPLOAD_SCAN = 4096                       # bytes a batch with no valid point
+                                         # yet reads on past UPLOAD_BATCH
+
 def read_batch(path, off=0, key=None):
     """Fill _body with up to UPLOAD_BATCH valid points from byte offset off
     as Overland JSON -> (n, n_ok, body_len, new_off, eof).
-    Truncated / non-numeric / inf / over-long points are skipped.
+    Truncated / non-numeric / inf / over-long points are skipped. While
+    no point is valid it reads on past UPLOAD_BATCH, up to UPLOAD_SCAN
+    bytes from off: an erased block (0xFF, a damaged 1-byte record each)
+    went 50 bytes an upload round, ~8 min and ~80 .pos writes for 4 KB.
     A valid point that does not fit is left unread (eof=False). A .trk is
     parsed in _rbuf and written straight into _body: a few small objects
     per point (the float checks), not ~25 and a line buffer. A .trb is
@@ -4453,7 +4466,8 @@ def read_batch(path, off=0, key=None):
                 pos = _trk_put(pos)
                 sep = 1
                 n_ok += 1
-            if n >= UPLOAD_BATCH:
+            if n >= UPLOAD_BATCH and (n_ok
+                                      or _rd[0] + _rd[2] - off >= UPLOAD_SCAN):
                 break
         new_off = _rd[0] + _rd[2]
     if not sep:
@@ -4658,9 +4672,17 @@ SRV_ERR_MAX = 3                          # the same batch answered with a code
                                          # that is no payload error (5xx,
                                          # 404...) in a row: its file held
 
-def _hold_file(path, now, ms):
-    """Backoff one file so a stuck oldest track does not block the rest."""
+def _hold_file(path, now, ms, srv=False):
+    """Backoff one file so a stuck oldest track does not block the rest.
+    srv: a hold for server errors (SRV_ERR_MAX), which a 2xx of any track
+    lifts (the server is back: after a 2-minute Dawarich restart the
+    oldest track waited BACKOFF_MAX); any other hold (a payload, read or
+    .pos error) is the file's own and stays."""
     up["hold"][path] = time.ticks_add(now, ms)
+    if srv:
+        up["srv_hold"][path] = True
+    else:
+        up["srv_hold"].pop(path, None)
 
 def _bad_full_left():
     """True while a .bad that hit MAX_BAD_BYTES still exists on flash and
@@ -4788,6 +4810,53 @@ def _tls_ready(now):
     finally:
         _post_phase[0] = None
 
+UPLOAD_AWAY_UNVERIFIED = True            # .env: 0 sends only verified TLS
+                                         # (https with CA_FILE) off home
+
+def _tls_state():
+    """How the upload reaches GEO_URL (status.json "tls"): "verified"
+    (https, CA_FILE), "unverified" (https without it: CERT_NONE, an evil
+    twin hotspot sees the Bearer key), "off" (http, in the clear), "ca err"
+    (one that cannot be read: no POST at all), None without a GEO_URL."""
+    u = up["url"]
+    if not u:
+        return None
+    if not u.startswith("https"):
+        return "off"
+    if _tls_ctx[0] is not None:
+        return "unverified" if _tls_ctx[1] is None else "verified"
+    try:
+        return "unverified" if _ca_size() is None else "verified"
+    except OSError:
+        return "ca err"
+
+def _up_env(env):
+    """UPLOAD_AWAY_UNVERIFIED=0 in .env: an upload that is not verified TLS
+    (http, or https without CA_FILE) goes only on a home network. And at
+    the start a diag line when https goes without CA_FILE (nothing said
+    so at run time)."""
+    global UPLOAD_AWAY_UNVERIFIED
+    v = _plain(env.get("UPLOAD_AWAY_UNVERIFIED"))
+    if v:
+        t = _truthy(v)
+        if t is None:
+            print("UPLOAD_AWAY_UNVERIFIED not 1/0, using",
+                  1 if UPLOAD_AWAY_UNVERIFIED else 0)
+        else:
+            UPLOAD_AWAY_UNVERIFIED = t
+    if _tls_state() == "unverified":
+        print("WARNING: no %s - the server is not verified" % CA_FILE)
+        _diag_write("upload GEO_URL https without %s: the server is not "
+                    "verified, uploads away %s"
+                    % (CA_FILE, "on" if UPLOAD_AWAY_UNVERIFIED else "off"))
+
+def _away_unverified():
+    """UPLOAD_AWAY_UNVERIFIED off, on a network that is not home, and the
+    upload would not be verified TLS: no POST."""
+    if UPLOAD_AWAY_UNVERIFIED or at_home():
+        return False
+    return _tls_state() != "verified"
+
 _rtc_set = [False]                       # board clock set from the GPS once
 
 def _rtc_sync(now):
@@ -4910,12 +4979,16 @@ def _http_head(s, want, got):
     of a header named in want (lowercase) goes to got at the same index.
     More than HTTP_LINES pieces before the blank line raise: silently
     stopped, the rest of the head read as the body (a GET's sha256 failed
-    every check with no clue; a POST keeps its 2xx, the caller catches)."""
+    every check with no clue; a POST's caller catches: the head was not
+    read). -> True at the blank line, False when the answer ended before
+    it (the head not whole)."""
     bol = True
     for _ in range(HTTP_LINES):
         h = s.readline(HTTP_LINE)
-        if not h or (bol and h in (b"\r\n", b"\n")):
-            return
+        if not h:
+            return False
+        if bol and h in (b"\r\n", b"\n"):
+            return True
         if bol:
             k, _, v = h.partition(b":")
             k = k.strip().lower()
@@ -4937,8 +5010,10 @@ def _raw_post(url, data, headers, timeout):
     waits for a body) and the Bearer header, without the timeout. The body
     goes out in HTTP_CHUNK pieces and the wait for the answer polls, both
     reading the UART meanwhile, so a slow server costs no NMEA. -> (status
-    code, Retry-After, Content-Type), the two headers bytes, None when not
-    sent."""
+    code, Retry-After, Content-Type), the two headers bytes: Retry-After
+    None when not sent; Content-Type b"" when the head was read to its
+    blank line without one, None when the head was not read whole (a
+    reset, a timeout, the guard, MemoryError, over HTTP_LINES)."""
     _post_phase[0] = "connect"
     s, addr, https, host, hdr = _http_open("POST", url)
     raw = s                              # (the TLS socket has no settimeout)
@@ -4995,14 +5070,17 @@ def _raw_post(url, data, headers, timeout):
         line = first + s.readline(HTTP_LINE - 1) if first else first
         code = int(line.split(None, 2)[1])
         got = [None, None]
+        whole = False
         try:
             # the status is in: a reset, a timeout or the guard closing
-            # the socket in the headers must not turn a 2xx into a resend
-            # (a duplicate batch)
-            _http_head(s, (b"retry-after", b"content-type"), got)
+            # the socket in the headers keeps the code, but the head is
+            # not whole (_http_post: a 2xx then is no commit, resent and
+            # deduplicated by Dawarich, rather than a portal's bare 200
+            # taken for one and the track deleted)
+            whole = _http_head(s, (b"retry-after", b"content-type"), got)
         except Exception as e:
             print("upload head", code, repr(e))
-        return code, got[0], got[1]
+        return code, got[0], (got[1] or b"") if whole else None
     finally:
         _http_close(s)
 
@@ -5059,15 +5137,20 @@ def _http_post(size):
              "Authorization": "Bearer %s" % up["key"]},
             HTTP_TIMEOUT)
         retry = _retry_after_ms(retry)
-        ct = ctype.lower() if ctype else None
-        if 200 <= code < 300 and (code == 204
-                                  or (ct is not None and b"json" not in ct)):
-            # a 2xx that is no JSON (HTML, plain text, a 204 without a
-            # body) is a captive portal or a proxy answering, not Dawarich:
-            # without CA_FILE nothing else tells, and the batch counted as
-            # sent was deleted. (A 2xx whose head could not be read, no
-            # Content-Type, stays a 2xx: resending it would duplicate.)
-            if ct is not None and b"html" in ct:
+        ct = ctype.lower() if ctype else ctype   # (b"" and None kept apart)
+        if 200 <= code < 300 and (code == 204 or ct is None
+                                  or b"json" not in ct):
+            # only a JSON 2xx commits. One that is no JSON (HTML, plain
+            # text, no Content-Type, a 204 without a body) is a captive
+            # portal or a proxy answering, not Dawarich: without CA_FILE
+            # nothing else tells, and the batch counted as sent was
+            # deleted. A head not read whole (ctype None: a reset, a
+            # timeout, the guard) cannot tell either: resent, Dawarich
+            # deduplicates the points.
+            if ct is None:
+                print("upload: %d, head not read" % code)
+                _diag_write("upload err head not read %d" % code)
+            elif b"html" in ct:
                 print("upload: HTML answer, not Dawarich (captive portal?)")
                 _diag_write("upload err html %d (captive portal?)" % code)
             else:
@@ -5260,6 +5343,15 @@ def upload_tick():
             up["state"] = "idle"
         _schedule(now, BACKOFF_START)
         return
+    if _away_unverified():
+        # UPLOAD_AWAY_UNVERIFIED=0 and no verified TLS: not on this
+        # network. An error state, so the radio sleeps out the wait
+        # (_upload_wait); a home network is a new one (err_ssid,
+        # _up_net_new): the tracks are due there at once
+        up["state"] = "err unverified"
+        up["err_ssid"] = wifi["ssid"]
+        _schedule(now, BACKOFF_MAX)
+        return
     path = files[0]
     try:
         off, key = read_pos(path)
@@ -5301,12 +5393,16 @@ def upload_tick():
             try:
                 os.rename(path, path + ".err")
                 _rm(path + ".pos")
+                up["err_files"] += 1
                 print("parked", path + ".err")
+                _diag_write("upload: %s unreadable, parked as .err" % path)
                 # its points, never sent, leave "left" (it held the OTA);
                 # unreadable, it cannot be counted: count the rest
                 up["left"] = count_points()
-            except OSError:
-                pass
+            except OSError as e2:        # (held: tried again after the hold)
+                print("upload park", path, repr(e2))
+                _diag_write("upload: %s unreadable, not parked %r"
+                            % (path, e2))
         _hold_file(path, now, BACKOFF_MAX)
         _schedule(now)
         return
@@ -5334,7 +5430,9 @@ def upload_tick():
         except MemoryError:
             _low_mem(now)
             return
-        _schedule(now, UPLOAD_GAP)
+        # no POST was made: the rest of a damaged stretch is read on at
+        # once (the .pos moved, so this ends), not a gap per UPLOAD_SCAN
+        _schedule(now, 0 if n and not eof else UPLOAD_GAP)
         return
     gc.collect()                         # frees an empty grown heap area
     # both margins keep the IDF block free for TLS: not for plain http
@@ -5403,11 +5501,18 @@ def upload_tick():
         up["sent"] += n_ok
         up["ok_at"] = _stamp()
         up["fail4"] = 0
-        up["srv"] = None
+        se = up["srv"]
+        if se and se[0] == path:         # (another's run goes on: lifted
+            up["srv"] = None             # below, its next error holds again)
         up["backoff"] = BACKOFF_START
         up["allow_bad"] = True
         up["skip"] = None
         up["hold"].pop(path, None)
+        sh = up["srv_hold"]
+        if sh:                           # the server answers: server-error
+            for p in sh:                 # holds go, payload holds stay
+                up["hold"].pop(p, None)
+            sh.clear()
         _clear_bad_full(path)
         if not _bad_full_left():
             up["state"] = "ok"
@@ -5444,15 +5549,18 @@ def upload_tick():
             # the same batch answered so SRV_ERR_MAX times in a row (a 5xx
             # from one point, a 404 / 403 of a proxy): hold that track, the
             # others go (only the backoff: files[0] for ever, the rest
-            # blocked behind it). The only one waiting: the backoff alone
+            # blocked behind it). The only one waiting: the backoff alone.
+            # The first hold of a run a 2xx of another track lifts (the
+            # server was down, not this batch: a Dawarich restart held the
+            # oldest track 30 min); the run's count stays, so the batch
+            # failing once more is held again, by a hold no 2xx lifts
             se = up["srv"]
             if se and se[0] == path and se[1] == off:
                 se[2] += 1
             else:
                 se = up["srv"] = [path, off, 1]
             if se[2] >= SRV_ERR_MAX:
-                up["srv"] = None
-                _hold_file(path, now, BACKOFF_MAX)
+                _hold_file(path, now, BACKOFF_MAX, se[2] == SRV_ERR_MAX)
 
 def _fs_err(now):
     """A .pos write (or delete) failed: retry later, the track stays."""
@@ -6393,8 +6501,10 @@ def _web_rows():
         ("left", up["left"]),
         ("files", files),
         ("bad_files", bad),
+        ("err_files", up["err_files"]),  # (parked unreadable / undeletable)
         ("sent", up["sent"]),
         ("upload", up["state"]),
+        ("tls", _tls_state()),           # (https: is the server verified?)
         ("upload_err", up["err"]),
         ("upload_age_s", None if up["ok_at"] is None
          else _age_s(up["ok_at"])),
