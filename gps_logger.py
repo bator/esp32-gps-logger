@@ -4866,12 +4866,13 @@ def _tls_state():
         return None
     if not u.startswith("https"):
         return "off"
-    if _tls_ctx[0] is not None:
-        return "unverified" if _tls_ctx[1] is None else "verified"
     try:
-        return "unverified" if _ca_size() is None else "verified"
-    except OSError:
-        return "ca err"
+        sz = _ca_size()                  # (the file now, not the context:
+    except OSError:                      # one made before CA_FILE went away
+        return "ca err"                  # is made again unverified by
+    if _tls_ctx[0] is not None and sz == _tls_ctx[1]:   # _tls_ready)
+        return "unverified" if _tls_ctx[1] is None else "verified"
+    return "unverified" if sz is None else "verified"
 
 def _up_env(env):
     """UPLOAD_AWAY_UNVERIFIED=0 in .env: an upload that is not verified TLS
@@ -4899,6 +4900,15 @@ def _away_unverified():
     if UPLOAD_AWAY_UNVERIFIED or at_home():
         return False
     return _tls_state() != "verified"
+
+def _hold_unverified(now):
+    """UPLOAD_AWAY_UNVERIFIED=0 and no verified TLS: not on this network. An
+    error state, so the radio sleeps out the wait (_upload_wait); a home
+    network is a new one (err_ssid, _up_net_new): the tracks are due there
+    at once."""
+    up["state"] = "err unverified"
+    up["err_ssid"] = wifi["ssid"]
+    _schedule(now, BACKOFF_MAX)
 
 _rtc_set = [False]                       # board clock set from the GPS once
 
@@ -5387,13 +5397,7 @@ def upload_tick():
         _schedule(now, BACKOFF_START)
         return
     if _away_unverified():
-        # UPLOAD_AWAY_UNVERIFIED=0 and no verified TLS: not on this
-        # network. An error state, so the radio sleeps out the wait
-        # (_upload_wait); a home network is a new one (err_ssid,
-        # _up_net_new): the tracks are due there at once
-        up["state"] = "err unverified"
-        up["err_ssid"] = wifi["ssid"]
-        _schedule(now, BACKOFF_MAX)
+        _hold_unverified(now)
         return
     path = files[0]
     try:
@@ -5506,6 +5510,9 @@ def upload_tick():
         _rtc_sync(now)                   # certificate dates need the time
         if not _tls_ready(now):
             return
+        if _away_unverified():           # (CA_FILE gone since the check
+            _hold_unverified(now)        # above: the context made now is
+            return                       # CERT_NONE)
     if not _bad_full_left():
         up["state"] = "sending"
     _rcv.read_uart()                          # drain NMEA before blocking

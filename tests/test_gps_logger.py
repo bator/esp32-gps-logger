@@ -12479,6 +12479,7 @@ check("U-11: no answer within HTTP_WAIT -> timeout, UART kept up",
 # default (1) uploads unverified away as before
 ta_td = tempfile.mkdtemp(prefix="tlsaway-")
 ta_tls = sys.modules.get("tls")
+ta_gone = None
 sys.modules["tls"] = RvTls
 ta = []
 ta_d = []
@@ -12511,6 +12512,17 @@ try:
     _posts[:] = []
     pump()
     ta.append((gl._tls_state(), len(_posts), os.path.exists(ta_p)))
+    os.rename(gl.CA_FILE, gl.CA_FILE + ".x")   # gone, the context kept
+    make_trk(ta_p, 3)
+    _posts[:] = []
+    pump()
+    ta_gone = (gl._tls_state(), len(_posts), gl.up["state"],
+               os.path.exists(ta_p))
+    os.rename(gl.CA_FILE + ".x", gl.CA_FILE)
+    tls_ctx_reset()
+    gl._tls_context()
+    if os.path.exists(ta_p):
+        os.remove(ta_p)
     gl.up["url"] = "http://d.example"
     make_trk(ta_p, 3)
     _posts[:] = []
@@ -12548,6 +12560,10 @@ check("TLS-AWAY: UPLOAD_AWAY_UNVERIFIED=0: an unverified or plain http "
       ta[1:] == [(0, "err unverified", True), (1, False),
                  ("verified", 1, False), ("off", 0, "err unverified"),
                  False, ("unverified", 1, False)], repr(ta))
+check("TLS-AWAY-GONE: CA_FILE removed after a verified context was made: "
+      "away with UPLOAD_AWAY_UNVERIFIED=0 no POST (the context made again "
+      "is CERT_NONE), 'tls' unverified",
+      ta_gone == ("unverified", 0, "err unverified", True), repr(ta_gone))
 
 # HEAD-ERR: once the status line is in, an error in the header loop keeps
 # the 2xx (a reset there resent the batch: a duplicate); bounded reads
