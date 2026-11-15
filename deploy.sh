@@ -190,7 +190,7 @@ for f in $FILES; do
 done
 echo "Flash: $(( BFREE * BSIZE / 1024 )) KB free, $(( NEED * BSIZE / 1024 )) KB needed"
 if [ "$BFREE" -lt "$NEED" ]; then
-    echo "Not enough free flash on the board: free some (old tracks in /gpx/, see README) and deploy again" >&2
+    echo "Not enough free flash on the board: free some (old tracks in /gpx/, see docs/usage.md) and deploy again" >&2
     exit 1
 fi
 

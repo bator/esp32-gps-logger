@@ -36,7 +36,7 @@
 # system's start, /.env with its keys too), erases the whole flash (the file
 # system too: copy /.env and /hist off first) and writes bootloader,
 # partition table, otadata and the app. Then put the files back and run
-# ./deploy.sh (see the README, "Firmware updates over WiFi").
+# ./deploy.sh (see docs/setup.md, "Firmware updates over WiFi").
 # --publish writes firmware/ota/ (micropython-<commit>.bin, the page as
 # web-<commit>.html.gz, manifest.json naming them: the board keeps the page
 # only gzipped, made with its WEB_GZ_WBITS window, and inflates it for a
