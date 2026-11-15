@@ -13732,6 +13732,7 @@ else:
          "track"),
         ("track create failing 20261102_100000.trk new x.trk", "track"),
         ("track write error 3 OSError(28) 20261102_100000.trk", "track"),
+        ("track hist error 2 OSError(28) close", "track"),
         ("time back 20261102T100500Z 20261102T100400Z", "tback"),
         ("stay left wifi aps 3 scans 6", "stay"),
         ("track full 20261102T1000-20261102T1005 drop 3", "full"),
@@ -17167,6 +17168,32 @@ check("GUARD-INT: an upload bug backs the upload off, the history copy "
       "GUARD_MEM_MAX MemoryErrors in a row reboot",
       gi_sched and gi_hist == "ok" and gi_pend == "raised"
       and len(gi_mem) == 1, repr((gi_sched, gi_hist, gi_pend, gi_mem)))
+# HIST-ERR: a day history write error (log["herr"]) goes to the diag log, the
+# first at once, then one per WERR_EVERY, and status.json has the count: it
+# was shown nowhere, and a bug in the copy (it takes any error) only printed
+gl.log_reset()
+diag_clear()
+gi_saved = (gl._track_lines, gl.HIST_DAYS)
+gl.HIST_DAYS = 7
+gl._track_lines = lambda *a: (_ for _ in ()).throw(TypeError("hist bug"))
+gi_n = []
+try:
+    for r in range(3):
+        if r == 2:
+            _clock[0] += gl.WERR_EVERY
+        gl._hist_batch(gi_tr, 0, 1, 0)
+        gi_n.append(len([x for x in diag_lines()
+                         if x.startswith("track hist error")]))
+finally:
+    gl._track_lines, gl.HIST_DAYS = gi_saved
+gi_rows = dict(gl._web_rows())
+check("HIST-ERR: the first day history write error goes to the diag log with "
+      "the error, then one per 10 min; status.json has hist_errs",
+      gi_n == [1, 1, 2] and gl.log["herr"] == 3 and gi_rows.get("hist_errs") == 3
+      and any("hist bug" in x for x in diag_lines()),
+      repr((gi_n, gl.log["herr"], gi_rows.get("hist_errs"), diag_lines()[-2:])))
+gl.log_reset()
+diag_clear()
 # WEB-JSON-TAIL: an error after the 200 (reading the diag tail, a
 # satellite) still cut the JSON (the page: OFFLINE). The parts after the
 # rows end the JSON instead, the error counted

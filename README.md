@@ -815,7 +815,10 @@ kept (`HIST_DAYS`; a day written both as text and as `.trb` is one day). The
 history yields to the tracks: under 1 MB
 free (`HIST_RESERVE`) the oldest days go first (today's stays), also before a
 batch would be dropped on a full flash, and nothing is added under
-2 × `MIN_FREE`. An append cut short (the flash full mid-write) leaves no
+2 × `MIN_FREE`. A failed write (or a bug in the copy) costs only the
+drawing: it is counted (`hist_errs` in `/status.json`) and in the
+diagnostic log as `track hist error`, the first and then one per 10
+minutes. An append cut short (the flash full mid-write) leaves no
 footer: the next one starts with 32 `0xC0` bytes and a newline
 (`HIST_SEP`), which end a record cut there (no keyframe is lost to it, no
 point made up). The page asks `/hist?d=YYYYMMDD&o=<offset>` and gets the

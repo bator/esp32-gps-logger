@@ -2290,6 +2290,7 @@ _RPAD = b" " * RE_W                      # an empty _RE entry
 def log_reset():
     log.clear()
     log.update(file=None, created=False, batch=[], points=0, err=0, herr=0,
+               herr_at=None,
                fix=False, lost_at=None, new_seg=False, seg_tc=[],
                full=False, wfail=False, wfails=0,
                still=_still_state(), clock=None, seq=0,
@@ -2587,6 +2588,20 @@ def _werr(what, e=None):
     except MemoryError:
         pass
 
+def _herr(what, e=None):
+    """Count a day history write error (log["herr"], hist_errs on the
+    status page), the first, then one per WERR_EVERY, in the diag log as
+    _werr's: the count alone was shown nowhere, and a bug in the history
+    copy (it takes any error: the commit after it is what matters) only
+    printed. Never raises."""
+    log["herr"] += 1
+    try:
+        if not _recent_s(log["herr_at"], WERR_EVERY // 1000):
+            log["herr_at"] = _stamp()
+            _diag_write("track hist error %d %r %s" % (log["herr"], e, what))
+    except MemoryError:
+        pass
+
 def _cut_to_footer(path, good, sz):
     """Before a failing file is left: a failed append that partly landed
     left the start of the batch after the last good footer, without one,
@@ -2704,8 +2719,8 @@ def _hist_close(hf, ok=True):
             try:
                 out += FOOTER.encode()
                 f.write(out)
-            except (OSError, MemoryError):
-                log["herr"] += 1
+            except (OSError, MemoryError) as e:
+                _herr("close", e)
         try:
             f.close()
         except OSError:
@@ -4538,7 +4553,7 @@ def _hist_batch(path, off, end, key):
         ok = True
     except Exception as e:               # (best effort: the commit after
         print("hist", repr(e))           # it is what matters)
-        log["herr"] += 1
+        _herr("write", e)
     finally:
         _hist_close(hf, ok)
 
@@ -6426,6 +6441,7 @@ def _web_rows():
         ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
         ("web_errs", _web_errs[0]),      # page requests that hit a bug
+        ("hist_errs", log["herr"]),      # day history write errors
         ("track_drop", log["drop"]),   # points lost (full flash,
         ("write_errs", log["err"]),    # MAX_BATCH, time back), track
         ("q_thin", st.get("q_thin", 0)),      # write errors, seconds thinned

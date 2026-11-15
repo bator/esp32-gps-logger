@@ -18,7 +18,7 @@ const SHOWN = ("fix sats hdop utc position nmea rx_bytes rx_age_s good_age_s gps
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days day_span stay uptime prev_run " +
   "boot_cause temp mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
 const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs",
-  "track_drop", "write_errs", "q_thin", "pos6"];
+  "track_drop", "write_errs", "q_thin", "pos6", "hist_errs"];
 const labeled = new Set(OTHER);
 for (const k of SHOWN) labeled.add(k);
 v.unlabeled = Object.keys(d).filter((k) => !labeled.has(k));
