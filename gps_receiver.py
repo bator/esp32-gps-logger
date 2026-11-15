@@ -370,8 +370,13 @@ def gsa(talker, f):
     sentence's), not the uptime's: after a loop blocked by a POST, two
     rounds 5 s apart on the wire were read within one uptime second and
     counted as a lost rate (a needless setup). Before any time sentence,
-    the uptime's."""
-    st["fixtype"] = _num(f[2], int)
+    the uptime's. Only a 2D or 3D mode is kept: GSA comes every
+    GSA_EVERY s, RMC every second, so after a "1" (no fix) round an RMC
+    valid again showed "Fix" for up to 5 s (measured indoors: 14 of 201
+    rounds). The last dimension stands until the next 2D/3D round."""
+    ft = _num(f[2], int)
+    if ft in (2, 3):
+        st["fixtype"] = ft
     t = _sec[0]
     if t is not None:
         if t != st["gsa_t"]:

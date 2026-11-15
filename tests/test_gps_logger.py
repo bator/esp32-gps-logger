@@ -8832,6 +8832,35 @@ for _ in range(4):
 check("GPS-18: >GSA_MAX GSA a second -> extra; one round of 4 does not",
       flood >= 1 and gl.st["extra"] == 0, "%d %d" % (flood, gl.st["extra"]))
 
+# FIX-DIM: a GSA round with mode 1 (no fix) is followed by a valid RMC before
+# the next GSA round (every 5 s; RMC 1 Hz): the label was "Fix" for that time
+# (7 of 98 status reads indoors). The last 2D/3D stands until the next round.
+_fd_t = [100]
+def _fd_rmc(status):
+    # a second is published by the next one's first sentence (_second)
+    _fd_t[0] += 1
+    gl._rcv.handle(rv_nmea("GNRMC,0928%02d.00,%s,4711.12279,N,01825.61582,E,"
+                           "0.0,,151126,,,%s,V" % (_fd_t[0] - 60, status,
+                                                    "A" if status == "A" else "N")))
+def _fixdim(mode):
+    gl._rcv.reset()
+    for g in (mode, "1"):
+        for sys_ in "12345":
+            gl._rcv.handle(rv_nmea("GNGSA,A,%s,01,02,03,,,,,,,,,,1.5,0.9,1.2,%s"
+                                   % (g, sys_)))
+    _fd_rmc("A")
+    _fd_rmc("A")
+    gl.st["rx"] = _clock[0]
+    return gl.status()
+fd3, fd2 = _fixdim("3"), _fixdim("2")
+_fd_rmc("V")
+_fd_rmc("V")
+gl.st["rx"] = _clock[0]
+fdv = gl.status()
+check("FIX-DIM: after a no-fix GSA round a valid RMC keeps 3D/2D; RMC V waits",
+      (fd3, fd2, fdv) == ("3D fix", "2D fix", "Waiting fix"),
+      "%r %r %r" % (fd3, fd2, fdv))
+
 # NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
 # bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
 # line "20A6-10-29T12:00:01Z" went into the track and became last_t, which no
