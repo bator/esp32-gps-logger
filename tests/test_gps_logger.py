@@ -17415,7 +17415,30 @@ check("RX-DRAIN: seconds 2-4 sampled in order as their own Fix at their ticks, s
       and all(x[2] == 4 and x[3] == _rd_q[3][_rd.F_LAT] for x in _rd_seen)
       and [x[4] for x in _rd_seen] == [q[_rd.F_LAT] for q in _rd_q[1:]]
       and _rd_left == ([], 4), repr((_rd_seen, _rd_left)))
+# a second published while one is sampled (read_uart() under _sample: the WiFi
+# scan of _home_veto) is sampled on the next pass: log["seq"] went to st["seq"]
+# after the loop and marked it seen
+gl.st["q"] = list(_rd_q[:2])
+gl.st["seq"], gl.log["seq"] = 2, 0
+_rd_seen = []
+def _rd_pub(now, fx=None):
+    _rd_seen.append(fx[_rd.F_SEQ])
+    if fx[_rd.F_SEQ] == 1:
+        gl.st["q"] = gl.st["q"] + [_rd_q[2]]
+        gl.st["seq"] = 3
+gl._sample = _rd_pub
+try:
+    gl._drain_q()
+    _rd_mid = list(_rd_seen)
+    gl._drain_q()
+finally:
+    gl._sample = _rd_saved
+check("RX-DRAIN: a second published while an earlier one is sampled is sampled on the "
+      "next pass, not marked seen",
+      _rd_mid == [1, 2] and _rd_seen == [1, 2, 3] and gl.log["seq"] == 3,
+      repr((_rd_mid, _rd_seen, gl.log["seq"])))
 gl.st["q"] = list(_rd_q)
+gl.st["seq"] = 4
 gl.log["seq"] = 0
 def _rd_boom(now, fx=None):
     raise MemoryError("memory allocation failed")

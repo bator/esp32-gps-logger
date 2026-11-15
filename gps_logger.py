@@ -3594,11 +3594,17 @@ def _drain_q():
     """Sample every averaged second not seen yet, oldest first, each as its
     own Fix at the ticks it was published (its fix time and freshness). st
     stays the latest second all the while."""
-    if st["seq"] == log["seq"]:
+    s = st["seq"]
+    if s == log["seq"]:
         return
     for fx in _rcv.drain(log["seq"]):
+        # seen as each one is sampled: a second published meanwhile (a
+        # read_uart() under _sample, e.g. the WiFi scan of _home_veto) comes
+        # after it, and marking st["seq"] seen at the end lost that second
+        log["seq"] = fx[_rcv.F_SEQ]
         _sample(fx[_rcv.F_POS_AT], fx)
-    log["seq"] = st["seq"]
+    if log["seq"] < s:                   # (all up to s were in the queue)
+        log["seq"] = s
 
 def _sample(now, fx=None):
     """One second: the Fix fx (a published second, see _drain_q), or the
