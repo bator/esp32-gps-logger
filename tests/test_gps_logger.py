@@ -8042,6 +8042,69 @@ try:
     check("DIAG: .env DIAG 0 off, 10-3600 s, anything else the default",
           vals == [0, 30000, 60000, 60000, 3600000, 60000], repr(vals))
 
+    # ENV-SAY: every refused .env value is a diag line (_say), the key
+    # named, the value never: they were console prints, and in the field
+    # there is no console
+    diag_clear()
+    gl.DIAG = 60000
+    es_g = ("CPU_MHZ", "CPU_MHZ_UPLOAD", "PB_KEEPALIVE", "WEB", "WEB_AWAY",
+            "TFT_IDLE", "OTA_URL", "OTA_KEY", "DIAG", "DEVICE_ID", "HOSTNAME")
+    es_keep = {k_: getattr(gl, k_) for k_ in es_g}
+    es_up = (gl.up["url"], gl.up["key"])
+    es_open = os.path.join(diag_dir, "env_es")
+    with open(es_open, "wb") as fh:
+        fh.write(b"K\xe9Y=zq9x\nNTP_SERVER=zq9x\xe9\nDEVICE_ID=bike\n")
+    es_env, es_part, es_mhz = {}, None, None
+    try:
+        es_got = []
+        es_got.append(gl._mhz_env({"CPU_MHZ": "zq9x"}, "CPU_MHZ", 80))
+        es_got.append(gl._mhz_env({"CPU_MHZ": "999"}, "CPU_MHZ", 80))
+        gl._diag_env({"DIAG": "999999"})
+        es_got.append(gl._static_ip({"IP": "zq9x"}, ("IP", "MASK", "GW", "DNS")))
+        es_got.append(gl._static_ip({"IP": "10.0.0.9", "GW": "10.0.0.1",
+                                     "MASK": "zq9x", "DNS": "zq9x"},
+                                    ("IP", "MASK", "GW", "DNS")))
+        gl._keepalive_env({"KEEPALIVE": "zq9x"})
+        gl._keepalive_env({"KEEPALIVE": "999"})
+        gl._web_env({"WEB": "zq9x", "WEB_AWAY": "zq9x"})
+        gl._tft_env({"TFT_IDLE": "zq9x"})
+        gl._ota_env({"OTA_URL": "zq9x"})
+        es_env = gl.load_env(es_open)
+        gl.wifi_reset()
+        gl.wifi_start({"CPU_MHZ": "40", "CPU_MHZ_UP": "20", "KEEPALIVE": "5"})
+        es_mhz = (gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD)
+
+        def _es_open(path, *a, **k):
+            if path == es_open:
+                raise RuntimeError("zq9x")
+            return builtins.open(path, *a, **k)
+        gl.open = _es_open
+        try:
+            es_part = gl.load_env(es_open)
+        finally:
+            del gl.open
+    finally:
+        for k_, v_ in es_keep.items():
+            setattr(gl, k_, v_)
+        gl.up["url"], gl.up["key"] = es_up
+        gl.wifi_reset()
+    es_lines = diag_lines()
+    es_keys = [l_.split()[1] for l_ in es_lines if l_.startswith("env ")]
+    check("ENV-SAY: CPU_MHZ, DIAG, IP / MASK / DNS, KEEPALIVE, WEB, WEB_AWAY, "
+          "TFT_IDLE, OTA, a .env key or value not UTF-8, a failed read and "
+          "CPU_MHZ / CPU_MHZ_UP too slow for WiFi are diag lines; the value "
+          "is never in one",
+          es_got == [80, 80, None, ("10.0.0.9", "255.255.255.0", "10.0.0.1",
+                                    "10.0.0.1")]
+          and es_keys == ["CPU_MHZ", "CPU_MHZ", "DIAG", "IP", "MASK", "DNS",
+                          "KEEPALIVE", "KEEPALIVE", "WEB", "WEB_AWAY",
+                          "TFT_IDLE", "OTA_URL/OTA_KEY", "a", "NTP_SERVER",
+                          "CPU_MHZ", "CPU_MHZ_UP", "read"]
+          and len(es_lines) == len(es_keys)
+          and es_env == {"DEVICE_ID": "bike"} and es_mhz == (80, 80)
+          and es_part == {} and not any("zq9x" in l_ for l_ in es_lines),
+          repr((es_got, es_lines, es_env, es_mhz, es_part)))
+
     diag_clear()
     gl.DIAG = 60000
     gl._rcv.reset()
@@ -8088,6 +8151,7 @@ try:
     check("DIAG: DIAG=0 writes nothing", diag_lines() == [])
     gl.DIAG = 60000
 
+    de_0 = getattr(gl, "_diag_errs", [None])[0]
     saved_file = gl.DIAG_FILE
     gl.DIAG_FILE = os.path.join(diag_dir, "no", "such", "dir", "d.log")
     try:
@@ -8099,6 +8163,22 @@ try:
         gl.DIAG_FILE = saved_file
     check("DIAG: a write error is printed, never raised", raised is None,
           repr(raised))
+    # DIAG-ERRS: the failed write is counted, in status.json and on the
+    # next diag line that gets through (it only printed: no console in the
+    # field)
+    de_n = getattr(gl, "_diag_errs", [None])[0]
+    de_row = dict(gl._web_rows()).get("diag_errs")
+    diag_clear()
+    gl._diag(1000)
+    de_line = (diag_lines() or [""])[-1]
+    check("DIAG-ERRS: a failed diag write is counted: diag_errs in status.json "
+          "and on the next status line",
+          de_0 is not None and de_n == de_0 + 1 and de_row == de_n
+          and de_line.endswith(" diag_errs %d" % de_n),
+          repr((de_0, de_n, de_row, de_line[-40:])))
+    if hasattr(gl, "_diag_errs"):
+        gl._diag_errs[0] = 0
+    diag_clear()
 
     # run(): boot line before the GPS setup, crash line before the reset
     diag_clear()
@@ -8123,6 +8203,30 @@ try:
           len(lines) == 2 and lines[0].startswith("boot cause ")
           and lines[1].startswith("crash up ") and "diag boom" in lines[1]
           and bool(_resets), repr(lines))
+    # ENV-SAY: run() reads DIAG first and writes the boot line, then the
+    # other readers' .env mistakes reach the diag (they only printed: no
+    # console in the field), the key named, the value never
+    diag_clear()
+    _resets[:] = []
+    gl._wdt = None
+    es_saved = (gl._rcv.UC_SYS, gl.MIN_MOVE, gl.TFT_LIGHT)
+    write_env(diag_dir, "GPS_SYS=zq9x\nMIN_MOVE=zq9x\nTFT_LIGHT=zq9x\n")
+    gl._loop = diag_boom
+    try:
+        gl.run()
+    except SystemExit:
+        pass
+    finally:
+        gl._loop = orig_loop
+        gl._rcv.UC_SYS, gl.MIN_MOVE, gl.TFT_LIGHT = es_saved
+    es_lines = diag_lines()
+    check("ENV-SAY: run() writes the boot line first, then the refused .env "
+          "values of GPS_SYS, MIN_MOVE and TFT_LIGHT (key yes, value never)",
+          len(es_lines) == 5 and es_lines[0].startswith("boot cause ")
+          and [l_.split()[:2] for l_ in es_lines[1:4]]
+          == [["env", "GPS_SYS"], ["env", "MIN_MOVE"], ["env", "TFT_LIGHT"]]
+          and not any("zq9x" in l_ for l_ in es_lines), repr(es_lines))
+    write_env(diag_dir, "")
     # previous run: read from the last diag lines at boot
     check("UPTIME: seconds read as s, min, h, d",
           [gl._hms(x) for x in (None, 45, 754, 3494, 11040, 183600)]
@@ -8581,6 +8685,33 @@ check("GPS-19: previous run found in diag.1 behind a non-status line",
       gl.prev_run["up"] == 3494 and gl.prev_run["how"] == "status",
       repr(gl.prev_run))
 diag_clear()
+# DIAG-PREV-DEEP: diag.1's tail was read with diag.log's and searched from
+# the end: 8 event lines after the run's last status line gave the end of a
+# run days before, in diag.1. diag.1 only when diag.log was read whole;
+# further back in diag.log first; past that the run is unknown
+_dp_old = "".join("up %d utc 20261101T0%d0000Z nmea 1/0\n" % (3600 * k, k)
+                  for k in range(1, 6))
+_dp_cur = ("up 400000 utc 20261110T120000Z x\n"
+           "boot cause 1 prev_up 400000 mhz 80 mem 1\n"
+           "up 3600 utc 20261114T100000Z x\n"
+           "up 7200 utc 20261114T110000Z x\n")
+_dp_ev = "".join("wifi fail home status 201 after 3000 ms %d\n" % k
+                 for k in range(9))
+_dp = []
+for _dp_text in (_dp_cur + _dp_ev, _dp_cur + _dp_ev * 6, _dp_ev):
+    diag_clear()
+    with open(gl.DIAG_OLD, "w") as f:
+        f.write(_dp_old)
+    with open(gl.DIAG_FILE, "w") as f:
+        f.write(_dp_text)
+    gl._diag_prev()
+    _dp.append((gl.prev_run["up"], gl.prev_run["end"]))
+diag_clear()
+check("DIAG-PREV-DEEP: the last status line 9 event lines back in diag.log is "
+      "the run's end (not diag.1's older one); 54 back it is unknown; a "
+      "diag.log read whole without one goes on in diag.1",
+      _dp == [(7200, "2026-11-14 11:00:00Z"), (None, None),
+              (18000, "2026-11-01 05:00:00Z")], repr(_dp))
 
 # DIAG-TAIL: status lines are ~180 B, so 160 B a line gave the page 13 of
 # WEB_DIAG lines, and right after a rotation only one; now the page takes
@@ -13724,6 +13855,10 @@ else:
         ("env WPA2_2 empty: SSID2 is tried as an open network", "env"),
         ("env FOO ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, WPA2_3 "
          "only)", "env"),
+        ("env DIAG not 0 or 10-3600 s, using 60 s", "env"),
+        ("env a key not UTF-8, its line skipped", "env"),
+        ("env NTP_SERVER not UTF-8, skipped", "env"),
+        ("env read stopped by MemoryError, the rest skipped", "env"),
         ("wifi fail krumpli status 201 after 12000 ms (+2 more)", "wfail"),
         ("wifi back krumpli after 2 min 05 s, 3 failed tries, rssi -60",
          "wback"),
@@ -13779,7 +13914,10 @@ else:
         ("crash up 3600 MemoryError()", "crash"),
         ("up 60 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
          "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
-         "idf None/None heap 124", "status")]
+         "idf None/None heap 124", "status"),
+        ("up 120 utc - nmea 0/0 gpsboots 0 loops 0 sats 0/None fix "
+         "No_data! hdop None points 0 sent 0 wifi off pulses 0 mem 27000 "
+         "idf None/None heap 124 bugs upload:3,wifi:1 diag_errs 2", "status")]
     ev_src = ""
     for n_ in ("gps_logger.py", "gps_receiver.py"):   # (the receiver's lines too)
         with open(os.path.join(ROOT, n_)) as f:
@@ -16911,7 +17049,7 @@ def _wr_row_bug():
 
 
 gl._web_errs[0] = 0
-gl._bugs[:] = []
+gl._bugs.clear()
 gl.wifi_reset()
 gl._web_rows = _wr_row_bug
 c, c2 = RvConn(b""), RvConn(b"")
@@ -17167,6 +17305,329 @@ check("GUARD-INT: an upload bug backs the upload off, the history copy "
       "GUARD_MEM_MAX MemoryErrors in a row reboot",
       gi_sched and gi_hist == "ok" and gi_pend == "raised"
       and len(gi_mem) == 1, repr((gi_sched, gi_hist, gi_pend, gi_mem)))
+# TICK-BUGS: a guarded tick's bug that goes on every TICK_PAUSE had one diag
+# line a boot (rotated out in a day or two), and a message that varies
+# filled BUG_KINDS with one bug, so a later one was never logged. The kind
+# is the tick and the exception type now, written again every BUG_AGAIN
+# while it goes on; status.json and the diag line count them per tick
+getattr(gl, "_tick_errs", {}).clear()
+gl._bugs.clear()
+gl._tick_bug.clear()
+diag_clear()
+
+
+def _tb_raise(e):
+    def f():
+        raise e
+    return f
+
+
+try:
+    for i_ in range(10):                 # an index that changes each time
+        gl._tick_bug.clear()
+        gl._guarded("ntp", _tb_raise(IndexError("index %d" % i_)))
+    gl._tick_bug.clear()
+    gl._guarded("wifi", _tb_raise(TypeError("w")))
+    tb_first = _wr_bugs("bug ")
+    _clock[0] += 60000                   # a minute on: not again
+    gl._tick_bug.clear()
+    gl._guarded("ntp", _tb_raise(IndexError("index 10")))
+    tb_min = _wr_bugs("bug ")
+    _clock[0] += gl.BUG_AGAIN * 1000 if hasattr(gl, "BUG_AGAIN") else 3600000
+    gl._tick_bug.clear()
+    gl._guarded("ntp", _tb_raise(IndexError("index 11")))
+    tb_hour = _wr_bugs("bug ")
+    tb_row = dict(gl._web_rows()).get("tick_bugs")
+    diag_clear()
+    gl._diag(_clock[0])
+    tb_line = (diag_lines() or [""])[-1]
+finally:
+    gl._tick_bug.clear()
+    getattr(gl, "_tick_errs", {}).clear()
+    gl._bugs.clear()
+check("TICK-BUGS: a bug whose message varies is one kind (the tick and the "
+      "type), so a later kind is still logged",
+      tb_first == ["bug ntp IndexError('index 0')", "bug wifi TypeError('w')"],
+      repr(tb_first))
+check("TICK-BUGS: a kind that keeps happening is written again after "
+      "BUG_AGAIN (an hour), not before",
+      tb_min == tb_first
+      and tb_hour == tb_first + ["bug ntp IndexError('index 11')"],
+      repr((tb_min, tb_hour)))
+check("TICK-BUGS: status.json's tick_bugs and the diag status line count "
+      "each tick's bugs, the last one in the JSON",
+      tb_row == "ntp:12 IndexError('index 11'), wifi:1 TypeError('w')"
+      and tb_line.startswith("up ") and tb_line.endswith(" bugs ntp:12,wifi:1"),
+      repr((tb_row, tb_line[-60:])))
+
+# LOOP-WIRING: one _loop pass runs every tick, in this order, the ones that
+# take it with this pass's ticks; the status and diag lines when due
+_lw_names = ("log_tick", "wifi_tick", "keepalive_tick", "upload_tick",
+             "web_tick", "ota_tick", "ntp_tick", "tft_tick", "_status",
+             "_diag", "_set_freq", "_boot_ok")
+_lw_saved = ({k_: getattr(gl, k_) for k_ in _lw_names},
+             gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms,
+             gl._wdt, gl.STATUS, gl.DIAG, gl._boot_ok_done)
+_lw_ev = []
+
+
+def _lw_rec(name, arg=False):
+    if arg:
+        return lambda a: _lw_ev.append((name, a))
+    return lambda: _lw_ev.append(name)
+
+
+_lw_n = [0, 2]
+
+
+def _lw_sleep(ms):
+    _clock[0] += ms
+    _lw_n[0] += 1
+    _lw_ev.append("sleep")
+    if _lw_n[0] >= _lw_n[1]:
+        raise KeyboardInterrupt
+
+
+try:
+    for k_ in _lw_names:
+        setattr(gl, k_, _lw_rec(k_, k_ in ("keepalive_tick", "ota_tick",
+                                          "ntp_tick", "tft_tick", "_diag",
+                                          "_set_freq")))
+    gl._rcv.read_uart = _lw_rec("read_uart")
+    gl._rcv.gps_check = _lw_rec("gps_check", True)
+    gl.time.sleep_ms = _lw_sleep
+    gl.STATUS = gl.DIAG = 20             # due in the second pass
+    gl._boot_ok_done = True
+    gl._tick_bug.clear()
+    gl._wdt = None
+    _lw_t0 = _clock[0]
+    try:
+        gl._loop()
+    except KeyboardInterrupt:
+        pass
+finally:
+    for k_, v_ in _lw_saved[0].items():
+        setattr(gl, k_, v_)
+    (gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms, gl._wdt,
+     gl.STATUS, gl.DIAG, gl._boot_ok_done) = _lw_saved[1:]
+
+
+def _lw_pass(t):
+    return ["read_uart", ("gps_check", t), "log_tick", "wifi_tick",
+            ("keepalive_tick", t), "upload_tick", "web_tick", ("ota_tick", t),
+            ("ntp_tick", t), ("tft_tick", t)]
+
+
+_lw_want = (_lw_pass(_lw_t0) + ["sleep"] + _lw_pass(_lw_t0 + 20)
+            + ["_status", ("_set_freq", gl.CPU_MHZ), ("_diag", _lw_t0 + 20),
+               "sleep"])
+check("LOOP-WIRING: a _loop pass calls the UART read, gps_check, log, WiFi, "
+      "keep-alive, upload, page, OTA, NTP and display ticks in order (with "
+      "this pass's ticks), then the due status line, the CPU clock and the "
+      "diag line",
+      _lw_ev == _lw_want, repr(_lw_ev))
+
+# LOOP-WRAP: the loop started 3 s before ticks_ms wraps at 2**30 (12.4 days
+# after boot): every deadline and timer that is a tick Mark still ends on
+# time after the wrap. The default fake ticks_diff (a - b) never wraps, so
+# these lines never ran across one: the status and diag timers, the WiFi
+# connect timeout, the upload deadline (_upload_wait, _waiting), the page's
+# request deadline, the POST guard, the Ctrl-C keep-alive limit, a tick's
+# TICK_PAUSE (_age), the receiver's settle minute and its GSV window
+_lp_w = 1 << 30
+_lp_saved = (time.ticks_diff, time.ticks_add, time.ticks_ms, list(_gck._up),
+             _clock[0], {k_: getattr(gl, k_) for k_ in _lw_names},
+             gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms, gl._wdt,
+             gl.STATUS, gl.DIAG, gl._boot_ok_done, gl._wifi_failed,
+             gl.KEEPALIVE_MAX, gl._keep, gl._keep_from, gl._running,
+             gl._rcv.UC_SETTLE, dict(gl._guard), gl._web_end[0],
+             dict(gl._rcv._uc_sv),
+             {k_: gl.up[k_] for k_ in ("state", "next_at", "hold")},
+             {k_: gl._rcv.st.get(k_) for k_ in ("settled", "fix_first", "speed")},
+             gl.pending)
+_lp = {"status": [], "diag": [], "fail": [], "wait": [], "waiting": [], "held": [],
+       "web": [], "close": [], "deinit": [], "ntp": [], "settled": [],
+       "gsv": [], "fed": []}
+
+
+class _LpW(object):
+    def status(self, *a):
+        return gl.network.STAT_CONNECTING
+
+
+class _LpSock(object):
+    def close(self):
+        _lp["close"].append(_lp_off())
+
+
+class _LpConn(object):
+    def settimeout(self, t):
+        pass
+
+
+class _LpTimer(object):
+    def deinit(self):
+        _lp["deinit"].append(_lp_off())
+
+
+def _lp_off():
+    return (_clock[0] - _lp_t0) % _lp_w
+
+
+def _lp_wifi():
+    if not _lp["fail"]:
+        gl._wifi_poll(_lp_cw)
+
+
+def _lp_up():
+    now = time.ticks_ms()
+    _lp["wait"].append((_lp_off(), gl._upload_wait(now)))
+    _lp["waiting"].append((_lp_off(), gl._waiting(now, gl.up["next_at"],
+                                                  gl.UP_WAIT_MAX)))
+    gl.up["state"] = "idle"              # (every waiting track held back)
+    _lp["held"].append((_lp_off(), gl._upload_wait(now)))
+    gl.up["state"] = "err 503"
+
+
+def _lp_web():
+    try:
+        gl._web_left(_LpConn())
+    except OSError:
+        _lp["web"].append(_lp_off())
+    _lp["gsv"].append((_lp_off(), gl._rcv._uc_gsv_skip()))
+
+
+def _lp_ntp(now):
+    _lp["ntp"].append(_lp_off())
+    if len(_lp["ntp"]) == 1:
+        raise ValueError("before the wrap")   # paused TICK_PAUSE
+
+
+def _lp_keep(now):
+    if gl._keep is not None:
+        gl._keep_cb(None)
+
+
+def _lp_ota(now):
+    if not gl._rcv.unsettled(now) and not _lp["settled"]:
+        _lp["settled"].append(_lp_off())
+
+
+def _lp_sleep(ms):
+    _clock[0] += ms
+    fed = gl._wdt.fed
+    gl._guard_cb(None)                   # (its timer: a second; here a pass)
+    if gl._guard["until"] is not None and gl._wdt.fed > fed:
+        _lp["fed"].append(_lp_off())
+    if _lp_off() >= 15000:
+        raise KeyboardInterrupt
+
+
+_lp_cw = _LpW()
+try:
+    time.ticks_diff = lambda a, b: (a - b + (_lp_w >> 1)) % _lp_w - (_lp_w >> 1)
+    time.ticks_add = lambda a, b: (a + b) % _lp_w
+    time.ticks_ms = lambda: _clock[0] % _lp_w
+    _clock[0] = _lp_w - 3000
+    _lp_t0 = _clock[0]
+    _gck._up[:] = [0, None, 0]
+    gl._stamp()
+    for k_ in _lw_names:
+        setattr(gl, k_, _lw_rec(k_, k_ in ("keepalive_tick", "ota_tick",
+                                          "ntp_tick", "tft_tick", "_diag",
+                                          "_set_freq")))
+    gl._status = lambda: _lp["status"].append(_lp_off())
+    gl._diag = lambda now: _lp["diag"].append(_lp_off())
+    gl.wifi_tick, gl.upload_tick, gl.web_tick = _lp_wifi, _lp_up, _lp_web
+    gl.ntp_tick, gl.keepalive_tick, gl.ota_tick = _lp_ntp, _lp_keep, _lp_ota
+    gl._rcv.read_uart = lambda *a: None
+    gl._rcv.gps_check = lambda now: None
+    gl.time.sleep_ms = _lp_sleep
+    gl.STATUS, gl.DIAG = 4000, 5000
+    gl._boot_ok_done = True
+    gl._tick_bug.clear()
+    gl._wdt = None
+    gl.wifi_reset()
+    gl.wifi.update(state="connecting", try_at=None, prev_status=None)
+    gl._wifi_failed = lambda w, s, el: _lp["fail"].append((_lp_off(), el))
+    now_ = time.ticks_ms()
+    gl.up["state"], gl.up["next_at"] = "err 503", time.ticks_add(now_, 6000)
+    gl.up["hold"] = {"t.trb": time.ticks_add(now_, 6500)}
+    gl.pending = lambda: ["t.trb"]
+    gl._web_end[0] = time.ticks_add(now_, 5000)
+    gl._guard.update(until=time.ticks_add(now_, 7000), sock=_LpSock())
+    gl.KEEPALIVE_MAX, gl._keep_from, gl._keep = 8000, now_, _LpTimer()
+    gl._running = False
+    gl._rcv.UC_SETTLE = 6000
+    gl._rcv.st.update(settled=False, fix_first=now_, speed=0)
+    gl._rcv._uc_sv["until"] = time.ticks_add(now_, 4000)
+    try:
+        gl._loop()
+        _lp_r = "returned"
+    except KeyboardInterrupt:
+        _lp_r = "ki"
+finally:
+    (time.ticks_diff, time.ticks_add, time.ticks_ms, _lp_up_s, _clock[0],
+     _lp_fns, gl._rcv.read_uart, gl._rcv.gps_check, gl.time.sleep_ms, gl._wdt,
+     gl.STATUS, gl.DIAG, gl._boot_ok_done, gl._wifi_failed, gl.KEEPALIVE_MAX,
+     gl._keep, gl._keep_from, gl._running, gl._rcv.UC_SETTLE, _lp_g,
+     gl._web_end[0], _lp_sv, _lp_upd, _lp_std, gl.pending) = _lp_saved
+    _gck._up[:] = _lp_up_s
+    for k_, v_ in _lp_fns.items():
+        setattr(gl, k_, v_)
+    gl._guard.clear()
+    gl._guard.update(_lp_g)
+    gl._rcv._uc_sv.clear()
+    gl._rcv._uc_sv.update(_lp_sv)
+    gl.up.update(_lp_upd)
+    gl._rcv.st.update(_lp_std)
+    gl._tick_bug.clear()
+    getattr(gl, "_tick_errs", {}).clear()
+    gl._bugs.clear()
+    gl.wifi_reset()
+
+
+def _lp_first(k, v):
+    """Offset of the first pass whose result was v (None: none)."""
+    return next((o for o, r in _lp[k] if r == v), None)
+
+
+def _lp_until(k, v, end):
+    """Every result before end was v."""
+    return all(r == v for o, r in _lp[k] if o < end)
+
+
+check("LOOP-WRAP: the status and diag lines are due 4 / 5 s on, after the "
+      "2**30 ticks wrap 3 s into the loop",
+      _lp_r == "ki" and _lp["status"] == [4000, 8000, 12000]
+      and _lp["diag"] == [5000, 10000], repr((_lp_r, _lp["status"],
+                                              _lp["diag"])))
+check("LOOP-WRAP: the WiFi connect timeout (12 s), the upload deadline "
+      "(6 s: _upload_wait, _waiting), a held track's (6.5 s) and the page's "
+      "request deadline (5 s) end on time across the wrap, not at once and "
+      "not never",
+      _lp["fail"] == [(gl.CONNECT_TIMEOUT, gl.CONNECT_TIMEOUT)]
+      and _lp_first("wait", 0) == 6000 and _lp_until("wait", 6000, 20)
+      and all(0 < r <= 6000 for o, r in _lp["wait"] if o < 6000)
+      and _lp_first("waiting", False) == 6000
+      and _lp_until("waiting", True, 6000)
+      and _lp_first("held", 0) == 6500
+      and all(0 < r <= 6500 for o, r in _lp["held"] if o < 6500)
+      and (_lp["web"] or [None])[0] == 5000,
+      repr((_lp["fail"], _lp["wait"][:2], _lp_first("wait", 0),
+            _lp_first("waiting", False), _lp["web"][:1])))
+check("LOOP-WRAP: the POST guard feeds the WDT and closes the socket at its "
+      "7 s deadline, the Ctrl-C keep-alive stops after KEEPALIVE_MAX, across "
+      "the wrap",
+      _lp["close"] == [7000] and _lp["fed"][:1] == [20]
+      and _lp["fed"][-1] == 6980 and _lp["deinit"] == [8020],
+      repr((_lp["close"], _lp["fed"][:1], _lp["fed"][-1:], _lp["deinit"])))
+check("LOOP-WRAP: a tick that raised 3 s before the wrap sits out "
+      "TICK_PAUSE, the receiver's settle minute (6 s here) and its GSV "
+      "window (4 s) end on time after it",
+      _lp["ntp"][:2] == [0, gl.TICK_PAUSE] and _lp["settled"] == [6000]
+      and _lp_first("gsv", False) == 4000 and _lp_until("gsv", True, 4000),
+      repr((_lp["ntp"][:2], _lp["settled"], _lp_first("gsv", False))))
 # WEB-JSON-TAIL: an error after the 200 (reading the diag tail, a
 # satellite) still cut the JSON (the page: OFFLINE). The parts after the
 # rows end the JSON instead, the error counted
@@ -22501,6 +22962,7 @@ try:
         _clock[0] += gl.PB_KEEPALIVE + 1000
         gl.wifi["pb_at"] = time.ticks_add(time.ticks_ms(), -gl.PB_KEEPALIVE - 1)
         gl._scan_known(gl.wifi["wlan"])
+        r3_3b = list(_r3_ev)
         n_scan = _r3_ev.count("scan")
         gl.keepalive_tick(time.ticks_ms())
         r3_3 = (_r3_ev[:2], n_scan, _r3_ev.count("scan"),
@@ -22511,6 +22973,11 @@ try:
     check("RV14-3: a round's scan reads the UART before it and counts as the "
           "keep-alive load: no second scan right after it in the same pass",
           r3_3 == (["uart", "scan"], 1, 1, 0), repr(r3_3))
+    # RV14-3b: and again after it: the scan takes ~2 s, the connect or the
+    # clear after it up to 500 ms more, and the 8 KB buffer holds ~3.5 s.
+    # (Safe with _drain_q giving each queued Fix its own seq)
+    check("RV14-3b: a round's scan reads the UART after it too",
+          r3_3b == ["uart", "scan", "uart"], repr(r3_3b))
 
     # RV14-4: TLS 1.3 tickets are the first POLLIN: the wait goes on,
     # reading the UART, until the answer's first byte
@@ -22606,6 +23073,35 @@ try:
           "-78 dBm is in range, as it is connected; otherwise the scan's bar "
           "stays ROAM_MIN_RSSI",
           r3_6 == [True, False, False, True], repr(r3_6))
+    # RV14-6b: the same bar for a hidden home (one of its learned BSSIDs):
+    # _blank_home_ok and the scan's own-BSSID pick kept ROAM_MIN_RSSI, so
+    # asleep after it a learned AP at -78 dBm was out of range, and a
+    # stranger's blank AP at -70 dBm took its place
+    _r3_ours, _r3_strange = b"\x01\x02\x03\x04\x05\x06", b"\x09" * 6
+
+    class _R3HH(_R3H):
+        def __init__(self, rssi, other):
+            self.r, self.o = rssi, other
+        def scan(self):
+            aps = [(b"", _r3_ours, 6, self.r, 3, True)]
+            if self.o is not None:
+                aps.append((b"", _r3_strange, 6, self.o, 3, True))
+            return aps
+    r3_6b = []
+    for sh, rssi, other in ((True, -78, None), (True, -78, -70),
+                            (False, -78, None), (True, -90, -70),
+                            (False, -70, None)):
+        gl.wifi_reset()
+        gl.wifi.update(wlan=_R3HH(rssi, other), state="sleep", sleep_home=sh,
+                       home_aps=[_r3_ours],
+                       nets=[{"ssid": "h", "pw": "", "home": True,
+                              "hidden": True, "bssid": None, "ip": None}])
+        r3_6b.append(gl.home_in_range())
+    gl.wifi_reset()
+    check("RV14-6b: asleep after a hidden home, its learned BSSID at -78 dBm "
+          "is in range (a stranger's stronger blank AP beside it too); "
+          "otherwise the bar stays ROAM_MIN_RSSI",
+          r3_6b == [True, True, False, False, True], repr(r3_6b))
 
     # RV14-7: a wake whose round raises is kept, the radio off again
     class _R3R(object):
