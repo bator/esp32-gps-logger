@@ -918,6 +918,13 @@ def _setup_check(now):
     gst = g is not None and time.ticks_diff(g, st["setup_at"]) >= 0
     no_gst = (not gst and not st["gst_nak"]
               and (st["ok"] - st["set_ok"]) & CNT_MASK >= 10)
+    # what came clears a FAIL before it (a late answer, a hit line): one
+    # left counted made a stray FAIL days later "refused" twice, the watch
+    # off for good (GST, the rate)
+    if gst:
+        st["gst_fails"], st["gst_nak"] = 0, False
+    if hz5:
+        st["rate_fails"], st["rate_nak"] = 0, False
     if slow or no_gst:
         st["extra"] += 1
         why = ("1 fix/s" if slow else

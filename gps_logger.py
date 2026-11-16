@@ -788,6 +788,20 @@ SCAN_ERR = WLAN_ERR + (MemoryError,)     # scan() builds its list on the heap
 
 _env_partial = [False]                   # load_env stopped part way (EIO)
 _env_skipped = []                        # keys whose value it skipped (not UTF-8)
+                                         # or whose garbled key it guessed
+_ENV_GUARD = ("WEB_TOKEN", "WPA2", "WPA2_2", "WPA2_3")
+
+def _env_key_guess(k):
+    """The key of _ENV_GUARD a key with bytes past ASCII (k) may have been:
+    the same without them (an NBSP, a BOM in the middle), or the same
+    length with them where its letters were (a byte gone bad); else None."""
+    r = bytes(c for c in k if c < 128).strip()
+    for n in _ENV_GUARD:
+        b = n.encode()
+        if r == b or (len(k) == len(b)
+                      and all(a == c or a > 127 for a, c in zip(k, b))):
+            return n
+    return None
 
 def load_env(path):
     """KEY=VALUE lines -> dict. Surrounding quotes are stripped.
@@ -814,15 +828,19 @@ def load_env(path):
                 if (len(v) >= 2 and v[:1] == v[-1:]
                         and v[:1] in (b'"', b"'")):
                     v = v[1:-1]
-                try:
-                    k = k.decode()
-                except UnicodeError:
-                    # (whose key it was is unknown: WEB_TOKEN, a WPA2 gone
-                    # left the routes open, the network tried open; the
-                    # read is not whole then, as after an EIO)
-                    _env_partial[0] = True
-                    _say("env a key not UTF-8, its line skipped")
+                if any(c > 127 for c in k):
+                    # (no key is: an ANSI or garbled line. One that was
+                    # WEB_TOKEN or a WPA2 is said missing, not unset: the
+                    # routes stayed open, the network was tried open; any
+                    # other is just skipped, a "Megjegyzés=" closed nothing)
+                    g = _env_key_guess(k)
+                    if g is None:
+                        _say("env a key not plain ASCII, its line skipped")
+                    else:
+                        _env_skipped.append(g)
+                        _say("env %s: its key not plain ASCII, its line skipped" % g)
                     continue
+                k = k.decode()
                 try:
                     v = v.decode()
                 except UnicodeError:
@@ -961,10 +979,11 @@ def _load_nets(env):
             continue
         seen.append(sb)
         p = env.get(pk)
-        if p is None and _env_partial[0]:
-            # (.env read part way: its password may be in the part not
-            # read; tried open, an open twin of the home SSID was home)
-            _say("env %s not read (.env read part way): %s dropped" % (pk, sk))
+        if p is None and (_env_partial[0] or pk in _env_skipped):
+            # (.env read part way, or its line garbled: its password may be
+            # there; tried open, an open twin of the home SSID was home)
+            _say("env %s not read (.env read part way, or its line garbled): "
+                 "%s dropped" % (pk, sk))
             continue
         if p is not None and not p:
             _say("env %s empty: %s is tried as an open network"
@@ -7492,7 +7511,7 @@ def _web_env(env):
         # (it may be in the part not read; or its value is not UTF-8)
         WEB_TOKEN = None
         _web_tok_bad[0] = True
-        _env_refused("WEB_TOKEN", "not read (.env read part way, or not UTF-8)",
+        _env_refused("WEB_TOKEN", "not read (.env read part way, or its line garbled)",
                      "every data route refused")
     v = _plain(env.get("WEB"))
     if v:
@@ -8909,6 +8928,9 @@ def _ntp_ask():
         return None
     t = v - _NTP_2020
     lo = _clock_floor()
+    if ota.get("seen_err"):              # (the floor unread: only the build's,
+        return None                      # an answer before the newest seen
+                                         # passed; asked again later)
     if t < 0:
         t += 1 << 32
         if t > lo + NTP_ERA:

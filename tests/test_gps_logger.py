@@ -9008,7 +9008,7 @@ try:
                           "CPU_MHZ", "CPU_MHZ_UP", "read"]
           and len(es_lines) == len(es_keys)
           and es_env == {"DEVICE_ID": "bike"} and es_mhz == (80, 80)
-          and es_partial is True
+          and es_partial is False
           and es_part == {} and not any("zq9x" in l_ for l_ in es_lines),
           repr((es_got, es_lines, es_env, es_mhz, es_part)))
 
@@ -15556,7 +15556,7 @@ else:
         ("gps systems h135155", "grx"),
         ("gps refused CFGSYS,h135155", "setup"),
         ("gps GPS_SYS sent 3 times this boot: not again", "grx"),
-        ("env WPA2_2 not read (.env read part way): SSID2 dropped", "env"),
+        ("env WPA2_2 not read (.env read part way, or its line garbled): SSID2 dropped", "env"),
         ("gps setup lost: no GST", "setup"),
         ("gps setup not taken: no GST (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -15568,7 +15568,8 @@ else:
         ("env FOO ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, WPA2_3 "
          "only)", "env"),
         ("env DIAG not 0 or 10-3600 s, using 60 s", "env"),
-        ("env a key not UTF-8, its line skipped", "env"),
+        ("env a key not plain ASCII, its line skipped", "env"),
+        ("env WEB_TOKEN: its key not plain ASCII, its line skipped", "env"),
         ("env NTP_SERVER not UTF-8, skipped", "env"),
         ("env read stopped by MemoryError, the rest skipped", "env"),
         ("wifi fail krumpli status 201 after 12000 ms (+2 more)", "wfail"),
@@ -28770,7 +28771,7 @@ _dp_lists = [l_ for l_ in re.findall(r'^\s*FILES="([^"]*)"', _dp_src, re.M)
 check("DEPLOY-SWAP: every FILES list ends in main.py; the swap stats each "
       ".dpl first; mpy-cross 1.29 is checked; ca.der goes up when there is one",
       len(_dp_lists) == 3 and all(l.split()[-1] == "main.py" for l in _dp_lists)
-      and "if $1:\n    for n in F:\n        os.stat(n + '.dpl')\n    print('preflight ok')\nfor n in F:" in _dp_src
+      and "if $1:\n    for n in F:\n        os.stat(n + '.dpl')\n    print('preflight ok')\nelse:" in _dp_src
       and "os.stat(n + '.dpl')\n        print('removing', n)\n        os.remove(n)" in _dp_src
       and "1.29.*) ;;" in _dp_src and 'FILES="ca.der $FILES"' in _dp_src
       and "ca.der" in _slurp(os.path.join(ROOT, ".gitignore")), repr(_dp_lists))
@@ -29293,11 +29294,13 @@ hw_saved = (dict(gr_.st), gr_.GPS_HZ)
 try:
     gr_.GPS_HZ = 5
     now_ = time.ticks_ms()
-    # (a run of 31 s at one fix; one of 5 s just begun, a fix back in a
-    # second's last epoch; one with a second of 5 fixes a second ago)
+    # (a run of 31 s at one fix; each case after it breaks one guard only:
+    # a run just begun, too few seconds at one fix in it, a second of 5
+    # fixes a second ago)
     for run_, n1_, ep5_ in ((now_ - gr_.UC_GST_LOST - 1000, 31, None),
-                            (now_ - 5000, 5, None),
-                            (now_ - gr_.UC_GST_LOST - 1000, 1, now_ - 1000)):
+                            (now_ - 5000, 31, None),
+                            (now_ - gr_.UC_GST_LOST - 1000, 1, None),
+                            (now_ - gr_.UC_GST_LOST - 1000, 31, now_ - 1000)):
         diag_clear()
         gr_.st.update(setup_ok=True, setup_at=now_ - gr_.UC_GST_LOST - 1, extra=0,
                       gst_nak=True, rate_nak=False, ep_at=now_ - 500, ep5_at=ep5_,
@@ -29310,7 +29313,7 @@ finally:
     gr_.GPS_HZ = hw_saved[1]
 check("RCV-HZ-WATCH: GST refused, a run of UC_GST_LOST at one fix is a lost "
       "setup; a run just begun (a fix regained) or GPS_HZ fixes are not",
-      hw == [(1, ["gps setup lost: 1 fix/s"]), (0, []), (0, [])], repr(hw))
+      hw == [(1, ["gps setup lost: 1 fix/s"]), (0, []), (0, []), (0, [])], repr(hw))
 
 # RCV-VIEW-TAIL: the GSV skip window ending inside a second skips the rest of
 # that second (its L1 sets were skipped, its L5 read: the view counted L5's
@@ -29340,10 +29343,13 @@ try:
     src_ = _slurp(os.path.join(ROOT, "gps_receiver.py"))
     cm2.append((src_.count('st["ok"] += 1'), src_.count('st["err"] += 1'),
                 src_.count("& CNT_MASK")))
+    gr_.st["ok"] = gr_.CNT_MASK          # (the next one wraps to 0)
+    gr_.handle(nmea("GPRMC,120002.00,V,,,,,,,171026,,,N"))
+    cm2.append(gr_.st["ok"])
 finally:
     gr_.st["ok"], gr_.st["err"] = cm2_saved
 check("RCV-CNT-MASK: every ok/err count wraps at CNT_MASK",
-      cm2 and cm2[0][:2] == (0, 0) and cm2[0][2] >= 10, repr(cm2))
+      cm2 and cm2[0][:2] == (0, 0) and cm2[0][2] >= 10 and cm2[1] == 0, repr(cm2))
 
 # RCV-SYS-AGAIN: after a restart of its own (a power dip: back at the
 # default mask) GPS_SYS is asked and sent again; not after the restart the
@@ -29706,24 +29712,34 @@ finally:
 check("RTC-GPS-OVER-NTP: a fix's Anchor corrects the clock an NTP answer set, "
       "once", rg == [([(2029, 11, 15), (2026, 11, 16)], None)], repr(rg))
 
-# ENV-KEY-PARTIAL: a key line that is not UTF-8 is a .env not read whole: an
-# SSID whose WPA2 it may have been is dropped (it was tried open)
+# ENV-KEY-GUESS: a key with bytes past ASCII is skipped; one that looks like
+# WEB_TOKEN or a WPA2 (without them, or with them in its letters' places) is
+# that key garbled: the routes closed, its network dropped. Any other closes
+# nothing (a "Megjegyzés=" line closed an open home network and the page)
 ek = []
+ek_saved = (gl.WEB_TOKEN, gl._web_tok_bad[0])
 try:
     p_ = os.path.join(_rv_td, "env-key")
-    with open(p_, "wb") as f:
-        f.write(b"SSID=home\nWPA\xd62=secret\n")
-    env_ = gl.load_env(p_)
-    ek.append((gl._env_partial[0], [n["ssid"] for n in gl._load_nets(env_)]))
-    with open(p_, "wb") as f:
-        f.write(b"SSID=home\nWPA2=secret\n")
-    env_ = gl.load_env(p_)
-    ek.append((gl._env_partial[0], [n["ssid"] for n in gl._load_nets(env_)]))
+    for body_ in (b"SSID=home\nWPA\xd62=secret\n",
+                  b"SSID=Cafe\nMegjegyz\xe9s=x\nWEB=1\n",
+                  b"SSID=Cafe\n\xc2\xa0WEB_TOKEN=abcdefghij\n",
+                  b"SSID=home\nWPA2=secret\n"):
+        with open(p_, "wb") as f:
+            f.write(body_)
+        gl.WEB_TOKEN, gl._web_tok_bad[0] = None, False
+        env_ = gl.load_env(p_)
+        gl._web_env(env_)
+        ek.append((gl._env_partial[0], [n["ssid"] for n in gl._load_nets(env_)],
+                   gl._web_tok_bad[0]))
 finally:
     gl._env_partial[0] = False
-check("ENV-KEY-PARTIAL: a key not UTF-8 marks the read part way (the SSID "
-      "without its WPA2 dropped); a whole one does not",
-      ek == [(True, []), (False, ["home"])], repr(ek))
+    del gl._env_skipped[:]
+    gl.WEB_TOKEN, gl._web_tok_bad[0] = ek_saved
+check("ENV-KEY-GUESS: a garbled WPA2 key drops its network, a garbled "
+      "WEB_TOKEN key (an NBSP too) closes the routes; another key not ASCII "
+      "closes nothing; none marks the read part way",
+      ek == [(False, [], False), (False, ["Cafe"], False), (False, ["Cafe"], True),
+             (False, ["home"], False)], repr(ek))
 
 # WEB-ERRNO-MORE: the names MicroPython's errno lacks (ENFILE: lwIP out of
 # sockets) are newlib's numbers, not dropped; a reopened listen socket starts
@@ -29738,7 +29754,10 @@ try:
     wm.append(gl._errnos("EAGAIN", "EWOULDBLOCK", "ECONNABORTED", "EINTR",
                          "ENFILE", "EMFILE", "ENOSUCH"))
 finally:
-    sys.modules["errno"] = wm_saved
+    if wm_saved is None:                 # (not loaded before: none again)
+        sys.modules.pop("errno", None)
+    else:
+        sys.modules["errno"] = wm_saved
 _wm_src = _slurp(os.path.join(ROOT, "gps_logger.py"))
 check("WEB-ERRNO-MORE: EWOULDBLOCK/EINTR/ENFILE/EMFILE by newlib's numbers when "
       "the module lacks them; the count starts anew with a listen socket",
@@ -29778,7 +29797,7 @@ check("DEPLOY-NO-ANSWER: the refusal needs the board's traceback without a "
       and 'grep -qE "^(preflight ok|swapped |removing )"' in _dp7
       and 'grep -q "^Traceback"' in _dp7
       and "trap '' INT TERM HUP PIPE\n    set +e" in _dp7
-      and "TMO=(timeout -s KILL 60)" in _dp7
+      and "TMO=(timeout -s KILL 60 bash -c" in _dp7
       and '"$MPREMOTE" connect "$PORT" exec "$(swap_py False)" || exit 1' in _dp7, "")
 if shutil.which("bash"):
     dn = []
@@ -29798,6 +29817,67 @@ if shutil.which("bash"):
           "preflight keeps the old install",
           dn == [(True, False, True, [], True), (True, True), (True, True, True)],
           repr(dn))
+
+# RCV-FAILS-CLEAR: a GST or the rate seen after a FAIL clears it (a stray
+# FAIL days later made it "refused" twice, the watch off for good)
+fc = []
+fc_saved = dict(gr_.st)
+try:
+    now_ = time.ticks_ms()
+    gr_.st.update(checked=False, setup_at=now_ - gr_.GPS_VERIFY - 1,
+                  gps_boots=0, set_boots=0, hz1=0, hz5=5, gst_at=now_ - 10,
+                  gst_fails=1, gst_nak=False, rate_fails=1, rate_nak=False,
+                  extra=0, ok=100, set_ok=0)
+    gr_._setup_check(now_)
+    fc.append((gr_.st["gst_fails"], gr_.st["rate_fails"]))
+finally:
+    gr_.st.clear()
+    gr_.st.update(fc_saved)
+check("RCV-FAILS-CLEAR: a setup whose GST and GPS_HZ came clears the FAILs "
+      "before it", fc == [(0, 0)], repr(fc))
+
+# NTP-SEEN-ERR: while /ota.seen cannot be read the NTP floor is unknown: no
+# answer believed (one between the build and the newest seen passed)
+ns = []
+ns_saved = (hl.socket, hl.FW_BUILD, dict(hl.ota), hl.OTA_SEEN)
+try:
+    hl.socket = _NtpMod
+    hl.FW_BUILD = hl._days(2026, 11, 1) * 86400
+    ns_dir = os.path.join(_rv_td, "seen-eio-hl")
+    os.makedirs(ns_dir)
+    hl.OTA_SEEN = ns_dir
+    hl.ota.pop("seen", None)
+    b20_ = (hl._days(2026, 11, 5) - hl.EPOCH_DAYS) * 86400
+    ns.append(_nask(_nreply(b20_)))
+    hl.OTA_SEEN = None                   # (no record: the build's floor)
+    hl.ota.pop("seen", None)
+    hl.ota.pop("seen_err", None)
+    ns.append(_nask(_nreply(b20_)) == b20_)
+finally:
+    hl.socket, hl.FW_BUILD, hl.OTA_SEEN = ns_saved[0], ns_saved[1], ns_saved[3]
+    hl.ota.clear()
+    hl.ota.update(ns_saved[2])
+check("NTP-SEEN-ERR: /ota.seen unreadable refuses NTP's answer; readable "
+      "(none) it is taken", ns == [None, True], repr(ns))
+
+# DEPLOY-ROLL-CHECK: the roll forward swaps nothing in when a file without
+# its .dpl is not the copy (no answer from the swap and a .dpl gone: a mixed
+# set, "Deployed", rc 0); the trap's mpremote ignores the signals under
+# timeout too
+_dp8 = _slurp(os.path.join(ROOT, "deploy.sh"))
+if shutil.which("bash"):
+    dr = []
+    rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "1", "FAKE_SWAP_MUTE": "1",
+                                           "FAKE_DPL_GONE": "main.py", "FAKE_FROZEN": "full"})
+    dr.append((rc != 0, "Swap FAILED part way" in err, "Deployed" in out,
+               dev_file(dev, "main.py") == b"old main",
+               [l for l in dev_logger(dev) if l.startswith("reset")]))
+    check("DEPLOY-ROLL-CHECK: a roll forward with a file not the copy swaps "
+          "nothing more, says FAILED, no reset; the trap's mpremote ignores "
+          "INT/TERM/HUP under timeout",
+          dr == [(True, True, False, True, [])]
+          and "trap \"\" INT TERM HUP; exec \"$@\"" in _dp8
+          and "raise OSError('not the copy, not swapped: ' + n)" in _dp8, repr(dr))
 
 gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl.free, gl.DIAG_MAX = _rv_saved
 diag_clear()

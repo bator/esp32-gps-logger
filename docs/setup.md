@@ -97,8 +97,12 @@ HOSTNAME=Dawarich-GPS-tracker
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored. A file saved as ANSI does not stop the boot: an SSID or password
-  that is not UTF-8 is used byte for byte, any other such value (or a key
-  that is not UTF-8) is skipped with a line in the diagnostic log.
+  that is not UTF-8 is used byte for byte, any other such value is skipped
+  with a line in the diagnostic log, and so is a line whose key is not
+  plain ASCII. Such a key that looks like `WEB_TOKEN` or a `WPA2` (the same
+  without its odd bytes, or with them in its letters' places) counts as
+  that key garbled, not unset: `WEB_TOKEN` closes the data routes, a `WPA2`
+  drops its network (it is not tried as an open one).
 - A value out of range or unreadable keeps the default and says so in the
   [diagnostic log](usage.md#diagnostic-log), on the console too (in the field there
   is none): `env KEEPALIVE not 0 or 5-600 s, using 5 s`, the key named,
@@ -346,8 +350,10 @@ build not newer than its own anyway. The board also keeps the newest
 signed, fresh build it could install (`/ota.seen`): a build older than
 that is refused (`ota` state `superseded`; publish a newer one to go
 back, or `OTA_SEEN_RESET=1 ./deploy.sh` over USB to forget it; a
-read error on the file other than its absence refuses every update that
-boot, `seen err`), and that
+read error on the file other than its absence refuses every update and
+every NTP answer while it lasts, `seen err`: it is read again at each
+check, and one that stays, across reboots too, is cleared by
+`OTA_SEEN_RESET=1 ./deploy.sh`), and that
 build's time (the commit's, signed) is a floor for the clock, an NTP
 answer's too: an NTP answer before it is refused, and a manifest that
 ended before it is expired whatever NTP says. A `FORCE=1` publish of a

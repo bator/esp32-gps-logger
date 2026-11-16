@@ -412,7 +412,7 @@ for x in [m] + list(m.get("files", [])):
         [ "${FORCE:-0}" = 1 ] || { echo "(FORCE=1 publishes it anyway)" >&2; exit 1; }
         echo "FORCE=1: publishing it anyway" >&2
         echo "WARNING: no board takes build $BUILD over the air if it runs build $LIVE_BUILD" >&2
-        echo "WARNING: (not newer than its own: --flash over USB), or saw it signed" >&2
+        echo "WARNING: (not newer than its own: --flash over USB), or saw a newer one signed" >&2
         echo "WARNING: (ota state superseded: OTA_SEEN_RESET=1 ./deploy.sh over USB)" >&2
     fi
     if [ -z "$RESUME" ]; then

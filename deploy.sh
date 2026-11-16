@@ -55,10 +55,12 @@ PORT=${PORT:-/dev/ttyACM0}               # the Heltec's USB Serial/JTAG
 VENV=${VENV:-$PWD/.venv}                 # python, pip and mpremote come from it
 PY=$VENV/bin/python
 MPREMOTE=$VENV/bin/mpremote
-# (the trap's roll forward runs with the signals ignored: a board that never
-# answers would hold it for good; KILL, its TERM is ignored with them)
+# (the trap's mpremote runs with the signals ignored: a board that never
+# answers would hold it for good; KILL, its TERM is ignored with them, and
+# ignored again under timeout, which sets them back for what it starts)
 TMO=()
-command -v timeout >/dev/null 2>&1 && TMO=(timeout -s KILL 60)
+command -v timeout >/dev/null 2>&1 \
+    && TMO=(timeout -s KILL 60 bash -c 'trap "" INT TERM HUP; exec "$@"' _)
 # (the display's two modules too: without them a plain firmware's TFT stayed
 # dark, "tft ImportError")
 # (main.py last: the swap below puts it in after the rest, a cut swap
@@ -125,6 +127,28 @@ if $1:
     for n in F:
         os.stat(n + '.dpl')
     print('preflight ok')
+else:
+    import hashlib, binascii
+    E = {}
+    for l in '''$EXPECT'''.split('\n'):
+        if l:
+            a = l.split()
+            E[a[0]] = (int(a[1]), a[2])
+    b = bytearray(512)
+    for n in F:
+        if n + '.dpl' in os.listdir():
+            continue
+        h = hashlib.sha256()
+        f = open(n, 'rb')
+        while True:
+            k = f.readinto(b)
+            if not k:
+                break
+            h.update(memoryview(b)[:k])
+        f.close()
+        if (os.stat(n)[6], binascii.hexlify(h.digest()).decode()) != E[n]:
+            raise OSError('not the copy, not swapped: ' + n)
+    print('roll forward ok')
 for n in F:
     if n + '.dpl' not in os.listdir():
         os.stat(n)
@@ -158,7 +182,7 @@ RTC().memory(b'0')"
 restart_logger() {
     local rc=$?
     # (a second Ctrl-C now killed the roll forward below with the script:
-    # ignored from here, by the mpremote it starts too; and a stderr gone
+    # ignored from here, by the mpremote it starts too (TMO); and a stderr gone
     # with it, a "| tee" the Ctrl-C ended, a closed terminal: the first
     # echo's SIGPIPE or EIO under set -e ended this before the reset)
     trap '' INT TERM HUP PIPE
@@ -169,6 +193,7 @@ restart_logger() {
     # that never answers: killed after a minute, nothing else ends it now)
     if [ "${SWAPPING:-0}" = 1 ]; then
         SWAPPING=0
+        echo "Swap cut part way: swapping the rest in (up to a minute)" >&2
         if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec "$(swap_py False)" >/dev/null 2>&1; then
             echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
             echo "No reset onto a mixed set: run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
@@ -179,13 +204,13 @@ restart_logger() {
         [ "$rc" != 0 ] || rc=1
     fi
     if [ "${OTAPEND:-}" = False ]; then
-        if ! "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1; then
+        if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1; then
             echo "WARNING: the reset failed: power the board off and on (or 'mpremote reset')" >&2
             [ "$rc" != 0 ] || rc=1
         fi
     else
         echo "Running the logger again without a reset (OTA pending or unknown)" >&2
-        "$MPREMOTE" connect "$PORT" exec --no-follow \
+        ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec --no-follow \
             "import gps_logger; gps_logger.run()" >/dev/null 2>&1 || true
     fi
     rm -rf "$BUILD"
