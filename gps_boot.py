@@ -49,6 +49,7 @@ def unshadow():
     (_cause) first."""
     note, BUILD = _note()
     if note is not None and note == BUILD:
+        _ran()
         return
     if note is not None:
         _cause()
@@ -71,19 +72,42 @@ def unshadow():
         except OSError:
             pass
 
+def _mark():
+    try:
+        with open(OTA_MARK) as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+def _ran():
+    """The new build boots: the install's "staged" becomes "ran" before
+    its import. A build that died before its own ota_boot (a hang, a
+    panic) left "staged", and the old firmware took that for an install
+    cut before set_boot: no try, no verdict, installed again for good.
+    Never raises."""
+    if _mark() != "staged":
+        return
+    try:
+        with open(OTA_MARK, "w") as f:
+            f.write("ran")
+    except Exception:
+        pass
+
 def _cause():
     """The old firmware's first boot after a rollback: its reset cause in
-    OTA_MARK ("cause <n>") for ota_boot, unless a mark is there (the new
-    build's crash or stop, ota_boot's boot). ota_boot read the cause of
-    its own boot: a reset of the old firmware before it ran (a Ctrl-C or a
-    stall, then the watchdog) was taken for the new build's, a watchdog
-    verdict on a good build. Never raises."""
-    import os
-    try:
-        os.stat(OTA_MARK)
-        return
-    except OSError:
-        pass
+    OTA_MARK ("cause <n>") for ota_boot, unless a mark that says more is
+    there (the new build's crash or stop, ota_boot's boot, an install's
+    staged). "ran" (the new build got as far as its import) and "valid"
+    (a power cut while it was confirmed: it never completed) are
+    overwritten: "valid" left there, a watchdog reset of the old firmware
+    before its ota_boot was read as the new build's, bad for good.
+    ota_boot read the cause of its own boot: a reset of the old firmware
+    before it ran (a Ctrl-C or a stall, then the watchdog) was taken for
+    the new build's, a watchdog verdict on a good build. Never raises."""
+    m = _mark()
+    if m is not None and m not in ("", "ran", "valid"):
+        return                           # ("": a write a power cut emptied,
+                                         # no verdict: this boot's cause goes in)
     try:
         c = machine.reset_cause()
         with open(OTA_MARK, "w") as f:
@@ -101,8 +125,8 @@ def crash():
     running after a rollback, failed: the new build's note is not cleared
     before ota_boot) or one that cannot be read. Never raises."""
     note, BUILD = _note()
-    if note is None or note != BUILD:
-        return
+    if note is None or note != BUILD or _mark() == "valid":
+        return                           # (valid: confirmed, not a crash's)
     try:
         with open(OTA_MARK, "w") as f:
             f.write("crash")

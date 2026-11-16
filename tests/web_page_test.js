@@ -34,7 +34,12 @@ v.coordNE = ctx.view({position: "47.10000, 18.40000"}).coord;
 v.nullSys = ctx.view({}).sys;
 // the GPS time as Hungarian time: the board's UTC "YYYY-MM-DD HH:MM:SS",
 // winter (CET) and summer (CEST)
-v.huTime = [ctx.view({utc: "2026-11-16 03:00:00"}).dl, ctx.view({utc: "2026-07-16 03:00:00"}).dl];
+// (the form the board sends: gps_clock.stamp_s, as status.json's "utc")
+v.huTime = [ctx.view({utc: "2026-11-16T03:00:00Z"}).dl, ctx.view({utc: "2026-07-16T03:00:00Z"}).dl,
+  ctx.view({utc: "garbage time"}).dl];
+// an update that cannot go on is a warning: no flash for its pages, a cut
+v.otaWarn = ["no flash for page", "install cut"].map((o) => (ctx.view({fw: "abc", fw_build: 0, ota: o}).sys
+  .match(/<div class="[^"]*"><i><\/i><b>Firmware<\/b>/) || [""])[0]);
 // a pending OTA: since when and why its confirmation waits
 v.otaPend = (ctx.view({fw: "abc", fw_build: 0, ota: "pending", ota_pend: [130, "no OTA_URL", null]}).sys
   .match(/<b>Firmware<\/b>.*?<\/div>/) || [""])[0];

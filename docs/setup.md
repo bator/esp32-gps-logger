@@ -392,7 +392,15 @@ try, so a power cut between them cannot count one attempt twice, and it
 writes the points in RAM first. The install marks itself `staged` in
 `/ota.mark` until `set_boot` is through (it hashes the image first): a
 power-off before that is no try of a build that never ran (`install cut`,
-dropped). A boot without a pending note confirms the running image and
+dropped); the new build turns it into `ran` before its import, so one that
+hangs before its own check is a watchdog rollback (bad), not a cut. An
+install begun notes itself in `/ota.dl`: one a reset cut waits
+`OTA_RETRY` (an hour) before the next, and every third in a row counts as a
+try (`ota build N install cut by a reset`): a brownout under the
+download's load reinstalled it at every boot. Once confirmed
+(`mark_app_valid`), a crash or stop no longer marks the image, and a
+`valid` mark left by a power cut gives way to the old firmware's reset
+cause. A boot without a pending note confirms the running image and
 removes a staged page a power cut left (`<file>.tmp`, `.new`). The pages
 must fit in the free flash before the 2 MB download (`no flash for page`).
 A pending build without `OTA_URL` (its `.env` reading lost it) is not

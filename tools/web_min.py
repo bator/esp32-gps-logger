@@ -37,7 +37,10 @@ _JS_KEYWORDS = ("return", "typeof", "case", "in", "delete", "void", "throw",
                 "new", "else", "do", "instanceof", "yield", "await")
 # before a "{" that opens an object literal (an expression: a "/" after its
 # "}" is a division), not a block
-_OBJ_AFTER = "(,=:[?!&|+-*%<>~^"
+_OBJ_AFTER = "(,=[?!&|+-*%<>~^"
+# words after which a "{" opens an object literal (an expression)
+_OBJ_WORDS = ("return", "typeof", "in", "of", "delete", "void", "throw", "new",
+              "case", "instanceof", "yield", "await")
 _PAREN_HEADS = ("if", "while", "for", "with")
 _WORD = re.compile(r"[\w$\u0080-￿]+")
 # what ends a JS line (and a // comment): not only \n
@@ -61,9 +64,15 @@ def _space(out, ws):
         out.append(" ")
 
 
-def _last(out):
-    """The last token written that is not white space, or ""."""
+def _last(out, skip=0):
+    """The last token written that is not white space, skip of them passed
+    over first, or "" (no copy of out: at each "{" one made it quadratic)."""
     k = len(out) - 1
+    while skip:
+        while k >= 0 and out[k] in (" ", "\n"):
+            k -= 1
+        k -= 1
+        skip -= 1
     while k >= 0 and out[k] in (" ", "\n"):
         k -= 1
     return out[k] if k >= 0 else ""
@@ -113,6 +122,9 @@ def minify_js(src):
     out, i, n = [], 0, len(src)
     # what came before: may a "/" here start a regex?
     regex_ok, parens, braces, word = True, [], [], ""
+    tern, colon_tern = 0, False          # "?" not yet matched by ":"; the last
+    terns = []                           # ":" a ternary's (its "{" an object);
+                                         # the counts of the braces around
     while i < n:
         c = src[i]
         if c in _JS_WS:
@@ -158,6 +170,8 @@ def minify_js(src):
                 out.append(word)
                 i = m.end()
                 regex_ok = word in _JS_KEYWORDS and not dot
+                if word == "of" and not dot:     # (a keyword only in for (x of)
+                    regex_ok = bool(parens and parens[-1])
                 if dot:
                     word = ""            # (x.if is no "if (" either)
                 continue
@@ -171,22 +185,46 @@ def minify_js(src):
                 parens.append(word in _PAREN_HEADS)
                 regex_ok = True
             elif c == "{":
-                prev = _last(out[:-1])
-                # an object literal: a "/" after its "}" divides
-                braces.append(not (prev and (prev[-1] in _OBJ_AFTER
-                                             or prev == "return")))
+                prev = _last(out, 1)
+                # an object literal: a "/" after its "}" divides; a block
+                # (after ")", "else", "=>", "case x:", a label) does not
+                if prev == ">" and _last(out, 2) == "=":
+                    obj = False                  # an arrow function's body
+                elif prev == ":":
+                    obj = colon_tern or bool(braces and not braces[-1])
+                else:
+                    obj = bool(prev) and (prev in _OBJ_WORDS
+                                          or prev[-1] in _OBJ_AFTER)
+                braces.append(not obj)
+                terns.append(tern)               # (an object's own ":" are no
+                tern = 0                         # ternary's)
                 regex_ok = True
             elif c == "}":
                 regex_ok = braces.pop() if braces else True
+                tern = terns.pop() if terns else 0
             elif c == ")":
                 # "if (x) /re/.test(y)": a regex, "(a + b) / 2" a division
                 regex_ok = parens.pop() if parens else False
             elif c == "]":
                 regex_ok = False
             else:
+                if c == "?" and not (src.startswith(".", i) and not src[i + 1:i + 2].isdigit()
+                                     or src.startswith("?", i)):
+                    tern += 1                    # (not "?." nor "??")
+                elif c == ":":
+                    colon_tern = tern > 0
+                    if tern:
+                        tern -= 1
+                elif c == ";":
+                    tern = 0
                 regex_ok = True
             word = ""
     return "".join(out).strip()
+
+
+def _css_word(c):
+    """A character a CSS identifier or number goes on with."""
+    return bool(c) and (c.isalnum() or c in "-_%#" or c > "\x7f")
 
 
 def minify_css(src):
@@ -205,8 +243,9 @@ def minify_css(src):
             if j < 0:
                 raise MinifyError("a CSS comment cut short: %r" % src[i:i + 60])
             i = j + 2
-            # (a/**/b are two tokens, a /* */ b needs no second space)
-            if out and out[-1] not in (" ", "\n") and i < n and src[i] not in " \t\r\n\f":
+            # (1px/**/solid are two tokens: a space; .a/**/.b is one compound
+            # selector, a space made it a descendant one: none)
+            if (out and _css_word(out[-1][-1:]) and i < n and _css_word(src[i])):
                 out.append(" ")
         elif c in "\"'":
             j = _string(src, i)
@@ -301,8 +340,54 @@ def node_check(page):
         finally:
             os.remove(path)
         if r.returncode:
-            raise MinifyError("the stripped script does not parse (node --check): %s"
-                              % (r.stderr.strip().splitlines() or [""])[-1])
+            lines = r.stderr.strip().splitlines()
+            what = next((l for l in lines if re.match(r"\w*Error:", l)), "")
+            at = next((l.rsplit(":", 1)[-1] for l in lines if l.startswith(path + ":")), "?")
+            raise MinifyError("the stripped script does not parse (node --check), "
+                              "line %s: %s" % (at, what or (lines or [""])[-1]))
+
+
+_AST_JS = (
+    "const a = require('internal/deps/acorn/acorn/dist/acorn');"
+    "const fs = require('fs');"
+    "const t = (p) => JSON.stringify(a.parse(fs.readFileSync(p, 'utf8'), {ecmaVersion: 'latest'}),"
+    " (k, v) => k === 'start' || k === 'end' ? undefined : typeof v === 'bigint' ? String(v) : v);"
+    "console.log(t(process.argv[1]) === t(process.argv[2]) ? 'same' : 'differ');")
+
+
+def ast_check(src, page):
+    """Each stripped <script> against its source in node's own acorn (the
+    positions left out), when node and its acorn are there: a "/" taken
+    for a regex that still parses (a regex's spaces folded, the same
+    program no more) passes node --check and fails here. Without acorn:
+    nothing (node_check). Raises MinifyError."""
+    node = shutil.which("node")
+    if not node:
+        print("web_min: no node: the stripped script is not checked", file=sys.stderr)
+        return
+    sa = [m.group(3) for m in _BLOCK.finditer(src) if m.group(1) and m.group(2).lower() == "script"]
+    sb = [m.group(3) for m in _BLOCK.finditer(page) if m.group(1) and m.group(2).lower() == "script"]
+    if len(sa) != len(sb):               # (zip let a dropped or added one by)
+        raise MinifyError("the stripped page has %d scripts, its source %d" % (len(sb), len(sa)))
+    for a, b in zip(sa, sb):
+        paths = []
+        try:
+            for t in (a, b):
+                fd, path = tempfile.mkstemp(suffix=".js")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(t)
+                paths.append(path)
+            r = subprocess.run([node, "--expose-internals", "-e", _AST_JS] + paths,
+                               capture_output=True, text=True, timeout=120)
+        finally:
+            for path in paths:
+                os.remove(path)
+        if "Cannot find module" in r.stderr or "bad option" in r.stderr:
+            print("web_min: this node has no acorn: only node --check", file=sys.stderr)
+            return                       # (a node without its acorn to reach)
+        if r.stdout.strip() != "same":
+            raise MinifyError("the stripped script is not the same program as the source "
+                              "(acorn): %s" % (r.stdout.strip() or r.stderr.strip()[-200:]))
 
 
 def main(argv):
@@ -311,8 +396,10 @@ def main(argv):
         return 2
     try:
         with open(argv[1], encoding="utf-8") as f:
-            text = minify(f.read())
+            src = f.read()
+        text = minify(src)
         node_check(text)
+        ast_check(src, text)
         page = text.encode("utf-8")
         if len(argv) == 2:
             sys.stdout.buffer.write(page)

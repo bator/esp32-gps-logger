@@ -449,9 +449,11 @@ home.
   A full `.bad` (64 kB) pauses that file (`BAD FULL`) instead of dropping
   points; pull or delete it, then reset. `BAD FULL` lasts while that `.bad`
   is on flash and its track waits; a copy that fails for another reason
-  (an I/O error, or the flash under half the reserve: the quarantine may
-  use the other half, as a poison batch on a full flash held the only track
-  for good) is `fs err` and is tried again.
+  (an I/O error, or the flash under the reserve; once the recording stopped
+  for want of space under half of it: the quarantine may use the other
+  half then, as a poison batch on a full flash held the only track for
+  good, but not while it records, whose new points it would cost) is
+  `fs err` and is tried again.
   Points moved to a `.bad` leave `left` once (a `.bad` is not counted).
 - Other errors back off from 15 s up to 30 minutes (`Retry-After` is
   honoured); 401 waits 30 minutes. The same batch answered 3 times in a

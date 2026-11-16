@@ -416,8 +416,8 @@ def _extra(talker, f):
         st["extra"] += 1
 
 def gsv(talker, f):
-    _uc_gsv(talker, f)                   # (its GSV stays on: not _extra)
-    n = _num(f[3], int)
+    n = _num(f[3], int)                  # (read first: a bad one changes
+    _uc_gsv(talker, f)                   # nothing; its GSV stays on: no _extra)
     if n is not None and talker in _UC_GNSS:
         st["view"][talker] = n          # per constellation, summed on display
                                         # (a talker of no system: not summed)
@@ -718,10 +718,19 @@ def _uc_gsv(talker, f):
     GSV are not even decoded (_uc_gsv_skip). Without a time sentence yet (or
     the same second still), the round's first sentence coming again closes
     it. (GPS's ",1" first sentence did: a GPS_SYS mask without GPS never
-    made a list, an empty GPS sentence of another signal never closed one.)"""
+    made a list, an empty GPS sentence of another signal never closed one.)
+    Its satellites are read first: one field that does not parse
+    (ValueError) leaves the round as it was (a sentence counted bad went
+    into the sky shown)."""
     g = _UC_GNSS.get(talker)
     if g is None:
         return
+    sats = []
+    for i in range(4, len(f) - 3, 4):
+        n = _num(f[i], int)
+        if n is not None:
+            sats.append((n, _num(f[i + 1], int), _num(f[i + 2], int),
+                         _num(f[i + 3], int) or 0))
     u = _uc_sv
     e = _sec[0]
     new = e is not None and e != u["sec"]    # its second's first GSV
@@ -746,12 +755,7 @@ def _uc_gsv(talker, f):
             u["head"] = (f[0], f[-1])
     sig = f[-1]                          # ("B", BDS B2I, is hex: no band)
     band = _UC_BAND.get(g << 8 | int(sig)) if sig.isdigit() else None
-    for i in range(4, len(f) - 3, 4):
-        n = _num(f[i], int)
-        if n is None:
-            continue
-        el, az = _num(f[i + 1], int), _num(f[i + 2], int)
-        cno = _num(f[i + 3], int) or 0
+    for n, el, az, cno in sats:
         k = g << 8 | n
         v = u["new"].get(k)
         if v is None:
@@ -847,7 +851,7 @@ def _not_taken(now, why):
                 + (" (%d more)" % more if more else ""))
 
 _STAMPS = ("rx", "good", "pos_at", "hdop_at", "std_at", "gsa_at",
-           "gst_at", "boot_at", "boot_last", "nt_said", "gst_said")
+           "gst_at", "boot_at", "boot_last", "nt_said", "gst_said", "rx_back")
 
 def _stamps_old(now):
     """ticks_ms wraps every 2**30 ms, so a timestamp left alone for 12.4
@@ -943,12 +947,31 @@ def _uc_watch(now):
         st["gst_said"] = now
         _diag_write("gps setup lost: no GST")
 
+EP_OVER = 1500                           # ms without a byte: the open second is
+                                         # over (a 1 Hz burst's gap is ~0.9 s)
+
+def _ep_over(now):
+    """Publish the open second once no byte came for EP_OVER: it waited for
+    the next second's first sentence, and at the end of a silence the
+    logger had broken the segment already (STALE): the last point before
+    the gap went into the new segment, a line over the gap, and after
+    GPS_SILENT it was dropped with the queue. A late sentence of it makes
+    a second of the same time again: the logger drops it (t <= last_t)."""
+    if ep["t"] is None or _recent(now, st["rx"], EP_OVER):
+        return
+    try:
+        _publish()
+    except MemoryError:
+        st["err"] += 1
+    _ep_new(None)
+
 def gps_check(now):
     """Send the setup again while the receiver still sends the sentences it
     turns off: a receiver powered up with the board is still booting when
     run() sends it, and stays at 1 Hz. Less and less often, so a receiver
     that never takes it (or an unwired ESP TX) costs next to nothing."""
     _usb_drain()
+    _ep_over(now)
     _uc_watch(now)
     if _age(now, st["loop_at"]) >= GPS_LOOP_WINDOW:
         st["loop_at"] = now
