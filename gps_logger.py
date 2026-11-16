@@ -428,6 +428,11 @@ def _diag_write(line):
         return
     _diag_busy[0] = True
     try:
+        # (lines left waiting by an earlier call first: one said in the
+        # few bytecodes after its drain stayed there, then went after a
+        # newer line, or with a power-off not at all)
+        while _diag_pend:
+            _diag_one(_diag_pend.pop(0))
         _diag_one(line)
         while _diag_pend:
             _diag_one(_diag_pend.pop(0))
@@ -7351,9 +7356,9 @@ def _vb_ref():
     a, b, c = h[-3][1], h[-2][1], h[-1][1]
     return max(min(a, b), min(max(a, b), c))
 
-_vb_jump = [0, None]                     # samples in a row off the last kept
-                                         # one by over VBAT_DROP, the last one's
-                                         # uptime
+_vb_jump = [0, None]                     # samples in a row that jumped (over
+                                         # VBAT_JUMP off _vb_ref, or off the
+                                         # plateau), the last one's uptime
 def vbat_tick(now):
     """Every VBAT_EVERY s a sample of what is left, and _vbat_fit once (the
     display asks every TFT_STATE). No battery starts the history again, so
@@ -7376,7 +7381,11 @@ def vbat_tick(now):
         _vb_jump[0], _vb_jump[1] = 0, None
         _vb_left[0] = None
         return
-    if _vb_hist and abs(p - _vb_ref()) > VBAT_JUMP:
+    r = _vb_ref() if _vb_hist else None
+    # (off the charger's plateau at the top of the charge too: there a
+    # point is ~13 mV, the unplug step 4 points, under VBAT_JUMP, and the
+    # plateau kept made the time left a quarter of the true one)
+    if r is not None and (abs(p - r) > VBAT_JUMP or (r >= 99 and r - p > VBAT_DROP)):
         _vb_jump[0] += 1
         _vb_jump[1] = t
         if _vb_jump[0] < VBAT_AGAIN:

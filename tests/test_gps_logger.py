@@ -27868,6 +27868,69 @@ finally:
 check("UPLOAD-LEFT-FUZZ: 'left' equals count_points every tick and every track goes "
       "(16 runs of mixed answers, damaged files too)", _lf_bad == [], repr(_lf_bad[:3]))
 
+# VBAT-UNPLUG-TOP: a top-up cut at 90-97 %: on the charger 4.20 V (100 %),
+# off it 4.145 V (96 %), a 4-point step, under VBAT_JUMP: the plateau kept
+# made the time left ~8 h for ~28 min (~35 h true). Leaving the plateau
+# by more than VBAT_DROP is a jump too
+_vu_saved = (gl.uptime_s, gl._vbat_now)
+_vu_up = [1000]
+gl.uptime_s = lambda now=None: _vu_up[0]
+_vu = []
+try:
+    _vb_reset()
+    for i_ in range(60):
+        _vu_up[0] = 1000 + 60 * i_
+        v_ = 4.20 if i_ < 30 else 4.145 - 0.0006 * (i_ - 30)
+        gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
+        gl.vbat_tick(0)
+        if i_ in (31, 32):
+            _vu.append(len(gl._vb_hist))
+finally:
+    gl.uptime_s, gl._vbat_now = _vu_saved
+    _vb_reset()
+check("VBAT-UNPLUG-TOP: off the charger's plateau at 96 % the samples start again",
+      _vu == [1, 2], repr(_vu))
+# VBAT-NOISE-SEEDS: ten noise seeds at 12 mV, at most one reset each in 6 h
+_vs_saved = (gl.uptime_s, gl._vbat_now)
+_vs_up = [1000]
+gl.uptime_s = lambda now=None: _vs_up[0]
+_vs = []
+try:
+    for seed_ in range(1, 11):
+        rnd_ = _vn_random.Random(seed_)
+        _vb_reset()
+        n_ = 0
+        for i_ in range(6 * 60):
+            _vs_up[0] = 1000 + 60 * i_
+            v_ = 4.0 - 0.0006 * i_ + rnd_.gauss(0, 0.012)
+            gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
+            k_ = len(gl._vb_hist)
+            gl.vbat_tick(0)
+            n_ += len(gl._vb_hist) == 1 and k_ > 1
+        _vs.append(n_)
+finally:
+    gl.uptime_s, gl._vbat_now = _vs_saved
+    _vb_reset()
+check("VBAT-NOISE-SEEDS: ten seeds of 12 mV noise, at most one reset in 6 h each",
+      max(_vs) <= 1, repr(_vs))
+# DIAG-PEND-LEFT: a line left waiting by an earlier call goes before the next one
+_dp_dir = tempfile.mkdtemp()
+_dp_saved = (gl.DIAG_FILE, gl.DIAG, gl.free)
+gl.DIAG = 60000
+gl.DIAG_FILE = os.path.join(_dp_dir, "diag.log")
+gl.free = lambda: 10 ** 8
+try:
+    gl._diag_pend.append("left waiting")
+    gl._diag_write("next")
+    with builtins.open(gl.DIAG_FILE) as f:
+        _dp = f.read()
+finally:
+    gl.DIAG_FILE, gl.DIAG, gl.free = _dp_saved
+    del gl._diag_pend[:]
+    shutil.rmtree(_dp_dir, ignore_errors=True)
+check("DIAG-PEND-LEFT: a waiting line goes out before the next one", _dp == "left waiting\nnext\n",
+      repr(_dp))
+
 _run_ended.append(1)
 _summary()
 sys.exit(1 if failed else 0)
