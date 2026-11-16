@@ -122,7 +122,7 @@ enough free flash` when the new files would not fit next to the old ones).
 It makes `web.html.gz` with `tools/web_min.py` (~25 KB instead of the ~88 KB
 `web.html`: comments and indentation out, gzipped with the firmware's 4 KB
 window, `WEB_GZ_WBITS`: see the [status page](usage.md#status-page)) and copies
-`gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy`, `main.py` and the status page, only as `web.html.gz`, as
+`gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy`, the display's `gps_tft.mpy` and `gps_tft_font.mpy`, `main.py` and the status page, only as `web.html.gz`, as
 `<name>.dpl`, checks their size and SHA-256 on the board, and only then
 renames them over the old files, removing an old plain `/web.html` in the
 same step (~90 KB of flash back); a failed check (`Copy check FAILED`)
@@ -389,8 +389,14 @@ bad for good, as two power cuts in the 2-minute pending window made a good
 build (a build in `/ota.bad` from an older firmware's tries stays there:
 remove the file to try it again); the health reset removes the note before it counts its
 try, so a power cut between them cannot count one attempt twice, and it
-writes the points in RAM first. A boot without a pending note confirms
-the running image. A note that is there but cannot be read or parsed is
+writes the points in RAM first. The install marks itself `staged` in
+`/ota.mark` until `set_boot` is through (it hashes the image first): a
+power-off before that is no try of a build that never ran (`install cut`,
+dropped). A boot without a pending note confirms the running image and
+removes a staged page a power cut left (`<file>.tmp`, `.new`). The pages
+must fit in the free flash before the 2 MB download (`no flash for page`).
+A pending build without `OTA_URL` (its `.env` reading lost it) is not
+confirmed: it rolls back, it could only be updated over USB. A note that is there but cannot be read or parsed is
 dropped with the staged pages and the running image is confirmed once
 (`ota note unreadable, dropped`): which build it named, and whether this
 is it or the old one after a rollback, is not known, and holding it as

@@ -7267,6 +7267,41 @@ if mpy_f32:
 else:
     skip_check("mpy-unix-f32", "MICROPYTHON_F32 not set")
 
+# RCV-SIM: tests/rcv_sim.py, a stateful UC6580 and the loop on a fake clock,
+# on single-precision floats: no fix dated with a day it was not sent on (a
+# day of silence dated the next GGA-only second a day back: seeds 6, 14,
+# 16, 17 of 40 events), no position out of range, no exception or bug, the
+# setup back at the end
+if mpy_f32:
+    _rs_out = []
+    for seed_ in (1, 6, 14, 16, 17):
+        try:
+            _rs_out.append(subprocess.check_output(
+                [mpy_f32, os.path.join(ROOT, "tests", "rcv_sim.py"), str(seed_), "40"],
+                stderr=subprocess.STDOUT, timeout=120).decode().strip().splitlines()[-1])
+        except Exception as e:
+            _rs_out.append(repr(e) + " " + (getattr(e, "output", b"") or b"").decode(
+                errors="replace")[-300:])
+    check("RCV-SIM: the receiver simulator holds on 5 seeds (dates, range, setup)",
+          all(re.match(r"seed \d+ bad 0 ", l_) for l_ in _rs_out), repr(_rs_out))
+else:
+    skip_check("RCV-SIM", "MICROPYTHON_F32 not set")
+
+# TRACK-FUZZ: tests/track_fuzz.py, the track writer under power cuts,
+# partial writes, failed closes and MemoryErrors: every point read back
+# once and in order unless it was in RAM at a cut or dropped on purpose
+# (a footer cut that failed sent 36 points twice; seeds 39 and 140 with
+# no failed close committing)
+import subprocess  # noqa: E402
+_tf = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "track_fuzz.py")]
+                     + [str(x_) for x_ in range(1, 31)] + ["%d:0" % x_ for x_ in (39, 64, 140)],
+                     capture_output=True, text=True, timeout=300)
+_tf_lines = [l_ for l_ in _tf.stdout.splitlines() if l_.startswith(("ok ", "FAULT "))]
+check("TRACK-FUZZ: 33 seeds of power cuts and write faults: no duplicate, no garbage, "
+      "no unexplained loss", _tf.returncode == 0 and len(_tf_lines) == 33
+      and all(l_.startswith("ok ") for l_ in _tf_lines),
+      repr([l_ for l_ in _tf_lines if not l_.startswith("ok ")][:3] or _tf.stderr[-300:]))
+
 # The same smoke under CPython (keeps the script itself working)
 import subprocess
 try:
@@ -7529,7 +7564,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and dev_file(dev, ".rtc") == b"0"
           and dev_file(dev, "gps_clock.py") is None
           and dev_file(dev, "gps_receiver.py") is None
-          and len(cps) == 5 and all(c[2].endswith(".dpl") for c in cps)
+          and len(cps) == 7 and all(c[2].endswith(".dpl") for c in cps)
           and "Board: Heltec Wireless Tracker" in out and "(xtensawin)" in out
           and "Deployed to %s/ttyACM0" % os.path.dirname(dev) in out,
           "rc=%d %r %r %r" % (rc, out[-300:], err[-300:], cps))
@@ -7552,13 +7587,14 @@ if shutil.which("bash") and shutil.which("sha256sum"):
         with open(pl) as f:
             dp_opt.append(f.read().split("\n")[:-1])
     opt_src = {}
-    for n in ("gps_logger.py", "gps_clock.py", "gps_receiver.py", "gps_boot.py", "gps_tft.py"):
+    for n in ("gps_logger.py", "gps_clock.py", "gps_receiver.py", "gps_boot.py", "gps_tft.py",
+              "gps_tft_font.py"):
         with open(os.path.join(ROOT, n)) as f:
             opt_src[n] = [ln for ln in f.read().splitlines()
                           if re.match(r"\s*assert\b", ln) or "__debug__" in ln]
     check("DEPLOY-OPT3: deploy.sh compiles with -O3, plain and FORCE_MPY; no "
           "assert or __debug__ in what is compiled that way",
-          len(dp_opt) == 2 and all(len(c) == 3 and all("-O3" in x.split() for x in c)
+          len(dp_opt) == 2 and all(len(c) == 5 and all("-O3" in x.split() for x in c)
                                    for c in dp_opt)
           and not any(opt_src.values()), repr((dp_opt, opt_src)))
     rc, out, err, dev, calls = deploy_run({"FAKE_FREE_BLOCKS": "3"})
@@ -7654,11 +7690,15 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not [c for call in calls_c for c in call if c[0] == "cp"]
           and rc_p == 0 and dev_file(dev_p, "gps_clock.mpy") is not None
           and sorted(c[1] for call in calls_p for c in call if c[0] == "cp")
-          == ["gps_clock.mpy", "gps_logger.mpy", "gps_receiver.mpy", "main.py", "web.html.gz"],
+          == ["gps_clock.mpy", "gps_logger.mpy", "gps_receiver.mpy", "gps_tft.mpy",
+              "gps_tft_font.mpy", "main.py", "web.html.gz"],
           "%r %r" % ((rc_c, err_c[-200:]), (rc_p, err_p[-200:])))
     # DEPLOY-RX: gps_receiver.py the same way: compared (RX), installed on a
     # plain board, a stale frozen one stops naming it
     rc_r, out_r, err_r, dev_r, calls_r = deploy_run({"FAKE_FROZEN": "rx-stale"})
+    check("DEPLOY-TFT: a plain board gets the display's modules too (its TFT stayed dark: "
+          "tft ImportError)", dev_file(dev_p, "gps_tft.mpy") is not None
+          and dev_file(dev_p, "gps_tft_font.mpy") is not None, repr(sorted(os.listdir(dev_p))))
     check("DEPLOY-RX: a frozen gps_receiver.py not this one stops, naming it; a plain board "
           "gets gps_receiver.mpy",
           rc_r != 0 and "gps_receiver.py" in err_r
@@ -7808,7 +7848,7 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           "the first session: a page tools/web_min.py refuses stops the deploy "
           "with the board untouched (no session, no reset)",
           dp_local[0] != 0 and dp_local[1:] == (True, [], [], b"old main")
-          and rc == 0 and dp_first == 3,
+          and rc == 0 and dp_first == 5,
           repr(dp_local + (rc, dp_first)))
 else:
     skip_check("DEPLOY", "no bash/sha256sum")
@@ -8580,9 +8620,12 @@ _clock[0] += gl._rcv.GPS_SILENT
 gl._rcv.gps_check(_clock[0])
 _gs_ms = gl.st["mute_s"] == gl._stamp() - gl._rcv.GPS_SILENT // 1000
 gl.st["mute_s"] = gl._stamp() - 7 * 86400   # (as if it began a week ago)
-gl.st["rx"] = _clock[0]
 gl.st["date"] = "2026-11-08"                 # (kept from before the silence)
 gl._rcv._day[0], gl._rcv._day[1] = b"081126", "2026-11-08"
+gl.st["rx_lost"] = True                      # (_stamps_old forgot its last byte)
+_uart_rx[:] = []
+_uart_rx.extend(b"$GPTXT,01,01,02,back*00\r\n")
+gl._rcv.read_uart()                          # the bytes again: the date goes
 gl._rcv.gps_check(_clock[0])
 _gs_long = [l for l in diag_lines() if "gps back" in l]
 _gs_date = (gl.st["date"], gl._rcv._day[0], gl._rcv._day[1])
@@ -8669,6 +8712,72 @@ check("RCV-PARTIAL: a GSA that fails leaves no fix type; a GSV of no system is n
       _rp_gsa == (True, 1) and _rp_used == [] and "XX" not in _rp_view
       and _rp_ep == (0, None)
       and _rp_date is None, repr((_rp_gsa, _rp_used, _rp_view, _rp_ep, _rp_date)))
+# RCV-SILENCE-END: bytes again after a silence of a day and more: the
+# second left open before it was published on their first time sentence
+# with its old date, and that date stayed for the next second without its
+# own RMC (a GGA-only 13:00:00 a day later dated the day before); and only
+# gps_check dropped it, after the POST guard's reads had published
+gl._rcv.reset()
+_uart_rx[:] = []
+_rs_q0 = gl.st["seq"]
+_uart_rx.extend(_rf_nm("GNRMC,120000.00,A,4730.00000,N,01903.00000,E,0.1,,151126,,,A,V") + b"\r\n"
+                + _rf_nm("GNGGA,120000.00,4730.00000,N,01903.00000,E,1,20,0.8,100.0,M,40.0,M,,")
+                + b"\r\n")
+gl._rcv.read_uart()                          # 12:00:00 open, dated the 15th
+_clock[0] += 25 * 3600 * 1000                # a day and an hour: no byte
+gl.st["rx"] = None                           # (_stamps_old forgets it by then)
+gl.st["rx_lost"] = True
+_uart_rx.extend(b"$GNRMC,130000.00,A,47"     # back mid-sentence: its RMC cut
+                + _rf_nm("GNGGA,130000.00,4731.00000,N,01903.00000,E,1,20,0.8,100.0,M,40.0,M,,")
+                + b"\r\n"
+                + _rf_nm("GNGGA,130001.00,4731.00000,N,01903.00000,E,1,20,0.8,100.0,M,40.0,M,,")
+                + b"\r\n")
+gl._rcv.read_uart()                          # (the POST guard: no gps_check)
+_rs = [(f[gl._rcv.F_DATE], f[gl._rcv.F_TIME]) for f in gl._rcv.drain(_rs_q0)]
+gl._rcv.reset()
+_uart_rx[:] = []
+check("RCV-SILENCE-END: the second before a day of silence keeps its date; the first one "
+      "after it without its own RMC gets none (it got the day before), on any read",
+      _rs[:1] == [("2026-11-15", "12:00:00")]
+      and ("2026-11-15", "13:00:00") not in _rs, repr(_rs))
+# RCV-GST-BACK: after a silence of 30 s and more GST had not come since
+# before it: the first pass after the bytes came again said "setup lost: no
+# GST" and sent the whole setup (10 commands), although it had kept it
+gl._rcv.reset()
+gl.st["setup_ok"], gl.st["setup_at"], gl.st["extra"] = True, _clock[0], 0
+gl.st["gst_at"] = gl.st["rx"] = _clock[0]
+_clock[0] += gl._rcv.UC_GST_LOST + 5000      # silent past UC_GST_LOST
+_uart_rx.extend(_rf_nm("GNGGA,120000.00,4730.00000,N,01903.00000,E,1,20,0.8,100.0,M,40.0,M,,")
+                + b"\r\n")
+gl._rcv.read_uart()
+gl._rcv._uc_watch(_clock[0])
+_gb = gl.st["extra"]
+for i_ in range(gl._rcv.UC_GST_LOST // 2000 + 1):   # and no GST since they came
+    _clock[0] += 2000
+    _uart_rx.extend(_rf_nm("GNGGA,1200%02d.00,4730.00000,N,01903.00000,E,1,20,0.8,100.0,"
+                           "M,40.0,M,," % (2 + 2 * i_)) + b"\r\n")
+    gl._rcv.read_uart()
+gl._rcv._uc_watch(_clock[0])
+_gb2 = gl.st["extra"]
+gl._rcv.reset()
+_uart_rx[:] = []
+check("RCV-GST-BACK: no 'setup lost' right after a silence; still said when GST stays away "
+      "UC_GST_LOST after the bytes came again", (_gb, _gb2) == (0, 1), repr((_gb, _gb2)))
+# RCV-NUM-LONG: 39 digits are inf in single precision; /status.json then
+# had "hdop": inf (no JSON, the page OFFLINE). A float field over NUM_MAX
+# characters is a bad sentence; a non-finite row is null in the JSON
+_nl = []
+for v_ in ("9" * 39, "1" * 17, "12345.678901"):
+    try:
+        _nl.append(gl._rcv._num(v_))
+    except ValueError:
+        _nl.append("bad")
+_nl_json = "".join(gl._web_json_parts([("hdop", float("inf")), ("std", float("nan"))], []))
+check("RCV-NUM-LONG: a float field over NUM_MAX characters is refused; inf / nan rows are "
+      "null in /status.json",
+      _nl == ["bad", "bad", 12345.678901] and '"hdop":null' in _nl_json
+      and '"std":null' in _nl_json and json.loads(_nl_json)["hdop"] is None,
+      repr((_nl, _nl_json[:80])))
 
 saved_diag = (gl.DIAG, gl.DIAG_MAX)
 try:
@@ -9055,6 +9164,8 @@ def _vb_reset():
     gl._vb[:] = [None, None, None, None, None, 0]
     gl._vb_hist[:] = []
     gl._vb_left[0] = None
+    if hasattr(gl, "_vb_jump"):
+        gl._vb_jump[:] = [0, None]
 
 
 def _vb_read(uvs):
@@ -9163,7 +9274,8 @@ check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 74 % (Meshtasti
 # carried down to 0 %, fitted once a sample, a minute at least. Nothing before
 # 10 min of samples, on a flat or rising (charging) line, at 99 % and up, or
 # without a battery; a jump of more than VBAT_DROP points (on or off the
-# charger) starts the history again, +2 points of noise does not.
+# charger) that holds a second sample starts the history again; +2 points
+# of noise, or one sample off alone, does not.
 gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]  # 0.5 %/min
 vl_fit = gl._vbat_fit()
 vl_txt = [gl._left_text(x) for x in (vl_fit, 2700, 59 * 60 + 40, 3 * 3600 + 4 * 60, 3570, 6900, 6840)]
@@ -9199,10 +9311,11 @@ try:
         gl.vbat_tick(_clock[0])
         vl_off.append(gl._vbat_left())
     vl_off_hist = len(gl._vb_hist)
-    # noise: +2 points keeps the history, +3 starts it again
+    # noise: +2 points keeps the history, one sample +3 off alone too, +3
+    # twice starts it again
     _vb_reset()
     vl_noise = []
-    for p_ in (50, 52, 55):
+    for p_ in (50, 52, 55, 50, 55, 55):
         gl._vbat_now = lambda p_=p_: p_
         _clock[0] += 60000
         gl.vbat_tick(_clock[0])
@@ -9222,10 +9335,13 @@ try:
     vl_span = gl._vb_hist[-1][0] - gl._vb_hist[0][0]
     vl_cached = (gl._vbat_left(), gl._vbat_fit())
     vl_rows = dict(gl._web_rows())
-    _VbAdc.uv = [int(4.05 / 4.9 * 1e6)]  # on the charger: up
+    _VbAdc.uv = [int(4.05 / 4.9 * 1e6)]  # on the charger: up, twice
     _clock[0] += 60000
     gl.vbat_tick(_clock[0])
-    vl_charge = (len(gl._vb_hist), gl._vbat_left())
+    vl_charge1 = len(gl._vb_hist)
+    _clock[0] += 60000
+    gl.vbat_tick(_clock[0])
+    vl_charge = (vl_charge1, len(gl._vb_hist), gl._vbat_left())
     _VbAdc.uv = [618000, 841000]         # no battery: the charger's swing, twice
     vl_none = []
     for _k in range(2):
@@ -9250,13 +9366,13 @@ check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min, rounded to 10 min from an 
       and vl_empty == "0 % (3.30 V), ~1 min left"
       and vl_tft == [(65, "2 óra"), (65, "1 óra"), (65, "1 óra"), (65, "59 p"), (65, "45 p"),
                      (65, "3 óra"), (65, "1 p"), (65, None), None]
-      and all(x is None for x in vl_off[:30]) and vl_off_hist == 16
+      and all(x is None for x in vl_off[:30]) and vl_off_hist == 15
       and vl_off[-1] is not None and abs(vl_off[-1] - 93 * 360) < 0.2 * 93 * 360
-      and vl_noise == [1, 2, 1]
+      and vl_noise == [1, 2, 2, 3, 3, 1]
       and vl_seen == list(range(1, 32)) + [31] * 14 and vl_span == 1800
       and vl_cached[0] == vl_cached[1] and vl_cached[0] is not None
       and vl_rows["vbat_left_s"] == vl_cached[0] and vl_rows["battery"].endswith(" left")
-      and vl_charge == (1, None) and vl_none == [2, 0] and vl_none_left is None,
+      and vl_charge == (31, 1, None) and vl_none == [2, 0] and vl_none_left is None,
       "%r %r %r %r %r %r %r %r %r %r %r %r %r" % (
           vl_fit, vl_txt, vl_cases, vl_bat, vl_empty, vl_tft, vl_off, vl_off_hist, vl_noise,
           vl_seen, (vl_span, vl_cached), [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
@@ -13105,7 +13221,7 @@ try:
 finally:
     del gl.open
 real_free_ = gl.free
-gl.free = lambda: gl.MIN_FREE            # the flash reserve, not the .bad
+gl.free = lambda: gl.MIN_FREE // 2       # the .bad's half of the reserve, used up
 try:
     gl.up.update(hold={}, fail4=0)
     _clock[0] += 1000
@@ -13515,6 +13631,14 @@ try:
                   b"\r\n\r\n{}"):
         rv_sock[0] = RvSock(resp_, polls=0)
         uh_res.append(gl._raw_post("https://d.example", b"{}", {}, 15))
+    rv_sock[0] = RvSock(b"", polls=0)           # closed before a status line
+    try:
+        gl._raw_post("https://d.example", b"{}", {}, 15)
+        uh_empty = "no error"
+    except OSError as e_:
+        uh_empty = e_.args[0]
+    except Exception as e_:
+        uh_empty = repr(e_)
     uh_p = os.path.join(up_td, "20261005_101500.trk")
     for resp_ in (b"HTTP/1.0 200 OK\r\n\r\n<html>login</html>",
                   b"HTTP/1.1 200 OK\r\nServer: portal\r\nContent-Length: 20"
@@ -13538,6 +13662,8 @@ finally:
     for x_ in (uh_p, uh_p + ".pos"):
         if os.path.exists(x_):
             os.remove(x_)
+check("UPL-EMPTY: an answer closed before its status line is OSError 104 (it was an "
+      "IndexError in the diag)", uh_empty == 104, repr(uh_empty))
 check("UPL-HEAD: _raw_post gives b\"\" for a whole head without a "
       "Content-Type, None for one not read to its end",
       [r_[2] for r_ in uh_res] == [b"", None, b"application/json"]
@@ -14201,7 +14327,8 @@ check("trk2gpx: a byte 0x0D splits no line (only \\n ends one, as _rd_line)",
       and "10:15:03Z" not in gpx_cr and gpx_cr.count("<trkpt") <= 2,
       gpx_cr[:400])
 # number fields float() takes that are no xsd:decimal are written as the
-# logger's _ptnum writes them ("%.1f"), plain decimals as written
+# logger's _ptnum writes them ("%.1f"), and so is a plain decimal not in
+# that form ("100" as 100.0: the upload's _canon), one in it as written
 g_num = trk2gpx.convert(["#TRK1\n", "47.5,19.0,1_0.0,0.9,20261029T101500Z\n",
                          "47.5,19.0,1e3,1E1,20261029T101501Z\n",
                          "47.5,19.0, 10.0 ,100,20261029T101502Z\n",
@@ -14209,7 +14336,7 @@ g_num = trk2gpx.convert(["#TRK1\n", "47.5,19.0,1_0.0,0.9,20261029T101500Z\n",
                          "47.5,19.0,-2.5,1e0,5_0,20261029T101503Z\n"], "x")
 check("trk2gpx: ele/hdop/acc/speed are xsd:decimal (1_0.0, 1e3, ' 10.0 ')",
       "<ele>10.0</ele>" in g_num and "<ele>1000.0</ele>" in g_num
-      and "<hdop>10.0</hdop>" in g_num and "<hdop>100</hdop>" in g_num
+      and "<hdop>10.0</hdop>" in g_num and "<hdop>100.0</hdop>" in g_num
       and "<ele>-2.5</ele>" in g_num and "<esp:acc>1.0</esp:acc>" in g_num
       and "<esp:speed>50.0</esp:speed>" in g_num
       and not re.search(r">[^<]*[_eE ][^<]*</(ele|hdop|esp:)", g_num),
@@ -15328,6 +15455,8 @@ else:
         ("ota a3f2271 installed (was 2e8bc6e), rebooting", "ota"),
         ("ota a3f2271 booted, checking", "ota"),
         ("ota note unreadable, dropped (running 2e8bc6e)", "otax"),
+        ("ota a3f2271 install cut before set_boot (a power-off): dropped, no try "
+         "(running 2e8bc6e)", "otax"),
         ("ota bad mark 1793548800 OSError(28,)", "otax"),
         ("ota a3f2271 set to boot, not run yet: rebooting into it", "ota"),
         ("ota a3f2271 crashed, rolled back by the bootloader: bad (running "
@@ -15431,6 +15560,13 @@ else:
           "word by its tone and the dBm",
           "</svg>&lt;x&gt; &middot; 50 % weak &middot; -75 dBm</span>" in sy,
           sy[sy.find("Wi-Fi"):sy.find("Wi-Fi") + 600])
+    check("PAGE-HU-TIME: the GPS time in Hungarian time (CET in winter, CEST in summer), "
+          "not UTC", "4:00:00" in v.get("huTime", [""])[0]
+          and "5:00:00" in v.get("huTime", ["", ""])[1]
+          and "UTC" not in "".join(v.get("huTime", ["UTC"])), repr(v.get("huTime")))
+    check("PAGE-OTA-PEND: a pending build's Firmware row says since when and why it waits",
+          "2 min 10 s" in v.get("otaPend", "") and "no OTA_URL" in v.get("otaPend", ""),
+          repr(v.get("otaPend")))
     # PAGE-NULL: south/west coordinates, Python None in diag lines, quotes
     check("PAGE-NULL: S/W coordinates as absolute values",
           v.get("coordSW", "").startswith("33.85678&deg; S  151.21530&deg; W")
@@ -16050,6 +16186,29 @@ check("WEB-MIN-EDGE: a // comment ends at \\r, U+2028 and U+2029 too, a /* */ wi
       "kept); a \"<style>\" in an HTML comment starts no block; <pre>, <textarea> "
       "and a <script>/<style> without an end tag stop the build",
       web_min and _wm_edge == [True] * 9, repr(_wm_edge))
+# WEB-MIN-DIV: the word before a "/" decided: a keyword as a property
+# (st.in / 8), "of" as a name and an object literal's "}" took a division
+# for a regex: the rest of the line read wrong, no MinifyError (a script
+# node refuses). node --check on the stripped script stops such a build
+_wm_div = []
+if web_min:
+    for src_ in ("k = st.in / 8, ok = /x\\//.test(p);\nf(k, ok);",
+                 "var of = 4; var z = of / 2, r = /a/g;",
+                 "var o = {a: 1} / 2, r = /b/;",
+                 "if (x) { y(); }\n/re/.test(z);",
+                 "x = a.do / 2; y = /c/;"):
+        _wm_div.append(web_min.minify_js(src_) == src_)
+    if shutil.which("node"):
+        try:
+            web_min.node_check("<script>\nvar a = ;\n</script>\n")
+            _wm_div.append(False)
+        except web_min.MinifyError:
+            _wm_div.append(True)
+        web_min.node_check("<script>\nvar a = 1;\n</script>\n")
+        _wm_div.append(True)
+check("WEB-MIN-DIV: a division after a property, \"of\" or an object literal stays one; "
+      "node --check stops a stripped script that does not parse",
+      web_min and _wm_div and all(_wm_div), repr(_wm_div))
 _wm_page = web_min.minify(page_src) if web_min else page_src
 _wm_css = lambda t_: re.sub(r"\s+", " ", re.sub(r"/\*.*?\*/", " ", t_[t_.index("<style>"):t_.index("</style>")],
                                                 flags=re.S)).replace(" }", "}").strip()
@@ -17432,6 +17591,54 @@ try:
           and "after a power-off" in rb[1][6][-1]
           and plain == [("valid",)],
           repr((rb, plain)))
+    # OTA-STAGED: a power cut between the pending note and set_boot (it
+    # hashes the 2 MB image first) was a try for a build that never ran
+    # (two such a day's hold); the mark "staged" says it was cut: dropped,
+    # no try. Set to boot and not run yet still boots it (OTA-UNBOOTED)
+    _ota_reset()
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    with open(page_p + ".new", "wb") as f:
+        f.write(_page)
+    with open(gl.OTA_PENDING, "w") as f:
+        f.write("200 abc0200\n" + page_p)
+    with open(gl.OTA_MARK, "w") as f:
+        f.write("staged")
+    _reset_cause[0] = 1
+    gl.ota_boot()
+    os_st = (gl.ota["state"], gl._ota_tries(), os.path.exists(gl.OTA_PENDING),
+             os.path.exists(gl.OTA_MARK), os.path.exists(page_p + ".new"),
+             [l for l in diag_lines() if l.startswith("ota ")][-1:])
+    check("OTA-STAGED: an install cut before set_boot is dropped, no try for a build "
+          "that never ran",
+          os_st[:5] == ("install cut", (None, 0), False, False, False)
+          and "install cut" in os_st[5][0], repr(os_st))
+    # OTA-ORPHAN: a power cut while a page was staged left its .tmp / .new
+    # (~26 KB) with no note to name it: a boot without a note drops them
+    _ota_reset()
+    for x_ in (page_p + ".tmp", page_p + ".new"):
+        with open(x_, "wb") as f:
+            f.write(b"x" * 100)
+    gl.ota_boot()
+    check("OTA-ORPHAN: a boot without a note removes staged page files left by a cut",
+          not os.path.exists(page_p + ".tmp") and not os.path.exists(page_p + ".new"),
+          repr(sorted(os.listdir(_ota_dir))))
+    # OTA-NOFLASH: the pages would not fit: refused before the 2 MB download
+    # (it failed halfway, after it, every OTA_RETRY)
+    _ota_reset()
+    _serve(_manifest(200))
+    gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+    _nf_free = gl.free
+    gl.free = lambda: gl.MIN_FREE
+    _nf_gets = []
+    gl.HTTP_GET = lambda u_, s_, l_: (_nf_gets.append(u_), _ota_get(u_, s_, l_))[1]
+    try:
+        gl._ota_check()
+    finally:
+        gl.free = _nf_free
+        gl.HTTP_GET = _ota_get
+    check("OTA-NOFLASH: no room for the pages: 'no flash for page', only the manifest read",
+          gl.ota["state"] == "no flash for page" and len(_nf_gets) == 1
+          and _ota_log == [], repr((gl.ota["state"], _nf_gets, _ota_log)))
     # OTA-PROMOTE: a staged page that cannot be renamed over the old one
     # (a file system that does not rename over an existing file) goes up
     # after the old one is removed; one that cannot go up at all is in the
@@ -17869,7 +18076,8 @@ try:
     # OTA-PROBE: a pending firmware is valid only once it read the manifest
     # too (HTTP 200, parsed): a build with a broken update path rolls back
     # instead of leaving the board to USB updates. Read every OTA_PROBE,
-    # OTA_HEALTH as before; no OTA_URL: valid with WiFi as before
+    # OTA_HEALTH as before; no OTA_URL: a build that lost it rolls back too
+    # (it was confirmed with WiFi alone, the board then USB-only)
     pr = []
     gets = []
     def _counting_get(url, sink, limit):
@@ -17914,12 +18122,12 @@ try:
         gl.wifi_reset()
     check("OTA-PROBE: valid after OTA_VALID_AFTER with WiFi and a manifest "
           "read; none read in OTA_HEALTH resets (a try, not bad); read "
-          "every OTA_PROBE; no OTA_URL as before",
+          "every OTA_PROBE; no OTA_URL rolls back (no manifest, 'no OTA_URL')",
           [p[:5] for p in pr] == [
               ("served", ([("valid",)], "ok"), [("valid",)], [], False),
               ("404", ([], "pending"), [("reset",)], [], False),
               ("late", ([], "pending"), [("valid",)], [], False),
-              ("no url", ([("valid",)], "ok"), [("valid",)], [], False)]
+              ("no url", ([], "pending"), [("reset",)], [], False)]
           and pr[0][5] == 1 and pr[3][5] == 0
           and 2 <= pr[1][5] <= gl.OTA_HEALTH // gl.OTA_PROBE + 2,
           repr(pr))
@@ -23076,7 +23284,7 @@ check("DNS-CACHE: a fast failure is only that; a slow one uses that network's ad
       "does not ask again; another network's address is never used; a new IP asks again",
       _dc == [_DAY, None, _DAY, _DAY, None, None, _DAY]
       and (_dc_asked, _dc_asked2, _dc_asked3) == (3, 4, 5)
-      and "_dns_bad.clear()" in _dc_src,
+      and "_dns_bad.pop(" in _dc_src,
       repr((_dc, _dc_asked, _dc_asked2, _dc_asked3)))
 # UPL-AWAY-HTML: a 400/413/422 quarantines its batch, away too and JSON or
 # not: taken as no answer away, a poison batch (Rails' own HTML 400, the
@@ -23221,7 +23429,7 @@ check("NTP-ASK-ECHO: the request carries the ticks as its transmit time; an answ
       _n_tx and _n_stray is None and _n_era == _n_era_s, repr((_n_tx, _n_stray, _n_era, _n_era_s)))
 
 _n0a = _n0
-hl._ntp[:] = [None, None, hl.NTP_RETRY]
+hl._ntp[:] = [None, None, hl.NTP_RETRY // 2]     # (as at boot)
 hl.log["clock"] = None
 _NtpMod.asked[:] = []
 _NtpMod.reply, _NtpMod.addr = OSError(110), [(2, 2, 17, "", ("192.0.2.1", 123))]
@@ -23250,9 +23458,13 @@ _n_lines = len(hl.log["batch"])
 _n_diag = []
 _n_dw = hl._diag_write
 hl._diag_write = _n_diag.append
+_n_tft = (hl._tft_t[0], hl._Rt.drawn)
+hl._tft_t[0], hl._Rt.drawn = ("shown",), 5
 hl.ntp_tick(_clock[0])
+_n_redraw = (hl._tft_t[0], hl._Rt.drawn) == (None, None)
+hl._tft_t[0], hl._Rt.drawn = _n_tft
 hl._diag_write = _n_dw
-_n_ok = hl._ntp[0] == (_DAY, hl._stamp()) and hl._ntp[2] == hl.NTP_AGAIN
+_n_ok = hl._ntp[0] == (_DAY, hl._stamp()) and hl._ntp[2] == hl.NTP_AGAIN and _n_redraw
 _n_asked = len(_NtpMod.asked)
 _n_t0 = _clock[0]                        # (the try's time is a Stamp: the clock moves)
 _clock[0] = _n_t0 + hl.NTP_AGAIN - 1000
@@ -23270,10 +23482,10 @@ _clock[0] = _n_t0 + hl.NTP_AGAIN * 3
 hl.ntp_tick(_clock[0])
 _n_again = len(_NtpMod.asked) == _n_asked + 1
 check("NTP-TICK: only connected, with a server and before a fix told the time; a failed try "
-      "waits, doubling to the cap; an answer lasts NTP_AGAIN, says one diag line and "
-      "writes no track line",
-      _n_offline == 0 and _n_off == 0 and _n_once == 1 and _n_w1 == 2 * hl.NTP_RETRY
-      and _n_w2 == 4 * hl.NTP_RETRY and _n_cap == hl.NTP_RETRY_MAX and _n_ok and _n_held
+      "waits NTP_RETRY (it was twice that), doubling to the cap; an answer lasts NTP_AGAIN, "
+      "says one diag line and writes no track line",
+      _n_offline == 0 and _n_off == 0 and _n_once == 1 and _n_w1 == hl.NTP_RETRY
+      and _n_w2 == 2 * hl.NTP_RETRY and _n_cap == hl.NTP_RETRY_MAX and _n_ok and _n_held
       and _n_fixed and _n_again and len(hl.log["batch"]) == _n_lines
       and _n_diag == ["clock ntp " + hl._stamp_s(_DAY)[0]],
       repr((_n_offline, _n_off, _n_once, _n_w1, _n_w2, _n_cap, _n_ok, _n_held, _n_fixed, _n_again, _n_diag)))
@@ -25952,8 +26164,9 @@ try:
         gl.wifi_reset()
     check("RV14-5: the first NTP failure after an answer retries in "
           "NTP_RETRY (it was an hour), and doubles from there; a new "
-          "connection with no answer yet starts the backoff over",
-          r3_5 == [gl.NTP_RETRY, 2 * gl.NTP_RETRY, (None, gl.NTP_RETRY)],
+          "connection with no answer yet starts the backoff over (its first retry in "
+          "NTP_RETRY, as a failure doubles the wait first)",
+          r3_5 == [gl.NTP_RETRY, 2 * gl.NTP_RETRY, (None, gl.NTP_RETRY // 2)],
           repr(r3_5))
 
     # RV14-6: asleep after the home link, the home AP's bar is SEEN_MIN_RSSI
@@ -26290,6 +26503,11 @@ try:
     _t2_b[_t2_hit] = 0x41                      # a flag byte below 0x80: damaged
     _t2_out = list(trk2gpx.trb_lines(bytes(_t2_b), "surrogateescape"))
     _t2_seg = "-\n" in _t2_out[1:]
+    # T2G-NUM: a number field the upload sends as "%.1f" prints it ("118.63"
+    # as 118.6, "123" as 123.0) went into the GPX as written: they disagreed
+    _tn = [trk2gpx._num(x_) for x_ in ("118.63", "100.0", "123", "0100.5", "-0.04", "1e3", "")]
+    check("T2G-NUM: ele / hdop / acc / speed as the upload has them",
+          _tn == ["118.6", "100.0", "123.0", "100.5", "-0.0", "1000.0", ""], repr(_tn))
     check("T2G-EDGES: .trb.bad.err taken, lon 180 written -180, a control character and a "
           "non-UTF-8 byte out of the name, an over-long line skipped, an empty file exits 1, a "
           "segment after a damaged record",
@@ -26386,11 +26604,288 @@ finally:
 check("DNS-NET: one slow failure on a network: no other host name is asked there",
       _dn == ["err", "err", "err"] and _dn_asked == ["geo.example"],
       repr((_dn, _dn_asked)))
+# DNS-SAMEIP: the slow-failure mark went on every reconnect, the same IP
+# too: a flaky link on a network whose resolver does not answer blocked
+# 7 s at each one. Only a new IP asks again
+
+
+class _DsW(object):
+    ip = "192.168.1.8"
+
+    def ifconfig(self):
+        return (self.ip, "255.255.255.0", "192.168.1.1", "192.168.1.1")
+
+    def status(self, *a):
+        return -60
+
+
+_ds_w = _DsW()
+_ds_saved = (hl.wifi["ssid"], hl.wifi["ip"])
+hl._dns_bad.clear()
+hl.wifi["ssid"], hl.wifi["ip"] = "hot", "192.168.1.8"
+hl._dns_bad["hot"] = (hl._stamp(), "192.168.1.8")
+hl._dns_bad["other"] = (hl._stamp(), "10.0.0.2")
+try:
+    hl._wifi_got_ip(_ds_w)
+    _ds_same = sorted(hl._dns_bad)
+    _ds_w.ip = "192.168.1.9"
+    hl._wifi_got_ip(_ds_w)
+    _ds_new = sorted(hl._dns_bad)
+finally:
+    hl.wifi["ssid"], hl.wifi["ip"] = _ds_saved
+    hl._dns_bad.clear()
+    hl.wifi_reset()
+check("DNS-SAMEIP: a reconnect with the same IP keeps the network's mark, a new IP drops "
+      "only its own", _ds_same == ["hot", "other"] and _ds_new == ["other"],
+      repr((_ds_same, _ds_new)))
+# WIFI-LOST-MEM: a MemoryError formatting "wifi lost" left the drop half
+# recorded: no sleep_home, so a home stay through a router restart read as
+# away (anchor points at home) for the whole outage
+_wl = []
+for inject_ in (False, True):
+    _wl_dir = tempfile.mkdtemp()
+    write_env(_wl_dir, "SSID=home\nWPA2=pw\n")
+    reset_wlan()
+    WLAN.scan_aps = [("home", -60)]
+    WLAN.ok = {"home"}
+    gl.LOG_DIR = _wl_dir
+    gl.log_reset()
+    gl.wifi_reset()
+    gl.up_reset()
+    gl.wifi_start()
+    for _ in range(3):
+        _clock[0] += 100
+        gl.wifi_tick()
+    gl.log["still"]["active"] = True
+    gl.log["still"]["home"] = True
+    _wl_w = gl.wifi["wlan"]
+    _wl_real = gl._wifi_diag
+
+    def _wl_bad(kind, line):
+        if kind == "lost":
+            raise MemoryError("format")
+        return _wl_real(kind, line)
+
+    if inject_:
+        gl._wifi_diag = _wl_bad
+    try:
+        WLAN.scan_aps = []
+        WLAN.ok = set()
+        _wl_w._status = 0
+        _wl_w._requested = False
+        _clock[0] += 20
+        gl._guarded("wifi", gl.wifi_tick)
+    finally:
+        gl._wifi_diag = _wl_real
+    _wl_home = 0
+    for _ in range(30):
+        _clock[0] += 10000
+        gl._guarded("wifi", gl.wifi_tick)
+        _wl_home += bool(gl.at_home())
+    _wl.append(_wl_home)
+    shutil.rmtree(_wl_dir, ignore_errors=True)
+check("WIFI-LOST-MEM: a home stay stays at home through a drop, a MemoryError in its "
+      "diag line or not", _wl == [30, 30], repr(_wl))
+# WIFI-ROUND-MEM: a MemoryError in a round from "not found" left the radio
+# on (KEEPALIVE=0: until the next round, 10 min with the backoff capped)
+_wr_dir = tempfile.mkdtemp()
+write_env(_wr_dir, "SSID=home\nWPA2=pw\nKEEPALIVE=0\n")
+reset_wlan()
+WLAN.scan_aps = [("other", -60)]
+gl.LOG_DIR = _wr_dir
+gl.log_reset()
+gl.wifi_reset()
+gl.up_reset()
+gl.log["batch"] = ["x"]
+gl.wifi_start()
+for _ in range(40):
+    _clock[0] += 20
+    gl.wifi_tick()
+_wr_w = gl.wifi["wlan"]
+gl.wifi["backoff"] = gl.WIFI_BACKOFF_MAX
+gl.wifi.update(state="not found", last_check=gl._stamp() - 4000, wake=True, idle_at=None)
+_wr_w.active(False)
+_wr_real = gl._candidate_order
+
+
+def _wr_boom(w_):
+    w_.scan()
+    raise MemoryError("dict copies")
+
+
+gl._candidate_order = _wr_boom
+try:
+    gl._guarded("wifi", gl.wifi_tick)
+finally:
+    gl._candidate_order = _wr_real
+_wr_on = _wr_w._active
+gl.log["batch"] = []
+reset_wlan()
+gl.wifi_reset()
+gl.up_reset()
+shutil.rmtree(_wr_dir, ignore_errors=True)
+check("WIFI-ROUND-MEM: a round from 'not found' that raises turns the radio off again",
+      _wr_on is False, repr(_wr_on))
+# WIFI-START-GUARD: the boot's first round ran outside _guarded: a bug or a
+# MemoryError in it went to run()'s crash branch (a reset, a boot failure)
+_ws_dir = tempfile.mkdtemp()
+write_env(_ws_dir, "SSID=home\nWPA2=pw\n")
+reset_wlan()
+WLAN.scan_aps = [("home", -60)]
+gl.LOG_DIR = _ws_dir
+gl.log_reset()
+gl.wifi_reset()
+gl.up_reset()
+_ws_real = gl._candidate_order
+gl._candidate_order = lambda w_: (_ for _ in ()).throw(RuntimeError("bug"))
+try:
+    gl.wifi_start()
+    _ws = ("ok", "wifi" in gl._tick_bug)
+except RuntimeError:
+    _ws = ("raised", None)
+finally:
+    gl._candidate_order = _ws_real
+    gl._tick_bug.pop("wifi", None)
+    reset_wlan()
+    gl.wifi_reset()
+    shutil.rmtree(_ws_dir, ignore_errors=True)
+diag_clear()
+check("WIFI-START-GUARD: a bug in the boot's first WiFi round is a guarded tick's, not a crash",
+      _ws == ("ok", True), repr(_ws))
+# CUT-MEM: a MemoryError in a later chunk of a flush left part of the batch
+# after the old footer (the close went through); the hold moved the batch
+# on while the footer cut failed too (the heap still short): the old file
+# was read to its end, the same lines from both files
+_cm_dir = tempfile.mkdtemp()
+gl.LOG_DIR = _cm_dir
+gl.log_reset()
+_cm_free = gl.free
+gl.free = lambda: 10 ** 8
+_cm_hold = [None]
+_cm_sh = gl._still_hold
+gl._still_hold = lambda: _cm_hold[0]
+_cm_sec = [0]
+
+
+def _cm_rec(n):
+    for _ in range(n):
+        _cm_sec[0] += 1
+        s_ = _cm_sec[0]
+        t_ = "2026-11-16T10:%02d:%02dZ" % (s_ // 60, s_ % 60)
+        gl._record((t_, trk_line(47.5 + s_ * 3e-5, 19.0 + s_ * 7e-5, t_,
+                                 ele="%.1f" % (100 + s_ % 7), hdop="1.%d" % (s_ % 9))), (0, 0))
+
+
+gl.start_file("20261116_100001")
+_cm_rec(20)
+gl.flush()
+_cm_rec(60)
+_cm_kp, _cm_n = gl._kb_part, [0]
+
+
+def _cm_kp2(lines, k, seg):
+    _cm_n[0] += 1
+    if _cm_n[0] == 2:
+        raise MemoryError("chunk 2")
+    return _cm_kp(lines, k, seg)
+
+
+gl._kb_part = _cm_kp2
+try:
+    gl.flush()
+finally:
+    gl._kb_part = _cm_kp
+_cm_hold[0] = gl.log["batch"][0][-17:-1]
+gl.open = lambda p_, m_="r", *a_: ((_ for _ in ()).throw(MemoryError("cut open"))
+                                    if m_ == "r+b" else _open3(p_, m_, *a_))
+try:
+    _cm_closed = gl._close_file()
+finally:
+    del gl.open
+_cm_hold[0] = None
+gl.flush()
+_cm_all = []
+for n_ in sorted(os.listdir(_cm_dir)):
+    with _open3(os.path.join(_cm_dir, n_), "rb") as f_:
+        _cm_all += [x for x in trk2gpx.trb_lines(f_.read()) if "," in x]
+gl._still_hold = _cm_sh
+gl.free = _cm_free
+gl.log_reset()
+shutil.rmtree(_cm_dir, ignore_errors=True)
+check("CUT-MEM: a footer cut that fails keeps the file open: every line once",
+      _cm_closed is False and len(_cm_all) == 80 and len(set(_cm_all)) == 80,
+      repr((_cm_closed, len(_cm_all), len(set(_cm_all)))))
+# CUT-EQ: a failed append that landed the footer's bytes at most left the
+# size: _cut_to_footer took that as nothing to cut (sz <= good), the footer
+# stayed damaged; one still in place is not written again
+_ce_dir = tempfile.mkdtemp()
+_ce_p = os.path.join(_ce_dir, "t.trb")
+with _open3(_ce_p, "wb") as f_:
+    f_.write(b"HEADER\n" + b"x" * 40 + gl.FOOTER.encode())
+_ce_good = os.path.getsize(_ce_p)
+with _open3(_ce_p, "r+b") as f_:
+    f_.seek(_ce_good - 5)
+    f_.write(b"\x82\xc8")                    # 2 bytes of the next record
+_ce_r = gl._cut_to_footer(_ce_p, _ce_good, _ce_good)
+with _open3(_ce_p, "rb") as f_:
+    _ce_end = f_.read()[-len(gl.FOOTER):]
+_ce_w = []
+
+
+class _CeF(object):
+    def __init__(self, f):
+        self.f = f
+
+    def write(self, b):
+        _ce_w.append(b)
+        return self.f.write(b)
+
+    def __getattr__(self, k):
+        return getattr(self.f, k)
+
+
+gl.open = lambda p_, m_="r", *a_: _CeF(_open3(p_, m_, *a_))
+try:
+    _ce_r2 = gl._cut_to_footer(_ce_p, _ce_good, _ce_good)
+finally:
+    del gl.open
+shutil.rmtree(_ce_dir, ignore_errors=True)
+check("CUT-EQ: a damaged footer at the same size is written back; one in place is not",
+      _ce_r is True and _ce_end == gl.FOOTER.encode() and _ce_r2 is True and _ce_w == [],
+      repr((_ce_r, _ce_end, _ce_r2, _ce_w)))
+# BAD-RESERVE / BAD-POS-STALE: on a flash under MIN_FREE (the recording
+# stopped, the one track pending) a poison batch could not be quarantined
+# and held the track for good; a new .bad of a track whose last .bad's .pos
+# was not removed read on from that offset (lines skipped)
+_bp_dir = tempfile.mkdtemp()
+_bp_p = os.path.join(_bp_dir, "20261001_120000.trk")
+make_trk(_bp_p, 5)
+_bp_sz = os.path.getsize(_bp_p)
+_bp_free = gl.free
+gl.free = lambda: gl.MIN_FREE
+try:
+    _bp_r = gl._append_bad(_bp_p, 0, _bp_sz)
+    _bp_lines = pts_in(_bp_p + ".bad") if os.path.exists(_bp_p + ".bad") else 0
+    if os.path.exists(_bp_p + ".bad"):
+        os.remove(_bp_p + ".bad")
+    with _open3(_bp_p + ".bad.pos", "w") as f_:
+        f_.write("344\n")
+    gl.free = lambda: 10 ** 8
+    gl._append_bad(_bp_p, 0, _bp_sz)
+    _bp_pos = os.path.exists(_bp_p + ".bad.pos")
+finally:
+    gl.free = _bp_free
+    shutil.rmtree(_bp_dir, ignore_errors=True)
+check("BAD-RESERVE: a rejected batch is quarantined in the second half of the flash "
+      "reserve (it held the only track for good)", _bp_r is None and _bp_lines == 5,
+      repr((_bp_r, _bp_lines)))
+check("BAD-POS-STALE: a new .bad drops a .pos left from the track's last one",
+      _bp_pos is False, repr(_bp_pos))
 # WIFI-GOTIP-MEM: _wifi_got_ip set "connected" first; a MemoryError on the
 # way (the diag line formatted) left the rest undone for good: the upload
 # in the other network's backoff (30 min), the failed try kept
 _gi = []
-for where_ in ("diag", "up"):
+for where_ in ("diag", "up", "diag always"):
     _gi_dir = tempfile.mkdtemp()
     reset_wlan()
     gl.LOG_DIR = _gi_dir
@@ -26415,11 +26910,11 @@ for where_ in ("diag", "up"):
 
     def _gi_boom(*a_):
         _gi_n[0] += 1
-        if _gi_n[0] == 1:
+        if _gi_n[0] == 1 or where_ == "diag always":
             raise MemoryError("memory allocation failed")
-        return (_gi_diag if where_ == "diag" else _gi_up)(*a_)
+        return (_gi_up if where_ == "up" else _gi_diag)(*a_)
 
-    if where_ == "diag":
+    if where_ != "up":
         gl._wifi_diag = _gi_boom
     else:
         gl._up_net_new = _gi_boom
@@ -26439,7 +26934,7 @@ reset_wlan()
 gl.wifi_reset()
 gl.up_reset()
 check("WIFI-GOTIP-MEM: a MemoryError getting the IP leaves nothing undone",
-      [g_[2:] for g_ in _gi] == [(None, True, False)] * 2
+      [g_[2:] for g_ in _gi] == [(None, True, False)] * 3
       and all(g_[1] in ("connected", "sleep") for g_ in _gi), repr(_gi))
 
 _run_ended.append(1)

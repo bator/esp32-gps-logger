@@ -208,7 +208,7 @@ last lines of the diagnostic log (the page itself reads the whole log, below).
 | `fix`, `sats` | Fix and satellites seen/used ("used" from the satellite list: GGA stops at 12) |
 | `satellites`, `satellites_age_s` | The satellite list (system and number, e.g. `GPS 7`, `Galileo 11`, `BeiDou 22`, `GLONASS 3`; signal in dBHz, elevation, azimuth, used) and its age; none once it is 2 min old (two `SV_POLL`), so a silent receiver's last sky is not shown as live |
 | `hdop` | HDOP |
-| `utc` | GPS time; `null` once the receiver has been silent over `NO_DATA`, as the position |
+| `utc` | GPS time (UTC; the page shows it in Hungarian time, CET / CEST); `null` once the receiver has been silent over `NO_DATA`, as the position |
 | `position`, `pos6` | Position to 5 decimals, and to the track line's 6; both `null` once the last second is over 3 s old (`NO_DATA`), so a silent receiver's last fix is not shown as live |
 | `nmea` | NMEA counts |
 | `rx_bytes`, `rx_age_s`, `good_age_s` | The GPS link: bytes read since boot (wrapping at 2^30); seconds since the last byte / the last whole NMEA sentence, `null` for none yet |
@@ -220,10 +220,11 @@ last lines of the diagnostic log (the page itself reads the whole log, below).
 | `uptime`, `prev_run`, `prev_end` | Uptime and how long the previous run lasted (e.g. `58 min 14 s`; seconds in the JSON), `prev_end` the time of its last line |
 | `boot_cause` | Boot cause |
 | `fw`, `fw_build` | The build |
+| `ota`, `ota_pend` | The update's state (`no flash for page`: the pages would not fit, checked before the download; `install cut`: a power-off before the new slot was set to boot, dropped, no try); while a new build runs pending, `[seconds since its boot, why the manifest read failed, why the confirmation failed]`, else `null` |
 | `temp` | Chip temperature |
 | `vbat`, `vbat_swing` | Battery: median of 32 reads in V; their 10th-90th percentile spread |
 | `vbat_pct` | What is left, 0-100 %, from a 1S LiPo curve: Meshtastic's `OCV_ARRAY` from its 3.30 V on, where the board stops (Heltec's datasheet: 3.3 V at least), as 0 %: 4.19 V 100 %, 3.84 V 60 %, 3.30 V 0 %, linear between. On USB the charger lifts the voltage, so it reads high while charging |
-| `vbat_left_s` | About how long the battery lasts, from a sample a minute (`VBAT_EVERY`) over the last 30 min: the least-squares slope carried down to 0 %, a minute at least. `null` until the samples span 10 min and fall at least 2 points, and at 99 % and up (on the charger, or too short to tell). A jump of more than 2 points in a minute, on or off the charger, starts the samples again |
+| `vbat_left_s` | About how long the battery lasts, from a sample a minute (`VBAT_EVERY`) over the last 30 min: the least-squares slope carried down to 0 %, a minute at least. `null` until the samples span 10 min and fall at least 2 points, and at 99 % and up (on the charger, or too short to tell). A jump of more than 2 points in a minute, on or off the charger, that holds the next sample too starts the samples again (one sample off alone is noise) |
 | `vbat_err` | ADC reads that failed (each kind a `bug vbat` line) |
 | `battery` | The page's text, `74 % (3.95 V), ~2 h 10 min left`, or `none, on USB` when the spread is over `VBAT_SWING` 0.5 V: without a battery the charger's output swings, measured 0.84-0.94 V on USB. The verdict, battery or none, turns on the second measurement in a row that says so (`VBAT_AGAIN`), one stray one is let go |
 | `mem`, `heap_kb`, `flash_kb` | Free Python heap and flash |

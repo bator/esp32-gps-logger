@@ -123,7 +123,7 @@ def reset():
               hz1=0, hz5=0,
               set_ok=0, gst_at=None,
               nt_said=None, nt_more=0,
-              set_boots=0)
+              set_boots=0, rx_back=None, rx_lost=False)
     _ep_new(None)
     _uc_sv_new()
 
@@ -140,13 +140,17 @@ def _ep_new(t):
 # and handle() counts the sentence bad; the handlers read every field
 # before they keep any of it.
 
+NUM_MAX = 16                             # characters of a float field at most
+
 def _num(s, conv=float):
     """A number field, None when empty. A float must be plain decimal:
     "1e9", "nan", "inf" are never NMEA (ValueError; looked for in the
-    text, no float made for it)."""
+    text, no float made for it). Nor over NUM_MAX characters: 39 digits are
+    inf in single precision, and /status.json had "hdop": inf (no JSON)."""
     if not s:
         return None
-    if conv is float and ("e" in s or "E" in s or "n" in s or "N" in s):
+    if conv is float and (len(s) > NUM_MAX or "e" in s or "E" in s
+                          or "n" in s or "N" in s):
         raise ValueError(s)
     return conv(s)
 
@@ -436,6 +440,25 @@ def _date_lost():
     row."""
     st["date"] = None
     _day[0] = _day[1] = None
+
+def _silence_end():
+    """Bytes again after GPS_SILENT without any, before they are handled:
+    by whoever reads (the POST guard's timer, a read in a scan, gps_check):
+    the date kept from before is no longer the receiver's, and neither is
+    the second left open then, nor the half line (its date published the
+    old day again: a GGA-only second after a day of silence dated a day
+    back). The open second is published first, with its own date: it is
+    the last one before the silence, not lost with it."""
+    global _rx_n, _rx_s
+    if ep["t"] is not None:
+        try:
+            _publish()
+        except MemoryError:
+            st["err"] += 1
+    _date_lost()
+    _ep_new(None)
+    _sec[0] = _sec[1] = None
+    _rx_n = _rx_s = 0
 
 def _gps_restarted():
     """The receiver restarted (power dip, reset), back at its defaults."""
@@ -842,6 +865,8 @@ def _stamps_old(now):
         t = st[k]
         if t is not None and _age(now, t) >= TICKS_CAP:
             st[k] = None
+            if k == "rx":
+                st["rx_lost"] = True     # (bytes then end a silence: _read_uart)
     t = st["svs_at"]
     if t is not None and _age(now, t) >= TICKS_CAP:
         st["svs"] = st["svs_at"] = None
@@ -873,9 +898,8 @@ def _gps_mute(now):
         ms = st.get("mute_s")
         n = (_age(rx, m) // 1000 if ms is None
              else max(0, _stamp() - ms - _age(now, rx) // 1000))
-        st["mute_s"] = None
-        _date_lost()
-        _diag_write("gps back after %d s" % n)
+        st["mute_s"] = None              # (the date went as the bytes came:
+        _diag_write("gps back after %d s" % n)   # _silence_end)
 
 _usb_in = None
 
@@ -906,6 +930,9 @@ def _uc_watch(now):
     g = st["gst_at"]
     if _age(now, at) < UC_GST_LOST or _recent(now, g, UC_GST_LOST):
         return
+    if _recent(now, st["rx_back"], UC_GST_LOST):
+        return                           # (bytes again after a silence: its
+                                         # GST a second later, not yet seen)
     if not _recent(now, st["rx"], NO_DATA):
         return                           # silent: _gps_mute's case
     st["extra"] = 1                      # (its usual backoff, under a minute)
@@ -1105,11 +1132,22 @@ def _read_uart():
     left = RX_READS
     while left and uart.any():
         left -= 1
+        now = time.ticks_ms()
+        last = st["rx"]                  # (None: none yet, or a day and more:
+        if last is None:                 # _stamps_old forgot it, rx_lost)
+            gap = TICKS_CAP if st["rx_lost"] else None
+        else:
+            gap = _age(now, last)
+        if gap is not None and gap >= NO_DATA:
+            st["rx_back"] = now          # (GST is due a second after this)
+            if gap >= GPS_SILENT:
+                st["rx_lost"] = False
+                _silence_end()
         n = _rx_n
         k = uart.readinto(_rxv[n:n + RX_READ])
         if not k:
             return
-        st["rx"] = time.ticks_ms()
+        st["rx"] = now
         # bytes read (the page's GPS link: differences), kept a small int
         st["rx_b"] = (st["rx_b"] + k) & 0x3FFFFFFF
         n += k

@@ -49,7 +49,9 @@ PORT=${PORT:-/dev/ttyACM0}               # the Heltec's USB Serial/JTAG
 VENV=${VENV:-$PWD/.venv}                 # python, pip and mpremote come from it
 PY=$VENV/bin/python
 MPREMOTE=$VENV/bin/mpremote
-FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy main.py web.html.gz"
+# (the display's two modules too: without them a plain firmware's TFT stayed
+# dark, "tft ImportError")
+FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy gps_tft.mpy gps_tft_font.mpy main.py web.html.gz"
 ARCH=xtensawin                           # the Heltec's ESP32-S3 (checked below)
 
 # A device path that is not there: say so, before anything else (mpremote's
@@ -74,7 +76,7 @@ fi
 # there); web.html itself keeps its comments.
 BUILD=$(mktemp -d "${TMPDIR:-/tmp}/deploy.XXXXXX")
 trap 'rm -rf "$BUILD"' EXIT
-for m in gps_logger gps_clock gps_receiver; do
+for m in gps_logger gps_clock gps_receiver gps_tft gps_tft_font; do
     "$PY" -m mpy_cross -O3 -march="$ARCH" -o "$BUILD/$m.mpy" "$m.py"
 done
 cp main.py "$BUILD/main.py"
@@ -258,9 +260,13 @@ for n in '$FILES'.split():
 'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
 'gps_clock.py' in os.listdir() and os.remove('gps_clock.py')
 'gps_receiver.py' in os.listdir() and os.remove('gps_receiver.py')
+'gps_tft.py' in os.listdir() and os.remove('gps_tft.py')
+'gps_tft_font.py' in os.listdir() and os.remove('gps_tft_font.py')
 $RM_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')
 $RM_MPY and 'gps_clock.mpy' in os.listdir() and os.remove('gps_clock.mpy')
-$RM_MPY and 'gps_receiver.mpy' in os.listdir() and os.remove('gps_receiver.mpy')" \
+$RM_MPY and 'gps_receiver.mpy' in os.listdir() and os.remove('gps_receiver.mpy')
+$RM_MPY and 'gps_tft.mpy' in os.listdir() and os.remove('gps_tft.mpy')
+$RM_MPY and 'gps_tft_font.mpy' in os.listdir() and os.remove('gps_tft_font.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
     ${RESET[@]+"${RESET[@]}"}

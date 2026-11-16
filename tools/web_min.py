@@ -23,13 +23,21 @@ what inflating it takes on the board, more than the Python heap has free.
 """
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import zlib
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-# after these a "/" starts a regex, not a division
-_JS_KEYWORDS = ("return", "typeof", "case", "in", "of", "delete", "void", "throw",
+# after these a "/" starts a regex, not a division (not after a "." : x.in /
+# 8 is a property; not "of": an identifier as often as a keyword, and
+# "for (x of /re/...)" is rarer than "of / 2")
+_JS_KEYWORDS = ("return", "typeof", "case", "in", "delete", "void", "throw",
                 "new", "else", "do", "instanceof", "yield", "await")
+# before a "{" that opens an object literal (an expression: a "/" after its
+# "}" is a division), not a block
+_OBJ_AFTER = "(,=:[?!&|+-*%<>~^"
 _PAREN_HEADS = ("if", "while", "for", "with")
 _WORD = re.compile(r"[\w$\u0080-￿]+")
 # what ends a JS line (and a // comment): not only \n
@@ -51,6 +59,14 @@ def _space(out, ws):
             out.append("\n")
     elif out and out[-1] not in (" ", "\n"):
         out.append(" ")
+
+
+def _last(out):
+    """The last token written that is not white space, or ""."""
+    k = len(out) - 1
+    while k >= 0 and out[k] in (" ", "\n"):
+        k -= 1
+    return out[k] if k >= 0 else ""
 
 
 def _string(src, i):
@@ -96,7 +112,7 @@ def minify_js(src):
     """src without comments, indentation or blank lines, token for token."""
     out, i, n = [], 0, len(src)
     # what came before: may a "/" here start a regex?
-    regex_ok, parens, word = True, [], ""
+    regex_ok, parens, braces, word = True, [], [], ""
     while i < n:
         c = src[i]
         if c in _JS_WS:
@@ -138,9 +154,12 @@ def minify_js(src):
             m = _WORD.match(src, i)
             if m:
                 word = m.group()
+                dot = _last(out) == "."
                 out.append(word)
                 i = m.end()
-                regex_ok = word in _JS_KEYWORDS
+                regex_ok = word in _JS_KEYWORDS and not dot
+                if dot:
+                    word = ""            # (x.if is no "if (" either)
                 continue
             out.append(c)
             i += 1
@@ -151,14 +170,20 @@ def minify_js(src):
             if c == "(":
                 parens.append(word in _PAREN_HEADS)
                 regex_ok = True
+            elif c == "{":
+                prev = _last(out[:-1])
+                # an object literal: a "/" after its "}" divides
+                braces.append(not (prev and (prev[-1] in _OBJ_AFTER
+                                             or prev == "return")))
+                regex_ok = True
+            elif c == "}":
+                regex_ok = braces.pop() if braces else True
             elif c == ")":
                 # "if (x) /re/.test(y)": a regex, "(a + b) / 2" a division
                 regex_ok = parens.pop() if parens else False
             elif c == "]":
                 regex_ok = False
             else:
-                # "}": a block's end more often than an object's, and taking a
-                # division for a regex fails loudly, the other way round not
                 regex_ok = True
             word = ""
     return "".join(out).strip()
@@ -255,18 +280,45 @@ def gz(page, w):
     return z.compress(page) + z.flush()
 
 
+def node_check(page):
+    """Each stripped <script> through `node --check`, when node is there: a
+    construct the token scan misreads (a division taken for a regex) fails
+    the build, not the board's page (its script dead, "connecting..." for
+    good). Without node: nothing (the suite's WEB-MIN-AST compares the
+    trees)."""
+    node = shutil.which("node")
+    if not node:
+        return
+    for m in _BLOCK.finditer(page):
+        if not m.group(1) or m.group(2).lower() != "script":
+            continue
+        fd, path = tempfile.mkstemp(suffix=".js")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(m.group(3))
+            r = subprocess.run([node, "--check", path], capture_output=True,
+                               text=True, timeout=60)
+        finally:
+            os.remove(path)
+        if r.returncode:
+            raise MinifyError("the stripped script does not parse (node --check): %s"
+                              % (r.stderr.strip().splitlines() or [""])[-1])
+
+
 def main(argv):
     if len(argv) not in (2, 3):
         print(__doc__, file=sys.stderr)
         return 2
     try:
         with open(argv[1], encoding="utf-8") as f:
-            page = minify(f.read()).encode("utf-8")
+            text = minify(f.read())
+        node_check(text)
+        page = text.encode("utf-8")
         if len(argv) == 2:
             sys.stdout.buffer.write(page)
             return 0
         data = gz(page, wbits())
-    except (OSError, UnicodeError, MinifyError) as e:
+    except (OSError, UnicodeError, MinifyError, subprocess.SubprocessError) as e:
         print("%s: %s" % (argv[0], e), file=sys.stderr)
         return 1
     with open(argv[2], "wb") as f:
