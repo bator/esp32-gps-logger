@@ -51,17 +51,24 @@ def _iso(tc):
                                    tc[9:11], tc[11:13], tc[13:15])
 
 
+# what the logger's _canon keeps of a one-decimal field as written (_ptnum,
+# dec 1, imax 6): anything else it sends as "%.1f" prints it
+_NUM1 = re.compile(r"-?(0|[1-9][0-9]{0,5})\.[0-9]")
+
+
 def _num(s):
-    """A finite number string kept as written when it is a plain decimal,
-    else as "%.1f" prints it (as the logger's _ptnum: float() also takes
-    "1_0", "1e3", " 10", which are no xsd:decimal), or "" (dropped)."""
+    """A finite number string as the upload has it: kept as written when it
+    reads as "%.1f" prints it, else "%.1f" of it (the logger's _ptnum and
+    _canon: "118.63" went up as 118.6 and into the GPX as written; float()
+    also takes "1_0", "1e3", " 10", which are no xsd:decimal), or ""
+    (dropped)."""
     try:
         v = float(s) if s else math.inf
     except ValueError:
         return ""
     if not math.isfinite(v):
         return ""
-    return s if _NUM.fullmatch(s) else "%.1f" % v
+    return s if _NUM1.fullmatch(s) else "%.1f" % v
 
 
 def _not_utf8(s):

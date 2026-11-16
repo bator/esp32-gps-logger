@@ -12,7 +12,9 @@ OTA_PENDING = "/ota.pending"             # (gps_logger's OTA_PENDING,
 OTA_MARK = "/ota.mark"                   # OTA_MARK and OTA_SHADOW)
 OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py",
               "/gps_clock.mpy", "/gps_clock.py",
-              "/gps_receiver.mpy", "/gps_receiver.py")
+              "/gps_receiver.mpy", "/gps_receiver.py",
+              "/gps_tft.mpy", "/gps_tft.py",
+              "/gps_tft_font.mpy", "/gps_tft_font.py")
 SKIP_PIN = 7                             # (main.py's: GPIO7 low at reset
 BOOT_FAIL_MAX = 5                        # skips the logger; the counter in
 BOOT_FAIL_FILE = "/boot_fail"            # RTC memory, else this file;

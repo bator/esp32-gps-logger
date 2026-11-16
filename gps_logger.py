@@ -1457,11 +1457,14 @@ def _wifi_got_ip(w):
     # "connected" last: what raised on the way (a MemoryError formatting the
     # diag line) is done again on the next wifi_tick, not skipped for good
     # (the upload left in the other network's backoff, failed kept)
-    _dns_bad.clear()                     # (a new IP: its resolver asked again)
     try:
         wifi["ip"] = w.ifconfig()[0]
     except WLAN_ERR:
         wifi["ip"] = None
+    bad = _dns_bad.get(wifi["ssid"])     # a new IP: its resolver asked again
+    if bad is not None and bad[1] != wifi["ip"]:   # (a reconnect with the
+        _dns_bad.pop(wifi["ssid"], None)           # same one: not, a flaky
+                                                   # link blocked 7 s each)
     wifi["rssi"] = _rssi(w)
     wifi["home"] = _net_home(wifi["ssid"])
     wifi["down_at"] = None
@@ -1496,7 +1499,7 @@ def _wifi_got_ip(w):
     if _ntp[0] is None:
         # no answer yet: a backoff grown on a network without internet
         # does not carry over to this one (up to an hour of "--:--")
-        _ntp[1], _ntp[2] = None, NTP_RETRY
+        _ntp[1], _ntp[2] = None, NTP_RETRY // 2
     wifi["state"] = "connected"
     print("wifi ok", wifi["ssid"] or "")
     return True
@@ -1977,7 +1980,12 @@ def wifi_start(env=None):
         return
     if _wifi_make() is None:
         return
-    w = wifi["wlan"]
+    wifi["last_check"] = _stamp()
+    # guarded as the loop's wifi_tick: a bug or a MemoryError in the boot's
+    # first round was run()'s crash branch, a reset and a boot failure
+    _guarded("wifi", _wifi_first, wifi["wlan"])
+
+def _wifi_first(w):
     _wifi_begin_round(w)
     if wifi["state"] == "connecting":
         _wifi_poll(w)
@@ -2068,8 +2076,7 @@ def wifi_tick():
         wifi["down_home"] = bool(wifi["home"])
         wifi["down_rssi"] = wifi["rssi"]
         wifi["down_ssid"] = wifi["ssid"]   # whose return a scan must see
-        _wifi_diag("lost", "wifi lost %s rssi %s" % (wifi["ssid"] or "",
-                                                    wifi["rssi"]))
+        ssid, rssi = wifi["ssid"] or "", wifi["rssi"]
         # a stay that began at home stays a home stay while the link is
         # down (a router restart): at_home() reads sleep_home off-line
         wifi["sleep_home"] = bool(wifi["home"] and log["still"]["active"])
@@ -2080,7 +2087,11 @@ def wifi_tick():
         wifi["cand_i"] = 0
         wifi["learn"] = False            # (it may come back on a hotspot)
         wifi["rounds"] = 0               # the next round tries every network
-        print("wifi lost", wifi["ssid"] or "")
+        print("wifi lost", ssid)
+        try:                             # last: a MemoryError formatting it
+            _wifi_diag("lost", "wifi lost %s rssi %s" % (ssid, rssi))
+        except MemoryError:              # left the drop half recorded (no
+            pass                         # sleep_home: the home stay away)
         return
     if wifi["state"] == "lost":
         if (s == network.STAT_CONNECTING or s == network.STAT_IDLE
@@ -2129,7 +2140,15 @@ def wifi_tick():
     if _age_s(wifi["last_check"]) < wifi["backoff"] // 1000:
         return
     wifi["last_check"] = _stamp()
-    _wifi_begin_round(w)
+    try:
+        _wifi_begin_round(w)
+    except Exception:
+        # (as the sleep's: a MemoryError outside the scan's own catch) the
+        # radio the round turned on goes off again: it stayed on, not
+        # associated, until the next round, 10 min with the backoff capped
+        if wifi["state"] in ("not found", "offline"):
+            _radio_off(w)
+        raise
 
 def wifi_stop():
     _web_close()
@@ -2138,7 +2157,10 @@ def wifi_stop():
         return
     try:
         w.disconnect()
-        w.active(False)
+    except WLAN_ERR:
+        pass
+    try:                                 # (apart: a failed disconnect left
+        w.active(False)                  # the radio on)
     except WLAN_ERR:
         pass
     wifi["state"] = "off"
@@ -2723,22 +2745,36 @@ def _cut_to_footer(path, good, sz):
     and the new file takes the whole batch. Write FOOTER back where it was
     (once, best effort): readers stop there, so the tail is not uploaded
     twice. Only a footer written this session (good), the file no shorter
-    (a write that landed the footer's bytes at most left the size)."""
+    (a write that landed the footer's bytes at most left the size). A
+    footer still there is not written again (a copy-on-write of a failing
+    file for nothing). True when the footer is in its place."""
     n = len(FOOTER)
     if good is None or good < n or sz is None or sz < good:
-        return
+        return False
     f = None
+    ok = False
     try:
         f = open(path, "r+b")
         f.seek(good - n, 0)
-        f.write(FOOTER.encode())
+        foot = FOOTER.encode()
+        if f.read(n) == foot:
+            ok = True
+        else:
+            f.seek(good - n, 0)
+            f.write(foot)
+            ok = None                    # (landed once the close is through)
     except (OSError, MemoryError) as e:  # (it runs when heap is short too)
         _werr("cut", e)
+        ok = False
     if f is not None:
         try:
             f.close()
+            if ok is None:
+                ok = True
         except OSError as e:
             _werr("cut", e)
+            ok = False
+    return ok is True
 
 # The day history (/hist/YYYYMMDD.trb, a UTC day) is a .trb track: the
 # header, then each append (an uploaded batch's _hist_batch) the records a
@@ -3307,11 +3343,16 @@ def _close_file(fx=None):
         if log["wfail"] and path is not None:
             # a failed write left part of these lines in the old file
             # (as flush's own switch to a new file): its footer back, or
-            # a create that never landed gone, else they went up twice
+            # a create that never landed gone, else they went up twice.
+            # When that fails too (the heap still short), the file stays
+            # open: the next flush writes from its good size over the tail
             if log["created"]:
-                _cut_to_footer(path, log["good_size"], _file_size(path))
+                if not _cut_to_footer(path, log["good_size"], _file_size(path)):
+                    return False
             else:
                 _rm(path)
+                if _file_size(path):
+                    return False
         start_file(_tcn(tc), fx)
         log["new_seg"], log["seg_tc"] = seg    # a break among the held lines
         return True
@@ -4865,9 +4906,16 @@ def _append_bad(path, off, new_off, key=None):
         print("bad file full", bad)
         return "full"
     room = free()
-    if room is not None and room - need < MIN_FREE:
+    # half the reserve is the quarantine's: a poison batch on a full flash
+    # (the recording stopped under MIN_FREE, the one track pending) was
+    # held and sent again forever, the space never freed by its end
+    if room is not None and room - need < MIN_FREE // 2:
         print("bad file: flash reserve", bad)
         return "flash"
+    if not sz:
+        _rm(bad + ".pos")                # (left from the last .bad of this
+                                         # track: it skipped the new one's
+                                         # lines, read on from its offset)
     cut = not _tail_nl(bad, sz)
     try:
         with open(path, "rb") as src, open(bad, "ab") as dst:
@@ -4898,11 +4946,12 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     _hist_batch(path, off, new_off, key)
     try:
         commit_offset(path, n, new_off, eof, key1)
-    except OSError as e:
+    except (OSError, MemoryError) as e:
         # the copy landed but the offset did not: the next try copies the
         # batch again (duplicates in .bad, deduplicated by Dawarich)
         print("quarantine offset", repr(e))
-        _up_err("fs err")
+        gc.collect()
+        _up_err("low mem" if isinstance(e, MemoryError) else "fs err")
         return False
     up["allow_bad"] = False
     up["state"] = "quarantine"
@@ -5255,7 +5304,7 @@ DNS_SLOW = 2000                          # ms: a failed lookup this long is no
                                          # answer (a fast one: no such name)
 DNS_KEEP = 8                             # addresses kept (host, port, kind, SSID)
 _dns = {}                                # key -> the last address on that net
-_dns_bad = {}                            # SSID -> Stamp of a slow failure
+_dns_bad = {}                            # SSID -> (Stamp of a slow failure, the IP)
 
 def _resolve(host, port, kind=None):
     """getaddrinfo's first answer. A lookup that failed slowly (DNS_SLOW: a
@@ -5273,7 +5322,7 @@ def _resolve(host, port, kind=None):
     net = wifi["ssid"]
     key = (host, port, kind, net)
     bad = _dns_bad.get(net)
-    if bad is not None and _recent_s(bad, DNS_RETRY):
+    if bad is not None and _recent_s(bad[0], DNS_RETRY):
         ai = _dns.get(key)
         if ai is None:
             raise OSError(-202)          # (lwIP's own "no answer")
@@ -5287,7 +5336,7 @@ def _resolve(host, port, kind=None):
         if time.ticks_diff(time.ticks_ms(), t0) >= DNS_SLOW:
             if len(_dns_bad) >= DNS_KEEP and net not in _dns_bad:
                 _dns_bad.clear()
-            _dns_bad[net] = _stamp()
+            _dns_bad[net] = (_stamp(), wifi["ip"])
             ai = _dns.get(key)
             if ai is not None:
                 return ai
@@ -5411,7 +5460,10 @@ def _raw_post(url, data, headers, timeout):
         raw.settimeout(max(HTTP_WAIT - _age(time.ticks_ms(), t0), 1000)
                        / 1000)
         line = first + s.readline(HTTP_LINE - 1) if first else first
-        code = int(line.split(None, 2)[1])
+        line = line.split(None, 2)
+        if len(line) < 2:                # closed before a status line: "no
+            raise OSError(104)           # answer", not an IndexError
+        code = int(line[1])
         got = [None, None]
         whole = False
         try:
@@ -5840,6 +5892,10 @@ def upload_tick():
         except OSError:
             _fs_err(now)
             return
+        except MemoryError:              # (the batch goes again: no
+            up["skip"] = path            # _schedule, no state, it was sent
+            _low_mem(now)                # once more after TICK_PAUSE)
+            return
         up["sent"] += n_ok
         up["ok_at"] = _stamp()
         up["fail4"] = 0
@@ -5986,7 +6042,9 @@ OTA_MARK = "/ota.mark"                   # what ended the pending run: crash,
                                          # first reset cause after it)
 OTA_SHADOW = ("/gps_logger.mpy", "/gps_logger.py",
               "/gps_clock.mpy", "/gps_clock.py",
-              "/gps_receiver.mpy", "/gps_receiver.py")  # moved aside (.ota-old)
+              "/gps_receiver.mpy", "/gps_receiver.py",
+              "/gps_tft.mpy", "/gps_tft.py",
+              "/gps_tft_font.mpy", "/gps_tft_font.py")  # moved aside (.ota-old)
                                          # for a frozen logger to run
 OTA_STUCK = 86400000                     # ms an upload may have no 2xx and
                                          # still hold the update check back
@@ -6128,7 +6186,9 @@ def _raw_get(url, sink, limit):
         if code != 200:                  # (its head is of no use: the code
             return code                  # comes back, however long it is)
         cl = [None]
-        _http_head(s, (b"content-length",), cl)
+        if not _http_head(s, (b"content-length",), cl):
+            raise OSError(5)             # (a head cut short: not an empty
+                                         # body's ValueError further on)
         clen = None
         try:
             clen = int(cl[0])
@@ -6360,6 +6420,7 @@ def _ota_promote(paths):
 def _ota_drop(paths):
     for p in paths:
         _rm(p + ".new")
+        _rm(p + ".tmp")                  # (a power cut while one was read)
 
 def _ota_shadow(aside):
     """A /gps_logger.mpy or .py (FORCE_MPY=1) shadows the frozen logger:
@@ -6492,6 +6553,14 @@ def _ota_check():
     if m["size"] > part.info()[3]:
         ota["state"] = "too big"
         return
+    # the pages are staged (.tmp, then .new beside the old one) after the
+    # 2 MB download: a full flash failed there, halfway, every OTA_RETRY
+    room = free()
+    need = MIN_FREE + sum(f["size"] for f in m.get("files") or ())
+    if room is not None and room < need:
+        ota["failed"] = (build, _stamp(), "no flash for page")
+        ota["state"] = "no flash for page"
+        return
     ota["state"] = "downloading"
     w = _SlotWriter(part)
     try:
@@ -6522,6 +6591,11 @@ def _ota_check():
         # reset, a power cut in _ota_done) must not speak for this build:
         # "valid" confirmed it at its first boot without a health check
         _rm(OTA_MARK)
+        # "staged" until set_boot is through (it hashes the 2 MB image
+        # first): a power cut before it is no try of a build that never
+        # ran (ota_boot drops it; it was a try, two such a day's hold)
+        with open(OTA_MARK, "w") as f:
+            f.write("staged")
         with open(OTA_PENDING, "w") as f:
             f.write("%d %s\n%s" % (build, m["commit"], "\n".join(paths)))
         if FW_BUILD:
@@ -6529,6 +6603,7 @@ def _ota_check():
             _ota_shadow(True)
         why = "set_boot err"
         part.set_boot()
+        _rm(OTA_MARK)
     except BaseException:
         # (a Ctrl-C too: it is no Exception) nothing boots: no pending note
         # (it would blame a build that never ran), no staged page, the
@@ -6537,6 +6612,7 @@ def _ota_check():
         # Unless set_boot took effect (a Ctrl-C right after it): reset
         if _ota_boot_slot() != part.info()[4]:
             _rm(OTA_PENDING)
+            _rm(OTA_MARK)
             _ota_drop(paths)
             _ota_shadow(False)
             ota["failed"] = (build, _stamp(), why)
@@ -6595,6 +6671,8 @@ def ota_boot():
     p = _ota_pending()
     if p is None:
         _rm(OTA_MARK)                    # (no pending run it could be about)
+        _ota_drop(OTA_PAGES)             # (a power cut while staging one:
+                                         # ~26 KB left until the next install)
         _ota_wait_tried()
         if esp32 is not None:
             _ota_valid()
@@ -6645,6 +6723,18 @@ def ota_boot():
                 _ota_health(time.ticks_ms())  # that fails: the next tick)
             except Exception:
                 pass
+        return
+    if mark == "staged" and not (esp32 is not None and _ota_unbooted()):
+        # the install cut before set_boot: the build never ran, no try
+        _ota_drop(paths)
+        _ota_shadow(False)
+        _rm(OTA_PENDING)
+        _rm(OTA_MARK)
+        ota["state"] = "install cut"
+        _diag_write("ota %s install cut before set_boot (a power-off): "
+                    "dropped, no try (running %s)" % (c, FW_COMMIT))
+        if esp32 is not None:
+            _ota_valid()
         return
     if esp32 is not None and mark != "boot" and _ota_unbooted():
         # never run (blamed here, a build that never booted went bad):
@@ -6717,8 +6807,11 @@ def _ota_probe(now):
 
 def _ota_health(now):
     """The pending firmware: valid after OTA_VALID_AFTER with WiFi connected
-    then (not only once before) and the manifest read (without OTA_URL WiFi only; then the staged page
-    goes up); neither in OTA_HEALTH and it resets, the bootloader then
+    then (not only once before) and the manifest read; then the staged page
+    goes up. Without OTA_URL it is not confirmed: only _ota_check writes
+    the pending note, and it needs OTA_URL (deploy.sh does not run with the
+    note there): a build that lost it (its .env reading) could be updated
+    only over USB from then on. Neither in OTA_HEALTH and it resets, the bootloader then
     boots the old image (a try: _ota_try). OTA_MARK "valid" goes first: a
     power cut between the confirmation and the note's removal booted a
     valid image as pending again (ota_boot finishes it now). A confirmation
@@ -6729,12 +6822,14 @@ def _ota_health(now):
     up = wifi["state"] == "connected"
     if up:
         ota["wifi_seen"] = True
-        if OTA_URL and not ota.get("probed"):
+        if not OTA_URL:
+            ota["probe_err"] = "no OTA_URL"
+        elif not ota.get("probed"):
             _ota_probe(now)
     age = _age(now, ota["pend_at"])
     # (WiFi now, not once: connected once and lost by a build that breaks
     # the reconnect was confirmed at OTA_VALID_AFTER without a link)
-    if ota.get("valid") or (up and (ota.get("probed") or not OTA_URL)
+    if ota.get("valid") or (up and ota.get("probed")
                             and age >= OTA_VALID_AFTER):
         if not ota.get("valid"):
             _ota_mark("valid")
@@ -7019,6 +7114,11 @@ def _web_rows():
         ("fw", FW_COMMIT),
         ("fw_build", FW_BUILD),          # (the commit time, s since 1970)
         ("ota", ota["state"]),
+        # a pending build: since when, and what holds its confirmation (the
+        # reason showed only after the rollback, in the old firmware's diag)
+        ("ota_pend", None if ota.get("pend") is None else
+         [_age(now, ota["pend_at"]) // 1000, ota.get("probe_err"),
+          ota.get("valid_err")]),
         ("web_errs", _web_errs[0]),      # page requests that hit a bug
         ("tick_bugs", _tick_bugs()),     # guarded ticks' bugs: count, last
         ("diag_errs", _diag_errs[0]),    # diag lines that failed to write
@@ -7079,23 +7179,38 @@ def _vbat_pct(v):
 
 _vb_hist = []                            # [(uptime s, %)] on the battery
 
+_vb_jump = [0, None]                     # samples in a row off the last kept
+                                         # one by over VBAT_DROP, the last one's
+                                         # uptime
 def vbat_tick(now):
     """Every VBAT_EVERY s a sample of what is left, and _vbat_fit once (the
     display asks every TFT_STATE). No battery starts the history again, so
-    does a jump of more than VBAT_DROP points in a sample: put on the
-    charger (it lifts the voltage) or taken off it (the lift gone at once:
-    the samples on the charger made a steep line, half the time left for
-    25 min)."""
-    if _vb_hist and uptime_s(now) - _vb_hist[-1][0] < VBAT_EVERY:
+    does a jump of more than VBAT_DROP points that holds VBAT_AGAIN
+    samples in a row: put on the charger (it lifts the voltage) or taken off
+    it (the lift gone at once: the samples on the charger made a steep
+    line, half the time left for 25 min). One sample off alone is let go:
+    2 points are ~20 mV, and a noisy reading started the samples again
+    (simulated: at 8 mV of noise the time left was known a quarter of the
+    time)."""
+    t = uptime_s(now)
+    last = _vb_jump[1] if _vb_jump[1] is not None else (
+        _vb_hist[-1][0] if _vb_hist else None)
+    if last is not None and t - last < VBAT_EVERY:
         return
     p = _vbat_now()
     if p is None:
         del _vb_hist[:]
+        _vb_jump[0], _vb_jump[1] = 0, None
         _vb_left[0] = None
         return
     if _vb_hist and abs(p - _vb_hist[-1][1]) > VBAT_DROP:
+        _vb_jump[0] += 1
+        _vb_jump[1] = t
+        if _vb_jump[0] < VBAT_AGAIN:
+            return
         del _vb_hist[:]
-    _vb_hist.append((uptime_s(now), p))
+    _vb_jump[0], _vb_jump[1] = 0, None
+    _vb_hist.append((t, p))
     if len(_vb_hist) > VBAT_HIST:
         del _vb_hist[0]
     _vb_left[0] = _vbat_fit()
@@ -7234,6 +7349,8 @@ def _web_json_parts(rows, svs, diag=False):
     yield '{"device":' + json.dumps(DEVICE_ID) + ',"refresh_s":%d' % (
         WEB_REFRESH)
     for key, v in rows:
+        if isinstance(v, float) and not math.isfinite(v):
+            v = None                     # (json.dumps writes inf, nan: no JSON)
         yield ",%s:%s" % (json.dumps(key), json.dumps(v))
     rows = None
     # after the 200: an error ends the list instead of the JSON (a cut one
@@ -8069,9 +8186,10 @@ NTP_RETRY = 60000                        # ms after a failed try, doubling to ..
 NTP_RETRY_MAX = 3600000                  # ... this
 NTP_AGAIN = 21600000                     # ms an answer is used before a new one
 _NTP_2020 = 3786825600                   # 2020-01-01 in seconds since 1900
-_ntp = [None, None, NTP_RETRY]           # the answer's Anchor (seconds since 2020,
+_ntp = [None, None, NTP_RETRY // 2]      # the answer's Anchor (seconds since 2020,
                                          # Stamp); Stamp of the last try; the wait
-                                         # after it (ms)
+                                         # after it (ms): half, as a failure doubles
+                                         # it first (the first retry was 120 s)
 
 def _ntp_env(env):
     global NTP_SERVER
@@ -8148,7 +8266,8 @@ def ntp_tick(now):
                                                           NTP_RETRY_MAX)
         return
     n[0], n[2] = (t, _stamp()), NTP_AGAIN
-    _tft_t[4] = 0
+    _tft_t[0] = None                     # the clock and the route's day now,
+    _Rt.drawn = None                     # not on the next TFT_STATE / ROUTE_DRAW
     _diag_write("clock ntp %s" % _stamp_s(t)[0])
 
 def _local_hm():

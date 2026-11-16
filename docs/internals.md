@@ -62,7 +62,12 @@
   nowhere. A `GSA` whose later field fails leaves no fix type; an HDOP of 0 or
   below and a negative `GST` are not taken; a `GSV` of a talker of no system is
   not counted as seen. A receiver restart forgets its date (kept, after a day of
-  silence the next fix had the old day).
+  silence the next fix had the old day), and so do bytes again after a minute
+  without any (`GPS_SILENT`, on whatever read them: the POST guard's timer
+  too): the second left open before the silence is published with its own
+  date first, the half line dropped. A float field over 16 characters is a
+  bad sentence (39 digits are `inf` in single precision), and a non-finite
+  value is `null` in `/status.json`.
 - **Midnight.** Only `RMC` carries the date, and only with a fix (before one the
   UC6580's `RMC` carries a made-up date). A second that runs back past midnight
   without its own `RMC` has no date, so it is not a fix rather than a day off.
@@ -444,7 +449,9 @@ home.
   A full `.bad` (64 kB) pauses that file (`BAD FULL`) instead of dropping
   points; pull or delete it, then reset. `BAD FULL` lasts while that `.bad`
   is on flash and its track waits; a copy that fails for another reason
-  (the flash reserve, an I/O error) is `fs err` and is tried again.
+  (an I/O error, or the flash under half the reserve: the quarantine may
+  use the other half, as a poison batch on a full flash held the only track
+  for good) is `fs err` and is tried again.
   Points moved to a `.bad` leave `left` once (a `.bad` is not counted).
 - Other errors back off from 15 s up to 30 minutes (`Retry-After` is
   honoured); 401 waits 30 minutes. The same batch answered 3 times in a
@@ -481,7 +488,8 @@ home.
   read already. The name lookup cannot be (lwIP: 7 s without an answer,
   nothing else runs): after a lookup that failed slowly (over 2 s,
   `DNS_SLOW`; a fast "no such name" is only that) the network is not asked
-  again for 10 min (`DNS_RETRY`) or until it gives a new IP, for no host name
+  again for 10 min (`DNS_RETRY`) or until it gives a new IP (a reconnect with
+  the same one keeps the mark), for no host name
   (one per name blocked the upload's, NTP's and the OTA's lookup: 21 s): the address
   that same network resolved before is used, or the POST fails at once.
   Another network's address is never used (a LAN address would take the

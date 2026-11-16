@@ -16,7 +16,7 @@ const v = ctx.view(d);
 // every status.json key: the page shows it, or it is for the raw JSON only
 const SHOWN = ("fix sats hdop utc position nmea rx_bytes rx_age_s good_age_s gps_boots gps_loops " +
   "receiver setup_ok points left files bad_files sent upload upload_err upload_age_s days day_span stay uptime prev_run " +
-  "boot_cause temp battery mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota prev_end fw_build").split(" ");
+  "boot_cause temp battery mhz mem heap_kb idf flash_kb wifi rssi pulses fw ota ota_pend prev_end fw_build").split(" ");
 const OTHER = ["device", "refresh_s", "diag", "satellites", "satellites_age_s", "std", "prev_uptime", "web_errs", "tick_bugs", "diag_errs",
   "vbat", "vbat_swing", "vbat_pct", "vbat_left_s", "vbat_err", "track_drop", "write_errs", "q_thin", "pos6", "err_files", "tls", "hist_errs"];
 const labeled = new Set(OTHER);
@@ -32,6 +32,12 @@ v.esc = ctx.esc("<a href=\"x\" title='y'>&</a>");
 v.coordSW = ctx.view({position: "-33.85678, -151.21530", hdop: 1}).coord;
 v.coordNE = ctx.view({position: "47.10000, 18.40000"}).coord;
 v.nullSys = ctx.view({}).sys;
+// the GPS time as Hungarian time: the board's UTC "YYYY-MM-DD HH:MM:SS",
+// winter (CET) and summer (CEST)
+v.huTime = [ctx.view({utc: "2026-11-16 03:00:00"}).dl, ctx.view({utc: "2026-07-16 03:00:00"}).dl];
+// a pending OTA: since when and why its confirmation waits
+v.otaPend = (ctx.view({fw: "abc", fw_build: 0, ota: "pending", ota_pend: [130, "no OTA_URL", null]}).sys
+  .match(/<b>Firmware<\/b>.*?<\/div>/) || [""])[0];
 
 // The page against a stub document (no browser in CI)
 function El(id) {

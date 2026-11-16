@@ -25,6 +25,13 @@ every pull request:
     `stale`) against a stub document, and the same on the page as
     `tools/web_min.py` strips it (it must print the same). With `CI=true`
     (GitHub Actions) a missing `node` is a FAIL, not a SKIP;
+  - `tests/rcv_sim.py` on the single-precision build: a stateful UC6580
+    and the loop on a fake clock (setup, restarts with and without a
+    banner, silences of days, blocks, lost sentences): no fix with a day
+    it was not sent on, the setup back at the end;
+  - `tests/track_fuzz.py`: the track writer under power cuts, partial
+    writes, failed closes and MemoryErrors (LittleFS's commit on close):
+    every point read back once and in order;
   - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
     board-side code under CPython): copy, check and rename, too little
     flash, a cut copy, frozen firmware (stale, `FORCE`, `FORCE_MPY`, no
