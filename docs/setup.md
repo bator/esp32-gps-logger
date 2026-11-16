@@ -64,7 +64,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. WiFi needs 80 or more: 20/40 are raised to 80 whenever the radio is used (a network set, or `KEEPALIVE` on). |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has. Once a fix has told the time it is not asked any more: that fix's clock (run on by the uptime) sets the board clock instead. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). An answer before the firmware's build (or the newest signed OTA build seen) or more than 5 years after it is refused, a later answer corrects the board clock an earlier one set, and NTP is asked again on another network and when a verified upload's TLS handshake fails on NTP's clock (a wrong answer would otherwise stand for 6 hours). |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has. Once a fix has told the time it is not asked any more: that fix's clock (run on by the uptime) sets the board clock instead, also over one an NTP answer set. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). An answer before the firmware's build (or the newest signed OTA build seen) or more than 5 years after it is refused, a later answer corrects the board clock an earlier one set, and NTP is asked again on another network and when a verified upload's TLS handshake fails on NTP's clock (a wrong answer would otherwise stand for 6 hours). |
 | `TFT_LIGHT` / `TFT_IDLE` | The display's backlight: `TFT_LIGHT` 0–100 per cent while it is on (default 30; 0 keeps it dark, the USER button still lights it), `TFT_IDLE` 0–86400 seconds into a stay (the board has not moved) before it goes dark (default 300; 0: never). Read at boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](hardware.md#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](usage.md#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
@@ -148,6 +148,9 @@ files left as `.dpl` are swapped in by a second session (a reset then
 booted a mixed set, the old `main.py` over new modules); one that cannot
 be finished leaves the board stopped and says so (`Swap FAILED part way`:
 run `deploy.sh` again at once, the watchdog resets a stopped logger). A
+copied file gone before the first rename is refused on the board's own word
+(`Swap refused`, the old install stays); no answer at all counts as a swap
+cut part way. A
 reset that fails after a whole swap is a warning, tried once more. On a
 frozen firmware whose marker has no display hash the display's
 `gps_tft*.mpy` stay; a failed check (`Copy check FAILED`)
@@ -342,11 +345,15 @@ server on the LAN, is good for 90 days at most, and the board refuses a
 build not newer than its own anyway. The board also keeps the newest
 signed, fresh build it could install (`/ota.seen`): a build older than
 that is refused (`ota` state `superseded`; publish a newer one to go
-back, or `OTA_SEEN_RESET=1 ./deploy.sh` over USB to forget it), and that
+back, or `OTA_SEEN_RESET=1 ./deploy.sh` over USB to forget it; a
+read error on the file other than its absence refuses every update that
+boot, `seen err`), and that
 build's time (the commit's, signed) is a floor for the clock, an NTP
 answer's too: an NTP answer before it is refused, and a manifest that
-ended before it is expired whatever NTP says. A `FORCE=1` publish of an
-older build warns about this.
+ended before it is expired whatever NTP says. A `FORCE=1` publish of a
+build not newer than the live one warns about this: a board that runs the
+live build needs `./tools/build_firmware.sh --flash`, one that only saw it
+`OTA_SEEN_RESET=1 ./deploy.sh`.
 
 The `OTA_DEST` path is a plain one: only letters, digits and `_ . / -` (no
 `~`, spaces or shell specials; `scp` takes it as it is, the `ssh` rename

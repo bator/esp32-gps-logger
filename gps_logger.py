@@ -817,6 +817,10 @@ def load_env(path):
                 try:
                     k = k.decode()
                 except UnicodeError:
+                    # (whose key it was is unknown: WEB_TOKEN, a WPA2 gone
+                    # left the routes open, the network tried open; the
+                    # read is not whole then, as after an EIO)
+                    _env_partial[0] = True
                     _say("env a key not UTF-8, its line skipped")
                     continue
                 try:
@@ -5450,12 +5454,15 @@ def _rtc_sync(now):
         if s is None:
             return
         s += _age(now, st["pos_at"]) // 1000
+        _rtc_ntp[0] = None
     elif (log["clock"] or _ntp[0]) and (
-            not _rtc_set[0] or (not log["clock"] and _rtc_ntp[0] is not _ntp[0])):
+            not _rtc_set[0]
+            or _rtc_ntp[0] is not (None if log["clock"] else _ntp[0])):
         # no fix now: the clock a fix gave this boot, else NTP's answer,
         # until a fix sets it (an Anchor: its UTC runs on with the uptime);
-        # a newer NTP answer corrects one an older answer set (a wrong one
-        # stayed the board's clock for the whole run)
+        # a newer NTP answer corrects one an older answer set, a fix's
+        # Anchor one any answer set (a wrong one stayed the board's clock
+        # for the whole run: NTP is not asked once a fix told the time)
         s = _utc_s(log["clock"] or _ntp[0])
         src = " gps" if log["clock"] else " ntp"
         _rtc_ntp[0] = None if log["clock"] else _ntp[0]
@@ -6491,7 +6498,11 @@ def _ota_seen():
     could be installed: an older one is no update after it (a replay of a
     manifest the server replaced, signed and fresh still), and its build
     time (the commit's, signed) is a floor for the clock. 0 without the
-    file (or OTA_SEEN None: no record)."""
+    file (or OTA_SEEN None: no record). Any other read error (EIO) is 0
+    for the floor with ota["seen_err"] set and nothing kept: taken for "no
+    file", a replayed older manifest passed and its build was written
+    over the newer one (the record gone for good); _ota_check refuses
+    then, and the next check reads again."""
     b = ota.get("seen")
     if b is None:
         b = 0
@@ -6499,13 +6510,18 @@ def _ota_seen():
             try:
                 with open(OTA_SEEN) as f:
                     b = int(f.read(24).split()[0])
-            except (OSError, ValueError, IndexError):
-                pass
+            except OSError as e:
+                if not _enoent(e):
+                    ota["seen_err"] = True
+                    return 0
+            except (ValueError, IndexError):
+                pass                     # (written by rename: no torn one)
+        ota["seen_err"] = False
         ota["seen"] = b
     return b
 
 def _ota_seen_note(build):
-    if not OTA_SEEN or build <= _ota_seen():
+    if not OTA_SEEN or build <= _ota_seen() or ota.get("seen_err"):
         return
     ota["seen"] = build
     tmp = OTA_SEEN + ".tmp"
@@ -6986,6 +7002,10 @@ def _ota_check():
         _ota_say("ota build %d: manifest %s" % (build, why))
         return
     b0 = _ota_seen()
+    if ota.get("seen_err"):              # (unread: no replay let through)
+        ota["state"] = "seen err"
+        _ota_say("ota build %d: %s not read, refused" % (build, OTA_SEEN))
+        return
     if build < b0:                       # (a newer one was signed since)
         ota["state"] = "superseded"
         _ota_say("ota build %d: older than build %d seen signed, refused" % (build, b0))
@@ -7518,6 +7538,7 @@ def _web_open():
         s.setblocking(False)
         _web_poll = _web_poller(s)
         _web_sock = s
+        _web_acc_err[0] = 0              # (an old socket's errors: not this one's)
         print("web http://%s/" % wifi["ip"])
     except (OSError, MemoryError) as e:  # (no half-open socket left behind)
         if s is not None and _web_sock is not s:
@@ -8606,15 +8627,27 @@ def _web_bug(e):
     _web_errs[0] += 1
     _bug_once("web error %s" % repr(e)[:60], ("web error", type(e)))
 
+# newlib's numbers of the names MicroPython's errno module leaves out
+# (MICROPY_PY_ERRNO_LIST: no EINTR, ENFILE, EMFILE, EWOULDBLOCK), the
+# same as Linux's: lwIP's accept says ENFILE when it is out of sockets
+_ERRNO_MORE = {"EWOULDBLOCK": 11, "EINTR": 4, "ENFILE": 23, "EMFILE": 24}
+
 def _errnos(*names):
     """The errno numbers of names: the board's (newlib: ECONNABORTED 113,
     ETIMEDOUT 116), not Linux's (103, 110: a client's RST closed the page's
-    listen socket for WEB_RETRY)."""
+    listen socket for WEB_RETRY); a name the module lacks by _ERRNO_MORE."""
     try:
         import errno
     except ImportError:
-        return ()
-    return tuple(getattr(errno, n) for n in names if hasattr(errno, n))
+        errno = None
+    out = []
+    for n in names:
+        v = getattr(errno, n, None) if errno is not None else None
+        if v is None:
+            v = _ERRNO_MORE.get(n)
+        if v is not None and v not in out:
+            out.append(v)
+    return tuple(out)
 
 # an accept that fails with one of these: a client gone, the IDF short of
 # memory or sockets for a moment; no broken listen socket

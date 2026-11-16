@@ -1182,7 +1182,7 @@ ft.histEnd = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTi
 // 12. a past day whose /hist answers 403 (or 5xx) is no day without
 // points: not cached, an error, asked again (it stayed "no trip" till the
 // page closed)
-ft.hist403 = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTime(), (c) => {
+function histErr(code) { return inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTime(), (c) => {
   const urls = [];
   c.XMLHttpRequest = function () { urls.push(this); };
   c.XMLHttpRequest.prototype.open = function (mm, u) { this.url = u; };
@@ -1196,9 +1196,12 @@ ft.hist403 = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTi
   c.hist = c.histNew("20261108");
   c.histLoad();
   const r = urls[urls.length - 1];
-  r.status = 403; r.responseText = "open the page as http://x/#k=<WEB_TOKEN>"; r.onload();
+  r.status = code; r.responseText = "open the page as http://x/#k=<WEB_TOKEN>"; r.onload();
   return [urls.length, c.hist.busy, c.hist.err, c.hist.done, "20261108" in c.dayCache];
-});
+}); }
+ft.hist403 = histErr(403);
+// (a 503, short of RAM, the same: an error to retry, not an empty day)
+ft.hist503 = histErr(503);
 // 13. the key is read at each request: one typed into the URL after a 403
 // counts without a reload; none is "1"
 ft.keyHash = (function () {

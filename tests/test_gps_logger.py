@@ -7512,7 +7512,14 @@ for c in cmds:
             env.pop("FAKE_RENAME_MAX", None)    # (the first swap only is cut)
         elif env.get("FAKE_RENAME_MAX"):
             open(mark, "w").close()
-        r = subprocess.run([sys.executable, "-c", shim + c[1]], cwd=dev, env=env)
+        # (mpremote prints the board's traceback on its stdout; MUTE: the
+        # first swap's output lost on the way, the link gone)
+        mute = os.path.join(os.path.dirname(dev), "swap-muted")
+        kw = {"stderr": subprocess.STDOUT}
+        if swap and env.get("FAKE_SWAP_MUTE") and not os.path.exists(mute):
+            open(mute, "w").close()
+            kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        r = subprocess.run([sys.executable, "-c", shim + c[1]], cwd=dev, env=env, **kw)
         if r.returncode:
             if swap and env.get("FAKE_SWAP_KILL"):
                 import signal                   # a Ctrl-C at the swap
@@ -7616,8 +7623,19 @@ def deploy_run(env_extra):
         env.update(VENV="venv",
                    FAKE_SHIM=os.path.join(alt, "venv", "bin", "shim.py"))
         cwd = alt
-    r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
-                       capture_output=True, text=True, timeout=60, cwd=cwd)
+    if env_extra.get("FAKE_STDERR_GONE"):        # (a "| tee" the Ctrl-C ended)
+        rd_, wr_ = os.pipe()
+        os.close(rd_)
+        try:
+            r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
+                               stdout=subprocess.PIPE, stderr=wr_, text=True,
+                               timeout=60, cwd=cwd)
+        finally:
+            os.close(wr_)
+        r.stderr = ""
+    else:
+        r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
+                           capture_output=True, text=True, timeout=60, cwd=cwd)
     try:
         with open(env["FAKE_LOG"]) as f:
             calls = [json.loads(line) for line in f]
@@ -8935,7 +8953,8 @@ try:
     es_open = os.path.join(diag_dir, "env_es")
     with open(es_open, "wb") as fh:
         fh.write(b"K\xe9Y=zq9x\nNTP_SERVER=zq9x\xe9\nDEVICE_ID=bike\n")
-    es_env, es_part, es_mhz = {}, None, None
+    es_env, es_part, es_mhz, es_partial = {}, None, None, None
+    es_tok = (gl.WEB_TOKEN, gl._web_tok_bad[0])
     try:
         es_got = []
         es_got.append(gl._mhz_env({"CPU_MHZ": "zq9x"}, "CPU_MHZ", 80))
@@ -8951,6 +8970,10 @@ try:
         gl._tft_env({"TFT_IDLE": "zq9x"})
         gl._ota_env({"OTA_URL": "zq9x"})
         es_env = gl.load_env(es_open)
+        # (its key not UTF-8 marks the read part way: the next .env's
+        # wifi_start below is another file, read whole)
+        es_partial = gl._env_partial[0]
+        gl._env_partial[0] = False
         gl.wifi_reset()
         gl.wifi_start({"CPU_MHZ": "40", "CPU_MHZ_UP": "20", "KEEPALIVE": "5"})
         es_mhz = (gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD)
@@ -8968,6 +8991,8 @@ try:
         for k_, v_ in es_keep.items():
             setattr(gl, k_, v_)
         gl.up["url"], gl.up["key"] = es_up
+        gl._env_partial[0] = False
+        gl.WEB_TOKEN, gl._web_tok_bad[0] = es_tok
         gl.wifi_reset()
     es_lines = diag_lines()
     es_keys = [l_.split()[1] for l_ in es_lines if l_.startswith("env ")]
@@ -8983,6 +9008,7 @@ try:
                           "CPU_MHZ", "CPU_MHZ_UP", "read"]
           and len(es_lines) == len(es_keys)
           and es_env == {"DEVICE_ID": "bike"} and es_mhz == (80, 80)
+          and es_partial is True
           and es_part == {} and not any("zq9x" in l_ for l_ in es_lines),
           repr((es_got, es_lines, es_env, es_mhz, es_part)))
 
@@ -15570,6 +15596,7 @@ else:
         ("bug ota seen not saved OSError(28)", "bug"),
         ("ota build 1793548800: older than build 1793548900 seen signed, "
          "refused", "otax"),
+        ("ota build 1793548800: /ota.seen not read, refused", "otax"),
         ("track dir error OSError(5)", "track"),
         ("upload err unverified: not verified TLS (tls off, UPLOAD_UNVERIFIED=0): "
          "put /ca.der on the board, or UPLOAD_UNVERIFIED=home|1 in .env", "upl"),
@@ -16179,8 +16206,9 @@ else:
           repr(ft.get("histEnd")))
     check("SP-HIST-403: a /hist 403 is an error, not a day without points: "
           "not cached, asked again later (it stayed 'no trip' till the page "
-          "closed)", ft.get("hist403") == [1, False, True, False, False],
-          repr(ft.get("hist403")))
+          "closed); a 503 too", ft.get("hist403") == [1, False, True, False, False]
+          and ft.get("hist503") == ft.get("hist403"),
+          repr((ft.get("hist403"), ft.get("hist503"))))
     check("SP-KEY-HASH: the X-GPS key is read from #k= at each request (one "
           "typed in after a 403 counts at once); none is 1",
           ft.get("keyHash") == ["X-GPS=abc", "X-GPS=d/e", "X-GPS=1", "X-GPS=1"],
@@ -28742,7 +28770,7 @@ _dp_lists = [l_ for l_ in re.findall(r'^\s*FILES="([^"]*)"', _dp_src, re.M)
 check("DEPLOY-SWAP: every FILES list ends in main.py; the swap stats each "
       ".dpl first; mpy-cross 1.29 is checked; ca.der goes up when there is one",
       len(_dp_lists) == 3 and all(l.split()[-1] == "main.py" for l in _dp_lists)
-      and "if $1:\n    for n in F:\n        os.stat(n + '.dpl')\nfor n in F:" in _dp_src
+      and "if $1:\n    for n in F:\n        os.stat(n + '.dpl')\n    print('preflight ok')\nfor n in F:" in _dp_src
       and "os.stat(n + '.dpl')\n        print('removing', n)\n        os.remove(n)" in _dp_src
       and "1.29.*) ;;" in _dp_src and 'FILES="ca.der $FILES"' in _dp_src
       and "ca.der" in _slurp(os.path.join(ROOT, ".gitignore")), repr(_dp_lists))
@@ -29420,9 +29448,10 @@ try:
         et.append(gl._web_tok_bad[0])
 finally:
     gl.WEB_TOKEN, gl._web_tok_bad[0] = et_saved
-check("ENV-TOKEN-ANSI: a WEB_TOKEN not UTF-8 closes the data routes; a key "
-      "that is not UTF-8 (no WEB_TOKEN) or no token leaves them as they are",
-      et == [True, False, False], repr(et))
+check("ENV-TOKEN-ANSI: a WEB_TOKEN not UTF-8 closes the data routes, so does "
+      "a key that is not UTF-8 (it may be WEB_TOKEN: the read is not whole); "
+      "no token leaves them as they are",
+      et == [True, True, False], repr(et))
 
 # ENV-PARTIAL-NETS: a .env read part way drops an SSID whose WPA2 was not
 # read (tried open, an open twin of the home SSID was home)
@@ -29605,6 +29634,170 @@ if shutil.which("bash") and web_min:
           "of superseded",
           bt == [0, 0, ["young.bin.tmp"]]
           and "sums could not be read" in _bf6 and "OTA_SEEN_RESET=1" in _bf6, repr(bt))
+
+# --- seventh review (2026-11-16g) -------------------------------------------
+
+# OTA-SEEN-EIO: /ota.seen that cannot be read (not ENOENT) refuses the update
+# that boot and is not written over: taken for "no file", a replayed older
+# manifest passed and its build replaced the newer record for good; read
+# again at the next check
+oe = []
+oe_saved = (gl.OTA_SEEN, gl.OTA_KEY, gl.FW_BUILD, gl.HTTP_GET, gl._ota_held,
+            gl._ntp[0], gl.log.get("clock"), dict(gl.ota), gl.OTA_URL, gl.esp32,
+            gl._ota_dl_begin)
+try:
+    oe_dir = os.path.join(_rv_td, "seen-eio")
+    os.makedirs(oe_dir)                  # (open() of a folder: EISDIR)
+    gl.OTA_SEEN = oe_dir
+    gl.OTA_KEY = b"0123456789abcdef0123456789abcdef"
+    gl.FW_BUILD = 1700000000
+    gl.OTA_URL = "http://ota.example/s3/manifest.json"
+    gl.esp32 = _FakeEsp32
+    gl._ntp[0] = None
+    gl.log["clock"] = None
+    gl.ota.pop("seen", None)
+    gl._ota_held = lambda b: False
+    oe_dl = []
+    gl._ota_dl_begin = lambda b: oe_dl.append(b)
+    e_far = 1700000000 - gl.EPOCH_2020 + 90 * 86400
+    oe.append((_os_check(1700000200, e_far), oe_dl[:], gl._clock_floor()
+               == gl.FW_BUILD - gl.EPOCH_2020))
+    oe_f = os.path.join(_rv_td, "seen-eio.ok")
+    with open(oe_f, "w") as f:
+        f.write("1700000300\n")
+    gl.OTA_SEEN = oe_f                   # (readable again)
+    oe.append((_os_check(1700000200, e_far), oe_dl[:]))
+    with open(oe_f) as f:
+        oe.append(f.read())
+finally:
+    (gl.OTA_SEEN, gl.OTA_KEY, gl.FW_BUILD, gl.HTTP_GET, gl._ota_held,
+     gl._ntp[0]) = oe_saved[:6]
+    gl.log["clock"] = oe_saved[6]
+    gl.ota.clear()
+    gl.ota.update(oe_saved[7])
+    gl.OTA_URL, gl.esp32, gl._ota_dl_begin = oe_saved[8:11]
+check("OTA-SEEN-EIO: /ota.seen unreadable (not absent) refuses the update, "
+      "writes nothing, floors at the build; read again it is the record",
+      oe == [("seen err", [], True), ("superseded", []), "1700000300\n"], repr(oe))
+
+# RTC-GPS-OVER-NTP: a fix's Anchor corrects the board clock an NTP answer set
+# (NTP is not asked once a fix told the time: a lie stood for the run, every
+# verified POST "expired")
+rg = []
+rg_saved = (list(gl._ntp), gl._rtc_set[0], gl._rtc_ntp[0], gl.st.get("valid"),
+            gl.log.get("clock"))
+try:
+    gl.st["valid"] = False
+    gl.log["clock"] = None
+    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
+    gl._rtc_set[0] = False
+    s1_ = (_dt.date(2026, 11, 16) - _dt.date(2020, 1, 1)).days * 86400 + 12 * 3600
+    gl._ntp[0] = (s1_ + 3 * 365 * 86400, gl._stamp())   # the lie
+    gl._rtc_sync(_clock[0])
+    gl.log["clock"] = (s1_, gl._stamp())                # a fix, gone again
+    gl._rtc_sync(_clock[0])
+    gl._rtc_sync(_clock[0])              # (the Anchor's again: nothing)
+    rg.append(([t_[:3] for t_ in RTC.sets], gl._rtc_ntp[0]))
+finally:
+    gl._ntp[:] = rg_saved[0]
+    gl._rtc_set[0], gl._rtc_ntp[0] = rg_saved[1], rg_saved[2]
+    gl.st["valid"] = rg_saved[3]
+    gl.log["clock"] = rg_saved[4]
+check("RTC-GPS-OVER-NTP: a fix's Anchor corrects the clock an NTP answer set, "
+      "once", rg == [([(2029, 11, 15), (2026, 11, 16)], None)], repr(rg))
+
+# ENV-KEY-PARTIAL: a key line that is not UTF-8 is a .env not read whole: an
+# SSID whose WPA2 it may have been is dropped (it was tried open)
+ek = []
+try:
+    p_ = os.path.join(_rv_td, "env-key")
+    with open(p_, "wb") as f:
+        f.write(b"SSID=home\nWPA\xd62=secret\n")
+    env_ = gl.load_env(p_)
+    ek.append((gl._env_partial[0], [n["ssid"] for n in gl._load_nets(env_)]))
+    with open(p_, "wb") as f:
+        f.write(b"SSID=home\nWPA2=secret\n")
+    env_ = gl.load_env(p_)
+    ek.append((gl._env_partial[0], [n["ssid"] for n in gl._load_nets(env_)]))
+finally:
+    gl._env_partial[0] = False
+check("ENV-KEY-PARTIAL: a key not UTF-8 marks the read part way (the SSID "
+      "without its WPA2 dropped); a whole one does not",
+      ek == [(True, []), (False, ["home"])], repr(ek))
+
+# WEB-ERRNO-MORE: the names MicroPython's errno lacks (ENFILE: lwIP out of
+# sockets) are newlib's numbers, not dropped; a reopened listen socket starts
+# its error count anew
+wm = []
+wm_saved = sys.modules.get("errno")
+try:
+    import types as _types
+    fake_ = _types.ModuleType("errno")
+    fake_.EAGAIN, fake_.ECONNABORTED = 11, 113
+    sys.modules["errno"] = fake_
+    wm.append(gl._errnos("EAGAIN", "EWOULDBLOCK", "ECONNABORTED", "EINTR",
+                         "ENFILE", "EMFILE", "ENOSUCH"))
+finally:
+    sys.modules["errno"] = wm_saved
+_wm_src = _slurp(os.path.join(ROOT, "gps_logger.py"))
+check("WEB-ERRNO-MORE: EWOULDBLOCK/EINTR/ENFILE/EMFILE by newlib's numbers when "
+      "the module lacks them; the count starts anew with a listen socket",
+      wm == [(11, 113, 4, 23, 24)] and 23 in gl.WEB_ACCEPT_OK
+      and "_web_sock = s\n        _web_acc_err[0] = 0" in _wm_src, repr(wm))
+
+# RCV-EPRUN-CAP: a run of fixes past TICKS_CAP (_stamps_old ended its start)
+# begins again: the 1 fix/s watch was off for good after a day of fixes
+er = []
+er_saved = (dict(gr_.st), dict(gr_.ep), len(gr_.st["q"]))
+try:
+    now_ = time.ticks_ms()
+    gr_.st.update(ep_run=None, ep_at=now_ - 500, ep1_n=0, checked=True)
+    gr_._ep_new("120000")
+    gr_.ep["g"] = [47.5, 19.0, 0.0, 0.0, 1]
+    gr_._publish()
+    er.append((gr_.st["ep_run"] is not None, gr_.st["ep1_n"]))
+finally:
+    del gr_.st["q"][er_saved[2]:]
+    gr_.st.clear()
+    gr_.st.update(er_saved[0])
+    gr_.ep.clear()
+    gr_.ep.update(er_saved[1])
+check("RCV-EPRUN-CAP: a run whose start expired (TICKS_CAP) begins again at the "
+      "next second", er == [(True, 1)], repr(er))
+
+# DEPLOY-NO-ANSWER / -PIPE / -REFUSED: a swap whose output never came back
+# (the link lost after the renames) is finished, not taken for "nothing
+# changed" and reset onto a board without main.py; the trap's echoes to a
+# stderr gone (| tee ended by the Ctrl-C) no longer stop it before the reset;
+# a preflight that refused says so on the board's word
+_dp7 = _slurp(os.path.join(ROOT, "deploy.sh"))
+check("DEPLOY-NO-ANSWER: the refusal needs the board's traceback without a "
+      "preflight ok; the trap ignores PIPE, runs set +e, times its roll forward "
+      "out; the inline roll forward leaves the trap's retry",
+      "print('preflight ok')" in _dp7
+      and 'grep -qE "^(preflight ok|swapped |removing )"' in _dp7
+      and 'grep -q "^Traceback"' in _dp7
+      and "trap '' INT TERM HUP PIPE\n    set +e" in _dp7
+      and "TMO=(timeout -s KILL 60)" in _dp7
+      and '"$MPREMOTE" connect "$PORT" exec "$(swap_py False)" || exit 1' in _dp7, "")
+if shutil.which("bash"):
+    dn = []
+    rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "1", "FAKE_SWAP_MUTE": "1",
+                                           "FAKE_FROZEN": "full"})
+    dn.append((rc == 0, "Swap refused" in err, dev_file(dev, "main.py") != b"old main",
+               sorted(n for n in os.listdir(dev) if n.endswith(".dpl")),
+               dev_logger(dev)[-1:] == ["reset"]))
+    rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "1", "FAKE_SWAP_KILL": "1",
+                                           "FAKE_STDERR_GONE": "1", "FAKE_FROZEN": "full"})
+    dn.append((dev_file(dev, "main.py") != b"old main",
+               dev_logger(dev)[-1:] == ["reset"]))
+    rc, out, err, dev, calls = deploy_run({"FAKE_DPL_GONE": "main.py", "FAKE_FROZEN": "full"})
+    dn.append((rc != 0, "Swap refused" in err, dev_file(dev, "main.py") == b"old main"))
+    check("DEPLOY-NO-ANSWER: no answer from the swap is finished and reset, not "
+          "'refused'; a stderr gone does not stop the trap's reset; a refused "
+          "preflight keeps the old install",
+          dn == [(True, False, True, [], True), (True, True), (True, True, True)],
+          repr(dn))
 
 gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl.free, gl.DIAG_MAX = _rv_saved
 diag_clear()

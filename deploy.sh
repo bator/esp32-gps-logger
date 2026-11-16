@@ -55,6 +55,10 @@ PORT=${PORT:-/dev/ttyACM0}               # the Heltec's USB Serial/JTAG
 VENV=${VENV:-$PWD/.venv}                 # python, pip and mpremote come from it
 PY=$VENV/bin/python
 MPREMOTE=$VENV/bin/mpremote
+# (the trap's roll forward runs with the signals ignored: a board that never
+# answers would hold it for good; KILL, its TERM is ignored with them)
+TMO=()
+command -v timeout >/dev/null 2>&1 && TMO=(timeout -s KILL 60)
 # (the display's two modules too: without them a plain firmware's TFT stayed
 # dark, "tft ImportError")
 # (main.py last: the swap below puts it in after the rest, a cut swap
@@ -120,6 +124,7 @@ F = '$FILES'.split()
 if $1:
     for n in F:
         os.stat(n + '.dpl')
+    print('preflight ok')
 for n in F:
     if n + '.dpl' not in os.listdir():
         os.stat(n)
@@ -153,16 +158,20 @@ RTC().memory(b'0')"
 restart_logger() {
     local rc=$?
     # (a second Ctrl-C now killed the roll forward below with the script:
-    # ignored from here, by the mpremote it starts too)
-    trap '' INT TERM HUP
+    # ignored from here, by the mpremote it starts too; and a stderr gone
+    # with it, a "| tee" the Ctrl-C ended, a closed terminal: the first
+    # echo's SIGPIPE or EIO under set -e ended this before the reset)
+    trap '' INT TERM HUP PIPE
+    set +e
     # cut in the swap (a Ctrl-C, a lost link): a reset now booted a mixed
     # set (the old main.py over new modules), and left stopped the WDT
-    # did the same a little later; the rest of it goes in first
+    # did the same a little later; the rest of it goes in first (a board
+    # that never answers: killed after a minute, nothing else ends it now)
     if [ "${SWAPPING:-0}" = 1 ]; then
         SWAPPING=0
-        if ! "$MPREMOTE" connect "$PORT" exec "$(swap_py False)" >/dev/null 2>&1; then
-            echo "Swap cut part way and not finished (the files not swapped are <name>.dpl):" >&2
-            echo "run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
+        if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec "$(swap_py False)" >/dev/null 2>&1; then
+            echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
+            echo "No reset onto a mixed set: run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
             rm -rf "$BUILD"
             exit 1
         fi
@@ -361,23 +370,24 @@ if ! SWAPPED=$("$MPREMOTE" connect "$PORT" exec "$(swap_py True)"); then
     printf '%s\n' "$SWAPPED" | tr -d '\r'
     SWAPPED_OUT=$SWAPPED
     SWAPPED=
-    if ! grep -qE "^(swapped|removing) " <<< "$(tr -d '\r' <<< "$SWAPPED_OUT")"; then
-        # nothing changed (a .dpl gone since the copy check): the old
-        # install is whole, the rest of it is not to be swapped in
+    SW_=$(tr -d '\r' <<< "$SWAPPED_OUT")
+    if ! grep -qE "^(preflight ok|swapped |removing )" <<< "$SW_" \
+            && grep -q "^Traceback" <<< "$SW_"; then
+        # the board's preflight refused (its traceback, no "preflight ok":
+        # a .dpl gone since the copy check): nothing changed, the old
+        # install is whole, the rest of it is not to be swapped in. Only on
+        # its word: no answer at all (a link lost after the renames began)
+        # is a swap cut part way, not "nothing"
         SWAPPING=0
         echo "Swap refused: a copied file is gone, nothing changed (the old install stays)" >&2
         exit 1
     fi
     # (the "swapped" lines above say which went in: the rest goes in now, the
-    # same way, rather than a reset onto a mixed set)
-    echo "Swap failed part way: swapping the rest in" >&2
-    if ! "$MPREMOTE" connect "$PORT" exec "$(swap_py False)"; then
-        SWAPPING=0
-        trap 'rm -rf "$BUILD"' EXIT
-        echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
-        echo "No reset onto a mixed set: run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
-        exit 1
-    fi
+    # same way, rather than a reset onto a mixed set; one that fails, a
+    # Ctrl-C too, which mpremote turns into exit 1, leaves SWAPPING set: the
+    # trap tries once more, signals ignored, before it says FAILED)
+    echo "Swap not finished: swapping the rest in" >&2
+    "$MPREMOTE" connect "$PORT" exec "$(swap_py False)" || exit 1
 fi
 printf '%s\n' "$SWAPPED" | tr -d '\r'
 SWAPPING=0

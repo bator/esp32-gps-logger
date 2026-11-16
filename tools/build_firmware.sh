@@ -411,8 +411,9 @@ for x in [m] + list(m.get("files", [])):
         echo "Build $BUILD ($COMMIT) is not newer than the published build $LIVE_BUILD" >&2
         [ "${FORCE:-0}" = 1 ] || { echo "(FORCE=1 publishes it anyway)" >&2; exit 1; }
         echo "FORCE=1: publishing it anyway" >&2
-        echo "WARNING: a board that saw build $LIVE_BUILD signed refuses this older one" >&2
-        echo "WARNING: (ota state superseded) until OTA_SEEN_RESET=1 ./deploy.sh over USB" >&2
+        echo "WARNING: no board takes build $BUILD over the air if it runs build $LIVE_BUILD" >&2
+        echo "WARNING: (not newer than its own: --flash over USB), or saw it signed" >&2
+        echo "WARNING: (ota state superseded: OTA_SEEN_RESET=1 ./deploy.sh over USB)" >&2
     fi
     if [ -z "$RESUME" ]; then
     rm -rf "$OUT/ota"
@@ -476,7 +477,7 @@ for x in [m] + list(m.get("files", [])):
     # upload in progress (its move would fail); one older a cut upload's
     # shellcheck disable=SC2029
     if [ -n "$LS_OK" ] && grep -q '\.tmp$' <<< "$LS"; then
-        ssh "${SSHO[@]}" -n "$DHOST" "find -H $QDIR -maxdepth 1 -name '*.tmp' -mmin +60 -delete" \
+        ssh "${SSHO[@]}" -n "$DHOST" "find -H $QDIR -maxdepth 1 -type f -name '*.tmp' -mmin +60 -delete" \
             || echo "WARNING: could not remove the old .tmp files in $OTA_DEST" >&2
     fi
     if [ -n "$RM" ]; then

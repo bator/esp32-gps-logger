@@ -254,8 +254,10 @@ def _publish():
     # (_uc_watch: GPS_HZ lost without GST) a run of valid seconds: begun
     # after NO_DATA without one, its seconds at one fix counted; one second
     # of several fixes ends it (a fix back in a second's last epoch was one
-    # fix: the watch fired at every fix regained)
-    if not _recent(now, st["ep_at"], NO_DATA):
+    # fix: the watch fired at every fix regained); one TICKS_CAP long is
+    # begun again (_stamps_old ended it: the watch was off for good after a
+    # day of fixes)
+    if st["ep_run"] is None or not _recent(now, st["ep_at"], NO_DATA):
         st["ep_run"], st["ep1_n"] = now, 0
     st["ep_at"] = now
     if n > 1:
