@@ -163,9 +163,10 @@ def _deg(v, hemi, ax):
     if d < 1 or len(hemi) != 1 or hemi not in ax:
         raise ValueError(v)
     a, mm = v[:d], v[d:]
-    m = float(mm)                        # (0 <= m < 60 also ends nan/inf)
-    # (float() takes "+5.5" and " 5.5": the minutes start with a digit)
-    if (not a.isdigit() or not mm[:1].isdigit() or not 0 <= m < 60
+    m = float(mm)
+    # (float() takes "+5.5" and " 5.5": the minutes start with two digits,
+    # under 60 by their text: single precision reads 59.999999 as 60.0)
+    if (not a.isdigit() or not mm[:2].isdigit() or mm[:2] >= "60"
             or "e" in mm or "E" in mm):
         raise ValueError(v)
     deg = int(a) + m / 60
@@ -373,7 +374,7 @@ def gga(talker, f):
         if alt is not None:
             ep["alt"][0] += alt
             ep["alt"][1] += 1
-        if hd is not None:
+        if hd is not None and hd > 0:   # (0 or below: no HDOP, not perfect)
             ep["hdop"][0] += hd
             ep["hdop"][1] += 1
 
@@ -389,7 +390,8 @@ def gsa(talker, f):
     valid again showed "Fix" for up to 5 s (measured indoors: 14 of 201
     rounds). The last dimension stands until the next 2D/3D round."""
     ft = _num(f[2], int)
-    if ft in (2, 3):
+    _uc_gsa(talker, f)                   # (first: a field that fails there
+    if ft in (2, 3):                     # leaves no fix type, no count)
         st["fixtype"] = ft
     t = _sec[0]
     if t is not None:
@@ -402,7 +404,6 @@ def gsa(talker, f):
     st["gsa_n"] += 1
     if st["gsa_n"] == GSA_MAX + 1:
         _extra(talker, f)
-    _uc_gsa(talker, f)
 
 def _extra(talker, f):
     """A sentence gps_setup turns off: the receiver did not take it."""
@@ -413,8 +414,9 @@ def _extra(talker, f):
 def gsv(talker, f):
     _uc_gsv(talker, f)                   # (its GSV stays on: not _extra)
     n = _num(f[3], int)
-    if n is not None:
+    if n is not None and talker in _UC_GNSS:
         st["view"][talker] = n          # per constellation, summed on display
+                                        # (a talker of no system: not summed)
 
 def gst(talker, f):
     """The receiver's own error estimate (1-sigma, metres) of the second's
@@ -423,8 +425,17 @@ def gst(talker, f):
     sl, sn = _num(f[6]), _num(f[7])      # (read first: _num)
     timed = _second(f[1])
     st["gst_at"] = time.ticks_ms()       # it comes (_setup_check)
-    if timed and sl is not None and sn is not None:
+    if timed and sl is not None and sn is not None and sl > 0 and sn > 0:
         ep["std"] = sl if sl > sn else sn
+
+def _date_lost():
+    """The date kept from before is no longer the receiver's: a restart, a
+    silence, a restart whose banner was lost. One kept across a silence of
+    a day and more stamped the next fix without its own RMC with the old
+    day, its time new; the midnight rule (_publish) only sees seconds in a
+    row."""
+    st["date"] = None
+    _day[0] = _day[1] = None
 
 def _gps_restarted():
     """The receiver restarted (power dip, reset), back at its defaults."""
@@ -438,6 +449,7 @@ def _gps_restarted():
     last = st["boot_last"]               # the gap sets the storm's quiet
     st["boot_gap"] = 0 if last is None else _age(now, last)
     st["boot_last"] = now
+    _date_lost()
     print("gps restarted")
     _gps_flap(now)                       # first: the restart that makes
     storm = (st["storm_at"] is not None  # it a storm waits too
@@ -647,10 +659,19 @@ def _uc_gsa(talker, f):
     loop pass of over 150 ms in a burst split it, and two rounds read in
     one go were one. The system is the last field (NMEA 4.10);
     before it (18 fields) the talker's, and none for GN (mixed): that one
-    adds nothing."""
+    adds nothing. Its fields are read first: one that does not parse
+    (ValueError) leaves the round as it was, none of its satellites in use."""
     n = len(f)
     if n < 18:
         return
+    g = _UC_SYS.get(_num(f[-1], int)) if n > 18 else _UC_GNSS.get(talker)
+    ids = None
+    if g is not None:
+        ids = []
+        for x in f[3:15]:
+            v = _num(x, int)
+            if v is not None:
+                ids.append(g << 8 | v)
     u = _uc_sv
     now = time.ticks_ms()
     e = _sec[0]
@@ -661,13 +682,8 @@ def _uc_gsa(talker, f):
     elif not _recent(now, u["gsa"], UC_GSA_GAP):
         u["used"] = []
     u["gsa"] = now
-    g = _UC_SYS.get(_num(f[-1], int)) if n > 18 else _UC_GNSS.get(talker)
-    if g is None:
-        return
-    for x in f[3:15]:
-        v = _num(x, int)
-        if v is not None:
-            _uc_sv["used"].append(g << 8 | v)
+    if ids:
+        u["used"].extend(ids)
 
 def _uc_gsv(talker, f):
     """One GSV sentence into a round's list (the same satellite on two
@@ -858,6 +874,7 @@ def _gps_mute(now):
         n = (_age(rx, m) // 1000 if ms is None
              else max(0, _stamp() - ms - _age(now, rx) // 1000))
         st["mute_s"] = None
+        _date_lost()
         _diag_write("gps back after %d s" % n)
 
 _usb_in = None
@@ -892,6 +909,7 @@ def _uc_watch(now):
     if not _recent(now, st["rx"], NO_DATA):
         return                           # silent: _gps_mute's case
     st["extra"] = 1                      # (its usual backoff, under a minute)
+    _date_lost()
     print("gps setup lost: no GST")
     said = st["gst_said"]
     if not _recent(now, said, GPS_NOT_TAKEN_SAY):

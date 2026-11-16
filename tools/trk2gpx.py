@@ -83,7 +83,9 @@ def read_points(lines):
             new_seg = True
             continue
         if (not raw.endswith("\n") or raw.startswith("#")
-                or raw.count(",") not in (4, 5)):
+                or raw.count(",") not in (4, 5)
+                # (a line over LINE_MAX bytes: the logger's _rd_line skips it)
+                or len(raw.encode("utf-8", "surrogateescape")) > LINE_MAX):
             continue
         f = raw[:-1].split(",")
         acc = speed = None
@@ -188,7 +190,8 @@ def trb_lines(data, errors="replace"):
     errors: how bytes that are not UTF-8 in a text line are decoded
     ("surrogateescape" lets read_points tell them from a U+FFFD)."""
     st = None
-    i, n = 0, len(data)
+    lost = False                         # a state dropped by damage: the
+    i, n = 0, len(data)                  # next keyframe starts a segment
     while i < n:
         m = data[i]
         if m >= 0x80:
@@ -203,6 +206,8 @@ def trb_lines(data, errors="replace"):
                     j += 1
                 b += 1
             if j - i > REC_MAX:
+                if st is not None:
+                    lost = True
                 st = None
                 i += 1
                 continue
@@ -230,6 +235,8 @@ def trb_lines(data, errors="replace"):
                 vals.append(v)
             i = j
             if not ok or st is None or m & 0x40 or (m & 0x3F) >> len(st):
+                if st is not None:
+                    lost = True
                 st = None
                 continue
             dt = 1 if vals[0] is None else vals[0]
@@ -244,6 +251,7 @@ def trb_lines(data, errors="replace"):
                         ok = False       # (9 digits, as the logger)
                         break
             if not ok or dt < 1 or st[0] + dt >= FIX_S_END:
+                lost = True
                 st = None
                 continue
             st[0] += dt
@@ -256,6 +264,8 @@ def trb_lines(data, errors="replace"):
         ln = j + 1 - i
         i = j + 1
         if ln > LINE_MAX:                # the logger skips it (_rd_line)
+            if st is not None:
+                lost = True
             st = None
             continue
         if line == "#END\n":
@@ -263,6 +273,11 @@ def trb_lines(data, errors="replace"):
             return
         if line.startswith("="):
             st = _state(line[1:-1])
+            if lost and st is not None:
+                # (the points lost in the damage: no straight line over
+                # them in the GPX; the logger's upload has no segments)
+                yield "-\n"
+                lost = False
             # a keyframe "=#END" is no footer (the logger's _rd_footer
             # matches the raw record only) and "=#..." no header: no point
             if not line.startswith("=#"):
@@ -273,6 +288,8 @@ def trb_lines(data, errors="replace"):
             # a damaged record (a flag byte below 0x80 read as text): the
             # next records may be read from inside one, none until a
             # keyframe (as _kb_rec)
+            if st is not None:
+                lost = True
             st = None
 
 
@@ -299,8 +316,11 @@ def convert(lines, name, count=None):
                                        else "")
                      + ("<esp:speed>%s</esp:speed>" % speed if speed else "")
                      + "</extensions>")
-        out.append('<trkpt lat="%.6f" lon="%.6f">%s</trkpt>\n'
-                   % (lat, lon, tags))
+        lon_s = "%.6f" % lon
+        if lon_s == "180.000000":        # (GPX 1.1: longitude < 180)
+            lon_s = "-180.000000"
+        out.append('<trkpt lat="%.6f" lon="%s">%s</trkpt>\n'
+                   % (lat, lon_s, tags))
     out.append(GPX_TAIL)
     if count is not None:
         count.append(n)
@@ -312,7 +332,8 @@ def convert(lines, name, count=None):
     return "".join(out)
 
 
-SUFFIXES = (".trk", ".trk.bad", ".trk.err", ".trb", ".trb.bad", ".trb.err")
+SUFFIXES = (".trk", ".trk.bad", ".trk.err", ".trb", ".trb.bad", ".trb.err",
+            ".trk.bad.err", ".trb.bad.err")   # (a parked .bad: text lines)
 
 
 def main(argv):
@@ -321,7 +342,11 @@ def main(argv):
                          " > FILE.gpx\n")
         return 2
     path = argv[1]
-    name = path.rsplit("/", 1)[-1]
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    # (the name goes into XML: a byte that is not UTF-8 in the file name, a
+    # surrogate here, or a control character made it no GPX)
+    name = "".join("?" if c < " " or "\ud800" <= c <= "\udfff"
+                   or c in "\ufffe\uffff" else c for c in name)
     # the suffix only (the longest that fits): "my.trip.trk" is "my.trip"
     for suf in sorted(SUFFIXES, key=len, reverse=True):
         if name.endswith(suf):
@@ -352,6 +377,10 @@ def main(argv):
         # has no valid time on any line
         sys.stderr.write("trk2gpx: no valid points in %s%s\n"
                          % (path, " (CRLF line ends?)" if crlf else ""))
+        return 1
+    if not data:
+        sys.stderr.write("trk2gpx: %s is empty\n" % path)
+        return 1
     return 0
 
 

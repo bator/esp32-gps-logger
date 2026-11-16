@@ -4643,6 +4643,39 @@ try:
           bad == 0, "mismatches=%d" % bad)
     gl.log_reset()
 
+
+    # HOME-FLIP: a home stay that a phone hotspot (not home) turns into an
+    # away one: hb_at None let an anchor go at once, past far_at and
+    # STILL_RUN, in the first metres walked out of the house. Now the first
+    # one waits STILL_BACK, and those checks hold meanwhile
+    gl.log_reset()
+    gl.log["still"] = sl = gl._still_state()
+    sl.update(active=True, anchor=(47.5, 19.0), aref=(47.5, 19.0), n=10, home=True)
+    _hf_hb = gl._still_heartbeat
+    _hf_beats = []
+    gl._still_heartbeat = lambda now: _hf_beats.append(now)
+    _hf_w = dict(gl.wifi)
+    try:
+        gl.wifi.update(state="connected", home=False, ssid="phone")
+        gl.st.update(valid=True, date="2026-10-18", time="10:00:00", alt=None,
+                     hdop=None, fixtype=3)
+        gl._still_active(_clock[0], (47.50005, 19.0))
+        _hf_flip = (sl["home"], sl["hb_at"] is not None)
+        gl._still_beat(_clock[0])
+        _hf_now = len(_hf_beats)
+        _clock[0] += gl.STILL_BACK + 2000
+        gl._still_beat(_clock[0])
+        _hf_later = len(_hf_beats)
+    finally:
+        gl._still_heartbeat = _hf_hb
+        gl.wifi.clear()
+        gl.wifi.update(_hf_w)
+        gl.log_reset()
+    check("HOME-FLIP: a home stay turned away by a hotspot writes no anchor at once; the "
+          "first comes after STILL_BACK",
+          _hf_flip == (False, True) and _hf_now == 0 and _hf_later == 1,
+          repr((_hf_flip, _hf_now, _hf_later)))
+
     # walking (1.4 m/s) is never a stay, even with the speed reading low
     sv_reset()
     for i in range(10 * 60):
@@ -7662,6 +7695,13 @@ if shutil.which("bash") and shutil.which("sha256sum"):
           and not os.path.exists(os.path.join(os.path.dirname(dev),
                                               "gps_logger.mpy")),
           "rc=%d %r %r" % (rc, out[-200:], err[-200:]))
+    # DEPLOY-TMP: a deploy that worked left its build directory behind (the
+    # last trap cleared, the rm with it)
+    _dt_tmp = tempfile.mkdtemp(dir=dp_td)
+    rc, out, err, dev, calls = deploy_run({"TMPDIR": _dt_tmp})
+    check("DEPLOY-TMP: a deploy that worked leaves no build directory",
+          rc == 0 and "Deployed" in out and os.listdir(_dt_tmp) == [],
+          "rc=%d %r" % (rc, os.listdir(_dt_tmp)))
     # DEPLOY-FORCE-MPY: the emergency path installs the .mpy over the frozen
     rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": "stale",
                                            "FORCE_MPY": "1"})
@@ -8541,11 +8581,27 @@ gl._rcv.gps_check(_clock[0])
 _gs_ms = gl.st["mute_s"] == gl._stamp() - gl._rcv.GPS_SILENT // 1000
 gl.st["mute_s"] = gl._stamp() - 7 * 86400   # (as if it began a week ago)
 gl.st["rx"] = _clock[0]
+gl.st["date"] = "2026-11-08"                 # (kept from before the silence)
+gl._rcv._day[0], gl._rcv._day[1] = b"081126", "2026-11-08"
 gl._rcv.gps_check(_clock[0])
 _gs_long = [l for l in diag_lines() if "gps back" in l]
-check("GPS-SILENT-LONG: a week of silence is said as a week (from Stamps)",
-      _gs_ms and len(_gs_long) == 1 and _gs_long[0] == "gps back after %d s" % (7 * 86400),
-      repr(_gs_long))
+_gs_date = (gl.st["date"], gl._rcv._day[0], gl._rcv._day[1])
+check("GPS-SILENT-LONG: a week of silence is said as a week (from Stamps); the date "
+      "from before it is dropped (a GGA-only second was stamped with the old day)",
+      _gs_ms and len(_gs_long) == 1 and _gs_long[0] == "gps back after %d s" % (7 * 86400)
+      and _gs_date == (None, None, None),
+      repr((_gs_long, _gs_date)))
+# GPS-LOST-DATE: a restart whose banner was lost (_uc_watch) drops the date
+# as a seen restart does
+gl._rcv.reset()
+gl.st["setup_ok"], gl.st["setup_at"], gl.st["extra"] = True, _clock[0], 0
+_clock[0] += gl._rcv.UC_GST_LOST
+gl.st["gst_at"] = None
+gl.st["rx"] = _clock[0]
+gl.st["date"] = "2026-11-08"
+gl._rcv._uc_watch(_clock[0])
+check("GPS-LOST-DATE: a lost setup (no GST) drops the date kept from before",
+      gl.st["extra"] == 1 and gl.st["date"] is None, repr((gl.st["extra"], gl.st["date"])))
 diag_clear()
 gl._rcv.reset()
 
@@ -8587,6 +8643,32 @@ check("RCV-FIELDS: minutes start with a digit; a time that does not exist is no 
       _rf == ["bad", "bad", 47.0917] and _rf_25 == (0, "120000", 1) and _rf_empty == 1
       and _rf_bounds == "120000" and _rf_rmc == (True, None) and _rf_gst is None,
       repr((_rf, _rf_25, _rf_empty, _rf_bounds, _rf_rmc, _rf_gst)))
+
+# RCV-PARTIAL (NMEA fuzz): a GSA whose later field fails set the fix type
+# and counted it before (a bad sentence that still changed state); a GSV of
+# a talker of no system went into the satellites seen for good; an HDOP of
+# 0 or below and a negative GST were taken; a receiver restart kept its old
+# date (after a day and more of silence the next fix had the old day)
+gl._rcv.reset()
+_rp_ft = gl.st["fixtype"]
+gl._rcv.handle(_rf_nm("GNGSA,A,2,01,02,,,,,,,,,,,1.5,0.9,1.2,X"))
+_rp_gsa = (gl.st["fixtype"] == _rp_ft, gl.st["err"])
+gl._rcv.handle(_rf_nm("GPGSA,A,3,07,0X,,,,,,,,,,,1.5,0.9,1.2,1"))
+_rp_used = list(gl._rcv._uc_sv["used"])     # (its 07 not kept "in use")
+gl._rcv.handle(_rf_nm("XXGSV,1,1,07,01,40,083,46,1"))
+_rp_view = dict(gl.st["view"])
+gl._rcv.handle(_rf_nm("GNGGA,120000.00,4711.12279,N,01825.61582,E,1,12,-1.0,100.0,M,40.0,M,,"))
+gl._rcv.handle(_rf_nm("GNGST,120000.00,1.0,,,,-2.0,-3.0,9.9"))
+_rp_ep = (gl._rcv.ep["hdop"][1], gl._rcv.ep.get("std"))
+gl.st["date"] = "2026-11-14"
+gl._rcv._gps_restarted()
+_rp_date = gl.st["date"]
+gl._rcv.reset()
+check("RCV-PARTIAL: a GSA that fails leaves no fix type; a GSV of no system is not seen; "
+      "HDOP 0 or below and a negative GST are not taken; a restart forgets the date",
+      _rp_gsa == (True, 1) and _rp_used == [] and "XX" not in _rp_view
+      and _rp_ep == (0, None)
+      and _rp_date is None, repr((_rp_gsa, _rp_used, _rp_view, _rp_ep, _rp_date)))
 
 saved_diag = (gl.DIAG, gl.DIAG_MAX)
 try:
@@ -8825,6 +8907,12 @@ try:
           and t3 == "under 60 s" and " prev_up 0 " in boot3
           and p4 == {"up": 125, "end": None, "how": "status"},
           "%r %r %r %r" % (p2, t2, p3, p4))
+    p7, _, _ = prev_after(st_lines + "crash boot 1 ImportError('x')\n" * 4)
+    p8, _, _ = prev_after(st_lines + "crash boot fail 3: REPL\n")
+    check("UPTIME: a start that failed (gps_boot / main.py 'crash boot') is the previous "
+          "run, not the status line before it",
+          p7 == {"up": 0, "end": None, "how": "crash"}
+          and p8 == {"up": 0, "end": None, "how": "crash"}, "%r %r" % (p7, p8))
     check("UPTIME: just rotated -> diag.1; no log at all -> unknown",
           p5["up"] == 3494 and p6["up"] is None and t6 is None
           and " prev_up - " in boot6, "%r %r %r" % (p5, p6, boot6))
@@ -11124,6 +11212,43 @@ check("HIST-FUTURE: no day file for a line past the clock's day and one more (a 
       hf_today == "20261116" and hf_put == ["20261115.trb"] and hf_trim == ["20261115.trb"]
       and sorted(_hf_days) == [d_ for d_ in hf_window if d_ != "20261130"],
       repr((hf_today, hf_put, hf_trim, hf_window)))
+# HIST-OLD: a track uploaded days late wrote its day file only for
+# _hist_close to remove it at once, for every batch (flash wear)
+_ho_dir = tempfile.mkdtemp()
+_ho_saved = (gl.HIST_DIR, gl.log["clock"], gl._rm)
+gl.HIST_DIR = os.path.join(_ho_dir, "hist")
+os.mkdir(gl.HIST_DIR)
+_ho_rm = []
+try:
+    gl.log["clock"] = (gl._kb_time(b"20261115T120000Z", 0), gl._stamp())
+    for k_ in range(gl.HIST_DAYS):
+        with builtins.open(os.path.join(gl.HIST_DIR, "202611%02d.trb" % (15 - k_)), "wb") as f:
+            f.write(b"x")
+    gl._rm = lambda p_: (_ho_rm.append(p_[-12:]), _ho_saved[2](p_))
+    for b_ in range(3):
+        hf_o = [None, False, False, None]
+        for s_ in range(3):
+            ln_ = b"47.500000,19.000000,10.0,,20261101T08%02d%02dZ\n" % (b_, s_)
+            gl._rbuf[0:len(ln_)] = ln_
+            gl._hist_put(hf_o, 0, len(ln_))
+        gl._hist_close(hf_o)
+    _ho_after = sorted(os.listdir(gl.HIST_DIR))
+    os.remove(os.path.join(gl.HIST_DIR, "20261109.trb"))   # room in the window
+    gl._hist_skip[0] = None
+    hf_o = [None, False, False, None]
+    ln_ = b"47.500000,19.000000,10.0,,20261108T080000Z\n"
+    gl._rbuf[0:len(ln_)] = ln_
+    gl._hist_put(hf_o, 0, len(ln_))
+    gl._hist_close(hf_o)
+    _ho_in = "20261108.trb" in os.listdir(gl.HIST_DIR)
+finally:
+    gl.HIST_DIR, gl.log["clock"], gl._rm = _ho_saved
+    gl._hist_skip[0] = None
+    shutil.rmtree(_ho_dir, ignore_errors=True)
+check("HIST-OLD: a day older than the HIST_DAYS kept is not written (nor removed); "
+      "one inside the window still is",
+      _ho_rm == [] and "20261101.trb" not in _ho_after and len(_ho_after) == gl.HIST_DAYS
+      and _ho_in, repr((_ho_rm, _ho_after, _ho_in)))
 
 # WiFi: findings 1, 3, 8, 9, 22, 23 and the WiFi improvements
 rv_td = tempfile.mkdtemp(prefix="rev29-")
@@ -16458,6 +16583,88 @@ finally:
 check("REV-3c: a MemoryError while cutting a failing file back to its "
       "footer is counted, not raised", cut_r == "ok"
       and gl.log["err"] == err0 + 1, cut_r)
+# FOOT-SMALL: a failed append that landed no more than the footer's bytes
+# left the size as it was: the end was taken as moved, the file left with
+# its footer damaged (a junk keyframe counted as a point), a new file begun
+_fs_dir = tempfile.mkdtemp()
+gl.LOG_DIR = _fs_dir
+gl.log_reset()
+_fs_free = gl.free
+gl.free = lambda: 10 ** 8
+gl.start_file("20261116_120000")
+_fs_l = [trk_line(47.5 + i * 1e-4, 19.0, "2026-11-16T12:00:%02dZ" % i) for i in range(20)]
+gl.log["batch"] += _fs_l[:10]
+gl.flush()
+_fs_fail = [2]
+
+
+class _FsW:
+    def __init__(self, f):
+        self.f = f
+
+    def write(self, b):
+        if _fs_fail[0] is not None:
+            n_, _fs_fail[0] = _fs_fail[0], None
+            self.f.write(bytes(b)[:n_])
+            raise OSError(28)
+        return self.f.write(b)
+
+    def __getattr__(self, k):
+        return getattr(self.f, k)
+
+
+gl.open = lambda p_, m_="r": _FsW(_open3(p_, m_)) if "+" in m_ else _open3(p_, m_)
+try:
+    gl.log["batch"] += _fs_l[10:]
+    gl.flush()                                   # 2 bytes over the footer
+    gl.flush()                                   # the retry
+finally:
+    del gl.open
+_fs_files = sorted(os.listdir(_fs_dir))
+with _open3(os.path.join(_fs_dir, "20261116_120000.trb"), "rb") as f_:
+    _fs_lines = [x for x in trk2gpx.trb_lines(f_.read()) if "," in x]
+gl.free = _fs_free
+shutil.rmtree(_fs_dir, ignore_errors=True)
+check("FOOT-SMALL: a failed append of the footer's bytes at most is retried in "
+      "the same file, its 20 points read back",
+      _fs_files == ["20261116_120000.trb"] and len(_fs_lines) == 20,
+      repr((_fs_files, len(_fs_lines))))
+# CLOSE-HELD: a failed append landed part of its lines, then the stay held
+# them all and _close_file moved them to a new file: the old one kept that
+# part without its footer, and the same lines went up from both files
+_ch_dir = tempfile.mkdtemp()
+gl.LOG_DIR = _ch_dir
+gl.log_reset()
+gl.free = lambda: 10 ** 8
+gl.start_file("20261116_130000")
+_ch_l = [trk_line(47.5 + i * 1e-4, 19.0, "2026-11-16T13:00:%02dZ" % i) for i in range(20)]
+gl.log["batch"] += _ch_l[:10]
+gl.flush()
+_fs_fail[0] = 150
+_ch_hold = gl._still_hold
+gl.open = lambda p_, m_="r": _FsW(_open3(p_, m_)) if "+" in m_ else _open3(p_, m_)
+try:
+    gl.log["batch"] += _ch_l[10:]
+    gl.flush()                                   # 150 bytes land, then it fails
+    _fs_fail[0] = None
+    gl._still_hold = lambda: _ch_l[10][-17:-1]   # all 10 held now
+    _ch_ok = gl._close_file()
+finally:
+    del gl.open
+    gl._still_hold = _ch_hold
+_ch_n = {}
+for n_ in sorted(os.listdir(_ch_dir)):
+    with _open3(os.path.join(_ch_dir, n_), "rb") as f_:
+        _ch_n[n_] = len([x for x in trk2gpx.trb_lines(f_.read()) if "," in x])
+_ch_left = len(gl.log["batch"]), (gl.log["file"] or "")[-19:]
+gl.free = _fs_free
+gl.log_reset()
+shutil.rmtree(_ch_dir, ignore_errors=True)
+check("CLOSE-HELD: the held lines move to a new file, the old file cut back to its "
+      "footer: each line in one file only",
+      _ch_ok and _ch_n == {"20261116_130000.trb": 10}
+      and _ch_left == (10, "20261116_130010.trb"),
+      repr((_ch_n, _ch_left)))
 gl.LOG_DIR = _rev_dir
 gl.log_reset()
 shutil.rmtree(_r3, ignore_errors=True)
@@ -22046,8 +22253,8 @@ _bf_none, _bf76, _bf15, _bf5, _bf100 = [_bat_frame(b) for b in (None, 76, 15, 5,
 _bf_l = _bat_frame(76, "2 óra")
 _bf_l15 = _bat_frame(15, "45 p")
 _bf_wide = _bat_frame(100, "12 óra")
-_bf_out = [(4, 56), (14, 56), (4, 62), (14, 62), (15, 58), (15, 60)]
-_bf_fill = lambda f: [x for x in range(6, 13) if f[(x, 59)] != _PAPER_C]
+_bf_out = [(4, 55), (14, 55), (4, 61), (14, 61), (15, 57), (15, 59)]
+_bf_fill = lambda f: [x for x in range(6, 13) if f[(x, 58)] != _PAPER_C]
 _bf_ink = lambda f, x0: [x for x in range(x0, 94) for y in range(54, 64) if f[(x, y)] != _PAPER_C]
 _bf_right = lambda f: {k: v for k, v in f.items() if k[0] >= 94}
 _bf_tx = 18 + _ft.width(_ft._SMALL, "76%") + _ft.BAT_SEP
@@ -22055,8 +22262,8 @@ check("TFT-BAT: under the route: outline and nub in ink, the charge 76 % of 7 px
       "15 % amber, 5 % red; the per cent, then the time left in the battery's tone, the widest "
       "short of the right column; nothing without a battery; the right column untouched",
       all(_bf76[k] == _INK_C for k in _bf_out)
-      and _bf_fill(_bf76) == list(range(6, 11)) and _bf76[(6, 59)] == _INK_C
-      and _bf15[(6, 59)] == _AMB_C and _bf5[(6, 59)] == _RED_C
+      and _bf_fill(_bf76) == list(range(6, 11)) and _bf76[(6, 58)] == _INK_C
+      and _bf15[(6, 58)] == _AMB_C and _bf5[(6, 58)] == _RED_C
       and len(_bf_fill(_bf5)) == 1 and len(_bf_fill(_bf100)) == 7
       and _bf_ink(_bf76, 18) and not _bf_ink(_bf76, _bf_tx)
       and _bf_ink(_bf_l, _bf_tx) and max(_bf_ink(_bf_wide, 0)) < 92
@@ -22067,6 +22274,24 @@ check("TFT-BAT: under the route: outline and nub in ink, the charge 76 % of 7 px
       and _bf_right(_bf_l) == _bf_right(_bf_none) == _bf_right(_bf100),
       repr((_bf_fill(_bf76), _bf_fill(_bf5), _bf_fill(_bf100), [_bf76[k] for k in _bf_out],
             max(_bf_ink(_bf_wide, 0) or [0]), _bf_tx)))
+# TFT-BAT-ROWS: the text's ink (the stem of "p" a row below its baseline)
+# stays in the top zone, rows 0-63: at BAT_Y 56 the row 64 under it was the
+# low zone's, the "p" cut short
+_bt_f = _ft._SMALL[0]
+_bt_low = []
+for ch_ in "0123456789% óratp":
+    i_ = _bt_f[0].find(ch_)
+    if i_ < 0:
+        continue
+    w_ = _bt_f[1][i_]
+    o_ = _bt_f[2][i_ * 2] | _bt_f[2][i_ * 2 + 1] << 8
+    bpr_ = (w_ + 1) // 2
+    rows_ = [r_ for r_ in range(_bt_f[4])
+             if any(_bt_f[3][o_ + r_ * bpr_:o_ + (r_ + 1) * bpr_])]
+    if rows_:
+        _bt_low.append(_ft.BAT_Y + _ft.BAT_H - _bt_f[5] + max(rows_))
+check("TFT-BAT-ROWS: every glyph of the battery's text ends above the low zone (LOW_Y)",
+      _bt_low and max(_bt_low) < _ft.LOW_Y, repr((max(_bt_low or [0]), _ft.LOW_Y)))
 _ft.set_state(*_STD)
 _ft.frame()
 
@@ -23506,7 +23731,8 @@ if _mf_pv != "11.0.0" or not _mf_font:
                % (_mf_pv, _mf_font))
 else:
     _mf_td = tempfile.mkdtemp(prefix="font-")
-    _mf_r = subprocess.run([sys.executable, _mf_path], cwd=_mf_td, capture_output=True, text=True)
+    _mf_r = subprocess.run([sys.executable, _mf_path, os.path.join(_mf_td, "gps_tft_font.py")],
+                           cwd=_mf_td, capture_output=True, text=True)
     with open(os.path.join(ROOT, "gps_tft_font.py"), "rb") as f:
         _mf_a = f.read()
     with open(os.path.join(_mf_td, "gps_tft_font.py"), "rb") as f:
@@ -26018,10 +26244,99 @@ try:
                       re.search(r"<name>([^<]*)</name>", r_.stdout).group(1),
                       r_.stdout.count("<trkpt")))
     check("RV14-14: trk2gpx warns on stderr when a non-empty file gives no "
-          "point (CRLF line ends named); the track's name loses only the "
+          "point (CRLF line ends named) and exits 1; the track's name loses only the "
           "suffix",
-          r3_14 == [(0, True, True, "my.trip", 0),
+          r3_14 == [(1, True, True, "my.trip", 0),
                     (0, False, False, "2026.track1", 1)], repr(r3_14))
+
+    # T2G-EDGES: a parked .bad (.trk.bad.err, .trb.bad.err: text) is taken;
+    # a longitude that rounds to 180.000000 is written -180.000000 (GPX 1.1:
+    # under 180); the name has no control character, no surrogate (a file
+    # name that is not UTF-8) and no directory (a Windows path); a line over
+    # LINE_MAX is skipped as the logger skips it; an empty file exits 1;
+    # after a damaged .trb record the next keyframe starts a segment
+    _t2 = []
+    for nm_, body_ in (("a.trb.bad.err", HEADER + trk_line(47.5, 179.9999997, "2026-10-18T08:00:00Z")),
+                       ("b\x01c.trk", HEADER + trk_line(47.5, 19.0, "2026-10-18T08:00:01Z")
+                        + "47.5,19.0," + "0" * 600 + ",1.5,20261018T080002Z\n")):
+        p_ = os.path.join(_r3_dir, nm_)
+        with builtins.open(p_, "w") as f:
+            f.write(body_)
+        r_ = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"), p_],
+                            capture_output=True, text=True)
+        _t2.append((r_.returncode, r_.stdout.count("<trkpt"),
+                    re.findall(r'lon="([^"]+)"', r_.stdout),
+                    (re.search(r"<name>([^<]*)</name>", r_.stdout) or [None, None])[1]))
+    _t2_nu = os.path.join(os.fsencode(_r3_dir), b"x\xff.trk")
+    with builtins.open(_t2_nu, "wb") as f:
+        f.write((HEADER + trk_line(47.5, 19.0, "2026-10-18T08:00:03Z")).encode())
+    r_ = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"),
+                         _t2_nu], capture_output=True)
+    _t2.append((r_.returncode, b"<name>x?</name>" in r_.stdout))
+    _t2_e = os.path.join(_r3_dir, "empty.trk")
+    builtins.open(_t2_e, "w").close()
+    _t2.append(subprocess.run([sys.executable, os.path.join(ROOT, "tools", "trk2gpx.py"),
+                               _t2_e], capture_output=True, text=True).returncode)
+    # a .trb: keyframe, deltas, a damaged record, the next keyframe
+    _t2_lines = [trk_line(47.5 + k * 1e-5, 19.0, "2026-10-18T08:%02d:%02dZ" % (k // 60, k % 60))
+                 for k in range(3 * gl.KEY_EVERY)]
+    gl._kb_start()
+    _t2_b = bytearray()
+    while True:                          # (KB_CHUNK at a time, as flush)
+        _t2_b += gl._kb_part(_t2_lines, len(_t2_lines), [])
+        if gl._kq[0] >= len(_t2_lines):
+            break
+    _t2_hit = next(i_ for i_ in range(5, len(_t2_b)) if _t2_b[i_] >= 0x80 and _t2_b[i_ - 1] < 0x80)
+    _t2_b[_t2_hit] = 0x41                      # a flag byte below 0x80: damaged
+    _t2_out = list(trk2gpx.trb_lines(bytes(_t2_b), "surrogateescape"))
+    _t2_seg = "-\n" in _t2_out[1:]
+    check("T2G-EDGES: .trb.bad.err taken, lon 180 written -180, a control character and a "
+          "non-UTF-8 byte out of the name, an over-long line skipped, an empty file exits 1, a "
+          "segment after a damaged record",
+          _t2[0][:3] == (0, 1, ["-180.000000"]) and _t2[1] == (0, 1, ["19.000000"], "b?c")
+          and _t2[2] == (0, True) and _t2[3] == 1 and _t2_seg,
+          repr((_t2, _t2_seg, _t2_out[:3])))
+
+    # FW-MANIFEST-FIELDS: firmware.py refuses a commit or a board the
+    # board's _ota_manifest_ok refuses (a 22-character hash with
+    # core.abbrev: signed, published, "bad manifest" on every board for
+    # good, and the publish removed the previous build's files)
+    _fm = []
+    for c_, b_ in (("abcdef0123456789abcdef", "GPS_LOGGER_S3"), ("ABC1234", "GPS_LOGGER_S3"),
+                   ("abc1234", ""), ("abc1234", "A|B"), ("abc1234", "GPS_LOGGER_C6"),
+                   ("abc1234-dirty", "GPS_LOGGER_S3")):
+        try:
+            _fw.manifest(_r3_dir, "/nonexistent", 1, c_, b_)
+            _fm.append("written")
+        except ValueError:
+            _fm.append("refused")
+        except OSError:
+            _fm.append("os")
+    check("FW-MANIFEST-FIELDS: a commit over 20 hex, uppercase, an empty board or one with "
+          "a | is refused before anything is signed; a good pair gets past it (no .bin here)",
+          _fm == ["refused"] * 5 + ["os"], repr(_fm))
+
+    # F32-FIELDS: MicroPython's float() reads ".", "+." and ".e1" as 0.0 (a
+    # ghost point at the equator went up); a single-precision float rounds
+    # 90.000003 onto 90.0 (past the limit, uploaded)
+    _ff = []
+    for txt_ in (b".", b"+.", b".e1", b"-", b"47.5", b"e1", b"+e1", b"-.e5", b"5e1"):
+        gl._rbuf[0:len(txt_)] = txt_
+        _ff.append(gl._fnum(0, len(txt_)))
+    _fp = []
+    for txt_, lim_ in ((b"90.000003", 90), (b"90.000000", 90), (b"90", 90),
+                       (b"-180.000007", 180), (b"180.0", 180), (b"900000001e-7", 90),
+                       (b"89.999999", 90), (b"179.999999", 180), (b"-179.999995", 180),
+                       (b"0180.5", 180), (b"181", 180)):
+        gl._rbuf[0:len(txt_)] = txt_
+        _fp.append(gl._past(0, len(txt_), lim_))
+    check("F32-FIELDS: a field without a digit is no number; a digit past the point of a "
+          "value on its limit is past it, a value under it is not (single precision "
+          "reads 179.999999 as 180.0); the CPython half of it, the mpy smoke the rest",
+          _ff == [None, None, None, None, 47.5, None, None, None, 50.0]
+          and _fp == [True, False, False, True, False, True, False, False, False,
+                      True, True],
+          repr((_ff, _fp)))
 finally:
     gl.LOG_DIR, gl.DIAG = _r3_saved
     gl.wifi_reset()
@@ -26030,6 +26345,102 @@ finally:
     gl._rcv.reset()
     diag_clear()
     shutil.rmtree(_r3_dir, ignore_errors=True)
+
+# DNS-NET: the slow failure marks the network, not the host name: a silent
+# resolver blocked the loop 7 s once per name (GEO_URL, NTP, OTA: 21 s)
+_dn_ssid = hl.wifi["ssid"]
+_dn_sock = hl.socket
+_dn_had = "getaddrinfo" in vars(_dn_sock)
+_dn_ga = getattr(_dn_sock, "getaddrinfo", None)
+_dn_asked = []
+
+
+def _dn_getaddrinfo(host, port, fam, typ):
+    _dn_asked.append(host)
+    _clock[0] += 7000
+    raise OSError(-202)
+
+
+_dn_sock.getaddrinfo = (staticmethod(_dn_getaddrinfo) if isinstance(_dn_sock, type)
+                        else _dn_getaddrinfo)
+_dn = []
+try:
+    hl._dns.clear()
+    hl._dns_bad.clear()
+    hl.wifi["ssid"] = "hot"
+    for h_ in ("geo.example", "pool.ntp.org", "ota.example"):
+        try:
+            hl._resolve(h_, 443, 1)
+            _dn.append("ok")
+        except OSError:
+            _dn.append("err")
+finally:
+    if _dn_had:
+        _dn_sock.getaddrinfo = (staticmethod(_dn_ga) if isinstance(_dn_sock, type)
+                                else _dn_ga)
+    else:
+        del _dn_sock.getaddrinfo
+    hl.wifi["ssid"] = _dn_ssid
+    hl._dns.clear()
+    hl._dns_bad.clear()
+check("DNS-NET: one slow failure on a network: no other host name is asked there",
+      _dn == ["err", "err", "err"] and _dn_asked == ["geo.example"],
+      repr((_dn, _dn_asked)))
+# WIFI-GOTIP-MEM: _wifi_got_ip set "connected" first; a MemoryError on the
+# way (the diag line formatted) left the rest undone for good: the upload
+# in the other network's backoff (30 min), the failed try kept
+_gi = []
+for where_ in ("diag", "up"):
+    _gi_dir = tempfile.mkdtemp()
+    reset_wlan()
+    gl.LOG_DIR = _gi_dir
+    gl.log_reset()
+    gl.wifi_reset()
+    gl.up_reset()
+    write_env(_gi_dir, "SSID=home\nWPA2=pw\nSSID2=hot\nWPA2_2=p\n"
+              "GEO_URL=https://x.example\nAPI_KEY=k\n")
+    WLAN.scan_aps = [("home", -60, b"\x01" * 6, 1)]
+    WLAN.ok = {"home"}
+    gl.wifi_start(gl.load_env(gl.ENV_FILE))
+    gl.up.update(err_ssid="hot", backoff=gl.BACKOFF_MAX,
+                 next_at=_clock[0] + 1500000)
+    for w_ in WLAN.instances:
+        w_._status = 5
+        w_._requested = True
+    _clock[0] += 100
+    gl.wifi_tick()
+    gl.wifi["failed"]["home"] = gl._stamp()
+    _gi_diag, _gi_up = gl._wifi_diag, gl._up_net_new
+    _gi_n = [0]
+
+    def _gi_boom(*a_):
+        _gi_n[0] += 1
+        if _gi_n[0] == 1:
+            raise MemoryError("memory allocation failed")
+        return (_gi_diag if where_ == "diag" else _gi_up)(*a_)
+
+    if where_ == "diag":
+        gl._wifi_diag = _gi_boom
+    else:
+        gl._up_net_new = _gi_boom
+    try:
+        for w_ in WLAN.instances:
+            w_._status = 3
+            w_._recover = 0
+        for i_ in range(4):
+            _clock[0] += 6000
+            gl._guarded("wifi", gl.wifi_tick)
+    finally:
+        gl._wifi_diag, gl._up_net_new = _gi_diag, _gi_up
+    _gi.append((where_, gl.wifi["state"], gl.up["err_ssid"], gl.up["backoff"]
+                == gl.BACKOFF_START, "home" in gl.wifi["failed"]))
+    shutil.rmtree(_gi_dir, ignore_errors=True)
+reset_wlan()
+gl.wifi_reset()
+gl.up_reset()
+check("WIFI-GOTIP-MEM: a MemoryError getting the IP leaves nothing undone",
+      [g_[2:] for g_ in _gi] == [(None, True, False)] * 2
+      and all(g_[1] in ("connected", "sleep") for g_ in _gi), repr(_gi))
 
 _run_ended.append(1)
 _summary()

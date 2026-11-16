@@ -114,6 +114,26 @@ def manifest(d, key_file, build, commit, board):
     """d/manifest.json for d's micropython-<commit>.bin and web-<commit>.html.gz,
     signed with the key in key_file (the page only gzipped: an older firmware
     after a rollback takes this too)."""
+    # what the board's _ota_manifest_ok takes, checked here: a manifest it
+    # refuses ("bad manifest" on every board, for good) was signed, written
+    # and published, and the publish removed the previous build's files
+    c = commit[:-6] if commit.endswith("-dirty") else commit
+    if not (0 < len(c) <= 20 and all(ch in "0123456789abcdef" for ch in c)):
+        raise ValueError("commit %r: the board takes 1-20 lowercase hex"
+                         " (git's short hash), maybe -dirty" % commit)
+    own = None
+    try:                                 # the firmware's own OTA_BOARD
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "gps_logger.py")) as f:
+            for ln in f:
+                if ln.startswith('OTA_BOARD = "'):
+                    own = ln.split('"')[1]
+                    break
+    except OSError:
+        pass
+    if not board or "|" in board or (own is not None and board != own):
+        raise ValueError("board %r: not the firmware's OTA_BOARD %r (its"
+                         " boards would refuse the manifest)" % (board, own))
     key = read_key(key_file)
 
     def meta(name):

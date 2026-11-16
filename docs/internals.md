@@ -56,7 +56,13 @@
   (`HHMMSS`) and a fix's date (`DDMMYY`) digits. Anything else makes the whole sentence bad
   (counted in `nmea` good / bad), none of it used. (One such date in a track
   line became a "last time" no real time ever came after: no line and no anchor
-  point until a reboot.)
+  point until a reboot.) The minutes start with a digit (`float()` took `+5.5`). A time that does
+  not exist (hour 24, minute 60, second 61) or an empty time is no second of its
+  own (no bad sentence: the checksum held), and its position, speed and GST go
+  nowhere. A `GSA` whose later field fails leaves no fix type; an HDOP of 0 or
+  below and a negative `GST` are not taken; a `GSV` of a talker of no system is
+  not counted as seen. A receiver restart forgets its date (kept, after a day of
+  silence the next fix had the old day).
 - **Midnight.** Only `RMC` carries the date, and only with a fix (before one the
   UC6580's `RMC` carries a made-up date). A second that runs back past midnight
   without its own `RMC` has no date, so it is not a fix rather than a day off.
@@ -104,6 +110,11 @@
     Each 60 s write starts
     with one, and one follows every 64 deltas (`KEY_EVERY`), so a damaged
     record loses at most the points up to the next keyframe.
+  - A track line's number without a digit (".", "+.") is no number: on the
+    board MicroPython's `float()` reads them as 0.0, and such a line went up
+    as a point at 0,0. A latitude or longitude whose text is past 90 or 180
+    is refused even where a single-precision float rounds it onto the limit
+    (90.000003 is 90.0 on the board).
   - The `.pos` is `offset keyframe-offset`: a reader resumes by decoding
     from that keyframe (at most 64 records). A `.pos` without a valid
     keyframe, or an offset inside a record, resends the file from the
@@ -131,6 +142,13 @@
     damage costs up to two keyframe spans, not one. The board's reader and
     `tools/trk2gpx.py` take the same records (the upload and the GPX
     agree); a fix would change the format, the `.pos` and both readers.
+  - Not caught at all: a flipped bit inside a delta's value (no checksum in
+    the format) decodes a wrong but valid number, and it carries on to the
+    next keyframe: a fuzz of single flipped bytes made ghost points in about
+    half the cases, a few of them hundreds of km off. A check per keyframe
+    span (a CRC, or a bound on the step per second with a keyframe for a
+    larger one) would change the format and both readers. LittleFS checks
+    its metadata, not the file data.
 - **Text tracks.** A `.trk` holds the same lines as text (a `#TRK1` header). None
   is written now, but they are read and uploaded: a `.trb.bad` is text, and it goes
   up again renamed `.trk`. A `#TRK2` file (`lat,lon,ele,acc,speed,YYYYMMDDTHHMMSSZ`,
@@ -193,8 +211,12 @@ tell a stay from a drive, so the stay filter works on positions.
   none. Nor while the device keeps receding, 15 m out already (a walk out
   within 50 m): the way out keeps its first metres. Drift out there delays a
   point by 5 minutes at most.
-- **At home** (a home network): no anchor points. If the home WiFi drops,
-  anchor points start; it is still a stay.
+- **At home** (a home network): no anchor points, also while the home link is
+  down (a router restart) or the radio sleeps: a stay that began at home stays
+  a home stay (`sleep_home`) until it ends. A non-home network (a phone
+  hotspot) connected during it makes it an away stay; its first anchor point
+  waits 30 s, as after an excursion, so it never lands in the first metres
+  walked out.
 - **Arrival.** Entering a stay closes the current track on any network, so
   the arrival uploads during the stay.
 - **Leaving.** 3 consecutive samples beyond 150 m that each gain at least
@@ -459,7 +481,8 @@ home.
   read already. The name lookup cannot be (lwIP: 7 s without an answer,
   nothing else runs): after a lookup that failed slowly (over 2 s,
   `DNS_SLOW`; a fast "no such name" is only that) the network is not asked
-  again for 10 min (`DNS_RETRY`) or until it gives a new IP: the address
+  again for 10 min (`DNS_RETRY`) or until it gives a new IP, for no host name
+  (one per name blocked the upload's, NTP's and the OTA's lookup: 21 s): the address
   that same network resolved before is used, or the POST fails at once.
   Another network's address is never used (a LAN address would take the
   API key to a stranger's device on a LAN of the same range). NTP goes before the upload in the loop, so the first

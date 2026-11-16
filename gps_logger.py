@@ -525,6 +525,12 @@ def _diag_prev_in(lines):
             if line.startswith("crash up "):
                 prev_run["up"], prev_run["how"] = int(f[2]), "crash"
                 return True
+            if line.startswith("crash boot"):
+                # (gps_boot / main.py: the logger failed to start, an OTA
+                # build that would not import; the run before it is not
+                # the previous one)
+                prev_run["up"], prev_run["how"] = 0, "crash"
+                return True
             if line.startswith("boot "):
                 prev_run["up"], prev_run["how"] = 0, "short"
                 return True
@@ -1448,7 +1454,9 @@ def _net_hidden(ssid):
     return bool(_net(ssid).get("hidden"))
 
 def _wifi_got_ip(w):
-    wifi["state"] = "connected"
+    # "connected" last: what raised on the way (a MemoryError formatting the
+    # diag line) is done again on the next wifi_tick, not skipped for good
+    # (the upload left in the other network's backoff, failed kept)
     _dns_bad.clear()                     # (a new IP: its resolver asked again)
     try:
         wifi["ip"] = w.ifconfig()[0]
@@ -1459,9 +1467,12 @@ def _wifi_got_ip(w):
     wifi["down_at"] = None
     lost = wifi["lost_at"]
     if lost is not None:
-        _wifi_diag("back", "wifi back %s after %s, %d failed tries, rssi %s"
-                   % (wifi["ssid"] or "", _hms(_age_s(lost)),
-                      wifi["fails"], wifi["rssi"]))
+        try:
+            _wifi_diag("back", "wifi back %s after %s, %d failed tries, rssi %s"
+                       % (wifi["ssid"] or "", _hms(_age_s(lost)),
+                          wifi["fails"], wifi["rssi"]))
+        except MemoryError:
+            pass                         # (only the diag line)
         wifi["lost_at"] = None
     wifi["learn"] = False
     if wifi["home"] and _net_hidden(wifi["ssid"]):
@@ -1486,6 +1497,7 @@ def _wifi_got_ip(w):
         # no answer yet: a backoff grown on a network without internet
         # does not carry over to this one (up to an hour of "--:--")
         _ntp[1], _ntp[2] = None, NTP_RETRY
+    wifi["state"] = "connected"
     print("wifi ok", wifi["ssid"] or "")
     return True
 
@@ -2582,7 +2594,7 @@ def flush(hold=None, fx=None):
             f.write(HEADERB.encode())
         else:
             f = open(path, "r+b")
-            if not _seek_footer(f, old):
+            if not _seek_footer(f, old, old == log["good_size"]):
                 # the end is not where the last write left it: after a
                 # guessed newline a record could be split, and its half
                 # read as points. The batch goes on in a new file.
@@ -2710,9 +2722,10 @@ def _cut_to_footer(path, good, sz):
     left the start of the batch after the last good footer, without one,
     and the new file takes the whole batch. Write FOOTER back where it was
     (once, best effort): readers stop there, so the tail is not uploaded
-    twice. Only a footer written this session (good), the file longer."""
+    twice. Only a footer written this session (good), the file no shorter
+    (a write that landed the footer's bytes at most left the size)."""
     n = len(FOOTER)
-    if good is None or good < n or sz is None or sz <= good:
+    if good is None or good < n or sz is None or sz < good:
         return
     f = None
     try:
@@ -3290,6 +3303,15 @@ def _close_file(fx=None):
     if hold is not None and b[0][-17:-1] >= hold:
         tc = b[0][-17:-1]
         seg = log["new_seg"], log["seg_tc"]
+        path = log["file"]
+        if log["wfail"] and path is not None:
+            # a failed write left part of these lines in the old file
+            # (as flush's own switch to a new file): its footer back, or
+            # a create that never landed gone, else they went up twice
+            if log["created"]:
+                _cut_to_footer(path, log["good_size"], _file_size(path))
+            else:
+                _rm(path)
         start_file(_tcn(tc), fx)
         log["new_seg"], log["seg_tc"] = seg    # a break among the held lines
         return True
@@ -3682,7 +3704,10 @@ def _still_active(now, pos, fx=None):
     home = bool(at_home())
     if home != sl["home"]:
         sl["home"] = home
-        sl["hb_at"] = None
+        # (as if the last anchor were STILL_BACK ago: None let the next one
+        # go at once, past far_at and STILL_RUN, and a home stay flipped
+        # by a phone hotspot put an anchor in the first metres walked)
+        sl["hb_at"] = _stamp() - (STILL_HEARTBEAT - STILL_BACK) // 1000
 
 def log_tick():
     """Sample a position every SAMPLE ms and record it if it is more than
@@ -3893,13 +3918,16 @@ def _file_size(path):
     except OSError:
         return None
 
-def _seek_footer(f, old):
+def _seek_footer(f, old, ours=False):
     """Seek to the last known FOOTER, or after the last newline if truncated
     (-> False: a guess).
 
     A partial append leaves extra bytes after good_size; overwrite those
-    from the last good footer. An externally truncated file is shorter
-    and does not end with FOOTER — resume after the last newline."""
+    from the last good footer. One that landed no more than the footer's
+    bytes left the size as it was: with ours (old is the footer this
+    session wrote) that is no damage either. An externally truncated file
+    is shorter and does not end with FOOTER — resume after the last
+    newline."""
     n = len(FOOTER)
     foot = FOOTER.encode()
     if old is not None and old >= n:
@@ -3909,7 +3937,8 @@ def _seek_footer(f, old):
             f.seek(pos, 0)
             return True
         f.seek(0, 2)
-        if f.tell() > old:
+        end = f.tell()
+        if end > old or (ours and end == old):
             f.seek(pos, 0)
             return True
     else:
@@ -4418,10 +4447,46 @@ def _tail():
     return _dev[1]
 
 def _fnum(a, b):
+    """_rbuf[a:b] as a float, None if it is none. A field without a digit
+    is none: MicroPython's float() reads ".", "+." and ".e1" as 0.0 (a
+    point on the equator or at 0,0 went up; trk2gpx dropped it)."""
+    i = a
+    while i < b and not 48 <= _rbuf[i] <= 57:
+        if _rbuf[i] in (69, 101):        # e E: ".e1" is no number either
+            return None
+        i += 1
+    if i == b:
+        return None
     try:
         return float(_rmv[a:b])
     except ValueError:
         return None
+
+def _past(a, b, lim):
+    """The text _rbuf[a:b] is past lim (90 or 180) although single
+    precision reads it as lim: 90.000003 is 90.0 on the board, and so is
+    89.999999, which is not past it. Its integer part decides, at lim
+    itself a digit other than 0 after the point. An exponent is past it
+    (900000001e-7 is 90.0 in f32 too; the logger writes none)."""
+    if _rbuf.find(b"e", a, b) >= 0 or _rbuf.find(b"E", a, b) >= 0:
+        return True
+    i = a
+    if i < b and _rbuf[i] == 45:         # -
+        i += 1
+    n = 0
+    while i < b and 48 <= _rbuf[i] <= 57:
+        n = n * 10 + _rbuf[i] - 48
+        if n > lim:
+            return True
+        i += 1
+    if n < lim or i >= b or _rbuf[i] != 46:
+        return False
+    i += 1
+    while i < b and 48 <= _rbuf[i] <= 57:
+        if _rbuf[i] != 48:
+            return True
+        i += 1
+    return False
 
 def _canon(a, b, dec, imax):
     """_rbuf[a:b] reads exactly as "%.<dec>f" prints it, with at most imax
@@ -4502,7 +4567,9 @@ def _trk_point(a, b):
         return 0                         # not take is passed here too)
     lat, lon = _fnum(a, c1), _fnum(c1 + 1, c2)
     if (lat is None or lon is None or not math.isfinite(lat) or not math.isfinite(lon)
-            or abs(lat) > 90 or abs(lon) > 180):
+            or abs(lat) > 90 or abs(lon) > 180
+            or (abs(lat) == 90 and _past(a, c1, 90))
+            or (abs(lon) == 180 and _past(c1 + 1, c2, 180))):
         return 0
     _pt[6] = t
     need = (_J_FIX + len(_tail()) + _ptnum(0, c1 + 1, c2, lon, b"%.6f", 6, 3)
@@ -4735,6 +4802,21 @@ def _hist_batch(path, off, end, key):
     finally:
         _hist_close(hf, ok)
 
+_hist_skip = [None]                      # the last day too old to keep
+
+def _hist_old(day, t):
+    """No file of day yet, and HIST_DAYS days up to t newer than it: a
+    track uploaded late (days offline) wrote it only for _hist_close to
+    remove it again, for every batch."""
+    try:
+        ns = _hist_names()
+    except OSError:
+        return False
+    ds = sorted(set(n[:8] for n in ns if t is None or n[:8] <= t))
+    if day in ds:
+        return False
+    return len(ds) >= HIST_DAYS and day < ds[-HIST_DAYS]
+
 def _hist_put(hf, a, b):
     """The line _rbuf[a:b] into the day file of its time (opened when the
     day changes)."""
@@ -4753,10 +4835,17 @@ def _hist_put(hf, a, b):
             return                       # (no date: not in a day's file)
         _hd8[k] = c
     day = bytes(_hd8).decode()
+    if day == _hist_skip[0]:
+        _hd8[0] = 0
+        return
     t = _hist_today()
     if t is not None and day > t:        # (after the clock's day: a time that
         _hd8[0] = 0                      # leapt; no file for it, and no
         return                           # match for the next line either)
+    if _hist_old(day, t):
+        _hist_skip[0] = day              # (its other lines: no listdir each)
+        _hd8[0] = 0
+        return
     _hist_begin(hf, day)
     _hist_line(hf, _rbuf, a, b)
 
@@ -5166,21 +5255,24 @@ DNS_SLOW = 2000                          # ms: a failed lookup this long is no
                                          # answer (a fast one: no such name)
 DNS_KEEP = 8                             # addresses kept (host, port, kind, SSID)
 _dns = {}                                # key -> the last address on that net
-_dns_bad = {}                            # key -> Stamp of a slow failure
+_dns_bad = {}                            # SSID -> Stamp of a slow failure
 
 def _resolve(host, port, kind=None):
     """getaddrinfo's first answer. A lookup that failed slowly (DNS_SLOW: a
     resolver that does not answer; measured 7 s, nothing else runs, the
     UART fills, no socket yet for the guard) is not asked again on that
-    network for DNS_RETRY or until it gives a new IP: the address that
-    network resolved before is used, or it fails at once. A fast failure
+    network for DNS_RETRY or until it gives a new IP, for no host (one
+    silent resolver blocked once per host name: GEO_URL, NTP and OTA were
+    21 s): the address that network resolved before is used, or it fails
+    at once. A fast failure
     (no such name) is only that. Addresses are kept per network: another
     network's (a LAN address reached by the API key on a stranger's LAN of
     the same range) is never used."""
     if kind is None:
         kind = socket.SOCK_STREAM
-    key = (host, port, kind, wifi["ssid"])
-    bad = _dns_bad.get(key)
+    net = wifi["ssid"]
+    key = (host, port, kind, net)
+    bad = _dns_bad.get(net)
     if bad is not None and _recent_s(bad, DNS_RETRY):
         ai = _dns.get(key)
         if ai is None:
@@ -5193,7 +5285,9 @@ def _resolve(host, port, kind=None):
     except OSError:
         feed()
         if time.ticks_diff(time.ticks_ms(), t0) >= DNS_SLOW:
-            _dns_bad[key] = _stamp()
+            if len(_dns_bad) >= DNS_KEEP and net not in _dns_bad:
+                _dns_bad.clear()
+            _dns_bad[net] = _stamp()
             ai = _dns.get(key)
             if ai is not None:
                 return ai
@@ -5202,7 +5296,7 @@ def _resolve(host, port, kind=None):
     if len(_dns) >= DNS_KEEP and key not in _dns:
         _dns.clear()                     # (a few networks: no growth)
     _dns[key] = ai
-    _dns_bad.pop(key, None)
+    _dns_bad.pop(net, None)
     return ai
 
 def _http_open(method, url):
