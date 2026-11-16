@@ -8438,8 +8438,12 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
               and all(i >= 0 for i in order) and order[-1] == max(order)
               and not [n for n in os.listdir(dest) if n.endswith(".tmp")])
     ct = str(man.get("build"))
-    rc_same, _o, err_same, _w, _c = build_run(["--publish"],
-                                              dict(penv, FAKE_CT=ct))
+    rc_same, o_same, err_same, _w, _c = build_run(["--publish"],
+                                                  dict(penv, FAKE_CT=ct))
+    # (the same commit time makes the same commit where the clock's zone
+    # is UTC, as on CI: then it is the published build itself, a resume)
+    same_ok = ((rc_same != 0 and "FORCE=1" in err_same)
+               or (rc_same == 0 and "already published" in o_same))
     # the published build itself again (the same commit): only the cleanup,
     # no upload; a .tmp a cut upload left goes
     dest_rs = tempfile.mkdtemp(dir=dp_td)
@@ -8463,7 +8467,7 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
           "manifest last; the same build of another commit or an older one "
           "is refused unless FORCE=1; the published build itself again only "
           "cleans up (no upload: a leftover .tmp goes)",
-          atomic and rc_same != 0 and "FORCE=1" in err_same
+          atomic and same_ok
           and rc_rs1 == 0 and rc_rs2 == 0 and "already published" in out_same
           and not [c for c in c_same if c[0] == "scp"] and not same_tmp
           and rc_old != 0 and kept and rc_force == 0 and forced,
