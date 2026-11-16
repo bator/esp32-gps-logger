@@ -87,6 +87,11 @@ HOSTNAME=Dawarich-GPS-tracker
   certificate the server's chain ends in, at most 4 KB, e.g. for a Let's
   Encrypt server `openssl x509 -in /etc/ssl/certs/ISRG_Root_X1.pem -outform der -out ca.der`
   (check which root your server uses: `openssl s_client -connect host:443 -showcerts`).
+  Several roots go one after the other in the same file (`cat a.der b.der >
+  ca.der`, 4 KB in all): where the home DNS answers the public name with the
+  LAN proxy (split DNS), the board sees that proxy's certificate at home and
+  the CDN's away, e.g. ISRG Root X1 (Traefik, Let's Encrypt) and GTS Root R4
+  (Cloudflare). Check from the board's network what it is served.
 - Values may be quoted. On the keys above the comment goes first, then the
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is

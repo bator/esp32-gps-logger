@@ -28813,6 +28813,52 @@ check("BUILD-TOOLS-2: the toolchain tags through a function (a path with a "
       and "a file it names is missing" in _bf_src
       and "it ends in under a week" in _bf_src, "")
 
+# CA-MULTI: CA_FILE with several DER roots one after the other loads each
+# with its own call (mbedtls parses one DER a call; at home the LAN proxy's
+# Let's Encrypt root, away the CDN's); positional (modtls takes no keyword);
+# anything that is not such a run goes whole, for modtls to judge
+cm = []
+cm_saved = (sys.modules.get("tls"), gl.CA_FILE)
+
+
+class _CmTls:
+    PROTOCOL_TLS_CLIENT, CERT_NONE, CERT_REQUIRED = 2, 0, 2
+
+    class SSLContext:
+        def __init__(self, proto):
+            self.verify_mode, self.cas = None, []
+
+        def load_verify_locations(self, cadata, /):
+            self.cas.append(bytes(cadata))
+
+
+def _cm_der(n, fill):
+    body = bytes([fill]) * n
+    return (b"\x30\x81" + bytes([n]) if n < 256 else
+            b"\x30\x82" + bytes([n >> 8, n & 255])) + body
+
+
+try:
+    sys.modules["tls"] = _CmTls
+    gl.CA_FILE = os.path.join(_rv_td, "ca.der")
+    a_, b_ = _cm_der(300, 1), _cm_der(200, 2)
+    for data_ in (a_ + b_, a_, a_ + b"\x00junk"):
+        with open(gl.CA_FILE, "wb") as f:
+            f.write(data_)
+        tls_ctx_reset()
+        ctx_ = gl._tls_context()
+        cm.append([len(c_) for c_ in ctx_.cas])
+finally:
+    if cm_saved[0] is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = cm_saved[0]
+    gl.CA_FILE = cm_saved[1]
+    tls_ctx_reset()
+check("CA-MULTI: two DER roots are two loads, one is one, a run with junk "
+      "after it goes whole",
+      cm == [[304, 203], [304], [304 + 5]], repr(cm))
+
 gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl.free, gl.DIAG_MAX = _rv_saved
 diag_clear()
 shutil.rmtree(_rv_td, ignore_errors=True)

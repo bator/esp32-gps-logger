@@ -5177,8 +5177,8 @@ def _io_write(s, b):
 _tls_ctx = [None, None]                  # the one SSLContext, and the size
                                          # of the CA_FILE it was made with
                                          # (None: there was none)
-CA_MAX = 4096                            # bytes of CA_FILE at most (one DER
-                                         # root is ~1-2 KB; a PEM bundle
+CA_MAX = 4096                            # bytes of CA_FILE at most (DER roots, one
+                                         # ~1-2 KB a root; a PEM bundle
                                          # saved as it hit MemoryError at
                                          # every POST: TLS reboots)
 
@@ -5191,6 +5191,29 @@ def _ca_size():
         if _enoent(e):
             return None
         raise
+
+def _der_certs(b):
+    """The DER certificates one after the other in b (each a SEQUENCE:
+    0x30, a long length 0x81 n or 0x82 n n), as bytes: [b] when it is not
+    such a run of two or more (modtls then judges the whole)."""
+    out = []
+    i = 0
+    n = len(b)
+    while i < n:
+        if b[i] != 0x30 or i + 2 > n:
+            return [b]
+        k = b[i + 1]
+        if k == 0x81 and i + 3 <= n:
+            end = i + 3 + b[i + 2]
+        elif k == 0x82 and i + 4 <= n:
+            end = i + 4 + (b[i + 2] << 8 | b[i + 3])
+        else:
+            return [b]
+        if end > n:
+            return [b]
+        out.append(b[i:end])
+        i = end
+    return out if len(out) > 1 else [b]
 
 def _tls_context():
     """The SSLContext every POST wraps its socket with: made (and CA_FILE
@@ -5225,8 +5248,12 @@ def _tls_context():
         ctx.verify_mode = tls.CERT_REQUIRED
         # (positional: modtls of 1.29 takes no keyword, cadata= raised
         # TypeError, every verified context failed, "ca err" for good;
-        # measured on the board 2026-11-16)
-        ctx.load_verify_locations(ca)
+        # measured on the board 2026-11-16). Several roots, one after the
+        # other: each its own call (mbedtls parses one DER a call, and
+        # appends): at home the server's name may be the LAN proxy's
+        # (Let's Encrypt), away the CDN's (another root)
+        for c in _der_certs(ca):
+            ctx.load_verify_locations(c)
     else:
         ctx.verify_mode = tls.CERT_NONE
     _post_phase[0] = ph
