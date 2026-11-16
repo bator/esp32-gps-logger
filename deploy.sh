@@ -128,6 +128,7 @@ for n in F:
         os.rename(n + '.dpl', n)
     except OSError:
         os.stat(n + '.dpl')
+        print('removing', n)
         os.remove(n)
         os.rename(n + '.dpl', n)
     print('swapped', n)
@@ -138,6 +139,8 @@ if $RM_MPY:
     D += ['gps_logger.mpy', 'gps_clock.mpy', 'gps_receiver.mpy']
     if not $KEEP_TFT:
         D += ['gps_tft.mpy', 'gps_tft_font.mpy']
+if $SEEN_RESET:
+    D += ['ota.seen']
 for n in D:
     n in os.listdir() and os.remove(n)
 from machine import RTC
@@ -149,6 +152,9 @@ RTC().memory(b'0')"
 # no reset either.
 restart_logger() {
     local rc=$?
+    # (a second Ctrl-C now killed the roll forward below with the script:
+    # ignored from here, by the mpremote it starts too)
+    trap '' INT TERM HUP
     # cut in the swap (a Ctrl-C, a lost link): a reset now booted a mixed
     # set (the old main.py over new modules), and left stopped the WDT
     # did the same a little later; the rest of it goes in first
@@ -164,7 +170,10 @@ restart_logger() {
         [ "$rc" != 0 ] || rc=1
     fi
     if [ "${OTAPEND:-}" = False ]; then
-        "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1 || true
+        if ! "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1; then
+            echo "WARNING: the reset failed: power the board off and on (or 'mpremote reset')" >&2
+            [ "$rc" != 0 ] || rc=1
+        fi
     else
         echo "Running the logger again without a reset (OTA pending or unknown)" >&2
         "$MPREMOTE" connect "$PORT" exec --no-follow \
@@ -220,6 +229,10 @@ except ImportError:
     print('plain')" | tr -d '\r' | grep -E '^(frozen [A-Za-z0-9._-]+ [A-Za-z0-9._-]+( [A-Za-z0-9._-]+){0,4}|plain)$' | tail -n 1 || true)
 RM_MPY=0                                 # (a frozen logger: drop a gps_logger.mpy that shadows it)
 KEEP_TFT=0                               # (a frozen firmware without the display's code: its .py/.mpy stay)
+# OTA_SEEN_RESET=1: the board forgets the newest signed build it saw
+# (/ota.seen): an older build published on purpose is taken again
+SEEN_RESET=0
+[ "${OTA_SEEN_RESET:-0}" = 1 ] && SEEN_RESET=1
 case "$FROZEN" in
     frozen*)
         read -r _ FCOMMIT FSHA FTFT FBOOT FCLOCK FRX <<< "$FROZEN"
@@ -344,7 +357,17 @@ echo "Copied and checked: $FILES"
 # it would abort the pending image; the EXIT trap runs the logger again and
 # the new files count from the next boot.
 SWAPPING=1
-if ! "$MPREMOTE" connect "$PORT" exec "$(swap_py True)"; then
+if ! SWAPPED=$("$MPREMOTE" connect "$PORT" exec "$(swap_py True)"); then
+    printf '%s\n' "$SWAPPED" | tr -d '\r'
+    SWAPPED_OUT=$SWAPPED
+    SWAPPED=
+    if ! grep -qE "^(swapped|removing) " <<< "$(tr -d '\r' <<< "$SWAPPED_OUT")"; then
+        # nothing changed (a .dpl gone since the copy check): the old
+        # install is whole, the rest of it is not to be swapped in
+        SWAPPING=0
+        echo "Swap refused: a copied file is gone, nothing changed (the old install stays)" >&2
+        exit 1
+    fi
     # (the "swapped" lines above say which went in: the rest goes in now, the
     # same way, rather than a reset onto a mixed set)
     echo "Swap failed part way: swapping the rest in" >&2
@@ -356,6 +379,7 @@ if ! "$MPREMOTE" connect "$PORT" exec "$(swap_py True)"; then
         exit 1
     fi
 fi
+printf '%s\n' "$SWAPPED" | tr -d '\r'
 SWAPPING=0
 # The reset in a session of its own: one that fails (the USB link gone with
 # it) is no failed swap, every file is in

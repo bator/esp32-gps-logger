@@ -388,7 +388,11 @@ for x in [m] + list(m.get("files", [])):
                 HAVE=$(ssh "${SSHO[@]}" -n "$DHOST" "sha256sum$NAMES" 2>/dev/null \
                        | sed -E 's#  .*/#  #' | sort || true)
             fi
-            if [ -z "$WANT" ] || [ "$HAVE" != "$WANT" ]; then
+            if [ -z "$WANT" ]; then
+                WHY="its manifest names no sums"
+            elif [ -z "$HAVE" ]; then
+                WHY="its files' sums could not be read (sha256sum on $DHOST?)"
+            elif [ "$HAVE" != "$WANT" ]; then
                 WHY="its files are not the ones its manifest signs"
             fi
         fi
@@ -407,6 +411,8 @@ for x in [m] + list(m.get("files", [])):
         echo "Build $BUILD ($COMMIT) is not newer than the published build $LIVE_BUILD" >&2
         [ "${FORCE:-0}" = 1 ] || { echo "(FORCE=1 publishes it anyway)" >&2; exit 1; }
         echo "FORCE=1: publishing it anyway" >&2
+        echo "WARNING: a board that saw build $LIVE_BUILD signed refuses this older one" >&2
+        echo "WARNING: (ota state superseded) until OTA_SEEN_RESET=1 ./deploy.sh over USB" >&2
     fi
     if [ -z "$RESUME" ]; then
     rm -rf "$OUT/ota"
@@ -470,7 +476,7 @@ for x in [m] + list(m.get("files", [])):
     # upload in progress (its move would fail); one older a cut upload's
     # shellcheck disable=SC2029
     if [ -n "$LS_OK" ] && grep -q '\.tmp$' <<< "$LS"; then
-        ssh "${SSHO[@]}" -n "$DHOST" "find $QDIR -maxdepth 1 -name '*.tmp' -mmin +60 -delete" \
+        ssh "${SSHO[@]}" -n "$DHOST" "find -H $QDIR -maxdepth 1 -name '*.tmp' -mmin +60 -delete" \
             || echo "WARNING: could not remove the old .tmp files in $OTA_DEST" >&2
     fi
     if [ -n "$RM" ]; then

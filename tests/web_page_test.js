@@ -1210,6 +1210,8 @@ ft.keyHash = (function () {
   c.own(x);
   c.location.hash = "";
   c.own(x);
+  c.location.hash = "#k=50%off";          // (a bad escape: "1", not the match)
+  c.own(x);
   return got;
 })();
 v.feat = ft;

@@ -120,7 +120,8 @@ def reset():
               gps_ver=None, gsa_at=None, gsa_n=0, gsa_t=None, uc_ok=0, uc_fail=0, uc_sys=None,
               uc_sys_sent=False, uc_sys_at=None, uc_sys_n=0, fix_first=None, settled=False, gst_said=None,
               ack_n=0, rate_nak=False, gst_nak=False, gst_fails=0, naks=None,
-              ep_at=None, ep5_at=None,
+              ep_at=None, ep5_at=None, ep_run=None, ep1_n=0, rate_fails=0,
+              sys_said=False,
               checked=True, unverified=False,
               hz1=0, hz5=0,
               set_ok=0, gst_at=None,
@@ -250,9 +251,17 @@ def _publish():
     if a is None:
         return
     n = a[4]
-    st["ep_at"] = now                    # (_uc_watch: GPS_HZ lost without GST)
+    # (_uc_watch: GPS_HZ lost without GST) a run of valid seconds: begun
+    # after NO_DATA without one, its seconds at one fix counted; one second
+    # of several fixes ends it (a fix back in a second's last epoch was one
+    # fix: the watch fired at every fix regained)
+    if not _recent(now, st["ep_at"], NO_DATA):
+        st["ep_run"], st["ep1_n"] = now, 0
+    st["ep_at"] = now
     if n > 1:
-        st["ep5_at"] = now
+        st["ep5_at"], st["ep1_n"] = now, 0
+    else:
+        st["ep1_n"] += 1
     if not st["checked"]:                # _setup_check: did GPS_HZ take?
         if n > 1:
             st["hz5"] += 1
@@ -512,8 +521,11 @@ def _gps_restarted():
     # back at the default mask, kept so for the run); not after the one a
     # mask sent just now makes (UC_SYS_SETTLE), at most UC_SYS_MAX a boot
     sa = st["uc_sys_at"]
-    if st["uc_sys_sent"] and (sa is None or _age(now, sa) >= UC_SYS_SETTLE):
-        st["uc_sys_sent"], st["uc_sys"] = False, None
+    own = sa is None or _age(now, sa) >= UC_SYS_SETTLE
+    if own:                              # (asked anew: a mask it had before
+        st["uc_sys"] = None              # the restart is no mask it has now)
+    if st["uc_sys_sent"] and own:
+        st["uc_sys_sent"] = False
     _ep_new(None)
     _sec[0] = _sec[1] = None             # (its time starts afresh too)
     _uc_sv_new()
@@ -628,6 +640,11 @@ def _uc_setup():
         if st["gps_ver"] is None:
             _uc_cmd("PDTINFO")           # (its answer: _uc_line)
         if (UC_SYS is not None and not st["uc_sys_sent"]
+                and st["uc_sys_n"] >= UC_SYS_MAX and not st["sys_said"]):
+            st["sys_said"] = True        # (the default mask from here on)
+            _diag_write("gps GPS_SYS sent %d times this boot: not again"
+                        % UC_SYS_MAX)
+        if (UC_SYS is not None and not st["uc_sys_sent"]
                 and st["uc_sys_n"] < UC_SYS_MAX):
             # asked first (only a mask it does not have; setting one
             # restarts the receiver, and that restart brings this setup
@@ -663,7 +680,10 @@ def _uc_setup():
                     nk.append(cmd)
                     _say("gps refused " + cmd)
                 if cmd.startswith("CFGNAV"):
-                    st["rate_nak"] = True
+                    # (as GST's below: twice in a row; one FAIL left the
+                    # receiver at 1 Hz with no verdict until a restart)
+                    st["rate_fails"] += 1
+                    st["rate_nak"] = st["rate_fails"] >= GST_NAK_N
                 elif cmd.startswith("CFGMSG,0,7,"):
                     # (no GST: no "not taken" for it) only refused twice in
                     # a row: one FAIL (a line hit on the way, a late answer
@@ -673,6 +693,8 @@ def _uc_setup():
                     st["gst_nak"] = st["gst_fails"] >= GST_NAK_N
             elif cmd.startswith("CFGMSG,0,7,"):
                 st["gst_fails"], st["gst_nak"] = 0, False
+            elif cmd.startswith("CFGNAV"):
+                st["rate_fails"], st["rate_nak"] = 0, False
         feed()
         return True
     except Exception as e:               # (an OSError of the UART too: said
@@ -840,7 +862,7 @@ def gps_setup():
     the receiver still sends the sentences it turns off."""
     read_uart()                          # a banner in it came before
     boots = st["gps_boots"]
-    st["setup_at"], st["extra"], st["rate_nak"] = time.ticks_ms(), 0, False
+    st["setup_at"], st["extra"] = time.ticks_ms(), 0
     _setup_done(_uc_setup(), boots)
 
 def _setup_done(ok, boots):
@@ -896,7 +918,8 @@ def _setup_check(now):
               and (st["ok"] - st["set_ok"]) & CNT_MASK >= 10)
     if slow or no_gst:
         st["extra"] += 1
-        why = "1 fix/s" if slow else "no GST"
+        why = ("1 fix/s" if slow else
+               "GST refused once, asked again" if st["gst_fails"] else "no GST")
         print("gps setup not taken:", why)
         _not_taken(now, why)
     elif ((gst or st["gst_nak"]) and (hz5 or GPS_HZ == 1 or st["rate_nak"])
@@ -916,7 +939,8 @@ def _not_taken(now, why):
                 + (" (%d more)" % more if more else ""))
 
 _STAMPS = ("rx", "good", "pos_at", "hdop_at", "std_at", "gsa_at",
-           "gst_at", "boot_at", "boot_last", "nt_said", "gst_said", "rx_back")
+           "gst_at", "boot_at", "boot_last", "nt_said", "gst_said", "rx_back",
+           "ep_at", "ep5_at", "ep_run", "uc_sys_at")
 
 def _stamps_old(now):
     """ticks_ms wraps every 2**30 ms, so a timestamp left alone for 12.4
@@ -1000,8 +1024,12 @@ def _uc_watch(now):
         # (a receiver that refused GST: no GST is no lost setup, it was set
         # up again every ~40 s for good) GPS_HZ tells instead: valid seconds
         # at one fix for UC_GST_LOST (a rate refused tells nothing)
+        # (UC_GST_LOST of valid seconds in one run, nearly all at one fix)
+        run = st["ep_run"]
         if (GPS_HZ > 1 and not st["rate_nak"] and _age(now, at) >= UC_GST_LOST
-                and _recent(now, st["ep_at"], NO_DATA)
+                and run is not None and _recent(now, st["ep_at"], NO_DATA)
+                and _age(now, run) >= UC_GST_LOST
+                and st["ep1_n"] >= UC_GST_LOST // 2000
                 and not _recent(now, st["ep5_at"], UC_GST_LOST)
                 and not _recent(now, st["rx_back"], UC_GST_LOST)):
             _setup_lost(now, "1 fix/s")
@@ -1014,7 +1042,7 @@ def _uc_watch(now):
                                          # GST a second later, not yet seen)
     if not _recent(now, st["rx"], NO_DATA):
         return                           # silent: _gps_mute's case
-    _setup_lost(now, "no GST")
+    _setup_lost(now, "GST refused once, asked again" if st["gst_fails"] else "no GST")
 
 def _setup_lost(now, why):
     st["extra"] = 1                      # (its usual backoff, under a minute)

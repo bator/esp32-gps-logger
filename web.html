@@ -242,8 +242,8 @@ var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this
 // read at each request: one typed in after a 403 counts without a reload
 function own(x) {
   var k = null;
-  try { k = /[#&]k=([^&]+)/.exec(location.hash); k = k && decodeURIComponent(k[1]); } catch (e) {}
-  try { x.setRequestHeader("X-GPS", k || "1"); } catch (e) {}
+  try { k = /[#&]k=([^&]+)/.exec(location.hash); k = k && decodeURIComponent(k[1]); } catch (e) { k = null; }
+  try { x.setRequestHeader("X-GPS", k || "1"); } catch (e) { try { x.setRequestHeader("X-GPS", "1"); } catch (f) {} }
 }
 
 function esc(v) {
