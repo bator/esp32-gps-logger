@@ -22,6 +22,7 @@ and its <hdop> is not one.
 import calendar
 import math
 import re
+import struct
 import sys
 import time
 from xml.sax.saxutils import escape
@@ -68,7 +69,11 @@ def _num(s):
         return ""
     if not math.isfinite(v):
         return ""
-    return s if _NUM1.fullmatch(s) else "%.1f" % v
+    if _NUM1.fullmatch(s):
+        return s
+    # rounded as the board rounds it: a single-precision float ("0.85" is
+    # 0.85000002 there, 0.9 uploaded; in double 0.84999999, 0.8 here)
+    return "%.1f" % struct.unpack("<f", struct.pack("<f", v))[0]
 
 
 def _not_utf8(s):

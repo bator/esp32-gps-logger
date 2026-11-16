@@ -37,7 +37,10 @@ _JS_KEYWORDS = ("return", "typeof", "case", "in", "delete", "void", "throw",
                 "new", "else", "do", "instanceof", "yield", "await")
 # before a "{" that opens an object literal (an expression: a "/" after its
 # "}" is a division), not a block
-_OBJ_AFTER = "(,=:[?!&|+-*%<>~^"
+_OBJ_AFTER = "(,=[?!&|+-*%<>~^"
+# words after which a "{" opens an object literal (an expression)
+_OBJ_WORDS = ("return", "typeof", "in", "of", "delete", "void", "throw", "new",
+              "case", "instanceof", "yield", "await")
 _PAREN_HEADS = ("if", "while", "for", "with")
 _WORD = re.compile(r"[\w$\u0080-￿]+")
 # what ends a JS line (and a // comment): not only \n
@@ -61,9 +64,15 @@ def _space(out, ws):
         out.append(" ")
 
 
-def _last(out):
-    """The last token written that is not white space, or ""."""
+def _last(out, skip=0):
+    """The last token written that is not white space, skip of them passed
+    over first, or "" (no copy of out: at each "{" one made it quadratic)."""
     k = len(out) - 1
+    while skip:
+        while k >= 0 and out[k] in (" ", "\n"):
+            k -= 1
+        k -= 1
+        skip -= 1
     while k >= 0 and out[k] in (" ", "\n"):
         k -= 1
     return out[k] if k >= 0 else ""
@@ -113,6 +122,9 @@ def minify_js(src):
     out, i, n = [], 0, len(src)
     # what came before: may a "/" here start a regex?
     regex_ok, parens, braces, word = True, [], [], ""
+    tern, colon_tern = 0, False          # "?" not yet matched by ":"; the last
+    terns = []                           # ":" a ternary's (its "{" an object);
+                                         # the counts of the braces around
     while i < n:
         c = src[i]
         if c in _JS_WS:
@@ -158,6 +170,8 @@ def minify_js(src):
                 out.append(word)
                 i = m.end()
                 regex_ok = word in _JS_KEYWORDS and not dot
+                if word == "of" and not dot:     # (a keyword only in for (x of)
+                    regex_ok = bool(parens and parens[-1])
                 if dot:
                     word = ""            # (x.if is no "if (" either)
                 continue
@@ -171,22 +185,46 @@ def minify_js(src):
                 parens.append(word in _PAREN_HEADS)
                 regex_ok = True
             elif c == "{":
-                prev = _last(out[:-1])
-                # an object literal: a "/" after its "}" divides
-                braces.append(not (prev and (prev[-1] in _OBJ_AFTER
-                                             or prev == "return")))
+                prev = _last(out, 1)
+                # an object literal: a "/" after its "}" divides; a block
+                # (after ")", "else", "=>", "case x:", a label) does not
+                if prev == ">" and _last(out, 2) == "=":
+                    obj = False                  # an arrow function's body
+                elif prev == ":":
+                    obj = colon_tern or bool(braces and not braces[-1])
+                else:
+                    obj = bool(prev) and (prev in _OBJ_WORDS
+                                          or prev[-1] in _OBJ_AFTER)
+                braces.append(not obj)
+                terns.append(tern)               # (an object's own ":" are no
+                tern = 0                         # ternary's)
                 regex_ok = True
             elif c == "}":
                 regex_ok = braces.pop() if braces else True
+                tern = terns.pop() if terns else 0
             elif c == ")":
                 # "if (x) /re/.test(y)": a regex, "(a + b) / 2" a division
                 regex_ok = parens.pop() if parens else False
             elif c == "]":
                 regex_ok = False
             else:
+                if c == "?" and not (src.startswith(".", i) and not src[i + 1:i + 2].isdigit()
+                                     or src.startswith("?", i)):
+                    tern += 1                    # (not "?." nor "??")
+                elif c == ":":
+                    colon_tern = tern > 0
+                    if tern:
+                        tern -= 1
+                elif c == ";":
+                    tern = 0
                 regex_ok = True
             word = ""
     return "".join(out).strip()
+
+
+def _css_word(c):
+    """A character a CSS identifier or number goes on with."""
+    return bool(c) and (c.isalnum() or c in "-_%#" or c > "\x7f")
 
 
 def minify_css(src):
@@ -205,8 +243,9 @@ def minify_css(src):
             if j < 0:
                 raise MinifyError("a CSS comment cut short: %r" % src[i:i + 60])
             i = j + 2
-            # (a/**/b are two tokens, a /* */ b needs no second space)
-            if out and out[-1] not in (" ", "\n") and i < n and src[i] not in " \t\r\n\f":
+            # (1px/**/solid are two tokens: a space; .a/**/.b is one compound
+            # selector, a space made it a descendant one: none)
+            if (out and _css_word(out[-1][-1:]) and i < n and _css_word(src[i])):
                 out.append(" ")
         elif c in "\"'":
             j = _string(src, i)
@@ -301,8 +340,11 @@ def node_check(page):
         finally:
             os.remove(path)
         if r.returncode:
-            raise MinifyError("the stripped script does not parse (node --check): %s"
-                              % (r.stderr.strip().splitlines() or [""])[-1])
+            lines = r.stderr.strip().splitlines()
+            what = next((l for l in lines if re.match(r"\w*Error:", l)), "")
+            at = next((l.rsplit(":", 1)[-1] for l in lines if l.startswith(path + ":")), "?")
+            raise MinifyError("the stripped script does not parse (node --check), "
+                              "line %s: %s" % (at, what or (lines or [""])[-1]))
 
 
 def main(argv):

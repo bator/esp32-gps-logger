@@ -150,6 +150,9 @@ case "$FROZEN" in
             echo "WARNING: FORCE_MPY=1: installing gps_logger.mpy over the frozen logger ($FCOMMIT)."
             echo "WARNING: it shadows the frozen one and takes ~100 KB of the Python heap again;"
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
+            # (not the display's modules: the frozen ones stay, ~8 KB of
+            # heap and a shadow of their frozen code for nothing)
+            FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy main.py web.html.gz"
         else
             # (the display's code, gps_boot.py, gps_clock.py and
             # gps_receiver.py on the board that has them in the marker: an older

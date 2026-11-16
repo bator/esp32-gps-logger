@@ -24,7 +24,14 @@ T.sleep_ms = _sl
 T.sleep = lambda s: _sl(int(s * 1000))
 T.time = lambda: clk[0] // 1000
 sys.modules["time"] = T
-sys.path.insert(0, __file__.rsplit("/", 2)[0] if "/" in __file__ else ".")
+_d = __file__.rsplit("/", 1)[0] if "/" in __file__ else "."   # tests/
+if _d in (".", ""):
+    _ROOT = ".."                         # (run from tests/)
+elif "/" in _d:
+    _ROOT = _d.rsplit("/", 1)[0] or "/"
+else:
+    _ROOT = "."                          # (run from the repo: tests/rcv_sim.py)
+sys.path.insert(0, _ROOT)
 import random
 
 def cs(body):

@@ -806,10 +806,12 @@ function view(d, prev) {
 // (YYYYMMDDTHHMMSSZ) last; a gap over 5 min breaks the line. A point:
 // [ms, lat, lon, ele or null].
 var HIST_REPLY = 16384, GAP_MS = 300000, sel = null, hist = histNew(null);
-// the board's UTC "YYYY-MM-DD HH:MM:SS" as Hungarian time (CET / CEST)
+// the board's UTC "YYYY-MM-DDTHH:MM:SSZ" (gps_clock.stamp_s) as Hungarian
+// time (CET / CEST); an invalid one says "Invalid Date": the time as sent
 function huTime(u) {
-  try { return new Date(u.replace(" ", "T") + "Z").toLocaleTimeString("hu", {timeZone: "Europe/Budapest"}); }
-  catch (e) { return esc(u.slice(11, 19)) + " UTC"; }
+  var t = new Date(u);
+  try { if (t > 0) return t.toLocaleTimeString("hu", {timeZone: "Europe/Budapest"}); } catch (e) {}
+  return esc(u.slice(11, 19)) + " UTC";
 }
 function utcDay(ms) { return new Date(ms).toISOString().slice(0, 10).replace(/-/g, ""); }
 function localDay(s) { return new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)).getTime(); }
