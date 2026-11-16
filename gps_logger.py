@@ -5223,7 +5223,10 @@ def _tls_context():
     ctx = tls.SSLContext(tls.PROTOCOL_TLS_CLIENT)   # fails parsing the CA
     if ca:                               # as ValueError("invalid cert")
         ctx.verify_mode = tls.CERT_REQUIRED
-        ctx.load_verify_locations(cadata=ca)
+        # (positional: modtls of 1.29 takes no keyword, cadata= raised
+        # TypeError, every verified context failed, "ca err" for good;
+        # measured on the board 2026-11-16)
+        ctx.load_verify_locations(ca)
     else:
         ctx.verify_mode = tls.CERT_NONE
     _post_phase[0] = ph

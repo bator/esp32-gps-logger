@@ -603,7 +603,7 @@ class _TlsCtx(object):
         self.verify_mode, self.ca = None, None
         _TlsCtx.made.append(self)
 
-    def load_verify_locations(self, cadata=None):
+    def load_verify_locations(self, cadata, /):   # (as modtls: no keyword)
         self.ca = cadata
 
     def wrap_socket(self, s, server_hostname=None):
@@ -13424,7 +13424,7 @@ class RvTls:
             self.verify_mode, self.ca = None, None
             RvTls.made.append(self)
 
-        def load_verify_locations(self, cadata=None):
+        def load_verify_locations(self, cadata, /):   # (as modtls: no keyword)
             self.ca = cadata
 
         def wrap_socket(self, s, server_hostname=None):
@@ -13929,7 +13929,7 @@ class _BadCaTls(object):
     PROTOCOL_TLS_CLIENT, CERT_NONE, CERT_REQUIRED = 2, 0, 2
 
     class SSLContext(_TlsCtx):
-        def load_verify_locations(self, cadata=None):
+        def load_verify_locations(self, cadata, /):   # (as modtls: no keyword)
             raise ValueError("invalid cert")
 
 
