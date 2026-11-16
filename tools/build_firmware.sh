@@ -369,6 +369,32 @@ case "$MODE" in
             WHY="a file it names is missing"
         elif [ "$LIVE_LEFT" -lt $((7 * 86400)) ]; then
             WHY="it ends in under a week (expires)"
+        else
+            # the files' sums, the manifest's: a republish of this commit
+            # (FORCE=1: the same names, a rebuild not byte for byte the same)
+            # whose ssh broke between the moves left a new image under the
+            # old manifest; a cleanup alone kept every board failing its sum
+            WANT=$(python3 -c 'import json, re, sys
+m = json.loads(sys.stdin.read())
+for x in [m] + list(m.get("files", [])):
+    assert re.match(r"^[0-9a-f]{64}$", x["sha256"]) and re.match(r"^[A-Za-z0-9._-]+$", x["url"])
+    print(x["sha256"] + "  " + x["url"])' <<< "$LIVE" 2>/dev/null | sort || true)
+            HAVE=
+            if [ -n "$WANT" ]; then
+                NAMES=""
+                while read -r _ f; do NAMES+=" $QDIR/$(printf %q "$f")"; done <<< "$WANT"
+                # (expanded here on purpose: the paths are %q-quoted)
+                # shellcheck disable=SC2029
+                HAVE=$(ssh "${SSHO[@]}" -n "$DHOST" "sha256sum$NAMES" 2>/dev/null \
+                       | sed -E 's#  .*/#  #' | sort || true)
+            fi
+            if [ -z "$WANT" ]; then
+                WHY="its manifest names no sums"
+            elif [ -z "$HAVE" ]; then
+                WHY="its files' sums could not be read (sha256sum on $DHOST?)"
+            elif [ "$HAVE" != "$WANT" ]; then
+                WHY="its files are not the ones its manifest signs"
+            fi
         fi
     fi
     if [ "$LIVE_BUILD" = x ]; then
@@ -385,6 +411,9 @@ case "$MODE" in
         echo "Build $BUILD ($COMMIT) is not newer than the published build $LIVE_BUILD" >&2
         [ "${FORCE:-0}" = 1 ] || { echo "(FORCE=1 publishes it anyway)" >&2; exit 1; }
         echo "FORCE=1: publishing it anyway" >&2
+        echo "WARNING: no board takes build $BUILD over the air if it runs build $LIVE_BUILD" >&2
+        echo "WARNING: (not newer than its own: --flash over USB), or saw a newer one signed" >&2
+        echo "WARNING: (ota state superseded: OTA_SEEN_RESET=1 ./deploy.sh over USB)" >&2
     fi
     if [ -z "$RESUME" ]; then
     rm -rf "$OUT/ota"
@@ -434,7 +463,7 @@ case "$MODE" in
     while IFS= read -r f; do
         case "$f" in
             "$BINF"|"web-$COMMIT.html.gz"|manifest.json) ;;
-            micropython-*.bin|web-*.html.gz|*.tmp) OLD+=("$f") ;;
+            micropython-*.bin|web-*.html.gz) OLD+=("$f") ;;
         esac
     done <<< "$LS"
     SEEN=" "
@@ -444,6 +473,13 @@ case "$MODE" in
         SEEN+="$f "
         RM+=" $QDIR/$(printf %q "$f")"
     done
+    # a .tmp only once an hour old: one younger is another publish's
+    # upload in progress (its move would fail); one older a cut upload's
+    # shellcheck disable=SC2029
+    if [ -n "$LS_OK" ] && grep -q '\.tmp$' <<< "$LS"; then
+        ssh "${SSHO[@]}" -n "$DHOST" "find -H $QDIR -maxdepth 1 -type f -name '*.tmp' -mmin +60 -delete" \
+            || echo "WARNING: could not remove the old .tmp files in $OTA_DEST" >&2
+    fi
     if [ -n "$RM" ]; then
         # (RM built here, its paths %q-quoted)
         # shellcheck disable=SC2029

@@ -691,6 +691,8 @@ def _reload_logger():
     m.LOWIDF_MARK = os.path.join(diag_dir, "lowidf")
     m.HIST_DIR = os.path.join(diag_dir, "hist")         # (day history)
     m.HOME_APS_FILE = None               # tests that keep BSSIDs set a path
+    m.OTA_SEEN = None                    # (the OTA tests' builds go up and
+                                         # down: OTA-SEEN sets a path)
     m.WEB = False                        # radio-sleep tests; WEB has its own
     m.UPLOAD_UNVERIFIED = "1"            # (no CA_FILE here: the upload tests
                                          # post unverified; TLS-AWAY tests it)
@@ -6502,8 +6504,10 @@ try:
         for start, v in ((False, "1"), (True, "0"), (True, "maybe"),
                          (False, None)):
             gl.WEB_AWAY = start
-            gl._web_env({"WEB_AWAY": v} if v is not None else {})
+            gl._web_env(dict({"WEB_AWAY": v} if v is not None else {},
+                             WEB_TOKEN="tok-12345"))
             aways.append(gl.WEB_AWAY)
+        gl.WEB_TOKEN = None
     finally:
         gl._web_close()
         gl.socket = real_socket
@@ -7450,6 +7454,15 @@ class RTC:
         open(".rtc", "wb").write(b)
 m.RTC = RTC
 sys.modules["machine"] = m
+if os.environ.get("FAKE_RENAME_MAX"):    # a swap cut after n renames
+    _rn = [int(os.environ["FAKE_RENAME_MAX"])]
+    _orn = os.rename
+    def _ren(a, b):
+        if _rn[0] <= 0:
+            raise OSError(5, "EIO")
+        _rn[0] -= 1
+        _orn(a, b)
+    os.rename = _ren
 if os.environ.get("FAKE_FREE_BLOCKS"):
     _blocks = int(os.environ["FAKE_FREE_BLOCKS"])
     os.statvfs = lambda p: (4096, 4096, 512, _blocks, _blocks, 0, 0, 0, 0,
@@ -7477,14 +7490,40 @@ for c in cmds:
     if c[:2] == ["exec", "--no-follow"]:
         logger("run " + c[2])   # (not run here: it would not return)
     elif c[0] == "reset":       # main.py runs it again; an OTA being
+        mark = os.path.join(os.path.dirname(dev), "reset-failed")
+        if os.environ.get("FAKE_RESET_FAIL") == "2" or (
+                os.environ.get("FAKE_RESET_FAIL") and not os.path.exists(mark)):
+            open(mark, "w").close()             # (the link gone with it)
+            sys.exit(1)
         logger("reset" + (" pending" if os.path.exists(    # validated aborts
             os.path.join(dev, "ota.pending")) else ""))
     elif c[0] == "exec":
         if os.environ.get("FAKE_GARBLE") and "gps_frozen" in c[1]:
             print("could not enter raw repl")    # no frozen/plain answer
             sys.exit(1)
-        r = subprocess.run([sys.executable, "-c", shim + c[1]], cwd=dev)
+        env = dict(os.environ)
+        swap = "print('swapped', n)" in c[1]
+        if swap and env.get("FAKE_DPL_GONE"):   # (gone since the copy check)
+            gone = os.path.join(dev, env["FAKE_DPL_GONE"] + ".dpl")
+            if os.path.exists(gone):
+                os.remove(gone)
+        mark = os.path.join(os.path.dirname(dev), "swap-cut")
+        if not swap or (os.path.exists(mark) and not env.get("FAKE_RENAME_ALL")):
+            env.pop("FAKE_RENAME_MAX", None)    # (the first swap only is cut)
+        elif env.get("FAKE_RENAME_MAX"):
+            open(mark, "w").close()
+        # (mpremote prints the board's traceback on its stdout; MUTE: the
+        # first swap's output lost on the way, the link gone)
+        mute = os.path.join(os.path.dirname(dev), "swap-muted")
+        kw = {"stderr": subprocess.STDOUT}
+        if swap and env.get("FAKE_SWAP_MUTE") and not os.path.exists(mute):
+            open(mute, "w").close()
+            kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        r = subprocess.run([sys.executable, "-c", shim + c[1]], cwd=dev, env=env, **kw)
         if r.returncode:
+            if swap and env.get("FAKE_SWAP_KILL"):
+                import signal                   # a Ctrl-C at the swap
+                os.kill(os.getppid(), signal.SIGTERM)
             sys.exit(1)
     elif c[0] == "cp":
         with open(c[1], "rb") as f:
@@ -7525,6 +7564,13 @@ def deploy_run(env_extra):
                  ("web.html.dpl", b"left from a failed deploy")):
         with open(os.path.join(dev, n), "wb") as f:
             f.write(b)
+    if env_extra.get("FAKE_DEV_SEEN"):         # the newest signed build seen
+        with open(os.path.join(dev, "ota.seen"), "w") as f:
+            f.write("1700000300\n")
+    if env_extra.get("FAKE_DEV_TFT"):          # the display's code as files
+        for n in ("gps_tft.mpy", "gps_tft_font.mpy"):
+            with open(os.path.join(dev, n), "wb") as f:
+                f.write(b"TFT MODULE")
     if env_extra.get("FAKE_OTA_PENDING"):      # an OTA install being validated:
         for n, b in (("ota.pending", b"1793557995 6b62646\n/web.html"),
                      ("web.html.new", b"page staged by the OTA")):
@@ -7577,8 +7623,19 @@ def deploy_run(env_extra):
         env.update(VENV="venv",
                    FAKE_SHIM=os.path.join(alt, "venv", "bin", "shim.py"))
         cwd = alt
-    r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
-                       capture_output=True, text=True, timeout=60, cwd=cwd)
+    if env_extra.get("FAKE_STDERR_GONE"):        # (a "| tee" the Ctrl-C ended)
+        rd_, wr_ = os.pipe()
+        os.close(rd_)
+        try:
+            r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
+                               stdout=subprocess.PIPE, stderr=wr_, text=True,
+                               timeout=60, cwd=cwd)
+        finally:
+            os.close(wr_)
+        r.stderr = ""
+    else:
+        r = subprocess.run(["bash", os.path.join(work, "deploy.sh")], env=env,
+                           capture_output=True, text=True, timeout=60, cwd=cwd)
     try:
         with open(env["FAKE_LOG"]) as f:
             calls = [json.loads(line) for line in f]
@@ -8451,6 +8508,8 @@ if all(shutil.which(t) for t in ("bash", "sha256sum", "git", "make")):
     rc_rs1 = build_run(["--publish"], rs_env)[0]
     with open(os.path.join(dest_rs, "micropython-stale.bin.tmp"), "w") as f:
         f.write("cut upload")
+    _t_old = time.time() - 2 * 3600          # (an hour old: a cut upload's)
+    os.utime(os.path.join(dest_rs, "micropython-stale.bin.tmp"), (_t_old, _t_old))
     rc_rs2, out_same, _e, _w, c_same = build_run(["--publish"], rs_env)
     same_tmp = os.path.exists(os.path.join(dest_rs, "micropython-stale.bin.tmp"))
     hi = json.dumps(dict(man, build=man.get("build", 0) + 1000))
@@ -8894,7 +8953,8 @@ try:
     es_open = os.path.join(diag_dir, "env_es")
     with open(es_open, "wb") as fh:
         fh.write(b"K\xe9Y=zq9x\nNTP_SERVER=zq9x\xe9\nDEVICE_ID=bike\n")
-    es_env, es_part, es_mhz = {}, None, None
+    es_env, es_part, es_mhz, es_partial = {}, None, None, None
+    es_tok = (gl.WEB_TOKEN, gl._web_tok_bad[0])
     try:
         es_got = []
         es_got.append(gl._mhz_env({"CPU_MHZ": "zq9x"}, "CPU_MHZ", 80))
@@ -8910,6 +8970,10 @@ try:
         gl._tft_env({"TFT_IDLE": "zq9x"})
         gl._ota_env({"OTA_URL": "zq9x"})
         es_env = gl.load_env(es_open)
+        # (its key not UTF-8 marks the read part way: the next .env's
+        # wifi_start below is another file, read whole)
+        es_partial = gl._env_partial[0]
+        gl._env_partial[0] = False
         gl.wifi_reset()
         gl.wifi_start({"CPU_MHZ": "40", "CPU_MHZ_UP": "20", "KEEPALIVE": "5"})
         es_mhz = (gl.CPU_MHZ, gl.CPU_MHZ_UPLOAD)
@@ -8927,6 +8991,8 @@ try:
         for k_, v_ in es_keep.items():
             setattr(gl, k_, v_)
         gl.up["url"], gl.up["key"] = es_up
+        gl._env_partial[0] = False
+        gl.WEB_TOKEN, gl._web_tok_bad[0] = es_tok
         gl.wifi_reset()
     es_lines = diag_lines()
     es_keys = [l_.split()[1] for l_ in es_lines if l_.startswith("env ")]
@@ -8942,6 +9008,7 @@ try:
                           "CPU_MHZ", "CPU_MHZ_UP", "read"]
           and len(es_lines) == len(es_keys)
           and es_env == {"DEVICE_ID": "bike"} and es_mhz == (80, 80)
+          and es_partial is False
           and es_part == {} and not any("zq9x" in l_ for l_ in es_lines),
           repr((es_got, es_lines, es_env, es_mhz, es_part)))
 
@@ -9645,10 +9712,11 @@ def rate_nak_run():
 
 
 rn1 = rate_nak_run()
-check("RATE-NAK: the rate refused -> setup ok at 1 Hz, not set up again",
-      rn1 == (0, (True, True, True, 0),
-              ["gps refused CFGNAV,%d,%d,1000" % (1000 // gl._rcv.GPS_HZ,
-                                                  1000 // gl._rcv.GPS_HZ)]),
+check("RATE-NAK: the rate refused -> set up once more (one FAIL may be a hit "
+      "line), then setup ok at 1 Hz, refused, said once",
+      0 < rn1[0] <= 12 and rn1[1][:2] == (True, True) and rn1[1][3] == 0
+      and rn1[2] == ["gps refused CFGNAV,%d,%d,1000" % (1000 // gl._rcv.GPS_HZ,
+                                                        1000 // gl._rcv.GPS_HZ)],
       repr(rn1))
 
 # SETUP-NOFIX: a setup before the first fix (at boot, indoors) got its one
@@ -15487,6 +15555,8 @@ else:
         ("gps refused CFGMSG,0,7,5", "setup"),
         ("gps systems h135155", "grx"),
         ("gps refused CFGSYS,h135155", "setup"),
+        ("gps GPS_SYS sent 3 times this boot: not again", "grx"),
+        ("env WPA2_2 not read (.env read part way, or its line garbled): SSID2 dropped", "env"),
         ("gps setup lost: no GST", "setup"),
         ("gps setup not taken: no GST (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -15498,7 +15568,8 @@ else:
         ("env FOO ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, WPA2_3 "
          "only)", "env"),
         ("env DIAG not 0 or 10-3600 s, using 60 s", "env"),
-        ("env a key not UTF-8, its line skipped", "env"),
+        ("env a key not plain ASCII, its line skipped", "env"),
+        ("env WEB_TOKEN: its key not plain ASCII, its line skipped", "env"),
         ("env NTP_SERVER not UTF-8, skipped", "env"),
         ("env read stopped by MemoryError, the rest skipped", "env"),
         ("wifi fail krumpli status 201 after 12000 ms (+2 more)", "wfail"),
@@ -15521,6 +15592,12 @@ else:
         ("upload: /gpx/20261102_100000.trk sent, its .pos not written "
          "OSError(5): held", "track"),
         ("web error listen OSError(23)", "bug"),
+        ("web error listen socket poll 8: opened again", "bug"),
+        ("bug home aps not read OSError(5): kept as it is this boot", "bug"),
+        ("bug ota seen not saved OSError(28)", "bug"),
+        ("ota build 1793548800: older than build 1793548900 seen signed, "
+         "refused", "otax"),
+        ("ota build 1793548800: /ota.seen not read, refused", "otax"),
         ("track dir error OSError(5)", "track"),
         ("upload err unverified: not verified TLS (tls off, UPLOAD_UNVERIFIED=0): "
          "put /ca.der on the board, or UPLOAD_UNVERIFIED=home|1 in .env", "upl"),
@@ -16128,6 +16205,15 @@ else:
                                  "/hist?d=20261108&o=0",
                                  "/hist?d=20261108&o=500"], False, True, 3],
           repr(ft.get("histEnd")))
+    check("SP-HIST-403: a /hist 403 is an error, not a day without points: "
+          "not cached, asked again later (it stayed 'no trip' till the page "
+          "closed); a 503 too", ft.get("hist403") == [1, False, True, False, False]
+          and ft.get("hist503") == ft.get("hist403"),
+          repr((ft.get("hist403"), ft.get("hist503"))))
+    check("SP-KEY-HASH: the X-GPS key is read from #k= at each request (one "
+          "typed in after a 403 counts at once); none is 1",
+          ft.get("keyHash") == ["X-GPS=abc", "X-GPS=d/e", "X-GPS=1", "X-GPS=1"],
+          repr(ft.get("keyHash")))
     check("SP-EVD-DEAD: every per-kind detail is for a kind the page has "
           "(EVD.pvt had none)", ft.get("evdKinds") == [],
           repr(ft.get("evdKinds")))
@@ -22036,11 +22122,14 @@ _hdl, _hdw = [], hl._diag_write
 hl._diag_write = _hdl.append
 hl._rcv.uart = _UcUart(bad=("CFGNAV",))
 hl._rcv.gps_setup()
+_rn_once = hl.st["rate_nak"]
+hl._rcv.gps_setup()                      # (refused twice in a row: refused)
 hl._diag_write = _hdw
 _hd = "\n".join(_hdl)
-check("UC-FAIL: a refused rate is said and is no \"not taken\" verdict; the "
-      "rest of the setup goes on",
-      hl.st["setup_ok"] is True and hl.st["rate_nak"] is True
+check("UC-FAIL: a refused rate (twice in a row) is said once and is no \"not "
+      "taken\" verdict; the rest of the setup goes on",
+      hl.st["setup_ok"] is True and hl.st["rate_nak"] is True and _rn_once is False
+      and _hd.count("gps refused CFGNAV") == 1
       and "gps refused CFGNAV,200,200,1000" in _hd
       and any(c.startswith(b"$CFGMSG,0,7,5") for c in hl._rcv.uart.cmds), _hd[-200:])
 
@@ -28605,7 +28694,7 @@ check("WEB-KEY: /hist and /diag without X-GPS are 403 (the board's own page's "
              True] + [(None, True, False)] * 4, repr(wk))
 _wk_page = _slurp(os.path.join(ROOT, "web.html"))
 check("WEB-KEY-PAGE: the page sends X-GPS on status.json, /hist and /diag",
-      _wk_page.count("own(x);") == 3 and 'try { x.setRequestHeader("X-GPS", KEY); } catch' in _wk_page,
+      _wk_page.count("own(x);") == 3 and 'try { x.setRequestHeader("X-GPS", k || "1"); } catch' in _wk_page,
       "")
 
 # OTA-FRESH: a manifest needs its end under hmac2 ("hmac" stays the string
@@ -28682,8 +28771,8 @@ _dp_lists = [l_ for l_ in re.findall(r'^\s*FILES="([^"]*)"', _dp_src, re.M)
 check("DEPLOY-SWAP: every FILES list ends in main.py; the swap stats each "
       ".dpl first; mpy-cross 1.29 is checked; ca.der goes up when there is one",
       len(_dp_lists) == 3 and all(l.split()[-1] == "main.py" for l in _dp_lists)
-      and "for n in '$FILES'.split():\n    os.stat(n + '.dpl')\nfor n in" in _dp_src
-      and "os.stat(n + '.dpl')\n        os.remove(n)" in _dp_src
+      and "if $1:\n    for n in F:\n        os.stat(n + '.dpl')\n    print('preflight ok')\nelse:" in _dp_src
+      and "os.stat(n + '.dpl')\n        print('removing', n)\n        os.remove(n)" in _dp_src
       and "1.29.*) ;;" in _dp_src and 'FILES="ca.der $FILES"' in _dp_src
       and "ca.der" in _slurp(os.path.join(ROOT, ".gitignore")), repr(_dp_lists))
 check("BUILD-TOOLS: PORT defaults to /dev/ttyACM0; MicroPython v1.29.0 and "
@@ -28846,8 +28935,11 @@ try:
         with open(gl.CA_FILE, "wb") as f:
             f.write(data_)
         tls_ctx_reset()
-        ctx_ = gl._tls_context()
-        cm.append([len(c_) for c_ in ctx_.cas])
+        try:
+            ctx_ = gl._tls_context()
+            cm.append([len(c_) for c_ in ctx_.cas])
+        except ValueError:
+            cm.append("ca err")
 finally:
     if cm_saved[0] is None:
         sys.modules.pop("tls", None)
@@ -28855,9 +28947,937 @@ finally:
         sys.modules["tls"] = cm_saved[0]
     gl.CA_FILE = cm_saved[1]
     tls_ctx_reset()
-check("CA-MULTI: two DER roots are two loads, one is one, a run with junk "
-      "after it goes whole",
-      cm == [[304, 203], [304], [304 + 5]], repr(cm))
+check("CA-MULTI: two DER roots are two loads, one is one, junk after a "
+      "root is ca err (not the first root alone)",
+      cm == [[304, 203], [304], "ca err"], repr(cm))
+
+
+# --- fifth review (2026-11-16e) ---------------------------------------------
+
+# CA-TAIL: a newline (or \r\n) after the last DER root is dropped; anything
+# else after a whole root raises ("ca err"): given whole, mbedtls loaded the
+# first root alone and the away server's root was gone without a word; no
+# DER at all (PEM) goes whole to modtls
+ct = []
+for b_ in (_cm_der(300, 1) + _cm_der(200, 2) + b"\r\n",
+           _cm_der(300, 1) + b"\n",
+           b"-----BEGIN CERTIFICATE-----\nx\n",
+           _cm_der(300, 1) + _cm_der(200, 2) + b"\x00junk"):
+    try:
+        ct.append([len(c_) for c_ in gl._der_certs(b_)])
+    except ValueError as e:
+        ct.append("ValueError" if "after certificate 2" in str(e) else repr(e))
+check("CA-TAIL: white space after the roots is dropped, junk after a whole "
+      "root is ca err (not the first root alone), PEM goes whole",
+      ct == [[304, 203], [304], [len(b"-----BEGIN CERTIFICATE-----\nx\n")], "ValueError"],
+      repr(ct))
+
+# UNV-ENV: UPLOAD_UNVERIFIED (or the old key) not one of its values is said
+# in the diag (a print only: in the field the uploads stopped without a
+# word); a CA_FILE there that cannot be read is "ca err" (_tls_ready says
+# so), not "put it on the board"
+ue = []
+ue_saved = (gl.UPLOAD_UNVERIFIED, gl._tls_state)
+try:
+    diag_clear()
+    gl.UPLOAD_UNVERIFIED = "0"
+    gl._up_env({"UPLOAD_UNVERIFIED": "always"})
+    gl._up_env({"UPLOAD_AWAY_UNVERIFIED": "sometimes"})
+    ue.append((gl.UPLOAD_UNVERIFIED,
+               len([l for l in _rv_diag() if l.startswith("env UPLOAD_UNVERIFIED not 0/home/1")]),
+               len([l for l in _rv_diag() if l.startswith("env UPLOAD_AWAY_UNVERIFIED not 1/0")])))
+    for ts_ in ("ca err", "unverified", "verified"):
+        gl._tls_state = lambda ts_=ts_: ts_
+        ue.append(gl._away_unverified())
+finally:
+    gl.UPLOAD_UNVERIFIED, gl._tls_state = ue_saved
+check("UNV-ENV: a bad UPLOAD_UNVERIFIED / UPLOAD_AWAY_UNVERIFIED is a diag "
+      "line; ca err is not held as 'unverified'",
+      ue == [("0", 1, 1), False, True, False], repr(ue))
+
+# WEB-AWAY-TOKEN / ENV-PARTIAL-TOKEN: WEB_AWAY=1 without WEB_TOKEN is
+# refused (the position and the track to a foreign network); a .env read
+# part way (EIO) without a WEB_TOKEN in the part read closes the data
+# routes (the token may be in the rest: they were left open)
+wa = []
+wa_saved = (gl.WEB_AWAY, gl.WEB_TOKEN, gl._web_tok_bad[0], gl._env_partial[0])
+try:
+    diag_clear()
+    gl.WEB_TOKEN, gl.WEB_AWAY = None, False
+    gl._env_partial[0] = False
+    gl._web_env({"WEB_AWAY": "1"})
+    wa.append((gl.WEB_AWAY, [l for l in _rv_diag() if "WEB_AWAY" in l]))
+    gl._web_env({"WEB_AWAY": "1", "WEB_TOKEN": "abcdefgh"})
+    wa.append(gl.WEB_AWAY)
+    gl.WEB_TOKEN, gl._web_tok_bad[0] = None, False
+    gl.open = lambda p, mode="r", *a: _EeF() if p == ee_p else builtins.open(p, mode, *a)
+    env_ = gl.load_env(ee_p)
+    del gl.open
+    gl._web_env(env_)
+    wa.append((gl._env_partial[0], gl.WEB_TOKEN, gl._web_tok_bad[0],
+               gl._web_key_ok(b"GET /status.json HTTP/1.0\r\nX-GPS: 1\r\n\r\n", False)))
+    env_ = gl.load_env(ee_p)             # read whole: no refusal from it
+    gl._web_tok_bad[0] = False
+    gl._web_env(env_)
+    wa.append((gl._env_partial[0], gl._web_tok_bad[0]))
+finally:
+    if "open" in vars(gl):
+        del gl.open
+    gl.WEB_AWAY, gl.WEB_TOKEN, gl._web_tok_bad[0], gl._env_partial[0] = wa_saved
+check("WEB-AWAY-TOKEN: WEB_AWAY=1 without WEB_TOKEN is refused (said), with "
+      "one it holds; a .env read part way closes every data route",
+      wa == [(False, ["env WEB_AWAY 1 without WEB_TOKEN, using 0"]), True,
+             (True, None, True, False), (False, False)], repr(wa))
+
+# HOME-APS-EIO: a BSSID file that cannot be read (EIO) is not saved over
+# that boot: the next learnt BSSID wrote the part read as the whole list
+ha = []
+ha_saved = (gl.HOME_APS_FILE, list(gl.wifi.get("home_aps") or []))
+try:
+    gl.HOME_APS_FILE = os.path.join(_rv_td, "home_aps")
+    with open(gl.HOME_APS_FILE, "wb") as f:
+        f.write(b"aabbccddeeff\n112233445566\n")
+    real_open_ = builtins.open
+
+    def _ha_open(p, mode="r", *a):
+        if p == gl.HOME_APS_FILE and "r" in mode:
+            raise OSError(5, "EIO")
+        return real_open_(p, mode, *a)
+    diag_clear()
+    gl._bugs.clear()
+    gl.open = _ha_open
+    gl._home_aps_load()
+    del gl.open
+    gl.wifi["home_aps"] = [b"\x01\x02\x03\x04\x05\x06"]
+    gl._home_aps_save()
+    with open(gl.HOME_APS_FILE, "rb") as f:
+        ha.append(f.read())
+    ha.append((gl._home_aps_ro[0], len([l for l in _rv_diag() if "home aps not read" in l])))
+    gl._home_aps_load()                  # read whole: saved again
+    ha.append((gl._home_aps_ro[0], len(gl.wifi["home_aps"])))
+finally:
+    if "open" in vars(gl):
+        del gl.open
+    gl.HOME_APS_FILE = ha_saved[0]
+    gl.wifi["home_aps"] = ha_saved[1]
+    gl._home_aps_ro[0] = False
+check("HOME-APS-EIO: an unreadable BSSID file is kept as it is that boot "
+      "(said once); one read whole is saved again",
+      ha == [b"aabbccddeeff\n112233445566\n", (True, 1), (False, 2)], repr(ha))
+
+# DIAG-STAT-EIO: a stat EIO on the diag file is counted and writes nothing
+# (taken for "not there", the line went on a full file past DIAG_MAX)
+ds = []
+ds_saved = (gl.os, gl._diag_errs[0])
+try:
+    diag_clear()
+    with open(gl.DIAG_FILE, "w") as f:
+        f.write("x" * 10 + "\n")
+
+    def _ds_stat(p):
+        if p == gl.DIAG_FILE:
+            raise OSError(5, "EIO")
+        return os.stat(p)
+    gl.os = _rv_os(stat=_ds_stat)
+    e0_ = gl._diag_errs[0]
+    gl._diag_write("one more")
+    gl.os = ds_saved[0]
+    ds.append((gl._diag_errs[0] - e0_, _rv_diag()))
+finally:
+    gl.os = ds_saved[0]
+check("DIAG-STAT-EIO: a diag file whose stat fails takes no line, counted",
+      ds == [(1, ["x" * 10])], repr(ds))
+
+# WEB-ACCEPT-BROKEN: an accept error other than EAGAIN (a netif reset under
+# the listen socket) closes it and opens it again after WEB_RETRY; each
+# pass returned on it, the page dead for good. EAGAIN keeps it
+wb = []
+wb_saved = (gl.WEB, dict(gl.wifi), gl._web_sock, gl._web_poll)
+
+
+class _WbSock:
+    def __init__(self, err):
+        self.err, self.closed = err, False
+
+    def accept(self):
+        raise OSError(self.err, "x")
+
+    def close(self):
+        self.closed = True
+
+
+import errno as _errno
+try:
+    gl.WEB = True
+    gl.wifi.update(state="connected", home=True)
+    for err_ in (_errno.EAGAIN, _errno.ECONNABORTED, _errno.ENOTCONN, _errno.EBADF):
+        diag_clear()
+        gl._bugs.clear()
+        s_ = _WbSock(err_)
+        gl._web_sock, gl._web_poll = s_, None
+        gl._web_fail_at[0] = None
+        gl._web_acc_err[0] = 0
+        for k_ in range(gl.WEB_BROKEN_N):
+            if gl._web_sock is s_:
+                gl.web_tick()
+        wb.append((gl._web_sock is s_, s_.closed, gl._web_fail_at[0] is not None,
+                   len([l for l in _rv_diag() if l.startswith("web error listen socket")])))
+finally:
+    gl.WEB = wb_saved[0]
+    gl.wifi.clear()
+    gl.wifi.update(wb_saved[1])
+    gl._web_sock, gl._web_poll = wb_saved[2], wb_saved[3]
+    gl._web_fail_at[0] = None
+check("WEB-ACCEPT-BROKEN: EAGAIN, a client gone (ECONNABORTED, ENOTCONN: the "
+      "board's numbers) keep the listen socket; WEB_BROKEN_N other errors in a "
+      "row close it (said) and open it after WEB_RETRY",
+      wb == [(True, False, False, 0)] * 3 + [(False, True, True, 1)], repr(wb))
+
+# NTP-AHEAD / RTC-NTP-AGAIN: an NTP answer over NTP_AHEAD past the build is
+# refused (2040 from whoever is on the path made every certificate look
+# expired); a newer answer corrects the board clock an older one set (a
+# wrong one stayed for the run)
+na = []
+na_saved = (hl.socket, hl.FW_BUILD)
+try:
+    hl.socket = _NtpMod
+    hl.FW_BUILD = hl._days(2026, 11, 1) * 86400
+    b20_ = (hl._days(2026, 11, 1) - hl.EPOCH_DAYS) * 86400
+    na.append(_nask(_nreply(b20_ + 86400)) == b20_ + 86400)
+    na.append(_nask(_nreply(b20_ + hl.NTP_AHEAD + 86400)))
+finally:
+    hl.socket, hl.FW_BUILD = na_saved
+rn_saved = (list(gl._ntp), gl._rtc_set[0], gl._rtc_ntp[0], gl.st.get("valid"),
+            gl.log.get("clock"))
+try:
+    gl.st["valid"] = False
+    gl.log["clock"] = None
+    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
+    gl._rtc_set[0] = False
+    s1_ = (_dt.date(2026, 11, 16) - _dt.date(2020, 1, 1)).days * 86400 + 12 * 3600
+    gl._ntp[0] = (s1_ + 10 * 86400, gl._stamp())     # a wrong first answer
+    gl._rtc_sync(_clock[0])
+    gl._rtc_sync(_clock[0])              # the same answer: nothing
+    gl._ntp[0] = (s1_, gl._stamp())      # the next one
+    gl._rtc_sync(_clock[0])
+    na.append([t_[:3] for t_ in RTC.sets])
+finally:
+    gl._ntp[:] = rn_saved[0]
+    gl._rtc_set[0], gl._rtc_ntp[0] = rn_saved[1], rn_saved[2]
+    gl.st["valid"] = rn_saved[3]
+    gl.log["clock"] = rn_saved[4]
+check("NTP-AHEAD: an answer past NTP_AHEAD after the build is None; a newer "
+      "NTP answer corrects the clock an older one set",
+      na == [True, None, [(2026, 11, 26), (2026, 11, 16)]], repr(na))
+
+# OTA-SEEN: the newest signed, fresh build the board could install is kept
+# (OTA_SEEN): an older build after it is refused (a replay of a manifest the
+# server replaced, signed and fresh still); its build time floors the clock,
+# with a clock too (an NTP answer of the build's time made every old signed
+# manifest fresh); one it cannot install (held) is no record
+os_ = []
+os_saved = (gl.OTA_SEEN, gl.OTA_KEY, gl.FW_BUILD, gl.HTTP_GET, gl._ota_held,
+            gl._ntp[0], gl.log.get("clock"), dict(gl.ota), gl.OTA_URL, gl.esp32,
+            gl._ota_dl_begin)
+try:
+    gl.OTA_SEEN = os.path.join(_rv_td, "ota.seen")
+    gl.OTA_KEY = b"0123456789abcdef0123456789abcdef"
+    gl.FW_BUILD = 1700000000
+    gl.OTA_URL = "http://ota.example/s3/manifest.json"
+    gl.esp32 = _FakeEsp32
+    gl._ntp[0] = None
+    gl.log["clock"] = None
+    gl.ota.pop("seen", None)
+    held_ = [False]
+    gl._ota_held = lambda b: held_[0]
+    dl_ = []
+    gl._ota_dl_begin = lambda b: dl_.append(b)    # (stops before the download)
+    e_far = 1700000000 - gl.EPOCH_2020 + 90 * 86400
+
+    def _os_man(build, e):
+        m = {"build": build, "commit": "abc%04d" % (build % 10000), "size": 10,
+             "sha256": "0" * 64, "url": "micropython-x.bin", "files": [],
+             "board": gl.OTA_BOARD, "expires": e}
+        return json.dumps(gl._ota_sign(gl.OTA_KEY, m)).encode()
+
+    def _os_check(build, e):
+        body_ = _os_man(build, e)
+        gl.HTTP_GET = lambda url, cb, mx: (cb(body_), 200)[1]
+        gl._ota_check()
+        return gl.ota["state"]
+    held_[0] = True
+    os_.append((_os_check(1700000500, e_far), os.path.exists(gl.OTA_SEEN)))
+    held_[0] = False
+    _os_check(1700000300, e_far)
+    _os_check(1700000200, e_far)
+    os_.append((list(dl_), gl.ota["state"]))
+    with open(gl.OTA_SEEN) as f:
+        os_.append(f.read())
+    gl.ota.pop("seen", None)             # (a reboot: read from the file)
+    # ended before the newest seen was built: expired without a clock, and
+    # with an NTP answer of this firmware's build time
+    os_.append(_os_check(1700000400, 1700000300 - gl.EPOCH_2020 - 100))
+    gl._ntp[0] = (gl.FW_BUILD - gl.EPOCH_2020, gl._stamp())
+    os_.append(_os_check(1700000400, 1700000300 - gl.EPOCH_2020 - 100))
+finally:
+    (gl.OTA_SEEN, gl.OTA_KEY, gl.FW_BUILD, gl.HTTP_GET, gl._ota_held,
+     gl._ntp[0]) = os_saved[:6]
+    gl.log["clock"] = os_saved[6]
+    gl.ota.clear()
+    gl.ota.update(os_saved[7])
+    gl.OTA_URL, gl.esp32, gl._ota_dl_begin = os_saved[8:11]
+check("OTA-SEEN: a held build is no record; after build B an older signed "
+      "one is superseded; the record survives a reboot and B's build time "
+      "floors the clock (NTP's answer too)",
+      os_ == [("rolled back", False), ([1700000300], "superseded"),
+              "1700000300\n", "expired", "expired"], repr(os_))
+
+# HIST-DONE: a batch that went up and into the history, its .pos not
+# written, then a reboot: the note on the flash keeps it out of the history
+# the second time (pos_wr was in RAM only); the note goes with the commit
+hd = []
+hd_dir = os.path.join(_rv_td, "histdone")
+os.makedirs(hd_dir)
+hd_saved = (gl.write_offset, gl._hist_batch)
+hd_hist = []
+try:
+    online(hd_dir)
+    hd_p = os.path.join(hd_dir, "20261116_120000.trk")
+    make_trk(hd_p, gl.UPLOAD_BATCH + 20)
+
+    def _hd_wo(*a, **k):
+        raise OSError(5, "EIO")
+    gl.write_offset = _hd_wo
+    gl._hist_batch = lambda *a: hd_hist.append(a[:2])
+    pump()
+    hd.append((len(hd_hist), os.path.exists(hd_p + gl.HIST_DONE)))
+    gl.write_offset = hd_saved[0]
+    gl.up_reset()                        # (the reboot: up anew, the dir read)
+    gl.up.update(url="https://dawarich.example.com", key="secret-key")
+    gl.wifi.update(state="connected", ssid="home")
+    pump()
+    hd.append((len(hd_hist), os.path.exists(hd_p + gl.HIST_DONE), gl.up["hd"]))
+finally:
+    gl.write_offset, gl._hist_batch = hd_saved
+check("HIST-DONE: a batch whose .pos failed is not drawn again after a "
+      "reboot; its note goes once the .pos is written",
+      hd == [(1, True), (1, False, set())], repr(hd))
+
+# RCV-GST-NAK2: GST is "refused" only twice in a row (one FAIL: a hit line,
+# a late answer, took GST and the watch off until a restart); an OK clears it
+gq = []
+gq_saved = (gr_._uc_cmd, gr_._say, dict(gr_.st))
+try:
+    gr_._say = lambda line: None
+    gr_.st.update(gps_ver="x", gst_fails=0, gst_nak=False, naks=None)
+    ans_ = [None]
+    gr_._uc_cmd = lambda cmd: ans_[0] if cmd.startswith("CFGMSG,0,7,") else True
+    gr_._uc_setup()
+    gq.append(gr_.st["gst_nak"])
+    gr_._uc_setup()
+    gq.append(gr_.st["gst_nak"])
+    ans_[0] = True
+    gr_._uc_setup()
+    gq.append((gr_.st["gst_nak"], gr_.st["gst_fails"]))
+finally:
+    gr_._uc_cmd, gr_._say = gq_saved[:2]
+    gr_.st.clear()
+    gr_.st.update(gq_saved[2])
+check("RCV-GST-NAK2: one refused GST is not 'no GST', two in a row are; "
+      "an OK clears it", gq == [False, True, (False, 0)], repr(gq))
+
+# RCV-HZ-WATCH: with GST refused the watch looks at the rate: valid seconds
+# at one fix for UC_GST_LOST (GPS_HZ lost with a lost restart banner) set it
+# up again; seconds of GPS_HZ fixes do not
+hw = []
+hw_saved = (dict(gr_.st), gr_.GPS_HZ)
+try:
+    gr_.GPS_HZ = 5
+    now_ = time.ticks_ms()
+    # (a run of 31 s at one fix; each case after it breaks one guard only:
+    # a run just begun, too few seconds at one fix in it, a second of 5
+    # fixes a second ago)
+    for run_, n1_, ep5_ in ((now_ - gr_.UC_GST_LOST - 1000, 31, None),
+                            (now_ - 5000, 31, None),
+                            (now_ - gr_.UC_GST_LOST - 1000, 1, None),
+                            (now_ - gr_.UC_GST_LOST - 1000, 31, now_ - 1000)):
+        diag_clear()
+        gr_.st.update(setup_ok=True, setup_at=now_ - gr_.UC_GST_LOST - 1, extra=0,
+                      gst_nak=True, rate_nak=False, ep_at=now_ - 500, ep5_at=ep5_,
+                      ep_run=run_, ep1_n=n1_, rx=now_, rx_back=None, gst_said=None)
+        gr_._uc_watch(now_)
+        hw.append((gr_.st["extra"], [l for l in _rv_diag() if "setup lost" in l]))
+finally:
+    gr_.st.clear()
+    gr_.st.update(hw_saved[0])
+    gr_.GPS_HZ = hw_saved[1]
+check("RCV-HZ-WATCH: GST refused, a run of UC_GST_LOST at one fix is a lost "
+      "setup; a run just begun (a fix regained) or GPS_HZ fixes are not",
+      hw == [(1, ["gps setup lost: 1 fix/s"]), (0, []), (0, []), (0, [])], repr(hw))
+
+# RCV-VIEW-TAIL: the GSV skip window ending inside a second skips the rest of
+# that second (its L1 sets were skipped, its L5 read: the view counted L5's
+# fewer); the next second is read
+vt = []
+vt_saved = (dict(gr_._uc_sv), list(gr_._sec))
+try:
+    now_ = time.ticks_ms()
+    gr_._sec[0] = 120000
+    gr_._uc_sv.update(until=time.ticks_add(now_, 10), sec=None)
+    vt.append(gr_._uc_gsv_skip())        # in the window
+    _clock[0] += 20
+    vt.append(gr_._uc_gsv_skip())        # past it, the same second
+    gr_._sec[0] = 120001
+    vt.append((gr_._uc_gsv_skip(), gr_._uc_sv["until"]))
+finally:
+    gr_._uc_sv.update(vt_saved[0])
+    gr_._sec[:] = vt_saved[1]
+check("RCV-VIEW-TAIL: the skip window's last second is skipped whole, the "
+      "next one read", vt == [True, True, (False, None)], repr(vt))
+
+# RCV-CNT-MASK: the sentence counts wrap at CNT_MASK (a small int; past
+# 2**30 each += made a long, ~40 a second)
+cm2 = []
+cm2_saved = (gr_.st["ok"], gr_.st["err"])
+try:
+    src_ = _slurp(os.path.join(ROOT, "gps_receiver.py"))
+    cm2.append((src_.count('st["ok"] += 1'), src_.count('st["err"] += 1'),
+                src_.count("& CNT_MASK")))
+    gr_.st["ok"] = gr_.CNT_MASK          # (the next one wraps to 0)
+    gr_.handle(nmea("GPRMC,120002.00,V,,,,,,,171026,,,N"))
+    cm2.append(gr_.st["ok"])
+finally:
+    gr_.st["ok"], gr_.st["err"] = cm2_saved
+check("RCV-CNT-MASK: every ok/err count wraps at CNT_MASK",
+      cm2 and cm2[0][:2] == (0, 0) and cm2[0][2] >= 10 and cm2[1] == 0, repr(cm2))
+
+# RCV-SYS-AGAIN: after a restart of its own (a power dip: back at the
+# default mask) GPS_SYS is asked and sent again; not after the restart the
+# mask itself makes (UC_SYS_SETTLE), at most UC_SYS_MAX a boot
+sa = []
+sa_saved = dict(gr_.st)
+try:
+    now_ = time.ticks_ms()
+    for at_ in (now_ - gr_.UC_SYS_SETTLE - 1, now_ - 1000):
+        gr_.st.update(uc_sys_sent=True, uc_sys=5, uc_sys_at=at_)
+        gr_._gps_restarted()
+        sa.append((gr_.st["uc_sys_sent"], gr_.st["uc_sys"]))
+finally:
+    gr_.st.clear()
+    gr_.st.update(sa_saved)
+check("RCV-SYS-AGAIN: a restart of its own asks GPS_SYS again, the mask's "
+      "own restart does not; UC_SYS_MAX a boot",
+      sa == [(False, None), (True, 5)] and gr_.UC_SYS_MAX >= 1
+      and 'st["uc_sys_n"] < UC_SYS_MAX' in _slurp(os.path.join(ROOT, "gps_receiver.py")),
+      repr(sa))
+
+# DEPLOY-SWAP-CUT / -FAIL / -RESET / KEEP-TFT: a swap cut by a signal or a
+# failed rename is finished (the rest swapped in) before any reset: the trap
+# reset a mixed set (the old main.py over new modules); one that cannot be
+# finished leaves the board stopped and says so; a reset that fails after a
+# whole swap is a warning, not "Swap FAILED"; a frozen firmware without the
+# display's code keeps its gps_tft .mpy files
+dp_td = tempfile.mkdtemp(prefix="deploy5-")   # (the first one is gone by now)
+dk = []
+for env_ in ({"FAKE_RENAME_MAX": "1", "FAKE_SWAP_KILL": "1", "FAKE_FROZEN": "full"},
+             {"FAKE_RENAME_MAX": "1", "FAKE_FROZEN": "full"},
+             {"FAKE_RENAME_MAX": "0", "FAKE_RENAME_ALL": "1", "FAKE_FROZEN": "full"},
+             {"FAKE_RESET_FAIL": "1", "FAKE_FROZEN": "full"}):
+    rc, out, err, dev, calls = deploy_run(env_)
+    left_ = sorted(n for n in os.listdir(dev) if n.endswith(".dpl"))
+    lg_ = dev_logger(dev)
+    dk.append((rc == 0, dev_file(dev, "main.py") != b"old main", left_,
+               lg_[-1:] == ["reset"], "Swap FAILED" in err,
+               "WARNING: every file is in" in err))
+for fz_, keep_ in (("sha-only", True), ("full", False)):
+    rc, out, err, dev, calls = deploy_run({"FAKE_FROZEN": fz_, "FAKE_DEV_TFT": "1"})
+    dk.append((rc == 0, (dev_file(dev, "gps_tft.mpy") is not None) == keep_))
+check("DEPLOY-SWAP-CUT: a swap cut by a signal or a rename is finished before "
+      "the reset; one that cannot be leaves the board stopped (said); a "
+      "failed reset after a whole swap is a warning; a frozen firmware "
+      "without the display's code keeps its gps_tft.mpy",
+      dk == [(False, True, [], True, False, False),
+             (True, True, [], True, False, False),
+             (False, False, ["main.py.dpl", "web.html.gz.dpl"], False, True, False),
+             (True, True, [], True, False, True),
+             (True, True), (True, True)], repr(dk))
+
+# BUILD-RESUME-SUM / BUILD-TMP-AGE: the published build again is a cleanup
+# only when its files' sums are the manifest's (a cut republish of the same
+# commit left a new image under the old manifest: every board failed its
+# sum); a .tmp under an hour old is another publish's, it stays
+if shutil.which("bash") and web_min:
+    br = []
+    key5_ = os.path.join(tempfile.mkdtemp(dir=dp_td), "ota.key")
+    with open(key5_, "w") as f:
+        f.write("0123456789abcdef0123456789abcdef\n")
+    os.chmod(key5_, 0o600)
+    dest_s = tempfile.mkdtemp(dir=dp_td)
+    s_env = {"OTA_KEY_FILE": key5_, "OTA_DEST": "fakehost:" + dest_s,
+             "FAKE_CT": "1700000400"}
+    br.append(build_run(["--publish"], s_env)[0])
+    bin_ = [n for n in os.listdir(dest_s) if n.endswith(".bin")][0]
+    with open(os.path.join(dest_s, bin_), "wb") as f:
+        f.write(b"another build's image")
+    with open(os.path.join(dest_s, "web-x.html.gz.tmp"), "w") as f:
+        f.write("another publish, uploading")
+    rc_, out_, err_, _w, c_ = build_run(["--publish"], s_env)
+    with open(os.path.join(dest_s, "manifest.json")) as f:
+        man_ = json.load(f)
+    with open(os.path.join(dest_s, bin_), "rb") as f:
+        got_ = hashlib.sha256(f.read()).hexdigest()
+    br.append((rc_, "not the ones its manifest signs" in out_,
+               len([c for c in c_ if c[0] == "scp"]), got_ == man_.get("sha256"),
+               os.path.exists(os.path.join(dest_s, "web-x.html.gz.tmp"))))
+    rc_, out_, err_, _w, c_ = build_run(["--publish"], s_env)
+    br.append((rc_, "already published" in out_))
+    check("BUILD-RESUME-SUM: a live image that is not its manifest's is "
+          "published again (not a cleanup); then it is a cleanup; a young "
+          ".tmp stays", br == [0, (0, True, 3, True, True), (0, True)], repr(br))
+
+
+# --- sixth review (2026-11-16f) ---------------------------------------------
+
+# ENV-TOKEN-ANSI: a WEB_TOKEN that is not UTF-8 (an ANSI .env) was skipped
+# and the data routes stayed open; a key line not UTF-8 may be it too
+et = []
+et_saved = (gl.WEB_TOKEN, gl._web_tok_bad[0])
+try:
+    for body_ in (b"SSID=a\nWPA2=b\nWEB_TOKEN=abcd\xe9fghij\n",
+                  b"SSID=a\nWPA2=b\nWEB_T\xd6KEN=abcdefghij\n",
+                  b"SSID=a\nWPA2=b\n"):
+        p_ = os.path.join(_rv_td, "env-ansi")
+        with open(p_, "wb") as f:
+            f.write(body_)
+        gl.WEB_TOKEN, gl._web_tok_bad[0] = None, False
+        gl._web_env(gl.load_env(p_))
+        et.append(gl._web_tok_bad[0])
+finally:
+    gl.WEB_TOKEN, gl._web_tok_bad[0] = et_saved
+check("ENV-TOKEN-ANSI: a WEB_TOKEN not UTF-8 closes the data routes, so does "
+      "a key that is not UTF-8 (it may be WEB_TOKEN: the read is not whole); "
+      "no token leaves them as they are",
+      et == [True, True, False], repr(et))
+
+# ENV-PARTIAL-NETS: a .env read part way drops an SSID whose WPA2 was not
+# read (tried open, an open twin of the home SSID was home)
+en = []
+en_saved = gl._env_partial[0]
+try:
+    gl._env_partial[0] = True
+    en.append([n["ssid"] for n in gl._load_nets({"SSID": "home", "SSID2": "cafe",
+                                                 "WPA2_2": "x"})])
+    gl._env_partial[0] = False
+    en.append([n["ssid"] for n in gl._load_nets({"SSID": "home"})])
+finally:
+    gl._env_partial[0] = en_saved
+check("ENV-PARTIAL-NETS: read part way, an SSID without its WPA2 is dropped; "
+      "read whole it is an open network as before",
+      en == [["cafe"], ["home"]], repr(en))
+
+# NTP-FLOOR / NTP-DOUBT: an NTP answer before the newest signed build seen is
+# refused (the floor), and a verified POST's handshake failing with the board
+# clock from NTP asks NTP again (once an answer); another network asks again
+nf = []
+nf_saved = (hl.socket, hl.FW_BUILD, dict(hl.ota), hl.OTA_SEEN)
+try:
+    hl.socket = _NtpMod
+    hl.FW_BUILD = hl._days(2026, 11, 1) * 86400
+    hl.OTA_SEEN = os.path.join(_rv_td, "ota.seen.hl")
+    hl.ota["seen"] = hl._days(2026, 11, 10) * 86400
+    b20_ = (hl._days(2026, 11, 5) - hl.EPOCH_DAYS) * 86400
+    nf.append(_nask(_nreply(b20_)))
+    nf.append(_nask(_nreply(b20_ + 10 * 86400)) == b20_ + 10 * 86400)
+finally:
+    hl.socket, hl.FW_BUILD, hl.OTA_SEEN = nf_saved[0], nf_saved[1], nf_saved[3]
+    hl.ota.clear()
+    hl.ota.update(nf_saved[2])
+nd_saved = (list(gl._ntp), gl._rtc_ntp[0], gl._ntp_doubted[0])
+try:
+    a_ = (100, gl._stamp())
+    gl._ntp[0], gl._ntp[1] = a_, gl._stamp()
+    gl._rtc_ntp[0] = a_
+    gl._ntp_doubted[0] = None
+    gl._ntp_doubt()
+    nf.append(gl._ntp[1])
+    gl._ntp[1] = gl._stamp()
+    gl._ntp_doubt()                      # (the same answer: once)
+    nf.append(gl._ntp[1] is not None)
+finally:
+    gl._ntp[:] = nd_saved[0]
+    gl._rtc_ntp[0], gl._ntp_doubted[0] = nd_saved[1], nd_saved[2]
+_nf_src = _slurp(os.path.join(ROOT, "gps_logger.py"))
+check("NTP-FLOOR: an NTP answer before the newest signed build seen is None; "
+      "a TLS handshake failure on NTP's clock asks again once; another network "
+      "asks again",
+      nf == [None, True, None, True]
+      and 'if _post_phase[0] == "tls":\n            _ntp_doubt()' in _nf_src
+      and 'elif _ntp_net[0] != wifi["ssid"]:' in _nf_src, repr(nf))
+
+# HIST-DONE-MEM: a MemoryError at the commit, then an OSError: the batch's
+# note is on the flash (a reboot drew it again)
+hm = []
+hm_dir = os.path.join(_rv_td, "histmem")
+os.makedirs(hm_dir)
+hm_saved = (gl.commit_offset, gl._hist_batch)
+try:
+    online(hm_dir)
+    hm_p = os.path.join(hm_dir, "20261116_130000.trk")
+    make_trk(hm_p, gl.UPLOAD_BATCH + 20)
+    errs_ = [MemoryError(), OSError(5, "EIO")]
+
+    def _hm_co(*a, **k):
+        raise errs_.pop(0)
+    gl.commit_offset = _hm_co
+    hm_n = []
+    gl._hist_batch = lambda *a: hm_n.append(1)
+    pump()
+    gl.up["skip"] = None
+    pump()
+    hm.append((len(hm_n), os.path.exists(hm_p + gl.HIST_DONE)))
+finally:
+    gl.commit_offset, gl._hist_batch = hm_saved
+check("HIST-DONE-MEM: a MemoryError then an OSError at the commit: drawn "
+      "once, the note written", hm == [(1, True)], repr(hm))
+
+# RCV-RATE-NAK2 / RCV-SYS-MAX / RCV-STAMPS / RCV-GST-ONCE: the rate is
+# "refused" only twice in a row too (an OK clears it); the mask's last send
+# is said; a restart of its own asks the mask anew even when none was sent;
+# the new times are wrap-checked; the first GST refusal says so
+rr = []
+rr_saved = (gr_._uc_cmd, gr_._say, dict(gr_.st), gr_.UC_SYS)
+try:
+    gr_._say = lambda line: None
+    gr_.st.update(gps_ver="x", rate_fails=0, rate_nak=False, naks=None)
+    ans_ = [None]
+    gr_._uc_cmd = lambda cmd: ans_[0] if cmd.startswith("CFGNAV") else True
+    gr_._uc_setup()
+    rr.append(gr_.st["rate_nak"])
+    gr_._uc_setup()
+    rr.append(gr_.st["rate_nak"])
+    ans_[0] = True
+    gr_._uc_setup()
+    rr.append(gr_.st["rate_nak"])
+    diag_clear()
+    gr_.UC_SYS = 5
+    gr_.st.update(uc_sys_sent=False, uc_sys_n=gr_.UC_SYS_MAX, sys_said=False)
+    gr_._uc_setup()
+    gr_._uc_setup()
+    rr.append(len([l for l in _rv_diag() if "GPS_SYS sent" in l]))
+    gr_.st.update(uc_sys_sent=False, uc_sys=5, uc_sys_at=None)
+    gr_._gps_restarted()
+    rr.append(gr_.st["uc_sys"])
+    rr.append(all(k_ in gr_._STAMPS for k_ in ("ep_at", "ep5_at", "ep_run", "uc_sys_at")))
+    now_ = time.ticks_ms()
+    diag_clear()
+    gr_.st.update(setup_ok=True, setup_at=now_ - gr_.UC_GST_LOST - 1, extra=0,
+                  gst_at=None, rx=now_, rx_back=None, gst_nak=False, gst_fails=1,
+                  gst_said=None)
+    gr_._uc_watch(now_)
+    rr.append([l for l in _rv_diag() if "setup lost" in l])
+finally:
+    gr_._uc_cmd, gr_._say = rr_saved[:2]
+    gr_.st.clear()
+    gr_.st.update(rr_saved[2])
+    gr_.UC_SYS = rr_saved[3]
+check("RCV-RATE-NAK2: a refused rate twice in a row, an OK clears it; the "
+      "mask's limit is said once; a restart of its own asks the mask anew; the "
+      "new times are wrap-checked; a first GST refusal says so",
+      rr == [False, True, False, 1, None, True,
+             ["gps setup lost: GST refused once, asked again"]], repr(rr))
+
+# DEPLOY-PREFLIGHT / -RESET2 / -PEND-CUT / -SEEN: a .dpl gone before the swap
+# swaps nothing (the old install stays, no roll forward of the rest); a reset
+# that fails twice is said; a cut swap with an OTA pending is finished and
+# the logger run, no reset; OTA_SEEN_RESET=1 removes /ota.seen; the trap
+# ignores a second Ctrl-C
+dp = []
+rc, out, err, dev, calls = deploy_run({"FAKE_DPL_GONE": "main.py", "FAKE_FROZEN": "full"})
+dp.append((rc != 0, "Swap refused" in err, dev_file(dev, "main.py") == b"old main",
+           dev_file(dev, "web.html.gz") is None))
+rc, out, err, dev, calls = deploy_run({"FAKE_RESET_FAIL": "2", "FAKE_FROZEN": "full"})
+dp.append((rc != 0, "WARNING: the reset failed: power" in err,
+           dev_file(dev, "main.py") != b"old main"))
+rc, out, err, dev, calls = deploy_run({"FAKE_OTA_PENDING": "1", "FORCE_PENDING": "1",
+                                       "FAKE_RENAME_MAX": "1", "FAKE_FROZEN": "full"})
+lg_ = dev_logger(dev)
+dp.append((dev_file(dev, "main.py") != b"old main",
+           sorted(n for n in os.listdir(dev) if n.endswith(".dpl")),
+           lg_[-1:] == ["run import gps_logger; gps_logger.run()"],
+           not [l for l in lg_ if l.startswith("reset")]))
+rc, out, err, dev, calls = deploy_run({"OTA_SEEN_RESET": "1", "FAKE_DEV_SEEN": "1",
+                                       "FAKE_FROZEN": "full"})
+dp.append((rc == 0, dev_file(dev, "ota.seen")))
+_dp6 = _slurp(os.path.join(ROOT, "deploy.sh"))
+dp.append(_dp6.index("trap '' INT TERM HUP") < _dp6.index('if [ "${SWAPPING:-0}" = 1 ]'))
+check("DEPLOY-PREFLIGHT: a .dpl gone swaps nothing (old install kept); a twice "
+      "failed reset is said; a cut swap with an OTA pending is finished, the "
+      "logger run, no reset; OTA_SEEN_RESET=1 removes /ota.seen; the trap "
+      "ignores a second signal",
+      dp == [(True, True, True, True), (True, True, True),
+             (True, [], True, True), (True, None), True], repr(dp))
+
+# BUILD-TMP-OLD: through a symlinked OTA_DEST a .tmp an hour old goes, a
+# young one stays (find without -H read the link alone: none went)
+if shutil.which("bash") and web_min:
+    bt = []
+    real_ = tempfile.mkdtemp(dir=dp_td)
+    link_ = real_ + "-link"
+    os.symlink(real_, link_)
+    t_env = {"OTA_KEY_FILE": key5_, "OTA_DEST": "fakehost:" + link_,
+             "FAKE_CT": "1700000500"}
+    bt.append(build_run(["--publish"], t_env)[0])
+    for n_, age_ in (("old.bin.tmp", 7200), ("young.bin.tmp", 60)):
+        with open(os.path.join(real_, n_), "w") as f:
+            f.write("x")
+        t_ = time.time() - age_
+        os.utime(os.path.join(real_, n_), (t_, t_))
+    bt.append(build_run(["--publish"], t_env)[0])
+    bt.append(sorted(n for n in os.listdir(real_) if n.endswith(".tmp")))
+    _bf6 = _slurp(os.path.join(ROOT, "tools", "build_firmware.sh"))
+    check("BUILD-TMP-OLD: a .tmp an hour old goes through a symlinked OTA_DEST, "
+          "a young one stays; unreadable sums are said as such; FORCE=1 warns "
+          "of superseded",
+          bt == [0, 0, ["young.bin.tmp"]]
+          and "sums could not be read" in _bf6 and "OTA_SEEN_RESET=1" in _bf6, repr(bt))
+
+# --- seventh review (2026-11-16g) -------------------------------------------
+
+# OTA-SEEN-EIO: /ota.seen that cannot be read (not ENOENT) refuses the update
+# that boot and is not written over: taken for "no file", a replayed older
+# manifest passed and its build replaced the newer record for good; read
+# again at the next check
+oe = []
+oe_saved = (gl.OTA_SEEN, gl.OTA_KEY, gl.FW_BUILD, gl.HTTP_GET, gl._ota_held,
+            gl._ntp[0], gl.log.get("clock"), dict(gl.ota), gl.OTA_URL, gl.esp32,
+            gl._ota_dl_begin)
+try:
+    oe_dir = os.path.join(_rv_td, "seen-eio")
+    os.makedirs(oe_dir)                  # (open() of a folder: EISDIR)
+    gl.OTA_SEEN = oe_dir
+    gl.OTA_KEY = b"0123456789abcdef0123456789abcdef"
+    gl.FW_BUILD = 1700000000
+    gl.OTA_URL = "http://ota.example/s3/manifest.json"
+    gl.esp32 = _FakeEsp32
+    gl._ntp[0] = None
+    gl.log["clock"] = None
+    gl.ota.pop("seen", None)
+    gl._ota_held = lambda b: False
+    oe_dl = []
+    gl._ota_dl_begin = lambda b: oe_dl.append(b)
+    e_far = 1700000000 - gl.EPOCH_2020 + 90 * 86400
+    oe.append((_os_check(1700000200, e_far), oe_dl[:], gl._clock_floor()
+               == gl.FW_BUILD - gl.EPOCH_2020))
+    oe_f = os.path.join(_rv_td, "seen-eio.ok")
+    with open(oe_f, "w") as f:
+        f.write("1700000300\n")
+    gl.OTA_SEEN = oe_f                   # (readable again)
+    oe.append((_os_check(1700000200, e_far), oe_dl[:]))
+    with open(oe_f) as f:
+        oe.append(f.read())
+finally:
+    (gl.OTA_SEEN, gl.OTA_KEY, gl.FW_BUILD, gl.HTTP_GET, gl._ota_held,
+     gl._ntp[0]) = oe_saved[:6]
+    gl.log["clock"] = oe_saved[6]
+    gl.ota.clear()
+    gl.ota.update(oe_saved[7])
+    gl.OTA_URL, gl.esp32, gl._ota_dl_begin = oe_saved[8:11]
+check("OTA-SEEN-EIO: /ota.seen unreadable (not absent) refuses the update, "
+      "writes nothing, floors at the build; read again it is the record",
+      oe == [("seen err", [], True), ("superseded", []), "1700000300\n"], repr(oe))
+
+# RTC-GPS-OVER-NTP: a fix's Anchor corrects the board clock an NTP answer set
+# (NTP is not asked once a fix told the time: a lie stood for the run, every
+# verified POST "expired")
+rg = []
+rg_saved = (list(gl._ntp), gl._rtc_set[0], gl._rtc_ntp[0], gl.st.get("valid"),
+            gl.log.get("clock"))
+try:
+    gl.st["valid"] = False
+    gl.log["clock"] = None
+    RTC.dt, RTC.sets[:] = (2000, 1, 1, 5, 0, 0, 0, 0), []
+    gl._rtc_set[0] = False
+    s1_ = (_dt.date(2026, 11, 16) - _dt.date(2020, 1, 1)).days * 86400 + 12 * 3600
+    gl._ntp[0] = (s1_ + 3 * 365 * 86400, gl._stamp())   # the lie
+    gl._rtc_sync(_clock[0])
+    gl.log["clock"] = (s1_, gl._stamp())                # a fix, gone again
+    gl._rtc_sync(_clock[0])
+    gl._rtc_sync(_clock[0])              # (the Anchor's again: nothing)
+    rg.append(([t_[:3] for t_ in RTC.sets], gl._rtc_ntp[0]))
+finally:
+    gl._ntp[:] = rg_saved[0]
+    gl._rtc_set[0], gl._rtc_ntp[0] = rg_saved[1], rg_saved[2]
+    gl.st["valid"] = rg_saved[3]
+    gl.log["clock"] = rg_saved[4]
+check("RTC-GPS-OVER-NTP: a fix's Anchor corrects the clock an NTP answer set, "
+      "once", rg == [([(2029, 11, 15), (2026, 11, 16)], None)], repr(rg))
+
+# ENV-KEY-GUESS: a key with bytes past ASCII is skipped; one that looks like
+# WEB_TOKEN or a WPA2 (without them, or with them in its letters' places) is
+# that key garbled: the routes closed, its network dropped. Any other closes
+# nothing (a "Megjegyzés=" line closed an open home network and the page)
+ek = []
+ek_saved = (gl.WEB_TOKEN, gl._web_tok_bad[0])
+try:
+    p_ = os.path.join(_rv_td, "env-key")
+    for body_ in (b"SSID=home\nWPA\xd62=secret\n",
+                  b"SSID=Cafe\nMegjegyz\xe9s=x\nWEB=1\n",
+                  b"SSID=Cafe\n\xc2\xa0WEB_TOKEN=abcdefghij\n",
+                  b"SSID=home\nWPA2=secret\n"):
+        with open(p_, "wb") as f:
+            f.write(body_)
+        gl.WEB_TOKEN, gl._web_tok_bad[0] = None, False
+        env_ = gl.load_env(p_)
+        gl._web_env(env_)
+        ek.append((gl._env_partial[0], [n["ssid"] for n in gl._load_nets(env_)],
+                   gl._web_tok_bad[0]))
+finally:
+    gl._env_partial[0] = False
+    del gl._env_skipped[:]
+    gl.WEB_TOKEN, gl._web_tok_bad[0] = ek_saved
+check("ENV-KEY-GUESS: a garbled WPA2 key drops its network, a garbled "
+      "WEB_TOKEN key (an NBSP too) closes the routes; another key not ASCII "
+      "closes nothing; none marks the read part way",
+      ek == [(False, [], False), (False, ["Cafe"], False), (False, ["Cafe"], True),
+             (False, ["home"], False)], repr(ek))
+
+# WEB-ERRNO-MORE: the names MicroPython's errno lacks (ENFILE: lwIP out of
+# sockets) are newlib's numbers, not dropped; a reopened listen socket starts
+# its error count anew
+wm = []
+wm_saved = sys.modules.get("errno")
+try:
+    import types as _types
+    fake_ = _types.ModuleType("errno")
+    fake_.EAGAIN, fake_.ECONNABORTED = 11, 113
+    sys.modules["errno"] = fake_
+    wm.append(gl._errnos("EAGAIN", "EWOULDBLOCK", "ECONNABORTED", "EINTR",
+                         "ENFILE", "EMFILE", "ENOSUCH"))
+finally:
+    if wm_saved is None:                 # (not loaded before: none again)
+        sys.modules.pop("errno", None)
+    else:
+        sys.modules["errno"] = wm_saved
+_wm_src = _slurp(os.path.join(ROOT, "gps_logger.py"))
+check("WEB-ERRNO-MORE: EWOULDBLOCK/EINTR/ENFILE/EMFILE by newlib's numbers when "
+      "the module lacks them; the count starts anew with a listen socket",
+      wm == [(11, 113, 4, 23, 24)] and 23 in gl.WEB_ACCEPT_OK
+      and "_web_sock = s\n        _web_acc_err[0] = 0" in _wm_src, repr(wm))
+
+# RCV-EPRUN-CAP: a run of fixes past TICKS_CAP (_stamps_old ended its start)
+# begins again: the 1 fix/s watch was off for good after a day of fixes
+er = []
+er_saved = (dict(gr_.st), dict(gr_.ep), len(gr_.st["q"]))
+try:
+    now_ = time.ticks_ms()
+    gr_.st.update(ep_run=None, ep_at=now_ - 500, ep1_n=0, checked=True)
+    gr_._ep_new("120000")
+    gr_.ep["g"] = [47.5, 19.0, 0.0, 0.0, 1]
+    gr_._publish()
+    er.append((gr_.st["ep_run"] is not None, gr_.st["ep1_n"]))
+finally:
+    del gr_.st["q"][er_saved[2]:]
+    gr_.st.clear()
+    gr_.st.update(er_saved[0])
+    gr_.ep.clear()
+    gr_.ep.update(er_saved[1])
+check("RCV-EPRUN-CAP: a run whose start expired (TICKS_CAP) begins again at the "
+      "next second", er == [(True, 1)], repr(er))
+
+# DEPLOY-NO-ANSWER / -PIPE / -REFUSED: a swap whose output never came back
+# (the link lost after the renames) is finished, not taken for "nothing
+# changed" and reset onto a board without main.py; the trap's echoes to a
+# stderr gone (| tee ended by the Ctrl-C) no longer stop it before the reset;
+# a preflight that refused says so on the board's word
+_dp7 = _slurp(os.path.join(ROOT, "deploy.sh"))
+check("DEPLOY-NO-ANSWER: the refusal needs the board's traceback without a "
+      "preflight ok; the trap ignores PIPE, runs set +e, times its roll forward "
+      "out; the inline roll forward leaves the trap's retry",
+      "print('preflight ok')" in _dp7
+      and 'grep -qE "^(preflight ok|swapped |removing )"' in _dp7
+      and 'grep -q "^Traceback"' in _dp7
+      and "trap '' INT TERM HUP PIPE\n    set +e" in _dp7
+      and "TMO=(timeout -s KILL 60 bash -c" in _dp7
+      and '"$MPREMOTE" connect "$PORT" exec "$(swap_py False)" || exit 1' in _dp7, "")
+if shutil.which("bash"):
+    dn = []
+    rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "1", "FAKE_SWAP_MUTE": "1",
+                                           "FAKE_FROZEN": "full"})
+    dn.append((rc == 0, "Swap refused" in err, dev_file(dev, "main.py") != b"old main",
+               sorted(n for n in os.listdir(dev) if n.endswith(".dpl")),
+               dev_logger(dev)[-1:] == ["reset"]))
+    rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "1", "FAKE_SWAP_KILL": "1",
+                                           "FAKE_STDERR_GONE": "1", "FAKE_FROZEN": "full"})
+    dn.append((dev_file(dev, "main.py") != b"old main",
+               dev_logger(dev)[-1:] == ["reset"]))
+    rc, out, err, dev, calls = deploy_run({"FAKE_DPL_GONE": "main.py", "FAKE_FROZEN": "full"})
+    dn.append((rc != 0, "Swap refused" in err, dev_file(dev, "main.py") == b"old main"))
+    check("DEPLOY-NO-ANSWER: no answer from the swap is finished and reset, not "
+          "'refused'; a stderr gone does not stop the trap's reset; a refused "
+          "preflight keeps the old install",
+          dn == [(True, False, True, [], True), (True, True), (True, True, True)],
+          repr(dn))
+
+# RCV-FAILS-CLEAR: a GST or the rate seen after a FAIL clears it (a stray
+# FAIL days later made it "refused" twice, the watch off for good)
+fc = []
+fc_saved = dict(gr_.st)
+try:
+    now_ = time.ticks_ms()
+    gr_.st.update(checked=False, setup_at=now_ - gr_.GPS_VERIFY - 1,
+                  gps_boots=0, set_boots=0, hz1=0, hz5=5, gst_at=now_ - 10,
+                  gst_fails=1, gst_nak=False, rate_fails=1, rate_nak=False,
+                  extra=0, ok=100, set_ok=0)
+    gr_._setup_check(now_)
+    fc.append((gr_.st["gst_fails"], gr_.st["rate_fails"]))
+finally:
+    gr_.st.clear()
+    gr_.st.update(fc_saved)
+check("RCV-FAILS-CLEAR: a setup whose GST and GPS_HZ came clears the FAILs "
+      "before it", fc == [(0, 0)], repr(fc))
+
+# NTP-SEEN-ERR: while /ota.seen cannot be read the NTP floor is unknown: no
+# answer believed (one between the build and the newest seen passed)
+ns = []
+ns_saved = (hl.socket, hl.FW_BUILD, dict(hl.ota), hl.OTA_SEEN)
+try:
+    hl.socket = _NtpMod
+    hl.FW_BUILD = hl._days(2026, 11, 1) * 86400
+    ns_dir = os.path.join(_rv_td, "seen-eio-hl")
+    os.makedirs(ns_dir)
+    hl.OTA_SEEN = ns_dir
+    hl.ota.pop("seen", None)
+    b20_ = (hl._days(2026, 11, 5) - hl.EPOCH_DAYS) * 86400
+    ns.append(_nask(_nreply(b20_)))
+    hl.OTA_SEEN = None                   # (no record: the build's floor)
+    hl.ota.pop("seen", None)
+    hl.ota.pop("seen_err", None)
+    ns.append(_nask(_nreply(b20_)) == b20_)
+finally:
+    hl.socket, hl.FW_BUILD, hl.OTA_SEEN = ns_saved[0], ns_saved[1], ns_saved[3]
+    hl.ota.clear()
+    hl.ota.update(ns_saved[2])
+check("NTP-SEEN-ERR: /ota.seen unreadable refuses NTP's answer; readable "
+      "(none) it is taken", ns == [None, True], repr(ns))
+
+# DEPLOY-ROLL-CHECK: the roll forward swaps nothing in when a file without
+# its .dpl is not the copy (no answer from the swap and a .dpl gone: a mixed
+# set, "Deployed", rc 0); the trap's mpremote ignores the signals under
+# timeout too
+_dp8 = _slurp(os.path.join(ROOT, "deploy.sh"))
+if shutil.which("bash"):
+    dr = []
+    rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "1", "FAKE_SWAP_MUTE": "1",
+                                           "FAKE_DPL_GONE": "main.py", "FAKE_FROZEN": "full"})
+    dr.append((rc != 0, "Swap FAILED part way" in err, "Deployed" in out,
+               dev_file(dev, "main.py") == b"old main",
+               [l for l in dev_logger(dev) if l.startswith("reset")]))
+    check("DEPLOY-ROLL-CHECK: a roll forward with a file not the copy swaps "
+          "nothing more, says FAILED, no reset; the trap's mpremote ignores "
+          "INT/TERM/HUP under timeout",
+          dr == [(True, True, False, True, [])]
+          and "trap \"\" INT TERM HUP; exec \"$@\"" in _dp8
+          and "raise OSError('not the copy, not swapped: ' + n)" in _dp8, repr(dr))
 
 gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl.free, gl.DIAG_MAX = _rv_saved
 diag_clear()

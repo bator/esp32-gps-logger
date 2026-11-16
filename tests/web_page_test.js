@@ -1179,5 +1179,43 @@ ft.histEnd = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTi
   said(ln(22, 59) + ln(23, 1), {"X-Hist-Next": "1000", "X-Hist-End": "3000"}); // past the local day's end
   return [urls.map((r) => r.url), c.hist.busy, c.hist.done, c.hist.pts.length];
 });
+// 12. a past day whose /hist answers 403 (or 5xx) is no day without
+// points: not cached, an error, asked again (it stayed "no trip" till the
+// page closed)
+function histErr(code) { return inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTime(), (c) => {
+  const urls = [];
+  c.XMLHttpRequest = function () { urls.push(this); };
+  c.XMLHttpRequest.prototype.open = function (mm, u) { this.url = u; };
+  c.XMLHttpRequest.prototype.setRequestHeader = function () {};
+  c.XMLHttpRequest.prototype.send = function () {};
+  c.XMLHttpRequest.prototype.overrideMimeType = function () {};
+  c.XMLHttpRequest.prototype.getResponseHeader = function () { return null; };
+  c.document = {getElementById: () => null};
+  c.mapD = null;
+  c.trackPaint = () => {};
+  c.hist = c.histNew("20261108");
+  c.histLoad();
+  const r = urls[urls.length - 1];
+  r.status = code; r.responseText = "open the page as http://x/#k=<WEB_TOKEN>"; r.onload();
+  return [urls.length, c.hist.busy, c.hist.err, c.hist.done, "20261108" in c.dayCache];
+}); }
+ft.hist403 = histErr(403);
+// (a 503, short of RAM, the same: an error to retry, not an empty day)
+ft.hist503 = histErr(503);
+// 13. the key is read at each request: one typed into the URL after a 403
+// counts without a reload; none is "1"
+ft.keyHash = (function () {
+  const c = page(1600).c, got = [];
+  const x = {setRequestHeader: (n, val) => got.push(n + "=" + val)};
+  c.location = {hash: "#k=abc"};
+  c.own(x);
+  c.location.hash = "#k=d%2Fe";
+  c.own(x);
+  c.location.hash = "";
+  c.own(x);
+  c.location.hash = "#k=50%off";          // (a bad escape: "1", not the match)
+  c.own(x);
+  return got;
+})();
 v.feat = ft;
 process.stdout.write(JSON.stringify(v));

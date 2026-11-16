@@ -64,14 +64,14 @@ HOSTNAME=Dawarich-GPS-tracker
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. WiFi needs 80 or more: 20/40 are raised to 80 whenever the radio is used (a network set, or `KEEPALIVE` on). |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
-| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has. Once a fix has told the time it is not asked any more: that fix's clock (run on by the uptime) sets the board clock instead. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). |
+| `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has. Once a fix has told the time it is not asked any more: that fix's clock (run on by the uptime) sets the board clock instead, also over one an NTP answer set. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). An answer before the firmware's build (or the newest signed OTA build seen) or more than 5 years after it is refused, a later answer corrects the board clock an earlier one set, and NTP is asked again on another network and when a verified upload's TLS handshake fails on NTP's clock (a wrong answer would otherwise stand for 6 hours). |
 | `TFT_LIGHT` / `TFT_IDLE` | The display's backlight: `TFT_LIGHT` 0–100 per cent while it is on (default 30; 0 keeps it dark, the USER button still lights it), `TFT_IDLE` 0–86400 seconds into a stay (the board has not moved) before it goes dark (default 300; 0: never). Read at boot. |
 | `GPS_SYS` | The UC6580's `$CFGSYS` mask in hex (see [Hardware](hardware.md#hardware)). Read at boot. |
 | `DIAG` | Seconds between [diagnostic log](usage.md#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](usage.md#status-page), and the radio staying on at home for it. Default 1. |
-| `WEB_AWAY` | `1`/`0`: with `WEB` on, the page is served on the non-home networks too (e.g. a phone hotspot), to everyone there, without a password, and the radio stays on for it instead of sleeping once all is uploaded. `0`: off home nothing is served, also while the radio is on for an upload. Default 0. |
-| `WEB_TOKEN` | 8–64 characters of `A-Za-z0-9._~+/=-`: `status.json`, `/hist` and `/diag` answer only a request whose `X-GPS` header is this token; open the page as `http://<board ip>/#k=<token>` (bookmark it). A token that breaks these rules is refused and closes all three (a diag line says so), it is not taken as "no token". It keeps casual LAN visitors out; on plain http it is no defence against someone who can sniff the LAN. Without it `/hist` and `/diag` still want an `X-GPS` header (any value; the page sends one) or a `Referer` of the board's own page (an older page, e.g. one open across an OTA), so a page of another site cannot keep the board busy decoding. Unset by default. |
-| `UPLOAD_UNVERIFIED` | Where an upload that is not verified TLS (an `http://` `GEO_URL`, or `https://` without `/ca.der`) may go: `0` nowhere (the default), `home` only on a home network, `1` everywhere. The home LAN is flat: any host on it can answer for the server (ARP, DNS), take the Bearer key and, with a 2xx, make the board delete tracks it never stored. So put the server's root certificate on the board (`ca.der` next to `deploy.sh`, see below) rather than turning this on. While it waits the state is `err unverified`. The old `UPLOAD_AWAY_UNVERIFIED` (`1`: everywhere, `0`: home) is still read when this key is missing. |
+| `WEB_AWAY` | `1`/`0`: with `WEB` on, the page is served on the non-home networks too (e.g. a phone hotspot), and the radio stays on for it instead of sleeping once all is uploaded. Only with a `WEB_TOKEN`: without one `WEB_AWAY=1` is refused (a diag line), as the position and the track would go to everyone on that network. `0`: off home nothing is served, also while the radio is on for an upload. Default 0. |
+| `WEB_TOKEN` | 8–64 characters of `A-Za-z0-9._~+/=-`: `status.json`, `/hist` and `/diag` answer only a request whose `X-GPS` header is this token; open the page as `http://<board ip>/#k=<token>` (bookmark it). A token that breaks these rules is refused and closes all three (a diag line says so), it is not taken as "no token". It keeps casual LAN visitors out; on plain http it is no defence against someone who can sniff the LAN. Without it `/hist` and `/diag` still want an `X-GPS` header (any value; the page sends one) or a `Referer` of the board's own page (an older page, e.g. one open across an OTA), so a page of another site cannot keep the board busy decoding. A `.env` read only part way (a flash read error) without the token in the part read closes the three too (the token may be in the rest). The page reads `#k=` at each request: one typed in after a 403 counts without a reload. Unset by default. |
+| `UPLOAD_UNVERIFIED` | Where an upload that is not verified TLS (an `http://` `GEO_URL`, or `https://` without `/ca.der`) may go: `0` nowhere (the default), `home` only on a home network, `1` everywhere. The home LAN is flat: any host on it can answer for the server (ARP, DNS), take the Bearer key and, with a 2xx, make the board delete tracks it never stored. So put the server's root certificate on the board (`ca.der` next to `deploy.sh`, see below) rather than turning this on. While it waits the state is `err unverified`; a value that is none of these is a diag line (`env UPLOAD_UNVERIFIED not 0/home/1`) and the default holds. A `/ca.der` that is there but cannot be read is `ca err`, not `err unverified`. The old `UPLOAD_AWAY_UNVERIFIED` (`1`: everywhere, `0`: home) is still read when this key is missing. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
@@ -88,7 +88,8 @@ HOSTNAME=Dawarich-GPS-tracker
   Encrypt server `openssl x509 -in /etc/ssl/certs/ISRG_Root_X1.pem -outform der -out ca.der`
   (check which root your server uses: `openssl s_client -connect host:443 -showcerts`).
   Several roots go one after the other in the same file (`cat a.der b.der >
-  ca.der`, 4 KB in all): where the home DNS answers the public name with the
+  ca.der`, 4 KB in all; white space after the last is fine, anything else
+  after a root is `ca err`, not that root alone): where the home DNS answers the public name with the
   LAN proxy (split DNS), the board sees that proxy's certificate at home and
   the CDN's away, e.g. ISRG Root X1 (Traefik, Let's Encrypt) and GTS Root R4
   (Cloudflare). Check from the board's network what it is served.
@@ -96,8 +97,12 @@ HOSTNAME=Dawarich-GPS-tracker
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored. A file saved as ANSI does not stop the boot: an SSID or password
-  that is not UTF-8 is used byte for byte, any other such value (or a key
-  that is not UTF-8) is skipped with a line in the diagnostic log.
+  that is not UTF-8 is used byte for byte, any other such value is skipped
+  with a line in the diagnostic log, and so is a line whose key is not
+  plain ASCII. Such a key that looks like `WEB_TOKEN` or a `WPA2` (the same
+  without its odd bytes, or with them in its letters' places) counts as
+  that key garbled, not unset: `WEB_TOKEN` closes the data routes, a `WPA2`
+  drops its network (it is not tried as an open one).
 - A value out of range or unreadable keeps the default and says so in the
   [diagnostic log](usage.md#diagnostic-log), on the console too (in the field there
   is none): `env KEEPALIVE not 0 or 5-600 s, using 5 s`, the key named,
@@ -140,8 +145,19 @@ It makes `web.html.gz` with `tools/web_min.py` (~25 KB instead of the ~88 KB
 window, `WEB_GZ_WBITS`: see the [status page](usage.md#status-page)) and copies
 `gps_logger.mpy`, `gps_clock.mpy`, `gps_receiver.mpy`, the display's `gps_tft.mpy` and `gps_tft_font.mpy`, `main.py` and the status page, only as `web.html.gz`, as
 `<name>.dpl`, checks their size and SHA-256 on the board, and only then
-renames them over the old files, removing an old plain `/web.html` in the
-same step (~90 KB of flash back); a failed check (`Copy check FAILED`)
+renames them over the old files, `main.py` last, removing an old plain
+`/web.html` in the same step (~90 KB of flash back). A swap cut part way
+(a Ctrl-C, a lost link, a failed rename) is finished before any reset: the
+files left as `.dpl` are swapped in by a second session (a reset then
+booted a mixed set, the old `main.py` over new modules); one that cannot
+be finished leaves the board stopped and says so (`Swap FAILED part way`:
+run `deploy.sh` again at once, the watchdog resets a stopped logger). A
+copied file gone before the first rename is refused on the board's own word
+(`Swap refused`, the old install stays); no answer at all counts as a swap
+cut part way. A
+reset that fails after a whole swap is a warning, tried once more. On a
+frozen firmware whose marker has no display hash the display's
+`gps_tft*.mpy` stay; a failed check (`Copy check FAILED`)
 removes the `.dpl` files and keeps the old install, so a copy cut short on
 a nearly full flash can no longer leave an unimportable module (not
 `<name>.new`: that is how an OTA stages the page it installs). Its first
@@ -316,9 +332,13 @@ OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 ```
 
 Once the new manifest is up, the files only the replaced manifest named
-are removed from `OTA_DEST`, and any other `micropython-*.bin`,
-`web-*.html.gz` or `*.tmp` the new manifest does not name (one a failed
-cleanup or upload left; plain names only, nothing else in the folder).
+are removed from `OTA_DEST`, and any other `micropython-*.bin` or
+`web-*.html.gz` the new manifest does not name (one a failed cleanup left;
+plain names only, nothing else in the folder); a `*.tmp` only once it is an
+hour old (a younger one is another publish's upload in progress). The
+published build itself again (same build and commit) is only that cleanup
+when its files' SHA-256 are the ones its manifest signs; otherwise (a
+republish cut between the moves) it is published again.
 The manifest also carries its end, `expires` (90 days on, seconds since
 2020 UTC), under a second HMAC, `hmac2` (the first one stays the string
 older boards check, so they still take the manifest that updates them).
@@ -326,7 +346,20 @@ A board of this build refuses a manifest without it, a forged one, and,
 once it knows the time, an expired one (`ota` state `expired`: publish
 again). So an older signed manifest, kept and served again by a spoofed
 server on the LAN, is good for 90 days at most, and the board refuses a
-build not newer than its own anyway.
+build not newer than its own anyway. The board also keeps the newest
+signed, fresh build it could install (`/ota.seen`): a build older than
+that is refused (`ota` state `superseded`; publish a newer one to go
+back, or `OTA_SEEN_RESET=1 ./deploy.sh` over USB to forget it; a
+read error on the file other than its absence refuses every update and
+every NTP answer while it lasts, `seen err`: it is read again at each
+check, and one that stays, across reboots too, is cleared by
+`OTA_SEEN_RESET=1 ./deploy.sh`), and that
+build's time (the commit's, signed) is a floor for the clock, an NTP
+answer's too: an NTP answer before it is refused, and a manifest that
+ended before it is expired whatever NTP says. A `FORCE=1` publish of a
+build not newer than the live one warns about this: a board that runs the
+live build needs `./tools/build_firmware.sh --flash`, one that only saw it
+`OTA_SEEN_RESET=1 ./deploy.sh`.
 
 The `OTA_DEST` path is a plain one: only letters, digits and `_ . / -` (no
 `~`, spaces or shell specials; `scp` takes it as it is, the `ssh` rename
