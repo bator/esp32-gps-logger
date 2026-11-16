@@ -8,13 +8,17 @@ what the receiver sent: no fix dated with a day it was not sent on, no
 position out of range, no exception, no bug; at the end, after 20 quiet
 minutes, the setup must be back (5 Hz with GST).
 
-    micropython -X heapsize=64M tests/rcv_sim.py SEED [EVENTS]
+    micropython -X heapsize=64M tests/rcv_sim.py SEED [EVENTS [x START_TICKS]]
+
+Also: silences of GPS_SILENT +- 1.5 s, blocks of 60-119 s with no read while
+the receiver sends on, a restart right at a silence's end, a clock that
+starts near the ticks wrap (START_TICKS); long silences in 5 s passes.
 
 One line "seed N bad 0 ..." when it holds. Not deployed."""
 import sys
 class _T: pass
 T = _T()
-clk = [1000]
+clk = [int(sys.argv[4]) if len(sys.argv) > 4 else 1000]
 T.ticks_ms = lambda: clk[0] & 0x3FFFFFFF
 T.ticks_diff = lambda a, b: ((a - b + 0x20000000) & 0x3FFFFFFF) - 0x20000000
 T.ticks_add = lambda a, b: (a + b) & 0x3FFFFFFF
@@ -175,11 +179,11 @@ def was_emitted(rx, date, hms):
 
 seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 400
-VERB = len(sys.argv) > 3
+VERB = len(sys.argv) > 3 and sys.argv[3] == "v"
 random.seed(seed)
 # 2026-11-15 23:58:30 UTC
 utc0 = (C.days(2026, 11, 15) - C.EPOCH_DAYS) * 86400 + 23 * 3600 + 58 * 60 + 30
-rx = Rx(utc0)
+rx = Rx(utc0 - clk[0] // 1000)
 r.uart = Uart(rx)
 r.reset()
 r.gps_setup()
@@ -228,6 +232,27 @@ for ev in range(N):
     rx.rmc_drop = random.choice([0, 0, 0.3, 1.0]) if random.random() < 0.2 else rx.rmc_drop
     rx.drop = random.choice([0, 0, 0.05]) if random.random() < 0.2 else rx.drop
     rx.cut = random.choice([0, 0, 0.05]) if random.random() < 0.2 else rx.cut
+    if x < 0.08:
+        d = r.GPS_SILENT + random.randint(-1500, 1500); note("silence near", d)
+        rx.silent_until = clk[0] + d
+        run_for(d + random.randint(0, 3000))
+        continue
+    if x < 0.14:
+        d = random.randint(60000, 119000); note("long block no read", d); block(d, False)
+        continue
+    if x < 0.20:
+        d = random.choice([r.GPS_SILENT + random.randint(-200, 200), random.randint(61000, 3 * 86400000)])
+        note("restart at silence end", d)
+        rx.silent_until = clk[0] + d
+        run_for(d - 1500, 5000 if d > 100000 else None)
+        e = rx.silent_until + random.randint(-50, 50)
+        while clk[0] < e:
+            pass_(random.randint(1, 30))
+        rx.restart(clk[0])
+        if random.random() < 0.3:
+            rx.buf = bytearray()
+        continue
+    x = random.random()
     if x < 0.30:
         run_for(random.randint(500, 20000))
     elif x < 0.45:
@@ -238,7 +263,7 @@ for ev in range(N):
         d = random.choice([61000, 300000, 3600000, 86400000 + random.randint(0, 7200000), 2 * 86400000 + 5000])
         note("silence", d); rx.silent_until = clk[0] + d
         # long silences in 1 s passes, then a timer-read block over the return
-        run_for(d - 2000, 1000 if d > 100000 else None)
+        run_for(d - 2000, 5000 if d > 100000 else None)
         if random.random() < 0.5:
             b = random.randint(2000, 30000); note("block timer over return", b); block(b, True)
     elif x < 0.75:
@@ -248,7 +273,7 @@ for ev in range(N):
     elif x < 0.85:
         note("restart during silence"); d = random.randint(61000, 3 * 86400000)
         rx.silent_until = clk[0] + d
-        run_for(d - 1000, 1000 if d > 100000 else None)
+        run_for(d - 1000, 5000 if d > 100000 else None)
         rx.restart(clk[0] + 1000)
     elif x < 0.90:
         note("fixless"); rx.fixless_until = clk[0] + random.randint(1000, 600000)

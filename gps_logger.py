@@ -95,6 +95,11 @@ VBAT_EVERY = 60                          # s between samples of the time left
 VBAT_HIST = 31                           # samples kept: 30 min
 VBAT_SPAN = 600                          # s of samples before a time left
 VBAT_DROP = 2                            # %-points the fit must fall over them
+VBAT_JUMP = 4                            # %-points off the last samples' median
+                                         # that are the charger, not noise
+                                         # (2 were ~20 mV: simulated at 8 mV of
+                                         # noise, 5 resets in 6 h; at 4 none, the
+                                         # charger's lift is 10 and more)
 VBAT_OCV = (4.19, 4.06, 4.00, 3.92, 3.84, 3.76, 3.68, 3.60, 3.51, 3.41, 3.30)
 # V of a 1S LiPo at 100, 90 ... 0 %, linear between: Meshtastic's default
 # OCV_ARRAY (src/Power.h: 4.19 ... 3.30 V at 10 %, 3.10 V at 0 %) from its
@@ -408,9 +413,32 @@ def _diag_write(line):
     most the line being written). Past DIAG_MAX the file becomes DIAG_OLD,
     so both together stay under 2 * DIAG_MAX. A line break in it becomes a
     space and a line is cut at DIAG_CUT (a field from the network, the OTA
-    manifest's commit, wrote forged lines and ~4 KB ones). Never raises."""
+    manifest's commit, wrote forged lines and ~4 KB ones). Never raises.
+    Not re-entered: the POST guard's timer reads the UART inside a write
+    (a receiver line to say), and its rotation between the remove and the
+    rename was undone by the outer one (160 KB of diag lost): a line said
+    meanwhile waits (DIAG_PEND at most) and goes after it."""
     if not DIAG:
         return
+    if _diag_busy[0]:
+        if len(_diag_pend) < DIAG_PEND:
+            _diag_pend.append(line)
+        else:
+            _diag_errs[0] += 1
+        return
+    _diag_busy[0] = True
+    try:
+        _diag_one(line)
+        while _diag_pend:
+            _diag_one(_diag_pend.pop(0))
+    finally:
+        _diag_busy[0] = False
+
+DIAG_PEND = 4                            # lines said inside a write, kept
+_diag_busy = [False]
+_diag_pend = []
+
+def _diag_one(line):
     try:
         if "\n" in line or "\r" in line:
             line = line.replace("\r", " ").replace("\n", " ")
@@ -5358,6 +5386,16 @@ DNS_KEEP = 12                            # addresses kept (host, port, kind, SSI
 _dns = {}                                # key -> the last address on that net
 _dns_bad = {}                            # SSID -> (Stamp of a slow failure, the IP)
 
+def _link_up():
+    """The station still has its IP (unknown: taken as up)."""
+    w = wifi["wlan"]
+    if w is None:
+        return False
+    try:
+        return w.status() == network.STAT_GOT_IP
+    except Exception:
+        return True
+
 def _resolve(host, port, kind=None):
     """getaddrinfo's first answer. A lookup that failed slowly (DNS_SLOW: a
     resolver that does not answer; measured 7 s, nothing else runs, the
@@ -5385,7 +5423,9 @@ def _resolve(host, port, kind=None):
         ai = socket.getaddrinfo(host, port, 0, kind)[0]
     except OSError:
         feed()
-        if time.ticks_diff(time.ticks_ms(), t0) >= DNS_SLOW:
+        if time.ticks_diff(time.ticks_ms(), t0) >= DNS_SLOW and _link_up():
+            # (a lookup the link dropped under is no silent resolver: with
+            # the same IP back the mark held for DNS_RETRY)
             if len(_dns_bad) >= DNS_KEEP and net not in _dns_bad:
                 _dns_bad.clear()
             _dns_bad[net] = (_stamp(), wifi["ip"])
@@ -5437,7 +5477,9 @@ def _http_head(s, want, got):
             k, _, v = h.partition(b":")
             k = k.strip().lower()
             if k in want:
-                got[want.index(k)] = v.strip()
+                i = want.index(k)
+                if got[i] is None:       # the first one: a text/html one and
+                    got[i] = v.strip()   # then a JSON one is no JSON answer
         bol = h[-1:] == b"\n"
     raise OSError("head over %d lines" % HTTP_LINES)
 
@@ -5702,7 +5744,8 @@ def _env_bad(url, key):
     """Why GEO_URL / API_KEY cannot go into a request head, or None. Both
     printable ASCII without a space (a CR in the key split the header, a
     space or a "# comment" got a 400 / 401 for ever); GEO_URL http(s)://
-    host[:port][/path], host letters, digits, "-" and "." (userinfo or
+    host[:port][/path], host letters, digits, "-", "." and "_" (a LAN or
+    Docker name, dawarich_app: "no .env" for the whole boot; userinfo or
     IPv6 made _raw_post's int(port) raise: "err net" for ever)."""
     for v, name in ((key, "API_KEY"), (url, "GEO_URL")):
         for c in v:
@@ -5714,7 +5757,7 @@ def _env_bad(url, key):
     ok = (proto in ("http", "https") and h
           and (":" not in host or (p.isdigit() and 0 < int(p) < 65536)))
     for c in h:
-        if not (c.isalpha() or c.isdigit() or c in "-."):
+        if not (c.isalpha() or c.isdigit() or c in "-._"):
             ok = False
     return None if ok else "GEO_URL in .env: not http(s)://host[:port][/path]"
 
@@ -7298,13 +7341,24 @@ def _vbat_pct(v):
 
 _vb_hist = []                            # [(uptime s, %)] on the battery
 
+def _vb_ref():
+    """What a sample is measured against for a jump: the median of the last
+    3 kept (the last one alone: a noisy one made the normal ones after it
+    look like jumps, 6 resets in 6 h at 8 mV of noise)."""
+    h = _vb_hist
+    if len(h) < 3:
+        return h[-1][1]
+    a, b, c = h[-3][1], h[-2][1], h[-1][1]
+    return max(min(a, b), min(max(a, b), c))
+
 _vb_jump = [0, None]                     # samples in a row off the last kept
                                          # one by over VBAT_DROP, the last one's
                                          # uptime
 def vbat_tick(now):
     """Every VBAT_EVERY s a sample of what is left, and _vbat_fit once (the
     display asks every TFT_STATE). No battery starts the history again, so
-    does a jump of more than VBAT_DROP points that holds VBAT_AGAIN
+    does a jump of more than VBAT_JUMP points (against the median of the
+    last 3 kept, _vb_ref) that holds VBAT_AGAIN
     samples in a row: put on the charger (it lifts the voltage) or taken off
     it (the lift gone at once: the samples on the charger made a steep
     line, half the time left for 25 min). One sample off alone is let go:
@@ -7322,7 +7376,7 @@ def vbat_tick(now):
         _vb_jump[0], _vb_jump[1] = 0, None
         _vb_left[0] = None
         return
-    if _vb_hist and abs(p - _vb_hist[-1][1]) > VBAT_DROP:
+    if _vb_hist and abs(p - _vb_ref()) > VBAT_JUMP:
         _vb_jump[0] += 1
         _vb_jump[1] = t
         if _vb_jump[0] < VBAT_AGAIN:

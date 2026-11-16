@@ -7273,17 +7273,26 @@ else:
 # 16, 17 of 40 events), no position out of range, no exception or bug, the
 # setup back at the end
 if mpy_f32:
+    # the seeds side by side (one at a time a busy machine timed one out),
+    # each one's time said; one starts 200 s before the ticks wrap
+    import time as _rs_time
+    _rs_runs = [(str(x_), "40") for x_ in (1, 6, 14, 16, 17)] + [("3", "30", "x", str((1 << 30) - 200000))]
+    _rs_p = [(r_, _rs_time.time(), subprocess.Popen(
+        [mpy_f32, "-X", "heapsize=64M", os.path.join(ROOT, "tests", "rcv_sim.py")] + list(r_),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)) for r_ in _rs_runs]
     _rs_out = []
-    for seed_ in (1, 6, 14, 16, 17):
+    for r_, t0_, p_ in _rs_p:
         try:
-            _rs_out.append(subprocess.check_output(
-                [mpy_f32, os.path.join(ROOT, "tests", "rcv_sim.py"), str(seed_), "40"],
-                stderr=subprocess.STDOUT, timeout=600).decode().strip().splitlines()[-1])
+            o_, _ = p_.communicate(timeout=900)
+            last_ = o_.decode(errors="replace").strip().splitlines()[-1:] or [""]
+            _rs_out.append(last_[0])
+            print("rcv_sim %s: %.0f s" % (" ".join(r_), _rs_time.time() - t0_))
         except Exception as e:
-            _rs_out.append(repr(e) + " " + (getattr(e, "output", b"") or b"").decode(
-                errors="replace")[-300:])
-    check("RCV-SIM: the receiver simulator holds on 5 seeds (dates, range, setup)",
-          all(re.match(r"seed \d+ bad 0 ", l_) for l_ in _rs_out), repr(_rs_out))
+            p_.kill()
+            _rs_out.append(repr(e))
+    check("RCV-SIM: the receiver simulator holds on 6 runs (dates, range, setup; silences "
+          "near GPS_SILENT, reads blocked over a minute, restarts at a silence's end, the "
+          "ticks wrap)", all(re.match(r"seed \d+ bad 0 ", l_) for l_ in _rs_out), repr(_rs_out))
 else:
     skip_check("RCV-SIM", "MICROPYTHON_F32 not set")
 
@@ -7301,6 +7310,19 @@ check("TRACK-FUZZ: 33 seeds of power cuts and write faults: no duplicate, no gar
       "no unexplained loss", _tf.returncode == 0 and len(_tf_lines) == 33
       and all(l_.startswith("ok ") for l_ in _tf_lines),
       repr([l_ for l_ in _tf_lines if not l_.startswith("ok ")][:3] or _tf.stderr[-300:]))
+
+# OTA-CUTSIM: tests/ota_cutsim.py, the OTA's whole life (install, every
+# boot's gps_boot and ota_boot, the pending run, the rollback) with a power
+# cut at each flash step, in three modes (WiFi, none, the old firmware's
+# watchdog before its ota_boot): the running firmware has its module and
+# page, a new one confirmed, nothing good bad (a "valid" left by a cut made
+# a good build bad in the watchdog mode)
+_oc = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "ota_cutsim.py")],
+                     capture_output=True, text=True, timeout=900)
+_oc_lines = [l_ for l_ in _oc.stdout.splitlines() if l_.startswith(("ok ", "FAULT "))]
+check("OTA-CUTSIM: a power cut at each OTA flash step, three modes: no fault",
+      _oc.returncode == 0 and len(_oc_lines) == 3 and all(l_.startswith("ok ") for l_ in _oc_lines),
+      repr(_oc_lines or _oc.stderr[-300:]))
 
 # The same smoke under CPython (keeps the script itself working)
 import subprocess
@@ -9274,7 +9296,7 @@ check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 74 % (Meshtasti
 # takes once a minute (the last 30 min, VBAT_HIST): the least-squares slope
 # carried down to 0 %, fitted once a sample, a minute at least. Nothing before
 # 10 min of samples, on a flat or rising (charging) line, at 99 % and up, or
-# without a battery; a jump of more than VBAT_DROP points (on or off the
+# without a battery; a jump of more than VBAT_JUMP points (on or off the
 # charger) that holds a second sample starts the history again; +2 points
 # of noise, or one sample off alone, does not.
 gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]  # 0.5 %/min
@@ -9312,11 +9334,11 @@ try:
         gl.vbat_tick(_clock[0])
         vl_off.append(gl._vbat_left())
     vl_off_hist = len(gl._vb_hist)
-    # noise: +2 points keeps the history, one sample +3 off alone too, +3
-    # twice starts it again
+    # noise: +2 points keeps the history, one sample +5 off alone too, +5
+    # twice starts it again; +3 (under VBAT_JUMP) never
     _vb_reset()
     vl_noise = []
-    for p_ in (50, 52, 55, 50, 55, 55):
+    for p_ in (50, 52, 57, 52, 57, 57):
         gl._vbat_now = lambda p_=p_: p_
         _clock[0] += 60000
         gl.vbat_tick(_clock[0])
@@ -16245,6 +16267,14 @@ if web_min:
         _wm_rb = subprocess.run([sys.executable, _wm_tool, _wm_bad], capture_output=True, text=True)
         _wm_d2.append(_wm_rb.returncode == 1 and "line 2" in _wm_rb.stderr
                       and "SyntaxError" in _wm_rb.stderr)
+        # (a regex's spaces folded parses still: node --check misses it,
+        # the AST compare in the build does not)
+        try:
+            web_min.ast_check("<script>\nvar r = /a  b/;\n</script>\n",
+                              "<script>\nvar r = /a b/;\n</script>\n")
+            _wm_d2.append(False)
+        except web_min.MinifyError:
+            _wm_d2.append(True)
 check("WEB-MIN-DIV2: blocks and objects told apart (case, label, arrow, keyword, ternary), "
       "\"of\" a keyword only in a for head, a compound CSS selector kept; a stripped script "
       "node refuses stops web_min, naming the line",
@@ -23436,7 +23466,15 @@ hl._dns_bad.clear()
 # network resolved before is used, or it fails at once. A fast failure (no
 # such name) is only that; another network's address is never used (a LAN
 # address reached with the API key on a stranger's LAN)
+class _DnsUp(object):
+    """A station with its IP (a slow lookup marks the network only then)."""
+    def status(self, *a):
+        return hl.network.STAT_GOT_IP
+
+
 _dc_ssid = hl.wifi["ssid"]
+_dc_wl = hl.wifi["wlan"]
+hl.wifi["wlan"] = _DnsUp()
 _dc_ga = _NtpMod.getaddrinfo
 _dc_slow = [0]
 
@@ -23472,6 +23510,7 @@ try:
 finally:
     _NtpMod.getaddrinfo = staticmethod(_dc_ga)
     hl.wifi["ssid"] = _dc_ssid
+    hl.wifi["wlan"] = _dc_wl
     hl._dns.clear()
     hl._dns_bad.clear()
 check("DNS-CACHE: a fast failure is only that; a slow one uses that network's address and "
@@ -26764,6 +26803,8 @@ finally:
 # DNS-NET: the slow failure marks the network, not the host name: a silent
 # resolver blocked the loop 7 s once per name (GEO_URL, NTP, OTA: 21 s)
 _dn_ssid = hl.wifi["ssid"]
+_dn_wl = hl.wifi["wlan"]
+hl.wifi["wlan"] = _DnsUp()
 _dn_sock = hl.socket
 _dn_had = "getaddrinfo" in vars(_dn_sock)
 _dn_ga = getattr(_dn_sock, "getaddrinfo", None)
@@ -26796,6 +26837,7 @@ finally:
     else:
         del _dn_sock.getaddrinfo
     hl.wifi["ssid"] = _dn_ssid
+    hl.wifi["wlan"] = _dn_wl
     hl._dns.clear()
     hl._dns_bad.clear()
 check("DNS-NET: one slow failure on a network: no other host name is asked there",
@@ -27563,6 +27605,268 @@ gl._rcv.reset()
 _uart_rx[:] = []
 check("GAP-HALFLINE: half a sentence before a silence is not joined to the bytes after it",
       "12:00:00" not in _gh, repr(_gh))
+
+# VBAT-NOISE: a jump was measured against the last sample alone, 2 points
+# (~20 mV): at 8 mV of noise the history started again 5 times in 6 h, the
+# time left known a third of the time. Against the median of the last 3,
+# VBAT_JUMP points: 6 h of a 0.6 mV/min discharge at 12 mV of noise, no reset
+import random as _vn_random
+_vn_rnd = _vn_random.Random(1)
+_vn_saved = (gl.uptime_s, gl._vbat_now)
+_vn_up = [1000]
+gl.uptime_s = lambda now=None: _vn_up[0]
+_vn_resets = _vn_known = 0
+try:
+    _vb_reset()
+    for i_ in range(6 * 60):
+        _vn_up[0] = 1000 + 60 * i_
+        v_ = 4.0 - 0.0006 * i_ + _vn_rnd.gauss(0, 0.012)
+        gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
+        n0_ = len(gl._vb_hist)
+        gl.vbat_tick(0)
+        _vn_resets += len(gl._vb_hist) == 1 and n0_ > 1
+        _vn_known += i_ > 30 and gl._vb_left[0] is not None
+finally:
+    gl.uptime_s, gl._vbat_now = _vn_saved
+    _vb_reset()
+check("VBAT-NOISE: 12 mV of noise starts no new history in 6 h; the time left known "
+      "over half the time", _vn_resets == 0 and _vn_known > (6 * 60 - 31) // 2,
+      repr((_vn_resets, _vn_known)))
+
+# DNS-LINK: a slow lookup the link dropped under marked the network for
+# DNS_RETRY, and a reconnect with the same IP kept the mark: only with the
+# station still up is it a silent resolver
+_dl_sock = hl.socket
+_dl_had = "getaddrinfo" in vars(_dl_sock)
+_dl_ga = getattr(_dl_sock, "getaddrinfo", None)
+
+
+def _dl_slow(h_, p_, f_, t_):
+    _clock[0] += 7000
+    raise OSError(-202)
+
+
+class _DlDown(object):
+    def status(self, *a):
+        return hl.network.STAT_CONNECTING
+
+
+_dl_sock.getaddrinfo = staticmethod(_dl_slow) if isinstance(_dl_sock, type) else _dl_slow
+_dl_saved = (hl.wifi["ssid"], hl.wifi["wlan"])
+_dl = []
+try:
+    for w_ in (_DlDown(), _DnsUp()):
+        hl._dns_bad.clear()
+        hl.wifi.update(ssid="hot", wlan=w_)
+        try:
+            hl._resolve("geo.example", 443, 1)
+        except OSError:
+            pass
+        _dl.append("hot" in hl._dns_bad)
+finally:
+    if _dl_had:
+        _dl_sock.getaddrinfo = staticmethod(_dl_ga) if isinstance(_dl_sock, type) else _dl_ga
+    else:
+        del _dl_sock.getaddrinfo
+    hl.wifi["ssid"], hl.wifi["wlan"] = _dl_saved
+    hl._dns_bad.clear()
+check("DNS-LINK: a slow failure marks the network only while the station has its IP",
+      _dl == [False, True], repr(_dl))
+# HTTP-CT-FIRST: of two Content-Type headers the last won (a text/html one
+# and then an application/json one committed the batch)
+
+
+class _CtS(object):
+    def __init__(self, lines):
+        self.lines = list(lines)
+
+    def readline(self, n=-1):
+        return self.lines.pop(0) if self.lines else b""
+
+
+_ct_got = [None]
+_ct_ok = gl._http_head(_CtS([b"Content-Type: text/html\r\n",
+                             b"Content-Type: application/json\r\n", b"\r\n"]),
+                       (b"content-type",), _ct_got)
+check("HTTP-CT-FIRST: the first Content-Type decides", _ct_ok and _ct_got == [b"text/html"],
+      repr((_ct_ok, _ct_got)))
+# ENV-UNDERSCORE: a LAN / Docker name with "_" (dawarich_app) was "no .env"
+# for the whole boot
+check("ENV-UNDERSCORE: GEO_URL may name a host with '_'",
+      gl._env_bad("http://dawarich_app:3000", "k") is None
+      and gl._env_bad("http://a b", "k") is not None, "")
+# DIAG-REENTER: the POST guard's timer said a line inside a diag write:
+# its rotation between the remove and the rename was undone by the outer
+# one; a line said inside one now waits and goes after it
+_dr_dir = tempfile.mkdtemp()
+_dr_saved = (gl.DIAG_FILE, gl.DIAG_OLD, gl.DIAG_MAX, gl._rm, gl.DIAG)
+gl.DIAG = 60000
+gl.DIAG_FILE = os.path.join(_dr_dir, "diag.log")
+gl.DIAG_OLD = os.path.join(_dr_dir, "diag.1")
+gl.DIAG_MAX = 15                             # (the 21 B there rotate, the next two do not)
+with builtins.open(gl.DIAG_FILE, "w") as f:
+    f.write("x" * 20 + "\n")
+_dr_inner = [True]
+
+
+def _dr_rm(p_):
+    if _dr_inner[0]:
+        _dr_inner[0] = False
+        gl._diag_write("inner line")         # (the timer's, inside the rotation)
+    _dr_saved[3](p_)
+
+
+gl._rm = _dr_rm
+try:
+    gl._diag_write("outer line")
+    with builtins.open(gl.DIAG_FILE) as f:
+        _dr_new = f.read()
+    with builtins.open(gl.DIAG_OLD) as f:
+        _dr_old = f.read()
+finally:
+    gl.DIAG_FILE, gl.DIAG_OLD, gl.DIAG_MAX, gl._rm, gl.DIAG = _dr_saved
+    shutil.rmtree(_dr_dir, ignore_errors=True)
+check("DIAG-REENTER: a line said inside a diag write goes after it; the rotation holds",
+      _dr_new == "outer line\ninner line\n" and _dr_old.startswith("x" * 20),
+      repr((_dr_new, _dr_old[:30])))
+
+# SEG-SILENCE (logger and receiver): the last second before a receiver
+# silence went out only with the next second's first sentence: after a
+# 5 s silence it opened the new segment (a line over the gap), after 70 s
+# it was dropped with the queue, after 400 s lost with the closed file. It
+# is the old segment's last point now, whatever the silence
+
+
+def _sg_nm(body):
+    c_ = 0
+    for ch_ in body.encode():
+        c_ ^= ch_
+    return ("$%s*%02X\r\n" % (body, c_)).encode()
+
+
+def _sg_run(sil):
+    d_ = tempfile.mkdtemp()
+    saved_ = gl.LOG_DIR
+    gl.LOG_DIR = d_
+    gl._rcv.reset()
+    gl.log_reset()
+    gl.st["checked"] = True
+    settled()
+    _uart_rx[:] = []
+    sec0_ = 12 * 3600
+
+    def epoch_(ms):
+        s_, f_ = ms // 1000, ms % 1000
+        hh_ = "%02d%02d%02d.%02d" % (s_ // 3600, s_ // 60 % 60, s_ % 60, f_ // 10)
+        m_ = 47.5 * 60 + (s_ + f_ / 1000.0 - sec0_) * 0.0075
+        la_ = "%02d%08.5f" % (m_ // 60, m_ % 60)
+        _uart_rx.extend(_sg_nm("GPRMC,%s,A,%s,N,01900.00000,E,27.0,0.0,151126,,,A" % (hh_, la_)))
+        _uart_rx.extend(_sg_nm("GPGGA,%s,%s,N,01900.00000,E,1,12,0.8,100.0,M,40.0,M,,"
+                               % (hh_, la_)))
+        _uart_rx.extend(_sg_nm("GPGST,%s,1.0,1.0,1.0,0.0,1.0,1.0,1.5" % hh_))
+
+    utc_ = nxt_ = sec0_ * 1000
+    q0_, q1_ = (sec0_ + 60) * 1000 + 600, (sec0_ + 60) * 1000 + 600 + sil
+    try:
+        while utc_ < q1_ + 15000:
+            while nxt_ <= utc_:
+                if not q0_ <= nxt_ < q1_:
+                    epoch_(nxt_)
+                nxt_ += 200
+            gl._rcv.read_uart()
+            gl._rcv.gps_check(_clock[0])
+            gl.log_tick()
+            utc_ += 40
+            _clock[0] += 40
+        gl._close_file()
+        gl.flush(None)
+        out_ = []
+        for n_ in sorted(os.listdir(d_)):
+            with _open3(os.path.join(d_, n_), "rb") as f_:
+                out_.append([x_[-8:-2] if "," in x_ else x_.strip()
+                             for x_ in trk2gpx.trb_lines(f_.read()) if x_[:1] != "#"])
+        return out_
+    finally:
+        gl.LOG_DIR = saved_
+        gl._rcv.reset()
+        gl.log_reset()
+        _uart_rx[:] = []
+        shutil.rmtree(d_, ignore_errors=True)
+
+
+_sg = {}
+for sil_ in (5000, 70000, 400000):
+    files_ = _sg_run(sil_)
+    where_ = [(i_, j_) for i_, f_ in enumerate(files_) for j_, x_ in enumerate(f_) if x_ == "120100"]
+    if not where_:
+        _sg[sil_] = "120100 missing"
+        continue
+    i_, j_ = where_[0]
+    after_ = files_[i_][j_ + 1:j_ + 2]
+    _sg[sil_] = "ok" if after_ in ([], ["-"]) else "then %r in its segment" % after_
+check("SEG-SILENCE: the last second before a 5 s, 70 s and 400 s receiver silence is the "
+      "old segment's last point", all(v_ == "ok" for v_ in _sg.values()), repr(_sg))
+
+# UPLOAD-LEFT-FUZZ: up["left"] (it holds the OTA back) stays what
+# count_points() says, tick for tick, through 201 / 422 / 500 answers,
+# batches of 3 to 50, .trk and .trb tracks of several flushes, damaged
+# bytes too; every track is gone at the end (a liveness check: holds and
+# backoff let go without being forced)
+import random as _lf_random
+_lf_saved = (gl.HIST_DAYS, gl.UPLOAD_BATCH)
+_post_headers[0] = {}
+_lf_bad = []
+try:
+    for run_ in range(16):
+        rnd_ = _lf_random.Random(7000 + run_)
+        d_ = tempfile.mkdtemp()
+        online(d_)
+        for k_ in range(rnd_.randint(1, 3)):
+            trb_ = rnd_.random() < 0.7
+            p_ = os.path.join(d_, "2026100%d_120000%s" % (k_ + 1, ".trb" if trb_ else ".trk"))
+            n_ = rnd_.randint(1, 120)
+            ls_ = [trk_line(52.5 + i_ * 1e-4, 13.4 + i_ * 1e-4,
+                            "2026-10-0%dT%02d:%02d:%02dZ" % (k_ + 1, i_ // 3600, i_ // 60 % 60, i_ % 60),
+                            ele="%.1f" % (rnd_.random() * 100)) for i_ in range(n_)]
+            if trb_:
+                out_ = bytearray(gl.HEADERB.encode())
+                cuts_ = sorted(rnd_.sample(range(1, n_), min(rnd_.randint(0, 5), n_ - 1))) + [n_]
+                a_ = 0
+                for c_ in cuts_:
+                    out_ += bytes(_kb_encode(ls_[a_:c_], c_ - a_, None))
+                    a_ = c_
+                out_ += gl.FOOTER.encode()
+            else:
+                out_ = bytearray(HEADER.encode() + "".join(ls_).encode() + gl.FOOTER.encode())
+            if run_ % 2:
+                for _ in range(rnd_.randint(0, 3)):
+                    out_[rnd_.randrange(len(out_))] = rnd_.choice([0xFF, 0x0A, 0x2C, 0x3D, 0x80])
+            with _open3(p_, "wb") as f_:
+                f_.write(out_)
+        gl.up["left"] = gl.count_points()
+        gl.HIST_DAYS = 0
+        gl.UPLOAD_BATCH = rnd_.choice([3, 10, 50])
+        drift_ = None
+        for step_ in range(3000):
+            _clock[0] += rnd_.choice([1000, 60000, 1900000])
+            r_ = rnd_.random()
+            _post_code[0] = 201 if step_ > 1500 or r_ < 0.7 else (422 if r_ < 0.85 else 500)
+            gl.upload_tick()
+            c_ = gl.count_points()
+            if c_ != gl.up["left"] and drift_ is None:
+                drift_ = (step_, gl.up["left"], c_)
+            if not [x_ for x_ in os.listdir(d_) if x_.endswith((".trb", ".trk"))]:
+                break
+        left_ = [x_ for x_ in os.listdir(d_) if x_.endswith((".trb", ".trk"))]
+        if drift_ or left_:
+            _lf_bad.append((run_, drift_, left_))
+        gl.up_reset()
+        shutil.rmtree(d_, ignore_errors=True)
+finally:
+    gl.HIST_DAYS, gl.UPLOAD_BATCH = _lf_saved
+    _post_code[0] = 201
+check("UPLOAD-LEFT-FUZZ: 'left' equals count_points every tick and every track goes "
+      "(16 runs of mixed answers, damaged files too)", _lf_bad == [], repr(_lf_bad[:3]))
 
 _run_ended.append(1)
 _summary()

@@ -347,14 +347,58 @@ def node_check(page):
                               "line %s: %s" % (at, what or (lines or [""])[-1]))
 
 
+_AST_JS = (
+    "const a = require('internal/deps/acorn/acorn/dist/acorn');"
+    "const fs = require('fs');"
+    "const t = (p) => JSON.stringify(a.parse(fs.readFileSync(p, 'utf8'), {ecmaVersion: 'latest'}),"
+    " (k, v) => k === 'start' || k === 'end' ? undefined : typeof v === 'bigint' ? String(v) : v);"
+    "console.log(t(process.argv[1]) === t(process.argv[2]) ? 'same' : 'differ');")
+
+
+def ast_check(src, page):
+    """Each stripped <script> against its source in node's own acorn (the
+    positions left out), when node and its acorn are there: a "/" taken
+    for a regex that still parses (a regex's spaces folded, the same
+    program no more) passes node --check and fails here. Without acorn:
+    nothing (node_check). Raises MinifyError."""
+    node = shutil.which("node")
+    if not node:
+        return
+    pairs = [(m.group(3), n.group(3))
+             for m, n in zip((m for m in _BLOCK.finditer(src)
+                              if m.group(1) and m.group(2).lower() == "script"),
+                             (n for n in _BLOCK.finditer(page)
+                              if n.group(1) and n.group(2).lower() == "script"))]
+    for a, b in pairs:
+        paths = []
+        try:
+            for t in (a, b):
+                fd, path = tempfile.mkstemp(suffix=".js")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(t)
+                paths.append(path)
+            r = subprocess.run([node, "--expose-internals", "-e", _AST_JS] + paths,
+                               capture_output=True, text=True, timeout=120)
+        finally:
+            for path in paths:
+                os.remove(path)
+        if "Cannot find module" in r.stderr or "bad option" in r.stderr:
+            return                       # (a node without its acorn to reach)
+        if r.stdout.strip() != "same":
+            raise MinifyError("the stripped script is not the same program as the source "
+                              "(acorn): %s" % (r.stdout.strip() or r.stderr.strip()[-200:]))
+
+
 def main(argv):
     if len(argv) not in (2, 3):
         print(__doc__, file=sys.stderr)
         return 2
     try:
         with open(argv[1], encoding="utf-8") as f:
-            text = minify(f.read())
+            src = f.read()
+        text = minify(src)
         node_check(text)
+        ast_check(src, text)
         page = text.encode("utf-8")
         if len(argv) == 2:
             sys.stdout.buffer.write(page)

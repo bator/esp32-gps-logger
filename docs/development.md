@@ -30,8 +30,14 @@ every pull request:
     banner, silences of days, blocks, lost sentences): no fix with a day
     it was not sent on, the setup back at the end;
   - `tests/track_fuzz.py`: the track writer under power cuts, partial
-    writes, failed closes and MemoryErrors (LittleFS's commit on close):
-    every point read back once and in order;
+    writes, failed closes, transient stat errors and MemoryErrors
+    (LittleFS's commit on close), over two UTC days, with the day history
+    of closed tracks: every point read back once and in order, no day file
+    shrinking but by its trim;
+  - `tests/ota_cutsim.py`: the OTA's whole life with a bootloader model and
+    a power cut at each flash step (WiFi, none, the old firmware's
+    watchdog before its ota_boot): the running firmware has its own module
+    and page, a new one is confirmed, no good build is bad;
   - `deploy.sh` against a fake board (a stand-in `mpremote` that runs the
     board-side code under CPython): copy, check and rename, too little
     flash, a cut copy, frozen firmware (stale, `FORCE`, `FORCE_MPY`, no
