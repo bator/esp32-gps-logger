@@ -757,13 +757,28 @@ for txt in (b".", b"+.", b".e1", b"e1", b"-.e5", b"47.5", b"5e1"):
     gl._rbuf[0:len(txt)] = txt
     ff.append(gl._fnum(0, len(txt)))
 fp = []
-for txt in (b"90.000003", b"90.000000", b"900000001e-7"):
+for txt, lim in ((b"90.000003", 90), (b"90.000000", 90), (b"900000001e-7", 90),
+                 (b"89.999999", 90), (b"179.999999", 180), (b"-179.999995", 180)):
     gl._rbuf[0:len(txt)] = txt
-    fp.append(gl._past(0, len(txt)))
-print("fnum", ff, "past", fp)
+    fp.append(gl._past(0, len(txt), lim))
+print("fnum", ff, "past", fp, float("179.999999"))
 check("track fields: no digit before the exponent is no number; past the limit is past "
-      "it where single precision rounds onto it",
-      ff == [None, None, None, None, None, 47.5, 50.0] and fp == [True, False, True])
+      "it where single precision rounds onto it, under it is not (89.999999 is 90.0 too)",
+      ff == [None, None, None, None, None, 47.5, 50.0]
+      and fp == [True, False, True, False, False, False])
+
+# NMEA minutes the way the board reads them: single precision rounds
+# 59.999999 onto 60.0, a valid position dropped as a bad sentence
+dg = []
+for v, h, ax in (("4759.999999", "N", "NS"), ("17959.999999", "E", "EW"),
+                 ("4760.000000", "N", "NS"), ("47+5.5", "N", "NS")):
+    try:
+        dg.append(round(gl._rcv._deg(v, h, ax), 3))
+    except ValueError:
+        dg.append("bad")
+print("deg", dg)
+check("NMEA minutes: under 60 by their text, not by a single-precision float",
+      dg == [48.0, 180.0, "bad", "bad"])
 
 if fails:
     raise SystemExit("mpy logger smoke FAILED: %s" % ", ".join(fails))

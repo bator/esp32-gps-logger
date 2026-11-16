@@ -481,7 +481,8 @@ home.
   read already. The name lookup cannot be (lwIP: 7 s without an answer,
   nothing else runs): after a lookup that failed slowly (over 2 s,
   `DNS_SLOW`; a fast "no such name" is only that) the network is not asked
-  again for 10 min (`DNS_RETRY`) or until it gives a new IP: the address
+  again for 10 min (`DNS_RETRY`) or until it gives a new IP, for no host name
+  (one per name blocked the upload's, NTP's and the OTA's lookup: 21 s): the address
   that same network resolved before is used, or the POST fails at once.
   Another network's address is never used (a LAN address would take the
   API key to a stranger's device on a LAN of the same range). NTP goes before the upload in the loop, so the first

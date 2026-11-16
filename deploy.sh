@@ -265,7 +265,7 @@ $RM_MPY and 'gps_receiver.mpy' in os.listdir() and os.remove('gps_receiver.mpy')
     + ls : \
     ${RESET[@]+"${RESET[@]}"}
 if [ "$OTAPEND" = False ]; then
-    trap - EXIT
+    trap 'rm -rf "$BUILD"' EXIT          # (the reset done: only the build dir)
 else
     echo "No reset (OTA pending or unknown): the new files count from the next boot" >&2
 fi
