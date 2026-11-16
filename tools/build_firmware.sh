@@ -74,7 +74,7 @@ BOARD_DIR=${BOARD_DIR:-$PWD/boards/GPS_LOGGER_S3}
 BOARD=$(basename "$BOARD_DIR")
 CHIP=$(sed -n 's/^set(IDF_TARGET \(.*\))$/\1/p' "$BOARD_DIR/mpconfigboard.cmake")
 FLASH_MB=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\([0-9]*\)MB"$/\1/p' "$BOARD_DIR/sdkconfig.board")
-PORT=${PORT:-/dev/ttyUSB0}
+PORT=${PORT:-/dev/ttyACM0}               # the Heltec's USB Serial/JTAG (as deploy.sh)
 APP_SIZE=0x1c0000                         # one OTA app slot (partitions-ota.csv)
 APP1=$(printf '0x%x' $((0x10000 + APP_SIZE)))  # the second slot's offset
 OUT=$PWD/firmware
@@ -144,6 +144,13 @@ mkdir -p "$OUT"
 # the frozen files: the logger, its Clock (gps_clock.py) and Receiver
 # (gps_receiver.py), main.py's boot helpers (gps_boot.py: OTA and the boot-fail
 # retry, out of the heap) and a marker deploy.sh looks for
+# what goes into the image (and the page): a change or an untracked one of
+# these is "-dirty" (--untracked-files=no let an untracked gps_*.py through
+# under a clean commit's name)
+SRC_FILES="gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py web.html"
+# shellcheck disable=SC2086
+src_sum() { cat $SRC_FILES | sha256sum | cut -d" " -f1; }
+SRC_SUM=$(src_sum)                        # (before the copies below)
 cp gps_logger.py "$OUT/gps_logger.py"
 cp gps_clock.py "$OUT/gps_clock.py"
 cp gps_receiver.py "$OUT/gps_receiver.py"
@@ -151,7 +158,9 @@ cp gps_boot.py "$OUT/gps_boot.py"
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD=$(git log -1 --format=%ct 2>/dev/null || echo 0)
 DIRTY=
-if [ "$COMMIT" != unknown ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+# shellcheck disable=SC2086
+if [ "$COMMIT" != unknown ] && { [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] \
+        || [ -n "$(git status --porcelain -- $SRC_FILES 2>/dev/null)" ]; }; then
     COMMIT=$COMMIT-dirty
     DIRTY=1
 fi
@@ -180,6 +189,25 @@ EOF
 # them with it; an older marker without TFT, BOOT, CLOCK or RX still passes)
 python3 tools/firmware.py marker >> "$OUT/gps_frozen.py"
 cp gps_tft.py gps_tft_font.py "$OUT/"
+
+# the toolchain the .mpy ABI and deploy.sh's mpy-cross pin are for: another
+# checkout made a signed image whose frozen code no deploy matched
+# (FORCE_TOOLS=1 builds anyway; a tree that is no git checkout is not checked)
+# (a function: a path with a space split into dir and tag, the check
+# skipped without a word)
+tool_tag() {
+    local d=$1 want=$2 got
+    [ -e "$d/.git" ] || return 0
+    if ! got=$(git -C "$d" describe --tags --exact-match 2>&1); then
+        got="no release tag ($got)"
+    fi
+    if [ "$got" != "$want" ]; then
+        echo "$d is at $got, not $want" >&2
+        [ "${FORCE_TOOLS:-0}" = 1 ] || { echo "(FORCE_TOOLS=1 builds anyway)" >&2; exit 1; }
+    fi
+}
+tool_tag "$MPY_DIR" v1.29.0
+tool_tag "$IDF_DIR" v5.5.2
 
 # shellcheck disable=SC1091
 source "$IDF_DIR/export.sh" >/dev/null
@@ -234,7 +262,12 @@ case "$MODE" in
         exit 1
     fi
     # otadata gone: the bootloader boots the first slot, the one just written
-    esptool.py --chip "$CHIP" --port "$PORT" -b 460800 --after hard_reset erase_region 0xd000 0x2000 >/dev/null
+    if ! esptool.py --chip "$CHIP" --port "$PORT" -b 460800 --after hard_reset erase_region 0xd000 0x2000 >/dev/null; then
+        echo "The app is written but otadata (0xd000) is not erased: a board that ran the" >&2
+        echo "second slot still boots it. Run:" >&2
+        echo "  esptool.py --chip $CHIP --port $PORT erase_region 0xd000 0x2000" >&2
+        exit 1
+    fi
     echo "Flashed $PORT. Now run ./deploy.sh (again if the board's REPL does not answer yet):"
     echo "it removes the old gps_logger.mpy that still shadows the frozen logger."
     echo "Roll back with: esptool.py --chip $CHIP --port $PORT write_flash 0x10000 $BACKUP, then ./deploy.sh"
@@ -273,17 +306,32 @@ case "$MODE" in
         *) echo "OTA_DEST must be host:/path (scp and ssh)" >&2; exit 1 ;;
     esac
     QDIR=$(printf %q "$DDIR")
+    # no password prompt, no stdin, no 2-minute hang on a dead host
+    SSHO=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10
+          -o ServerAliveCountMax=3)      # (and no hang on a link that dies)
     # the published build: only a newer one goes up (a board takes a
     # manifest's build when it is newer than its own, so an older or equal
     # one would not reach boards already updated, and republishing a commit
     # rewrote the .bin boards may be downloading)
     # (expanded here on purpose: QDIR is quoted for the remote shell)
     # shellcheck disable=SC2029
-    if ! LIVE=$(ssh "$DHOST" "if [ -e $QDIR/manifest.json ]; then cat $QDIR/manifest.json; fi"); then
+    if ! LIVE=$(ssh "${SSHO[@]}" -n "$DHOST" "if [ -d $QDIR ]; then echo dir; fi; if [ -e $QDIR/manifest.json ]; then cat $QDIR/manifest.json; fi"); then
         echo "Could not read the published manifest in $OTA_DEST" >&2
         exit 1
     fi
+    # (a folder that is not there: a typo in OTA_DEST, not a first publish
+    # whose checks below would all pass)
+    if [ "${LIVE%%$'\n'*}" != dir ]; then
+        echo "$OTA_DEST is no directory on $DHOST (mkdir it for a first publish)" >&2
+        exit 1
+    fi
+    LIVE=${LIVE#dir}
+    LIVE=${LIVE#$'\n'}
+    if [ -z "$LIVE" ]; then
+        echo "No manifest in $OTA_DEST yet: a first publish there"
+    fi
     LIVE_BUILD=0
+    LIVE_COMMIT=
     # the manifest's "board" is signed, and a board refuses another's
     if [ -n "$LIVE" ]; then
         # ("?": unreadable, not an empty name, an older board's manifest:
@@ -294,18 +342,53 @@ case "$MODE" in
             exit 1
         fi
         LIVE_BUILD=$(python3 -c 'import json, sys; print(int(json.loads(sys.stdin.read())["build"]))' <<< "$LIVE" 2>/dev/null || echo x)
+        LIVE_COMMIT=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read()).get("commit") or "")' <<< "$LIVE" 2>/dev/null || true)
+    fi
+    RESUME=
+    BINF=micropython-$COMMIT.bin
+    # (expanded here on purpose: QDIR is quoted for the remote shell)
+    # shellcheck disable=SC2029
+    if ! LS=$(ssh "${SSHO[@]}" -n "$DHOST" "ls -1A $QDIR"); then
+        echo "WARNING: could not list $OTA_DEST: leftovers are not removed" >&2
+        LS=
+        LS_OK=
+    else
+        LS_OK=1
+    fi
+    # the live manifest is this very build (same build and commit): only a
+    # cleanup when its files are there and it does not end within a week;
+    # else it is published again (the same names, each moved in)
+    SAME=
+    if [ "$LIVE_BUILD" != x ] && [ "$BUILD" = "$LIVE_BUILD" ] && [ "$COMMIT" = "$LIVE_COMMIT" ]; then
+        SAME=1
+        LIVE_LEFT=$(python3 -c 'import json, sys, time; m = json.loads(sys.stdin.read()); print(int(m.get("expires", 0)) + 1577836800 - int(time.time()))' <<< "$LIVE" 2>/dev/null || echo 0)
+        WHY=
+        if [ -z "$LS_OK" ]; then
+            WHY="its folder could not be listed"
+        elif ! grep -qx -- "$BINF" <<< "$LS" || ! grep -qx -- "web-$COMMIT.html.gz" <<< "$LS"; then
+            WHY="a file it names is missing"
+        elif [ "$LIVE_LEFT" -lt $((7 * 86400)) ]; then
+            WHY="it ends in under a week (expires)"
+        fi
     fi
     if [ "$LIVE_BUILD" = x ]; then
         echo "The published manifest in $OTA_DEST has no readable build" >&2
         [ "${FORCE:-0}" = 1 ] || exit 1
+    elif [ -n "$SAME" ] && [ "${FORCE:-0}" != 1 ] && [ -z "$WHY" ]; then
+        # this very build is the live one (a publish whose ssh broke after
+        # the renames, or whose cleanup failed): only the cleanup below
+        echo "Build $BUILD ($COMMIT) is already published: removing what is left over only (FORCE=1 publishes it again)"
+        RESUME=1
+    elif [ -n "$SAME" ]; then
+        echo "Build $BUILD ($COMMIT) is the published one, ${WHY:-FORCE=1}: publishing it again"
     elif [ "$BUILD" -le "$LIVE_BUILD" ]; then
         echo "Build $BUILD ($COMMIT) is not newer than the published build $LIVE_BUILD" >&2
         [ "${FORCE:-0}" = 1 ] || { echo "(FORCE=1 publishes it anyway)" >&2; exit 1; }
         echo "FORCE=1: publishing it anyway" >&2
     fi
+    if [ -z "$RESUME" ]; then
     rm -rf "$OUT/ota"
     mkdir -p "$OUT/ota"
-    BINF=micropython-$COMMIT.bin
     cp "$OUT/micropython.bin" "$OUT/ota/$BINF"
     # stripped and gzipped as deploy.sh does it, the firmware's own window
     python3 tools/web_min.py web.html "$OUT/ota/web-$COMMIT.html.gz"
@@ -314,29 +397,57 @@ case "$MODE" in
     # each as <name>.tmp, then moved over the live one (one rename: a board
     # downloading it keeps reading the old file), the named files first,
     # the manifest naming them last
+    # the sources once more: one edited during the build (web.html is
+    # minified just above) went up under the clean commit's name
+    if [ "$(src_sum)" != "$SRC_SUM" ]; then
+        echo "The sources changed during the build: nothing published (build again)" >&2
+        exit 1
+    fi
     MV=""
     for f in "$BINF" "web-$COMMIT.html.gz" manifest.json; do
-        scp -q "$OUT/ota/$f" "$DHOST:$DDIR/$f.tmp"
+        scp "${SSHO[@]}" -q "$OUT/ota/$f" "$DHOST:$DDIR/$f.tmp"
         MV+="mv -f $QDIR/$f.tmp $QDIR/$f && "
     done
     # (MV built here, its paths %q-quoted)
     # shellcheck disable=SC2029
-    ssh "$DHOST" "${MV}true"
+    ssh "${SSHO[@]}" -n "$DHOST" "${MV}true"
     echo "Published $COMMIT (build $BUILD) to $OTA_DEST"
+    fi
     # the files only the replaced manifest named go (an older signed
     # manifest and its image stayed on the server to be served again; the
     # HMAC binds no freshness): after the new manifest is up, never one the
     # new manifest names, plain names only (tools/firmware.py old)
+    # And any build's image, page or .tmp in the folder the new manifest
+    # does not name: one a failed cleanup or upload left was named by no
+    # later manifest and stayed for good (served again, a rollback target)
     RM=""
-    if [ -n "$LIVE" ]; then
-        for f in $(python3 tools/firmware.py old "$BINF" "web-$COMMIT.html.gz" <<< "$LIVE" 2>/dev/null || true); do
-            RM+=" $QDIR/$(printf %q "$f")"
-        done
+    OLD=()
+    if [ -n "$LIVE" ] && [ -z "$RESUME" ]; then
+        read -r -a OLD <<< "$(python3 tools/firmware.py old "$BINF" "web-$COMMIT.html.gz" <<< "$LIVE" 2>/dev/null | tr '\n' ' ' || true)"
     fi
+    # (expanded here on purpose: QDIR is quoted for the remote shell)
+    # shellcheck disable=SC2029
+    if [ -z "$RESUME" ] && ! LS=$(ssh "${SSHO[@]}" -n "$DHOST" "ls -1A $QDIR"); then
+        echo "WARNING: could not list $OTA_DEST: leftovers are not removed" >&2
+        LS=
+    fi
+    while IFS= read -r f; do
+        case "$f" in
+            "$BINF"|"web-$COMMIT.html.gz"|manifest.json) ;;
+            micropython-*.bin|web-*.html.gz|*.tmp) OLD+=("$f") ;;
+        esac
+    done <<< "$LS"
+    SEEN=" "
+    for f in "${OLD[@]+"${OLD[@]}"}"; do
+        [[ $f =~ ^[A-Za-z0-9._-]+$ ]] || continue
+        case "$SEEN" in *" $f "*) continue ;; esac
+        SEEN+="$f "
+        RM+=" $QDIR/$(printf %q "$f")"
+    done
     if [ -n "$RM" ]; then
         # (RM built here, its paths %q-quoted)
         # shellcheck disable=SC2029
-        if ssh "$DHOST" "rm -f$RM"; then
+        if ssh "${SSHO[@]}" -n "$DHOST" "rm -f$RM"; then
             echo "Removed the previous build's files:$RM"
         else
             echo "WARNING: could not remove the previous build's files:$RM" >&2

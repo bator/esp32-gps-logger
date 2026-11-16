@@ -43,6 +43,12 @@ case "${VENV:-.venv}" in
     /*) ;;
     *) [ -z "${VENV:-}" ] || VENV=$PWD/$VENV ;;
 esac
+# (CA_DER too: a relative one was looked for in the script's folder, not
+# found, and skipped without a word)
+case "${CA_DER:-}" in
+    ""|/*) ;;
+    *) CA_DER=$PWD/$CA_DER ;;
+esac
 cd "$(dirname "$0")"
 
 PORT=${PORT:-/dev/ttyACM0}               # the Heltec's USB Serial/JTAG
@@ -51,7 +57,9 @@ PY=$VENV/bin/python
 MPREMOTE=$VENV/bin/mpremote
 # (the display's two modules too: without them a plain firmware's TFT stayed
 # dark, "tft ImportError")
-FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy gps_tft.mpy gps_tft_font.mpy main.py web.html.gz"
+# (main.py last: the swap below puts it in after the rest, a cut swap
+# then starts the old main.py over the files it knows)
+FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy gps_tft.mpy gps_tft_font.mpy web.html.gz main.py"
 ARCH=xtensawin                           # the Heltec's ESP32-S3 (checked below)
 
 # A device path that is not there: say so, before anything else (mpremote's
@@ -63,10 +71,22 @@ case "$PORT" in
         fi ;;
 esac
 
-# mpy-cross must match the firmware's .mpy version (MicroPython 1.29)
+# mpy-cross must match the firmware's .mpy version (MicroPython 1.29): an
+# other one installed made .mpy files the board refused at import (5 failed
+# boots, the REPL) while this said "Deployed"
+if [ ! -x "$PY" ]; then
+    echo "No Python in $VENV (VENV=... to choose; see docs/setup.md)" >&2
+    exit 1
+fi
 if ! "$PY" -c "import mpy_cross" 2>/dev/null; then
     "$VENV/bin/pip" install -q "mpy-cross==1.29.*"
 fi
+MPYV=$("$PY" -c 'import importlib.metadata as m; print(m.version("mpy-cross"))' 2>/dev/null || true)
+case "$MPYV" in
+    1.29.*) ;;
+    *) echo "mpy-cross $MPYV is not 1.29.x: $VENV/bin/pip install 'mpy-cross==1.29.*'" >&2
+       exit 1 ;;
+esac
 
 # What goes up, made here before the board is asked anything: the logger's
 # modules (sent unless the firmware has them frozen in) and main.py, and the
@@ -152,7 +172,7 @@ case "$FROZEN" in
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
             # (not the display's modules: the frozen ones stay, ~8 KB of
             # heap and a shadow of their frozen code for nothing)
-            FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy main.py web.html.gz"
+            FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy web.html.gz main.py"
         else
             # (the display's code, gps_boot.py, gps_clock.py and
             # gps_receiver.py on the board that has them in the marker: an older
@@ -166,7 +186,7 @@ case "$FROZEN" in
                 [ "${FORCE:-0}" = 1 ] || exit 1
                 echo "FORCE=1: deploying main.py and the page next to a stale frozen logger" >&2
             fi
-            FILES="main.py web.html.gz"
+            FILES="web.html.gz main.py"
             RM_MPY=1
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
@@ -175,6 +195,31 @@ case "$FROZEN" in
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
+# The upload server's root certificate (DER, at most 4 KB) goes up as
+# /ca.der when there is one: CA_DER=path, or ca.der next to this script
+# (gitignored). Without it the logger posts no unverified TLS (see
+# UPLOAD_UNVERIFIED in docs/setup.md).
+CA_SRC=${CA_DER:-ca.der}
+if [ -n "${CA_DER:-}" ] && [ ! -f "$CA_SRC" ]; then
+    echo "CA_DER=$CA_DER: no such file" >&2
+    exit 1
+fi
+if [ -f "$CA_SRC" ]; then
+    CA_N=$(wc -c < "$CA_SRC")
+    # (a DER SEQUENCE: 0x30, then a long length, 0x81 or 0x82, as every
+    # certificate over 127 bytes has)
+    CA_HEAD=$(head -c 2 "$CA_SRC" | od -An -tx1 | tr -d ' \n')
+    if [ "$CA_N" -gt 4096 ] || { [ "$CA_HEAD" != 3081 ] && [ "$CA_HEAD" != 3082 ]; }; then
+        echo "$CA_SRC is not a DER certificate of at most 4096 bytes" >&2
+        exit 1
+    fi
+    cp "$CA_SRC" "$BUILD/ca.der"
+    FILES="ca.der $FILES"
+    echo "Root certificate: $CA_SRC ($CA_N B) -> /ca.der"
+else
+    echo "No ca.der (CA_DER=...): the board's /ca.der is left as it is"
+fi
+
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
 # of metadata, while the old one still exists
@@ -250,15 +295,19 @@ echo "Copied and checked: $FILES"
 # count from the next boot.
 RESET=(+ reset)
 [ "$OTAPEND" = False ] || RESET=()
-"$MPREMOTE" connect "$PORT" \
+if ! "$MPREMOTE" connect "$PORT" \
     exec "
 import os
+for n in '$FILES'.split():
+    os.stat(n + '.dpl')
 for n in '$FILES'.split():
     try:
         os.rename(n + '.dpl', n)
     except OSError:
+        os.stat(n + '.dpl')
         os.remove(n)
         os.rename(n + '.dpl', n)
+    print('swapped', n)
 'web.html' in os.listdir() and os.remove('web.html')
 'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
 'gps_clock.py' in os.listdir() and os.remove('gps_clock.py')
@@ -272,7 +321,14 @@ $RM_MPY and 'gps_tft.mpy' in os.listdir() and os.remove('gps_tft.mpy')
 $RM_MPY and 'gps_tft_font.mpy' in os.listdir() and os.remove('gps_tft_font.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
-    ${RESET[@]+"${RESET[@]}"}
+    ${RESET[@]+"${RESET[@]}"}; then
+    # (the "swapped" lines above say which went in: a mixed set, which the
+    # EXIT trap's reset would boot into; the board is left stopped instead)
+    trap 'rm -rf "$BUILD"' EXIT
+    echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
+    echo "The board is left stopped (no reset onto a mixed set): run ./deploy.sh again" >&2
+    exit 1
+fi
 if [ "$OTAPEND" = False ]; then
     trap 'rm -rf "$BUILD"' EXIT          # (the reset done: only the build dir)
 else

@@ -171,7 +171,11 @@ reserve nothing is written. Nothing reads a whole file into RAM: the
 rotation only looks at the size, the boot reads the last few lines, and the
 status page reads both files in 16 KB pieces (`/diag?f=1|0&o=<byte>`, see
 the *Event log* below; `/status.json?diag` carries the last 15 lines,
-`WEB_DIAG`, plain `/status.json` no longer reads them). After a walk, plug the board in and read it:
+`WEB_DIAG`, plain `/status.json` no longer reads them). `/diag` and `/hist`
+answer only a request with an `X-GPS` header (the page sends one; with
+`curl`, `-H 'X-GPS: 1'`), and with `WEB_TOKEN` set in `.env` all three
+want it to be that token (`-H 'X-GPS: <token>'`; the page takes it from
+`#k=<token>` in its URL). After a walk, plug the board in and read it:
 
 ```bash
 .venv/bin/mpremote resume fs cat :/diag.log

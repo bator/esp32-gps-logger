@@ -127,9 +127,9 @@ def _manifest(build, img=_img, key=b"secret", **kw):
          "files": [{"path": page_path, "size": len(_page),
                     "sha256": _hl.sha256(_page).hexdigest(),
                     "url": "web.html.gz"}]}
+    m["expires"] = 1 << 30               # (2054: no test clock gets there)
     m.update(kw)
-    m["hmac"] = gl._hmac_hex(key, gl._ota_signed(m))
-    return m
+    return gl._ota_sign(key, m)
 
 
 def _serve(m, img=_img):

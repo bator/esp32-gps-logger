@@ -59,6 +59,7 @@ function page(width, D) {                // D: a Date of the test's own (a set c
   map.offsetWidth = width; map.offsetHeight = 360;
   function XHR() { xhrs.push(this); }
   XHR.prototype.open = function (m, u) { this.method = m; this.url = u; };
+  XHR.prototype.setRequestHeader = function (n, v) { (this.sent = this.sent || {})[n] = v; };
   XHR.prototype.send = function () {};
   XHR.prototype.overrideMimeType = function (m) { this.mime = m; };
   XHR.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };
@@ -1039,6 +1040,7 @@ ft.rev = (() => {
     const urls = [];
     c.XMLHttpRequest = function () { urls.push(this); };
     c.XMLHttpRequest.prototype.open = function (mm, u) { this.url = u; };
+    c.XMLHttpRequest.prototype.setRequestHeader = function () {};
     c.XMLHttpRequest.prototype.send = function () {};
     c.XMLHttpRequest.prototype.overrideMimeType = function () {};
     c.XMLHttpRequest.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };
@@ -1160,6 +1162,7 @@ ft.histEnd = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTi
   const urls = [];
   c.XMLHttpRequest = function () { urls.push(this); };
   c.XMLHttpRequest.prototype.open = function (mm, u) { this.url = u; };
+  c.XMLHttpRequest.prototype.setRequestHeader = function () {};
   c.XMLHttpRequest.prototype.send = function () {};
   c.XMLHttpRequest.prototype.overrideMimeType = function () {};
   c.XMLHttpRequest.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };

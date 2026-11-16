@@ -261,7 +261,7 @@ f.close()
 try:
     o, dgot, dok, dmax = 0, b"", True, 0
     for _ in range(20):
-        s = client(b"GET /diag?f=0&o=%d HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        s = client(b"GET /diag?f=0&o=%d HTTP/1.1\r\nX-GPS: 1\r\nHost: 127.0.0.1\r\n\r\n"
                    % o)
         tick()
         dmax = max([dmax] + outs)
@@ -280,7 +280,7 @@ try:
           "over WEB_CHUNK",
           dok and dgot == dbody and len(dbody) > gl.HIST_REPLY
           and dmax <= gl.WEB_CHUNK, (dok, len(dgot), len(dbody), dmax))
-    s = client(b"GET /diag?f=1&o=0 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    s = client(b"GET /diag?f=1&o=0 HTTP/1.1\r\nX-GPS: 1\r\nHost: 127.0.0.1\r\n\r\n")
     tick()
     got = read_all(s)
     check("GET /diag?f=1 without diag.1 is a 404",

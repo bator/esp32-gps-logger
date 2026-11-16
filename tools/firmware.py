@@ -23,6 +23,11 @@ import hmac
 import json
 import os
 import sys
+import time
+
+EPOCH_2020 = 1577836800                 # Unix time of 2020-01-01 UTC
+EXPIRE_S = 90 * 86400                   # a manifest's life: a board that
+                                        # missed it takes the next publish
 
 # the marker's fields: its name, the sources it hashes (concatenated in this
 # order), what deploy.sh names when it differs. SHA is the logger itself.
@@ -150,6 +155,11 @@ def manifest(d, key_file, build, commit, board):
         m["files"].append({"path": path, "size": n, "sha256": h, "url": name})
     m["board"] = board
     m["hmac"] = hmac.new(key, signed(m).encode(), hashlib.sha256).hexdigest()
+    # its end (seconds since 2020, UTC) under a second HMAC: "hmac" stays
+    # the string older boards check, so they still take this manifest
+    m["expires"] = int(time.time()) - EPOCH_2020 + EXPIRE_S
+    m["hmac2"] = hmac.new(key, (signed(m) + "|expires=%d" % m["expires"]).encode(),
+                          hashlib.sha256).hexdigest()
     with open(os.path.join(d, "manifest.json"), "w") as f:
         json.dump(m, f)
     return m

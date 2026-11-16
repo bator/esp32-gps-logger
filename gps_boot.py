@@ -139,7 +139,8 @@ def safe(n, retry_ms, again):
     reset; it failing again is another retry_ms here). It sat in the REPL
     for good, not logging, until someone came with a cable. A virtual
     timer (-1, esp_timer): hardware Timer(0) is the logger's Ctrl-C
-    keep-alive, one started from the REPL took it over."""
+    keep-alive, one started from the REPL took it over. -> None, or the
+    error (text) when the timer could not be made."""
     global _retry
     print("boot fail", n, "- REPL; one more start in", retry_ms // 60000,
           "min (gps_boot._retry.deinit() stops it)")
@@ -149,6 +150,8 @@ def safe(n, retry_ms, again):
                     callback=lambda t: again())
     except Exception as e:
         print("no retry timer", e)
+        return repr(e)[:40]
+    return None
 
 # --- the start (main.py's, here so that an OTA brings it) -------------------
 
@@ -204,9 +207,14 @@ def _again():
     machine.reset()
 
 def _safe(n, why):
-    diag("crash boot fail %d%s: REPL, one more start in %d min" % (
-        n, why, BOOT_RETRY_MS // 60000))
-    safe(n, BOOT_RETRY_MS, _again)
+    """The diag line after the timer: written first, it promised a start
+    in 30 min that a timer that could not be made never gave."""
+    err = safe(n, BOOT_RETRY_MS, _again)
+    if err is None:
+        diag("crash boot fail %d%s: REPL, one more start in %d min" % (
+            n, why, BOOT_RETRY_MS // 60000))
+    else:
+        diag("crash boot fail %d%s: REPL, no retry timer %s" % (n, why, err))
 
 def _failed(e):
     """The logger's import or run() raised (before run()'s own crash

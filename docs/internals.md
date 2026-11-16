@@ -519,11 +519,13 @@ home.
   ends in) turns verification on. With an `http://` `GEO_URL` the logger
   warns that everything goes in the clear. Without `/ca.der` the start
   writes `upload GEO_URL https without /ca.der: the server is not verified,
-  uploads away on|off` to the diagnostic log, and `/status.json` has `tls`:
-  `verified`, `unverified`, `off` (http) or `ca err`. On a phone hotspot an
-  unverified upload shows the Bearer key to whoever runs the access point:
-  `UPLOAD_AWAY_UNVERIFIED=0` in `.env` keeps such uploads to the home
-  networks. The `SSLContext` (and the
+  uploads off|home only|on` to the diagnostic log, and `/status.json` has `tls`:
+  `verified`, `unverified`, `off` (http) or `ca err`. An unverified upload
+  shows the Bearer key to whoever can answer for the server: the access
+  point of a hotspot, and at home any host of the flat LAN (ARP or DNS),
+  whose 2xx also made the board delete tracks it never kept. So by default
+  (`UPLOAD_UNVERIFIED=0`) none goes, at home neither; `home` lets one go on
+  a home network, `1` everywhere. The `SSLContext` (and the
   certificate) is made once at boot, before the WiFi starts (made at the
   first POST it could grow the Python heap and keep that area), and reused.
   Only a missing `/ca.der` means no verification: one that cannot be read,
