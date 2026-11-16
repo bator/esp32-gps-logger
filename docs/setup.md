@@ -70,12 +70,19 @@ HOSTNAME=Dawarich-GPS-tracker
 | `DIAG` | Seconds between [diagnostic log](usage.md#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](usage.md#status-page), and the radio staying on at home for it. Default 1. |
 | `WEB_AWAY` | `1`/`0`: with `WEB` on, the page is served on the non-home networks too (e.g. a phone hotspot), to everyone there, without a password, and the radio stays on for it instead of sleeping once all is uploaded. `0`: off home nothing is served, also while the radio is on for an upload. Default 0. |
-| `UPLOAD_AWAY_UNVERIFIED` | `1`/`0`: `0` uploads only over verified TLS (`https://` with `/ca.der`) on a non-home network; without the certificate, or with an `http://` `GEO_URL`, the tracks wait for a home network (state `err unverified`, the radio sleeps meanwhile), so an evil-twin hotspot never sees the API key. Default 1 (uploads everywhere, as before). |
+| `WEB_TOKEN` | 1–64 printable ASCII characters, no spaces: `status.json`, `/hist` and `/diag` answer only a request whose `X-GPS` header is this token; open the page as `http://<board ip>/#k=<token>` (bookmark it). Without it `/hist` and `/diag` still want an `X-GPS` header (any value; the page sends one), so a page of another site cannot keep the board busy decoding. Unset by default. |
+| `UPLOAD_UNVERIFIED` | Where an upload that is not verified TLS (an `http://` `GEO_URL`, or `https://` without `/ca.der`) may go: `0` nowhere (the default), `home` only on a home network, `1` everywhere. The home LAN is flat: any host on it can answer for the server (ARP, DNS), take the Bearer key and, with a 2xx, make the board delete tracks it never stored. So put the server's root certificate on the board (`ca.der` next to `deploy.sh`, see below) rather than turning this on. While it waits the state is `err unverified`. The old `UPLOAD_AWAY_UNVERIFIED` (`1`: everywhere, `0`: home) is still read when this key is missing. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `UPLOAD_AWAY_UNVERIFIED`). SSIDs, passwords, `GEO_URL` and
-  `API_KEY` are taken verbatim, since they may contain `#`.
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `UPLOAD_UNVERIFIED`, `UPLOAD_AWAY_UNVERIFIED`). SSIDs, passwords, `GEO_URL`,
+  `API_KEY` and `WEB_TOKEN` are taken verbatim, since they may contain `#`.
+- **The server's certificate:** `./deploy.sh` copies `ca.der` from the repo
+  folder (gitignored; or `CA_DER=/path/to/root.der`) to the board's `/ca.der`
+  with the other files, checked by size and SHA-256. It is the DER root
+  certificate the server's chain ends in, at most 4 KB, e.g. for a Let's
+  Encrypt server `openssl x509 -in /etc/ssl/certs/ISRG_Root_X1.pem -outform der -out ca.der`
+  (check which root your server uses: `openssl s_client -connect host:443 -showcerts`).
 - Values may be quoted. On the keys above the comment goes first, then the
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
@@ -271,7 +278,14 @@ republished `.bin` keeps reading the old one, and none reads a half-copied
 manifest), the files first, the manifest naming them last, so a board
 reading the old manifest meanwhile still finds its files. A build that is
 not newer than the published manifest's is refused (a board only takes a
-newer one; `FORCE=1` publishes it anyway). The
+newer one; `FORCE=1` publishes it anyway); the published build itself
+again (the same build and commit: a publish whose `ssh` broke after the
+renames) only does the cleanup below. `ssh` and `scp` run with
+`BatchMode=yes` and a 10 s connect timeout (no password prompt, no hang),
+and an `OTA_DEST` folder that is not there is refused (`mkdir` it for a
+first publish). The sources are checked again right before the upload: one
+edited during the build stops it. `MPY_DIR` must be at the `v1.29.0` tag
+and `IDF_DIR` at `v5.5.2` (`FORCE_TOOLS=1` builds anyway). The
 manifest carries the build (the commit time), the commit, size and SHA-256
 of each file, and an HMAC-SHA256 over them with the key in `OTA_KEY_FILE`
 (default `~/.config/gps-logger/ota.key`). The key is one line of printable
@@ -291,13 +305,17 @@ OTA_DEST=user@host:/srv/www/gps-ota tools/build_firmware.sh --publish
 ```
 
 Once the new manifest is up, the files only the replaced manifest named
-are removed from `OTA_DEST` (plain names only, never one the new manifest
-names, nothing else in the folder). The HMAC binds no freshness: anyone
-who kept an older signed manifest and its image can serve them again (a
-spoofed server on the LAN), and a board behind that build installs it.
-The board refuses a build not newer than its own, and the removal keeps
-the server itself from serving old builds; a signed minimum build would
-need a new HMAC string, which the boards in the field do not check.
+are removed from `OTA_DEST`, and any other `micropython-*.bin`,
+`web-*.html.gz` or `*.tmp` the new manifest does not name (one a failed
+cleanup or upload left; plain names only, nothing else in the folder).
+The manifest also carries its end, `expires` (90 days on, seconds since
+2020 UTC), under a second HMAC, `hmac2` (the first one stays the string
+older boards check, so they still take the manifest that updates them).
+A board of this build refuses a manifest without it, a forged one, and,
+once it knows the time, an expired one (`ota` state `expired`: publish
+again). So an older signed manifest, kept and served again by a spoofed
+server on the LAN, is good for 90 days at most, and the board refuses a
+build not newer than its own anyway.
 
 The `OTA_DEST` path is a plain one: only letters, digits and `_ . / -` (no
 `~`, spaces or shell specials; `scp` takes it as it is, the `ssh` rename

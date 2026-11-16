@@ -237,6 +237,15 @@ var ADDR = "https://atlas.crusand.org/api/v1/photon/reverse";
 var ADDR_M = 25, ADDR_S = 20;
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA sentence: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
+// the X-GPS header the board's data routes want: its WEB_TOKEN as #k=...
+// in the URL (bookmark it; no browser storage), else "1" (no token set)
+var KEY = (function () {
+  try {
+    var k = /[#&]k=([^&]+)/.exec(location.hash);
+    return k ? decodeURIComponent(k[1]) : "1";
+  } catch (e) { return "1"; }
+})();
+function own(x) { x.setRequestHeader("X-GPS", KEY); }
 
 function esc(v) {
   if (v == null) return "-";
@@ -875,6 +884,7 @@ function histNext(i) {
   }
   var h = hist, day = h.days[i], o = h.off[day] || 0, x = new XMLHttpRequest();
   x.open("GET", "/hist?d=" + day + "&o=" + o + (h.t[day] ? "&t=" + h.t[day] : ""), true);
+  own(x);
   // one char a byte: the offsets count bytes (as UTF-8 a non-ASCII byte
   // was one char, or U+FFFD, and shifted the next o=)
   x.overrideMimeType("text/plain; charset=x-user-defined");
@@ -1159,6 +1169,7 @@ function diagLoad() { dg.busy = true; diagNext(); }
 function diagNext() {
   var g = dg, f = g.f, o = g.off[f], x = new XMLHttpRequest();
   x.open("GET", "/diag?f=" + f + "&o=" + o, true);
+  own(x);
   x.overrideMimeType("text/plain; charset=x-user-defined");   // one char a byte: o counts bytes
   x.timeout = 10000;
   function fail() { if (g === dg) { g.busy = false; g.at = Date.now(); evPaint(); } }
@@ -1460,6 +1471,7 @@ function stale() {
 function tick() {
   var x = new XMLHttpRequest();
   x.open("GET", "/status.json", true);
+  own(x);
   x.timeout = 10000;
   x.onload = function () {
     var d = null;

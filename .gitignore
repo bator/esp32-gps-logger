@@ -243,3 +243,7 @@ hist/
 ota.key*
 # Claude Code's local worktrees and settings
 .claude/
+
+# The upload server's root certificate (deploy.sh sends it as /ca.der)
+ca.der
+*.der

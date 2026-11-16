@@ -65,6 +65,8 @@ WEB_GZ_WBITS = 12                        # its window: 2**12 = 4 KB of heap to
 WEB_PAGE = "/web.html"                   # the plain page of a board deployed
                                          # before: served as is while there
 WEB_DIAG = 15                            # diag.log lines on the page
+WEB_TOKEN = None                         # .env WEB_TOKEN: the X-GPS header
+                                         # status.json, /hist, /diag need
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
                                          # for the page on the other networks too
 
@@ -455,7 +457,10 @@ def _diag_one(line):
         size = _file_size(DIAG_FILE)
         if size is not None and size >= DIAG_MAX:
             _rm(DIAG_OLD)
-            os.rename(DIAG_FILE, DIAG_OLD)
+            try:
+                os.rename(DIAG_FILE, DIAG_OLD)
+            except OSError:              # (raised, every later line was
+                _rm(DIAG_FILE)           # lost: the full file stays)
         f = open(DIAG_FILE, "a")
         try:
             f.write(line + "\n")
@@ -801,8 +806,13 @@ def load_env(path):
                         _say("env %s not UTF-8, skipped" % k)
                         continue
                 env[k] = v
-    except OSError:
-        pass                             # no .env on the device
+    except OSError as e:
+        if not _enoent(e):               # (no .env on the device: nothing
+            try:                         # to say; an EIO in the middle
+                _say("env read stopped by OSError %s, the rest skipped"
+                     % (e.args[0] if e.args else "?"))
+            except Exception:            # left a part of it unsaid)
+                pass
     except Exception as e:               # (the type only: no value)
         try:
             _say("env read stopped by %s, the rest skipped" % type(e).__name__)
@@ -1331,21 +1341,30 @@ def _home_aps_load():
 
 def _home_aps_save():
     """HOME_APS_FILE rewritten (a few bytes, only when the list changed);
-    not into the flash reserve the tracks keep (MIN_FREE). Never raises."""
+    not into the flash reserve the tracks keep (MIN_FREE). Never raises.
+    Written to a .tmp and renamed over: a write error or a power cut in a
+    "wb" over the file left it empty, the hidden home's BSSIDs gone after
+    the next boot."""
     if not HOME_APS_FILE:
         return
+    tmp = HOME_APS_FILE + ".tmp"
     try:
         room = free()
         if room is not None and room < MIN_FREE:
             return
-        f = open(HOME_APS_FILE, "wb")
+        f = open(tmp, "wb")
         try:
             for b in wifi["home_aps"]:
                 f.write(binascii.hexlify(b) + b"\n")
         finally:
             f.close()
+        os.rename(tmp, HOME_APS_FILE)
     except (OSError, TypeError, ValueError, MemoryError) as e:
         print("home aps", repr(e))      # (MemoryError: the format, open())
+        _rm(tmp)
+        if isinstance(e, OSError):       # (no RAM: no diag line either)
+            _bug_once("bug home aps not saved %s" % repr(e)[:50],
+                      ("home aps", type(e)))
 
 def _hidden_home_target(now, arrival=False):
     """Hidden home when a strong empty-SSID AP was seen.
@@ -4018,6 +4037,15 @@ def _rm(path):
     except OSError:
         pass
 
+def _rm_gone(path):
+    """Remove path; ENOENT (not there) is fine, any other OSError raises:
+    for a step that must not be taken as done when the file stayed."""
+    try:
+        os.remove(path)
+    except OSError as e:
+        if not _enoent(e):
+            raise
+
 def _enoent(e):
     n = getattr(e, "errno", None)
     if n is None:
@@ -4092,7 +4120,7 @@ def up_reset():
               lowpy_at=None, lowpy_seen=None, ok_at=None,
               lowidf_boot=lowboot, next_at=time.ticks_ms(),
               rm_err={}, env_u=None, env_k=None, srv=None, err_ssid=None,
-              srv_hold={}, err_files=0)
+              srv_hold={}, err_files=0, pos_wr=None)
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
     _tls_ctx[0] = None
@@ -4131,8 +4159,8 @@ def read_pos(path):
     corrupt big one raised MemoryError. Read as bytes: one that is not
     UTF-8 (a damaged block) raised UnicodeError read as text, out of
     up_reset at every boot."""
-    size = _file_size(path)
-    if size is None:
+    size = _size_or_gone(path)           # (a stat EIO raises: read as 0
+    if size is None:                     # it resent the whole file)
         return 0, None
     try:
         with open(path + ".pos", "rb") as f:
@@ -4170,8 +4198,10 @@ def read_pos(path):
         if not ok:
             print("pos misaligned", path, off)
             return 0, None
-    except OSError:
-        return 0, None
+    except OSError as e:                 # (gone: nothing to resend; an EIO
+        if _enoent(e):                   # raises, the caller's hold)
+            return 0, None
+        raise
     return off, key if tb else None
 
 def write_offset(path, off, key=None):
@@ -5223,8 +5253,11 @@ def _tls_ready(now):
     finally:
         _post_phase[0] = None
 
-UPLOAD_AWAY_UNVERIFIED = True            # .env: 0 sends only verified TLS
-                                         # (https with CA_FILE) off home
+UPLOAD_UNVERIFIED = "0"                  # .env: where a POST that is not
+                                         # verified TLS (https with CA_FILE)
+                                         # may go: "0" nowhere, "home" on a
+                                         # home network, "1" everywhere
+_UNV_SAY = {"0": "off", "home": "home only", "1": "on"}
 
 def _tls_state():
     """How the upload reaches GEO_URL (status.json "tls"): "verified"
@@ -5245,34 +5278,44 @@ def _tls_state():
     return "unverified" if sz is None else "verified"
 
 def _up_env(env):
-    """UPLOAD_AWAY_UNVERIFIED=0 in .env: an upload that is not verified TLS
-    (http, or https without CA_FILE) goes only on a home network. And at
-    the start a diag line when https goes without CA_FILE (nothing said
-    so at run time)."""
-    global UPLOAD_AWAY_UNVERIFIED
-    v = _plain(env.get("UPLOAD_AWAY_UNVERIFIED"))
+    """UPLOAD_UNVERIFIED in .env: 0 (the default) posts only over verified
+    TLS: at home too, the LAN is flat and any host on it can answer for
+    the server (ARP, DNS), take the Bearer key and a 2xx removes tracks it
+    never kept; "home" lets an unverified one (http, or https without
+    CA_FILE) go on a home network, 1 everywhere. The old
+    UPLOAD_AWAY_UNVERIFIED (1: everywhere, 0: home) is read when the new
+    key is not there. And at the start a diag line when https goes without
+    CA_FILE (nothing said so at run time)."""
+    global UPLOAD_UNVERIFIED
+    v = _plain(env.get("UPLOAD_UNVERIFIED"))
     if v:
-        t = _truthy(v)
+        v = "home" if v.lower() == "home" else v
+        t = v if v == "home" else _truthy(v)
         if t is None:
-            print("UPLOAD_AWAY_UNVERIFIED not 1/0, using",
-                  1 if UPLOAD_AWAY_UNVERIFIED else 0)
+            print("UPLOAD_UNVERIFIED not 0/home/1, using", UPLOAD_UNVERIFIED)
         else:
-            UPLOAD_AWAY_UNVERIFIED = t
+            UPLOAD_UNVERIFIED = t if t == "home" else ("1" if t else "0")
+    else:
+        v = _plain(env.get("UPLOAD_AWAY_UNVERIFIED"))
+        t = _truthy(v) if v else None
+        if t is not None:
+            UPLOAD_UNVERIFIED = "1" if t else "home"
     if _tls_state() == "unverified":
         print("WARNING: no %s - the server is not verified" % CA_FILE)
         _diag_write("upload GEO_URL https without %s: the server is not "
-                    "verified, uploads away %s"
-                    % (CA_FILE, "on" if UPLOAD_AWAY_UNVERIFIED else "off"))
+                    "verified, uploads %s"
+                    % (CA_FILE, _UNV_SAY.get(UPLOAD_UNVERIFIED, "?")))
 
 def _away_unverified():
-    """UPLOAD_AWAY_UNVERIFIED off, on a network that is not home, and the
-    upload would not be verified TLS: no POST."""
-    if UPLOAD_AWAY_UNVERIFIED or at_home():
+    """The upload would not be verified TLS and UPLOAD_UNVERIFIED does not
+    let it go on this network: no POST."""
+    m = UPLOAD_UNVERIFIED
+    if m == "1" or (m == "home" and at_home()):
         return False
     return _tls_state() != "verified"
 
 def _hold_unverified(now):
-    """UPLOAD_AWAY_UNVERIFIED=0 and no verified TLS: not on this network. An
+    """UPLOAD_UNVERIFIED and no verified TLS: not on this network. An
     error state, so the radio sleeps out the wait (_upload_wait); a home
     network is a new one (err_ssid, _up_net_new): the tracks are due there
     at once."""
@@ -5988,11 +6031,15 @@ def upload_tick():
     if code is not None and 200 <= code < 300:
         # the day history gets the points once they are up (at flush they
         # were on the flash twice while they waited)
-        _hist_batch(path, off, new_off, key)
+        # (not again for a batch that went up before and whose .pos write
+        # failed: each retry of it added the points to the history again)
+        pw = up["pos_wr"]
+        if not (pw and pw[0] == path and pw[1] == off):
+            _hist_batch(path, off, new_off, key)
         try:
             commit_offset(path, n, new_off, eof, key1)
-        except OSError:
-            _fs_err(now)
+        except OSError as e:
+            _pos_wr_err(path, off, e, now)
             return
         except MemoryError:              # (the batch goes again: no
             up["skip"] = path            # _schedule, no state, it was sent
@@ -6001,6 +6048,9 @@ def upload_tick():
         up["sent"] += n_ok
         up["ok_at"] = _stamp()
         up["fail4"] = 0
+        pw = up["pos_wr"]
+        if pw and pw[0] == path:         # (another's: its batch still ahead)
+            up["pos_wr"] = None
         se = up["srv"]
         if se and se[0] == path:         # (another's run goes on: lifted
             up["srv"] = None             # below, its next error holds again)
@@ -6066,6 +6116,24 @@ def _fs_err(now):
     """A .pos write (or delete) failed: retry later, the track stays."""
     _up_err("fs err")
     _schedule(now)
+
+def _pos_wr_err(path, off, e, now):
+    """The batch at off went up (2xx) and its .pos (or the delete at EOF)
+    could not be written: sent again at the retry, without an end before.
+    Counted per batch; at READ_ERR_MAX in a row a diag line (once) and the
+    track is held BACKOFF_MAX so the newer ones still go."""
+    pw = up["pos_wr"]
+    if pw and pw[0] == path and pw[1] == off:
+        pw[2] += 1
+    else:
+        pw = up["pos_wr"] = [path, off, 1]
+    print("upload pos write", path, repr(e))
+    if pw[2] >= READ_ERR_MAX:
+        if pw[2] == READ_ERR_MAX:
+            _diag_write("upload: %s sent, its .pos not written %r: held"
+                        % (path, e))
+        _hold_file(path, now, BACKOFF_MAX)
+    _fs_err(now)
 
 def _low_mem(now):
     gc.collect()
@@ -6267,19 +6335,54 @@ def _ota_manifest_ok(m):
     except (KeyError, TypeError, AttributeError):
         return False
 
+OTA_EXPIRY = "|expires=%d"               # (hmac2: the signed string, then this)
+
+def _ota_fresh(m):
+    """The manifest's freshness: "expires" (seconds since 2020, UTC) and
+    "hmac2", its HMAC over _ota_signed + OTA_EXPIRY (a second one: "hmac"
+    stays as it was, so a board of an older build still reads the
+    manifest that updates it). Every older signed manifest had no end: one
+    left on the server or replayed by the LAN could be served again. ->
+    None, or why not (no expiry, its hmac, expired: only with a clock)."""
+    e, h = m.get("expires"), m.get("hmac2")
+    if type(e) is not int or not _ota_str(h, 64):
+        return "no expiry"
+    if not _ota_eq(_hmac_hex(OTA_KEY, _ota_signed(m) + (OTA_EXPIRY % e).encode()), h):
+        return "bad hmac2"
+    c = log.get("clock") or _ntp[0]
+    if c is not None and _utc_s(c) > e:
+        return "expired"
+    return None
+
+def _ota_sign(key, m):
+    """hmac and hmac2 as tools/firmware.py writes them (tests, simulators)."""
+    m["hmac"] = _hmac_hex(key, _ota_signed(m))
+    if "expires" in m:
+        m["hmac2"] = _hmac_hex(key, _ota_signed(m)
+                               + (OTA_EXPIRY % m["expires"]).encode())
+    return m
+
 def _ota_url(rel):
     """A manifest URL relative to the manifest's own folder."""
     if rel.startswith(("http://", "https://")):
         return rel
     return OTA_URL[:OTA_URL.rfind("/") + 1] + rel
 
+OTA_GET_SMALL = 30000                    # ms a GET of at most OTA_SMALL_MAX
+OTA_SMALL_MAX = 65536                    # bytes may take (manifest, page)
+
+def _get_deadline(limit):
+    return OTA_GET_SMALL if limit <= OTA_SMALL_MAX else OTA_MAX
+
 def _raw_get(url, sink, limit):
     """A minimal HTTP/1.0 GET, no redirects: the body goes to sink(memoryview)
     in pieces, the UART read and the WDT fed between, at most limit bytes
     (more: ValueError). The guard closes the socket after OTA_MAX. -> the
-    status code (sink only gets a 200's body)."""
+    status code (sink only gets a 200's body). A small body (the manifest,
+    a page) gets OTA_GET_SMALL: a server that drips one byte each 14 s held
+    the loop the image's whole 300 s, each OTA_CHECK."""
     s, addr, https, host, hdr = _http_open("GET", url)
-    _guard_start(s, OTA_MAX)
+    _guard_start(s, _get_deadline(limit))
     try:
         if https:
             _rtc_sync(time.ticks_ms())   # (the certificate's dates)
@@ -6688,6 +6791,11 @@ def _ota_check():
         # (no unverified string in it: the build is an int)
         _ota_say("ota build %d: manifest hmac does not match" % build)
         return
+    why = _ota_fresh(m)
+    if why is not None:
+        ota["state"] = why
+        _ota_say("ota build %d: manifest %s" % (build, why))
+        return
     ota["said"] = None
     if _ota_held(build):                 # (OTA_TRIES_MAX tries: a while)
         ota["state"] = "rolled back"
@@ -7043,9 +7151,13 @@ def _ota_done():
     modules, the notes gone (OTA_MARK "valid" last of them), then the
     pending state ends."""
     _ota_promote(ota.get("paths") or ())
-    for p in OTA_SHADOW:                 # (before the note: main.py puts
-        _rm(p + ".ota-old")              # back what has no note)
-    _rm(OTA_PENDING)
+    # (before the note: gps_boot.unshadow puts back what has no note, an
+    # .ota-old left by a failed remove went back over the new frozen
+    # module while the diag said "ok"; one that fails raises: the guard
+    # pauses, the next tick runs the steps again, the note still there)
+    for p in OTA_SHADOW:
+        _rm_gone(p + ".ota-old")
+    _rm_gone(OTA_PENDING)
     _rm(OTA_TRIES)
     _rm(OTA_MARK)
     # the pending state ends last: a MemoryError in a step above (the
@@ -7120,8 +7232,18 @@ _web_poll = None                         # its poll, None: accept() asks itself
 
 def _web_env(env):
     """WEB=0 in .env: no status page, the radio sleeps at home as before.
-    WEB_AWAY=1: the radio stays on for the page on a non-home network too."""
-    global WEB, WEB_AWAY
+    WEB_AWAY=1: the radio stays on for the page on a non-home network too.
+    WEB_TOKEN: the position, the track and the diag go only to a request
+    with it as its X-GPS header (the page sends what #k= in its URL gave);
+    printable ASCII without spaces, else refused (no token: as before)."""
+    global WEB, WEB_AWAY, WEB_TOKEN
+    v = env.get("WEB_TOKEN")
+    if isinstance(v, str) and v.strip():
+        v = v.strip()
+        if len(v) <= 64 and all(33 <= ord(ch) < 127 for ch in v):
+            WEB_TOKEN = v
+        else:
+            _env_refused("WEB_TOKEN", "not 1-64 printable ASCII", "no token")
     v = _plain(env.get("WEB"))
     if v:
         t = _truthy(v)
@@ -7149,6 +7271,9 @@ def _web_poller(s):
     except (AttributeError, TypeError, ValueError, OSError):
         return None
 
+WEB_RETRY = 5000                         # ms between listen tries that fail
+_web_fail_at = [None]                    # ticks of the last failed one
+
 def _web_open():
     global _web_sock, _web_poll
     s = None
@@ -7170,6 +7295,7 @@ def _web_open():
         if isinstance(e, MemoryError):
             raise                        # _guarded: a pause, not 40 tries a s
         print("web", repr(e))
+        _bug_once("web error listen %s" % repr(e)[:60], ("web listen", type(e)))
 
 def _web_close():
     global _web_sock, _web_poll
@@ -7505,8 +7631,12 @@ def _file_counts():
                     n += 1
             elif name.endswith(_BADS):
                 bad += 1
-    except OSError:
-        pass
+    except OSError as e:                 # (no directory: none waiting; another
+        if _enoent(e):                   # error unknown, not a partial count
+            n = bad = 0                  # as a real one: the page shows "-")
+        else:
+            n = bad = None
+            _bug_once("track dir error %r" % e, ("log dir", type(e)))
     _fc[0], _fc[1], _fc[2] = n, bad, _stamp()
     return n, bad
 
@@ -7656,6 +7786,36 @@ def _web_host_ok(req):
     name = HOSTNAME.lower()
     return h in (wifi["ip"] or "", name, name + ".local")
 
+def _web_hdr(req, name):
+    """The value (bytes, stripped) of header name (lower case, no colon) in
+    the request head, None when it has none."""
+    n = _web_head_len(req)
+    r = req[:n] if n >= 0 else req
+    i = r.lower().find(b"\n" + name + b":")
+    if i < 0:
+        return None
+    j = r.find(b"\n", i + 1)
+    if j < 0:
+        return None                      # its line cut off
+    return r[i + len(name) + 2:j].strip()
+
+def _web_key_ok(req, need):
+    """The data routes: with WEB_TOKEN the X-GPS header must be it (in a
+    time independent of where it differs). Without one, need: an X-GPS
+    header at all (/hist, /diag: a page of another site cannot send one
+    without a preflight the board never answers, so its no-cors loop of
+    decodes kept the board busy)."""
+    v = _web_hdr(req, b"x-gps")
+    if WEB_TOKEN:
+        if v is None:
+            return False
+        try:
+            v = v.decode()
+        except UnicodeError:
+            return False
+        return _ota_eq(v, WEB_TOKEN)
+    return v is not None or not need
+
 def _web_head(c, code, ctype, extra=""):
     _web_out(c, ("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n%s"
                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (
@@ -7800,6 +7960,12 @@ def _web_reply(c, req):
         return                           # "GET " and no path: cut off
     path = parts[1]
     parts = None
+    data = path.startswith((b"/status.json", b"/hist?", b"/diag?"))
+    if data and not _web_key_ok(req, not path.startswith(b"/status.json")):
+        _web_send(c, "403 Forbidden", "text/plain",
+                  ("an X-GPS header (WEB_TOKEN) is needed: open the page "
+                   "as http://%s/#k=<WEB_TOKEN>" % (wifi["ip"] or "<board ip>"),))
+        return
     if path.startswith(b"/status.json"):
         _web_status(c, path.startswith(b"/status.json?diag"))
     elif path.startswith(b"/hist?"):
@@ -8194,9 +8360,15 @@ def web_tick():
         _web_close()
         return
     if _web_sock is None:
+        now = time.ticks_ms()            # (a socket or bind that keeps
+        t = _web_fail_at[0]              # failing was tried each loop pass:
+        if t is not None and 0 <= time.ticks_diff(now, t) < WEB_RETRY:
+            return                       # a socket a 20 ms, the IDF heap)
         _web_open()
         if _web_sock is None:
+            _web_fail_at[0] = now
             return
+        _web_fail_at[0] = None
     if _web_poll is not None:
         for _ in _web_poll.ipoll(0):
             break

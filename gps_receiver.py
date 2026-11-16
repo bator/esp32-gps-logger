@@ -119,7 +119,8 @@ def reset():
               svs=None, svs_at=None,
               gps_ver=None, gsa_at=None, gsa_n=0, gsa_t=None, uc_ok=0, uc_fail=0, uc_sys=None,
               uc_sys_sent=False, fix_first=None, settled=False, gst_said=None,
-              ack_n=0, rate_nak=False, checked=True, unverified=False,
+              ack_n=0, rate_nak=False, gst_nak=False, naks=None,
+              checked=True, unverified=False,
               hz1=0, hz5=0,
               set_ok=0, gst_at=None,
               nt_said=None, nt_more=0,
@@ -415,12 +416,24 @@ def _extra(talker, f):
     if at is not None and _age(time.ticks_ms(), at) >= 1000:
         st["extra"] += 1
 
+_view_at = {}                            # talker -> ticks of its second's
+                                         # first GSV set (gsv)
+
 def gsv(talker, f):
     n = _num(f[3], int)                  # (read first: a bad one changes
     _uc_gsv(talker, f)                   # nothing; its GSV stays on: no _extra)
     if n is not None and talker in _UC_GNSS:
-        st["view"][talker] = n          # per constellation, summed on display
-                                        # (a talker of no system: not summed)
+        # per constellation, summed on display (a talker of no system: not
+        # summed). A UC6580 sends a set per signal (L1, then L5), each with
+        # its own count: the largest of a second's sets, not the last one
+        # (L5's fewer stood for the constellation)
+        now = time.ticks_ms()
+        va = _view_at
+        if _recent(now, va.get(talker), 500):
+            n = max(n, st["view"].get(talker, 0))
+        else:
+            va[talker] = now             # (a new second's first set)
+        st["view"][talker] = n
 
 def gst(talker, f):
     """The receiver's own error estimate (1-sigma, metres) of the second's
@@ -482,7 +495,7 @@ def _gps_restarted():
     # the model asked anew (_uc_setup); the settle rule anew, and not the
     # second it was in: published by the next sentence, its fixes would start
     # the rule before a real fix
-    st.update(svs=None, svs_at=None, gps_ver=None, fix_first=None,
+    st.update(svs=None, svs_at=None, gps_ver=None, fix_first=None, naks=None,
               settled=False)
     _ep_new(None)
     _sec[0] = _sec[1] = None             # (its time starts afresh too)
@@ -616,9 +629,19 @@ def _uc_setup():
             if r is False:
                 return False
             if r is None:
-                _say("gps refused " + cmd)
+                # said once a receiver boot (naks; _gps_restarted clears
+                # it): a setup that came again each GPS_IGNORED_MAX wrote
+                # the same line ~1400 times a day over the real events
+                nk = st["naks"]
+                if nk is None:
+                    nk = st["naks"] = []
+                if cmd not in nk:
+                    nk.append(cmd)
+                    _say("gps refused " + cmd)
                 if cmd.startswith("CFGNAV"):
                     st["rate_nak"] = True
+                elif cmd.startswith("CFGMSG,0,7,"):
+                    st["gst_nak"] = True     # (no GST: no "not taken" for it)
         feed()
         return True
     except Exception as e:               # (an OSError of the UART too: said
@@ -778,6 +801,7 @@ def gps_setup():
     read_uart()                          # a banner in it came before
     boots = st["gps_boots"]
     st["setup_at"], st["extra"], st["rate_nak"] = time.ticks_ms(), 0, False
+    st["gst_nak"] = False
     _setup_done(_uc_setup(), boots)
 
 def _setup_done(ok, boots):
@@ -829,13 +853,15 @@ def _setup_check(now):
     slow = GPS_HZ > 1 and not hz5 and not st["rate_nak"]
     g = st["gst_at"]
     gst = g is not None and time.ticks_diff(g, st["setup_at"]) >= 0
-    no_gst = not gst and st["ok"] - st["set_ok"] >= 10
+    no_gst = (not gst and not st["gst_nak"]
+              and st["ok"] - st["set_ok"] >= 10)
     if slow or no_gst:
         st["extra"] += 1
         why = "1 fix/s" if slow else "no GST"
         print("gps setup not taken:", why)
         _not_taken(now, why)
-    elif gst and (hz5 or GPS_HZ == 1 or st["rate_nak"]) and not st["extra"]:
+    elif ((gst or st["gst_nak"]) and (hz5 or GPS_HZ == 1 or st["rate_nak"])
+          and not st["extra"]):
         st["ack_n"] = 0                  # it took this one
 
 def _not_taken(now, why):

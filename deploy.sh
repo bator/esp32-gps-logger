@@ -51,7 +51,9 @@ PY=$VENV/bin/python
 MPREMOTE=$VENV/bin/mpremote
 # (the display's two modules too: without them a plain firmware's TFT stayed
 # dark, "tft ImportError")
-FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy gps_tft.mpy gps_tft_font.mpy main.py web.html.gz"
+# (main.py last: the swap below puts it in after the rest, a cut swap
+# then starts the old main.py over the files it knows)
+FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy gps_tft.mpy gps_tft_font.mpy web.html.gz main.py"
 ARCH=xtensawin                           # the Heltec's ESP32-S3 (checked below)
 
 # A device path that is not there: say so, before anything else (mpremote's
@@ -63,10 +65,22 @@ case "$PORT" in
         fi ;;
 esac
 
-# mpy-cross must match the firmware's .mpy version (MicroPython 1.29)
+# mpy-cross must match the firmware's .mpy version (MicroPython 1.29): an
+# other one installed made .mpy files the board refused at import (5 failed
+# boots, the REPL) while this said "Deployed"
+if [ ! -x "$PY" ]; then
+    echo "No Python in $VENV (VENV=... to choose; see docs/setup.md)" >&2
+    exit 1
+fi
 if ! "$PY" -c "import mpy_cross" 2>/dev/null; then
     "$VENV/bin/pip" install -q "mpy-cross==1.29.*"
 fi
+MPYV=$("$PY" -c 'import importlib.metadata as m; print(m.version("mpy-cross"))' 2>/dev/null || true)
+case "$MPYV" in
+    1.29.*) ;;
+    *) echo "mpy-cross $MPYV is not 1.29.x: $VENV/bin/pip install 'mpy-cross==1.29.*'" >&2
+       exit 1 ;;
+esac
 
 # What goes up, made here before the board is asked anything: the logger's
 # modules (sent unless the firmware has them frozen in) and main.py, and the
@@ -152,7 +166,7 @@ case "$FROZEN" in
             echo "WARNING: rebuild with tools/build_firmware.sh --flash and deploy again soon."
             # (not the display's modules: the frozen ones stay, ~8 KB of
             # heap and a shadow of their frozen code for nothing)
-            FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy main.py web.html.gz"
+            FILES="gps_logger.mpy gps_clock.mpy gps_receiver.mpy web.html.gz main.py"
         else
             # (the display's code, gps_boot.py, gps_clock.py and
             # gps_receiver.py on the board that has them in the marker: an older
@@ -166,7 +180,7 @@ case "$FROZEN" in
                 [ "${FORCE:-0}" = 1 ] || exit 1
                 echo "FORCE=1: deploying main.py and the page next to a stale frozen logger" >&2
             fi
-            FILES="main.py web.html.gz"
+            FILES="web.html.gz main.py"
             RM_MPY=1
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
@@ -175,6 +189,22 @@ case "$FROZEN" in
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
+# The upload server's root certificate (DER, at most 4 KB) goes up as
+# /ca.der when there is one: CA_DER=path, or ca.der next to this script
+# (gitignored). Without it the logger posts no unverified TLS (see
+# UPLOAD_UNVERIFIED in docs/setup.md).
+CA_SRC=${CA_DER:-ca.der}
+if [ -e "$CA_SRC" ]; then
+    CA_N=$(wc -c < "$CA_SRC")
+    if [ "$CA_N" -gt 4096 ] || [ "$(head -c 1 "$CA_SRC" | od -An -tx1 | tr -d ' ')" != 30 ]; then
+        echo "$CA_SRC is not a DER certificate of at most 4096 bytes" >&2
+        exit 1
+    fi
+    cp "$CA_SRC" "$BUILD/ca.der"
+    FILES="ca.der $FILES"
+    echo "Root certificate: $CA_SRC ($CA_N B) -> /ca.der"
+fi
+
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
 # each new file needs its size rounded up to whole blocks, plus one block
 # of metadata, while the old one still exists
@@ -254,9 +284,12 @@ RESET=(+ reset)
     exec "
 import os
 for n in '$FILES'.split():
+    os.stat(n + '.dpl')
+for n in '$FILES'.split():
     try:
         os.rename(n + '.dpl', n)
     except OSError:
+        os.stat(n + '.dpl')
         os.remove(n)
         os.rename(n + '.dpl', n)
 'web.html' in os.listdir() and os.remove('web.html')
