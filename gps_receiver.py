@@ -418,6 +418,9 @@ def _extra(talker, f):
 
 _view_at = {}                            # talker -> ticks of its second's
                                          # first GSV set (gsv)
+GSV_SET_MS = 2000                        # a second's sets (L1, L5): a loop
+                                         # stall between them is no new one
+                                         # (GSV comes each GSV_EVERY s)
 
 def gsv(talker, f):
     n = _num(f[3], int)                  # (read first: a bad one changes
@@ -429,7 +432,7 @@ def gsv(talker, f):
         # (L5's fewer stood for the constellation)
         now = time.ticks_ms()
         va = _view_at
-        if _recent(now, va.get(talker), 500):
+        if _recent(now, va.get(talker), GSV_SET_MS):
             n = max(n, st["view"].get(talker, 0))
         else:
             va[talker] = now             # (a new second's first set)
@@ -955,7 +958,10 @@ def _uc_watch(now):
     check runs once. No GST for UC_GST_LOST with sentences coming: set it up
     again (GST comes with or without a fix, once it is on)."""
     at = st["setup_at"]
-    if st["setup_ok"] is not True or at is None or st["extra"]:
+    # (a receiver that refused GST: no GST is no lost setup, it was set up
+    # again every ~40 s for good)
+    if (st["setup_ok"] is not True or at is None or st["extra"]
+            or st["gst_nak"]):
         return
     g = st["gst_at"]
     if _age(now, at) < UC_GST_LOST or _recent(now, g, UC_GST_LOST):

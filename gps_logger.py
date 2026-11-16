@@ -67,6 +67,8 @@ WEB_PAGE = "/web.html"                   # the plain page of a board deployed
 WEB_DIAG = 15                            # diag.log lines on the page
 WEB_TOKEN = None                         # .env WEB_TOKEN: the X-GPS header
                                          # status.json, /hist, /diag need
+WEB_TOKEN_LEN = (8, 64)                  # its length, at least and at most
+_web_tok_bad = [False]                   # one in .env refused: all closed
 WEB_AWAY = False                         # .env WEB_AWAY=1: keep the radio on
                                          # for the page on the other networks too
 
@@ -459,8 +461,16 @@ def _diag_one(line):
             _rm(DIAG_OLD)
             try:
                 os.rename(DIAG_FILE, DIAG_OLD)
-            except OSError:              # (raised, every later line was
-                _rm(DIAG_FILE)           # lost: the full file stays)
+            except OSError as e:
+                # (raised, every later line was lost): the full file goes,
+                # a line says so; one that cannot go either is no file to
+                # grow past DIAG_MAX into the tracks' flash: counted
+                _diag_errs[0] += 1
+                _rm(DIAG_FILE)
+                if _file_size(DIAG_FILE) is not None:
+                    return
+                line = "bug diag rotate failed %r, %d KB dropped\n%s" % (
+                    e, size // 1024, line)
         f = open(DIAG_FILE, "a")
         try:
             f.write(line + "\n")
@@ -4120,7 +4130,7 @@ def up_reset():
               lowpy_at=None, lowpy_seen=None, ok_at=None,
               lowidf_boot=lowboot, next_at=time.ticks_ms(),
               rm_err={}, env_u=None, env_k=None, srv=None, err_ssid=None,
-              srv_hold={}, err_files=0, pos_wr=None)
+              srv_hold={}, err_files=0, pos_wr={})
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
     _tls_ctx[0] = None
@@ -5300,11 +5310,16 @@ def _up_env(env):
         t = _truthy(v) if v else None
         if t is not None:
             UPLOAD_UNVERIFIED = "1" if t else "home"
-    if _tls_state() == "unverified":
+    ts = _tls_state()
+    if ts == "unverified":
         print("WARNING: no %s - the server is not verified" % CA_FILE)
         _diag_write("upload GEO_URL https without %s: the server is not "
                     "verified, uploads %s"
                     % (CA_FILE, _UNV_SAY.get(UPLOAD_UNVERIFIED, "?")))
+    elif ts == "off":                    # (http: it was not said at all, and
+        print("WARNING: GEO_URL is http - in the clear")   # the default holds it)
+        _diag_write("upload GEO_URL http: in the clear, uploads %s"
+                    % _UNV_SAY.get(UPLOAD_UNVERIFIED, "?"))
 
 def _away_unverified():
     """The upload would not be verified TLS and UPLOAD_UNVERIFIED does not
@@ -5322,6 +5337,13 @@ def _hold_unverified(now):
     up["state"] = "err unverified"
     up["err_ssid"] = wifi["ssid"]
     _schedule(now, BACKOFF_MAX)
+    if not _unv_said[0]:                 # (once a boot: the tracks wait for
+        _unv_said[0] = True              # good, a board updated over the air
+        _diag_write("upload err unverified: not verified TLS (tls %s, UPLOAD_UNVERIFIED"
+                    "=%s): put %s on the board, or UPLOAD_UNVERIFIED=home|1 "
+                    "in .env" % (_tls_state(), UPLOAD_UNVERIFIED, CA_FILE))
+
+_unv_said = [False]                      # _hold_unverified's line this boot
 
 _rtc_set = [False]                       # board clock set from the GPS once
 
@@ -6033,8 +6055,8 @@ def upload_tick():
         # were on the flash twice while they waited)
         # (not again for a batch that went up before and whose .pos write
         # failed: each retry of it added the points to the history again)
-        pw = up["pos_wr"]
-        if not (pw and pw[0] == path and pw[1] == off):
+        pw = up["pos_wr"].get(path)
+        if not (pw and pw[0] == off):
             _hist_batch(path, off, new_off, key)
         try:
             commit_offset(path, n, new_off, eof, key1)
@@ -6048,9 +6070,8 @@ def upload_tick():
         up["sent"] += n_ok
         up["ok_at"] = _stamp()
         up["fail4"] = 0
-        pw = up["pos_wr"]
-        if pw and pw[0] == path:         # (another's: its batch still ahead)
-            up["pos_wr"] = None
+        up["pos_wr"].pop(path, None)     # (per track: two failing ones
+                                         # reset each other's count)
         se = up["srv"]
         if se and se[0] == path:         # (another's run goes on: lifted
             up["srv"] = None             # below, its next error holds again)
@@ -6122,14 +6143,14 @@ def _pos_wr_err(path, off, e, now):
     could not be written: sent again at the retry, without an end before.
     Counted per batch; at READ_ERR_MAX in a row a diag line (once) and the
     track is held BACKOFF_MAX so the newer ones still go."""
-    pw = up["pos_wr"]
-    if pw and pw[0] == path and pw[1] == off:
-        pw[2] += 1
+    pw = up["pos_wr"].get(path)
+    if pw and pw[0] == off:
+        pw[1] += 1
     else:
-        pw = up["pos_wr"] = [path, off, 1]
+        pw = up["pos_wr"][path] = [off, 1]
     print("upload pos write", path, repr(e))
-    if pw[2] >= READ_ERR_MAX:
-        if pw[2] == READ_ERR_MAX:
+    if pw[1] >= READ_ERR_MAX:
+        if pw[1] == READ_ERR_MAX:
             _diag_write("upload: %s sent, its .pos not written %r: held"
                         % (path, e))
         _hold_file(path, now, BACKOFF_MAX)
@@ -6336,6 +6357,7 @@ def _ota_manifest_ok(m):
         return False
 
 OTA_EXPIRY = "|expires=%d"               # (hmac2: the signed string, then this)
+EPOCH_2020 = 1577836800                  # Unix time of 2020-01-01 (FW_BUILD's)
 
 def _ota_fresh(m):
     """The manifest's freshness: "expires" (seconds since 2020, UTC) and
@@ -6350,7 +6372,11 @@ def _ota_fresh(m):
     if not _ota_eq(_hmac_hex(OTA_KEY, _ota_signed(m) + (OTA_EXPIRY % e).encode()), h):
         return "bad hmac2"
     c = log.get("clock") or _ntp[0]
-    if c is not None and _utc_s(c) > e:
+    # (no clock: indoors, NTP dropped by the LAN; this firmware's own build
+    # time is a floor no replay can turn back: a manifest that ended
+    # before it was built is expired without one)
+    now = _utc_s(c) if c is not None else FW_BUILD - EPOCH_2020
+    if now > e:
         return "expired"
     return None
 
@@ -6977,7 +7003,7 @@ def ota_boot():
         if not valid:
             _rm(OTA_MARK)                # (a run before this one stopped)
         ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
-                   confirmed=False,
+                   confirmed=False, done_err=0,
                    probed=False, probe_at=None, probe_err=None,
                    state="pending", paths=paths, valid=valid,
                    valid_err=None)
@@ -6986,8 +7012,8 @@ def ota_boot():
         if valid:                        # (no health check again: it
             try:                         # passed before the cut; a step
                 _ota_health(time.ticks_ms())  # that fails: the next tick)
-            except Exception:
-                pass
+            except Exception as e:
+                _bug_once("bug ota boot %r" % e, ("ota boot", type(e)))
         return
     if mark == "staged" and not (esp32 is not None and _ota_unbooted()):
         # the install cut before set_boot: the build never ran, no try
@@ -7146,6 +7172,8 @@ def _ota_health(now):
     finally:
         machine.reset()
 
+OTA_DONE_MAX = 5                         # _ota_done tries before it gives up
+
 def _ota_done():
     """The confirmed image's steps: the staged page up, the moved-aside
     modules, the notes gone (OTA_MARK "valid" last of them), then the
@@ -7155,9 +7183,26 @@ def _ota_done():
     # .ota-old left by a failed remove went back over the new frozen
     # module while the diag said "ok"; one that fails raises: the guard
     # pauses, the next tick runs the steps again, the note still there)
-    for p in OTA_SHADOW:
-        _rm_gone(p + ".ota-old")
-    _rm_gone(OTA_PENDING)
+    # A remove that keeps failing (a damaged block) kept the image pending
+    # for good: the radio never slept, no memory reboot, no later update
+    # could come. After OTA_DONE_MAX the pending state ends anyway (a diag
+    # line names the error): the note left on flash keeps unshadow from
+    # putting the .ota-old back, the next boot runs the steps again.
+    try:
+        for p in OTA_SHADOW:
+            _rm_gone(p + ".ota-old")
+        _rm_gone(OTA_PENDING)
+    except OSError as e:
+        n = ota["done_err"] = ota.get("done_err", 0) + 1
+        if n < OTA_DONE_MAX:
+            raise
+        _diag_write("ota %s steps failed %d times (%r): pending ended, "
+                    "the rest at the next boot" % (FW_COMMIT, n, e))
+        ota["pend"] = None
+        ota["valid"] = False
+        ota["state"] = "ok (leftover)"
+        return
+    ota.pop("done_err", None)
     _rm(OTA_TRIES)
     _rm(OTA_MARK)
     # the pending state ends last: a MemoryError in a step above (the
@@ -7235,15 +7280,24 @@ def _web_env(env):
     WEB_AWAY=1: the radio stays on for the page on a non-home network too.
     WEB_TOKEN: the position, the track and the diag go only to a request
     with it as its X-GPS header (the page sends what #k= in its URL gave);
-    printable ASCII without spaces, else refused (no token: as before)."""
+    WEB_TOKEN_LEN characters of letters, digits and ._~+/=- (what a URL
+    fragment carries as it is). One that is not: refused, and every data
+    route then too (a token taken as "no token" left them open while the
+    owner thought them closed)."""
     global WEB, WEB_AWAY, WEB_TOKEN
     v = env.get("WEB_TOKEN")
     if isinstance(v, str) and v.strip():
         v = v.strip()
-        if len(v) <= 64 and all(33 <= ord(ch) < 127 for ch in v):
+        if (WEB_TOKEN_LEN[0] <= len(v) <= WEB_TOKEN_LEN[1]
+                and all(ch.isalpha() and ord(ch) < 128 or ch.isdigit()
+                        or ch in "._~+/=-" for ch in v)):
             WEB_TOKEN = v
+            _web_tok_bad[0] = False
         else:
-            _env_refused("WEB_TOKEN", "not 1-64 printable ASCII", "no token")
+            WEB_TOKEN = None
+            _web_tok_bad[0] = True
+            _env_refused("WEB_TOKEN", "not %d-%d of A-Za-z0-9._~+/=-"
+                         % WEB_TOKEN_LEN, "every data route refused")
     v = _plain(env.get("WEB"))
     if v:
         t = _truthy(v)
@@ -7773,18 +7827,7 @@ def _web_host_ok(req):
     j = r.find(b"\n", i + 6)
     if j < 0:
         return False                     # its line cut off
-    h = r[i + 6:j].strip()
-    k = h.rfind(b":")
-    if k >= 0 and b"]" not in h[k:]:
-        h = h[:k]
-    try:
-        h = h.decode()
-    except UnicodeError:
-        return False
-    if h.endswith("."):
-        h = h[:-1]
-    name = HOSTNAME.lower()
-    return h in (wifi["ip"] or "", name, name + ".local")
+    return _web_name_ok(r[i + 6:j].strip())
 
 def _web_hdr(req, name):
     """The value (bytes, stripped) of header name (lower case, no colon) in
@@ -7799,12 +7842,45 @@ def _web_hdr(req, name):
         return None                      # its line cut off
     return r[i + len(name) + 2:j].strip()
 
+def _web_name_ok(h):
+    """h (bytes, lower case, a host[:port] or [v6]:port) is the board: its
+    IP, HOSTNAME or HOSTNAME.local, a trailing dot allowed."""
+    k = h.rfind(b":")
+    if k >= 0 and b"]" not in h[k:]:
+        h = h[:k]
+    try:
+        h = h.decode()
+    except UnicodeError:
+        return False
+    if h.endswith("."):
+        h = h[:-1]
+    name = HOSTNAME.lower()
+    return h in (wifi["ip"] or "", name, name + ".local")
+
+def _web_same_page(req):
+    """A Referer of the board's own page: an older page (one open across an
+    OTA, or kept when the new one could not go up) sends no X-GPS. A page
+    of another site sends its own Referer, or none (no-referrer)."""
+    r = _web_hdr(req, b"referer")
+    if not r:
+        return False
+    r = r.lower()
+    i = r.find(b"://")
+    if i < 0:
+        return False
+    h = r[i + 3:]
+    j = h.find(b"/")
+    return _web_name_ok(h if j < 0 else h[:j])
+
 def _web_key_ok(req, need):
     """The data routes: with WEB_TOKEN the X-GPS header must be it (in a
-    time independent of where it differs). Without one, need: an X-GPS
-    header at all (/hist, /diag: a page of another site cannot send one
+    time independent of where it differs); a WEB_TOKEN refused: never.
+    Without one, need: an X-GPS header, or a Referer of the board's own
+    page (/hist, /diag: a page of another site cannot send the header
     without a preflight the board never answers, so its no-cors loop of
     decodes kept the board busy)."""
+    if _web_tok_bad[0]:
+        return False
     v = _web_hdr(req, b"x-gps")
     if WEB_TOKEN:
         if v is None:
@@ -7814,7 +7890,7 @@ def _web_key_ok(req, need):
         except UnicodeError:
             return False
         return _ota_eq(v, WEB_TOKEN)
-    return v is not None or not need
+    return v is not None or not need or _web_same_page(req)
 
 def _web_head(c, code, ctype, extra=""):
     _web_out(c, ("HTTP/1.0 %s\r\nContent-Type: %s; charset=utf-8\r\n%s"

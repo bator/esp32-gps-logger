@@ -144,6 +144,13 @@ mkdir -p "$OUT"
 # the frozen files: the logger, its Clock (gps_clock.py) and Receiver
 # (gps_receiver.py), main.py's boot helpers (gps_boot.py: OTA and the boot-fail
 # retry, out of the heap) and a marker deploy.sh looks for
+# what goes into the image (and the page): a change or an untracked one of
+# these is "-dirty" (--untracked-files=no let an untracked gps_*.py through
+# under a clean commit's name)
+SRC_FILES="gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py web.html"
+# shellcheck disable=SC2086
+src_sum() { cat $SRC_FILES | sha256sum | cut -d" " -f1; }
+SRC_SUM=$(src_sum)                        # (before the copies below)
 cp gps_logger.py "$OUT/gps_logger.py"
 cp gps_clock.py "$OUT/gps_clock.py"
 cp gps_receiver.py "$OUT/gps_receiver.py"
@@ -151,13 +158,6 @@ cp gps_boot.py "$OUT/gps_boot.py"
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD=$(git log -1 --format=%ct 2>/dev/null || echo 0)
 DIRTY=
-# what goes into the image (and the page): a change or an untracked one of
-# these is "-dirty" (--untracked-files=no let an untracked gps_*.py through
-# under a clean commit's name)
-SRC_FILES="gps_logger.py gps_clock.py gps_receiver.py gps_boot.py gps_tft.py gps_tft_font.py web.html"
-# shellcheck disable=SC2086
-src_sum() { cat $SRC_FILES | sha256sum | cut -d" " -f1; }
-SRC_SUM=$(src_sum)
 # shellcheck disable=SC2086
 if [ "$COMMIT" != unknown ] && { [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] \
         || [ -n "$(git status --porcelain -- $SRC_FILES 2>/dev/null)" ]; }; then
@@ -193,16 +193,21 @@ cp gps_tft.py gps_tft_font.py "$OUT/"
 # the toolchain the .mpy ABI and deploy.sh's mpy-cross pin are for: another
 # checkout made a signed image whose frozen code no deploy matched
 # (FORCE_TOOLS=1 builds anyway; a tree that is no git checkout is not checked)
-for _t in "$MPY_DIR v1.29.0" "$IDF_DIR v5.5.2"; do
-    read -r _d _want <<< "$_t"
-    if [ -e "$_d/.git" ]; then
-        _got=$(git -C "$_d" describe --tags --exact-match 2>/dev/null || echo "not a release tag")
-        if [ "$_got" != "$_want" ]; then
-            echo "$_d is at $_got, not $_want" >&2
-            [ "${FORCE_TOOLS:-0}" = 1 ] || { echo "(FORCE_TOOLS=1 builds anyway)" >&2; exit 1; }
-        fi
+# (a function: a path with a space split into dir and tag, the check
+# skipped without a word)
+tool_tag() {
+    local d=$1 want=$2 got
+    [ -e "$d/.git" ] || return 0
+    if ! got=$(git -C "$d" describe --tags --exact-match 2>&1); then
+        got="no release tag ($got)"
     fi
-done
+    if [ "$got" != "$want" ]; then
+        echo "$d is at $got, not $want" >&2
+        [ "${FORCE_TOOLS:-0}" = 1 ] || { echo "(FORCE_TOOLS=1 builds anyway)" >&2; exit 1; }
+    fi
+}
+tool_tag "$MPY_DIR" v1.29.0
+tool_tag "$IDF_DIR" v5.5.2
 
 # shellcheck disable=SC1091
 source "$IDF_DIR/export.sh" >/dev/null
@@ -302,7 +307,8 @@ case "$MODE" in
     esac
     QDIR=$(printf %q "$DDIR")
     # no password prompt, no stdin, no 2-minute hang on a dead host
-    SSHO=(-o BatchMode=yes -o ConnectTimeout=10)
+    SSHO=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10
+          -o ServerAliveCountMax=3)      # (and no hang on a link that dies)
     # the published build: only a newer one goes up (a board takes a
     # manifest's build when it is newer than its own, so an older or equal
     # one would not reach boards already updated, and republishing a commit
@@ -339,20 +345,47 @@ case "$MODE" in
         LIVE_COMMIT=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read()).get("commit") or "")' <<< "$LIVE" 2>/dev/null || true)
     fi
     RESUME=
+    BINF=micropython-$COMMIT.bin
+    # (expanded here on purpose: QDIR is quoted for the remote shell)
+    # shellcheck disable=SC2029
+    if ! LS=$(ssh "${SSHO[@]}" -n "$DHOST" "ls -1A $QDIR"); then
+        echo "WARNING: could not list $OTA_DEST: leftovers are not removed" >&2
+        LS=
+        LS_OK=
+    else
+        LS_OK=1
+    fi
+    # the live manifest is this very build (same build and commit): only a
+    # cleanup when its files are there and it does not end within a week;
+    # else it is published again (the same names, each moved in)
+    SAME=
+    if [ "$LIVE_BUILD" != x ] && [ "$BUILD" = "$LIVE_BUILD" ] && [ "$COMMIT" = "$LIVE_COMMIT" ]; then
+        SAME=1
+        LIVE_LEFT=$(python3 -c 'import json, sys, time; m = json.loads(sys.stdin.read()); print(int(m.get("expires", 0)) + 1577836800 - int(time.time()))' <<< "$LIVE" 2>/dev/null || echo 0)
+        WHY=
+        if [ -z "$LS_OK" ]; then
+            WHY="its folder could not be listed"
+        elif ! grep -qx -- "$BINF" <<< "$LS" || ! grep -qx -- "web-$COMMIT.html.gz" <<< "$LS"; then
+            WHY="a file it names is missing"
+        elif [ "$LIVE_LEFT" -lt $((7 * 86400)) ]; then
+            WHY="it ends in under a week (expires)"
+        fi
+    fi
     if [ "$LIVE_BUILD" = x ]; then
         echo "The published manifest in $OTA_DEST has no readable build" >&2
         [ "${FORCE:-0}" = 1 ] || exit 1
-    elif [ "$BUILD" = "$LIVE_BUILD" ] && [ "$COMMIT" = "$LIVE_COMMIT" ] && [ "${FORCE:-0}" != 1 ]; then
+    elif [ -n "$SAME" ] && [ "${FORCE:-0}" != 1 ] && [ -z "$WHY" ]; then
         # this very build is the live one (a publish whose ssh broke after
         # the renames, or whose cleanup failed): only the cleanup below
-        echo "Build $BUILD ($COMMIT) is already published: removing what is left over only"
+        echo "Build $BUILD ($COMMIT) is already published: removing what is left over only (FORCE=1 publishes it again)"
         RESUME=1
+    elif [ -n "$SAME" ]; then
+        echo "Build $BUILD ($COMMIT) is the published one, ${WHY:-FORCE=1}: publishing it again"
     elif [ "$BUILD" -le "$LIVE_BUILD" ]; then
         echo "Build $BUILD ($COMMIT) is not newer than the published build $LIVE_BUILD" >&2
         [ "${FORCE:-0}" = 1 ] || { echo "(FORCE=1 publishes it anyway)" >&2; exit 1; }
         echo "FORCE=1: publishing it anyway" >&2
     fi
-    BINF=micropython-$COMMIT.bin
     if [ -z "$RESUME" ]; then
     rm -rf "$OUT/ota"
     mkdir -p "$OUT/ota"
@@ -394,7 +427,10 @@ case "$MODE" in
     fi
     # (expanded here on purpose: QDIR is quoted for the remote shell)
     # shellcheck disable=SC2029
-    LS=$(ssh "${SSHO[@]}" -n "$DHOST" "ls -1A $QDIR" 2>/dev/null || true)
+    if [ -z "$RESUME" ] && ! LS=$(ssh "${SSHO[@]}" -n "$DHOST" "ls -1A $QDIR"); then
+        echo "WARNING: could not list $OTA_DEST: leftovers are not removed" >&2
+        LS=
+    fi
     while IFS= read -r f; do
         case "$f" in
             "$BINF"|"web-$COMMIT.html.gz"|manifest.json) ;;

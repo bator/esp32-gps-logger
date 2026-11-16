@@ -15522,6 +15522,13 @@ else:
          "OSError(5): held", "track"),
         ("web error listen OSError(23)", "bug"),
         ("track dir error OSError(5)", "track"),
+        ("upload err unverified: not verified TLS (tls off, UPLOAD_UNVERIFIED=0): "
+         "put /ca.der on the board, or UPLOAD_UNVERIFIED=home|1 in .env", "upl"),
+        ("upload GEO_URL http: in the clear, uploads off", "env"),
+        ("ota abc1234 steps failed 5 times (OSError(5,)): pending ended, the "
+         "rest at the next boot", "otax"),
+        ("bug ota boot OSError(5)", "bug"),
+        ("bug diag rotate failed OSError(5), 160 KB dropped", "bug"),
         ("clock set 2026-11-02T11:38:31Z", "other"),
         ("clock ntp 2026-11-02T11:38:31Z", "other"),
         ("tft light 0", "disp"),
@@ -28156,19 +28163,33 @@ try:
     for i_ in range(gl.READ_ERR_MAX):
         gl.up["hold"].pop(pw_p, None)
         pump()
-    pw.append((len(_posts), len(pw_hist), gl.up["pos_wr"][2],
+    pw.append((len(_posts), len(pw_hist), gl.up["pos_wr"][pw_p][1],
                pw_p in gl.up["hold"],
                len([l for l in _rv_diag() if ".pos not written" in l])))
     gl.write_offset = pw_saved[0]
     gl.up["hold"].pop(pw_p, None)
     pump()
     pw.append((len(pw_hist), gl.up["pos_wr"]))
+    # two tracks failing: each keeps its own count (one slot: they reset
+    # each other's, the history written again each round)
+    online(pw_dir)
+    gl.write_offset = _pw_wo
+    pw_q = os.path.join(pw_dir, "20261116_110500.trk")
+    make_trk(pw_p, gl.UPLOAD_BATCH + 20)
+    make_trk(pw_q, gl.UPLOAD_BATCH + 20)
+    pw_hist[:] = []
+    for i_ in range(2 * gl.READ_ERR_MAX):  # (A to its hold, then B)
+        pump()
+    gl.up["hold"].clear()
+    pump()                               # A again: its own count goes on
+    pw.append((sorted(v_[1] for v_ in gl.up["pos_wr"].values()), len(pw_hist)))
 finally:
     gl.write_offset, gl._hist_batch = pw_saved
 check("POS-WR: a .pos write failing after a 2xx: the batch into the history "
       "once, a diag line and a hold at READ_ERR_MAX, cleared once it is "
       "written",
-      pw == [(gl.READ_ERR_MAX, 1, gl.READ_ERR_MAX, True, 1), (1, None)],
+      pw == [(gl.READ_ERR_MAX, 1, gl.READ_ERR_MAX, True, 1), (1, {}),
+             ([gl.READ_ERR_MAX, gl.READ_ERR_MAX + 1], 2)],
       repr(pw))
 
 # READ-POS-EIO: a stat or the alignment read failing with EIO raises (the
@@ -28225,14 +28246,29 @@ try:
     def _dr_ren(a, b):
         raise OSError(5, "EIO")
     gl.os = _rv_os(rename=_dr_ren)
+    e0 = gl._diag_errs[0]
     gl._diag_write("after the failed rename")
     dr.append(_rv_diag())
+    dr.append(gl._diag_errs[0] - e0)
+    # neither the rename nor the remove: no write past DIAG_MAX (it grew
+    # into the tracks' flash), counted
+    with open(gl.DIAG_FILE, "w") as f:
+        f.write("old line\n" * 10)
+
+    def _dr_rm(p):
+        if p == gl.DIAG_FILE:
+            raise OSError(5, "EIO")
+        os.remove(p)
+    gl.os = _rv_os(rename=_dr_ren, remove=_dr_rm)
+    gl._diag_write("not written")
+    dr.append((len(_rv_diag()), gl._diag_errs[0] - e0))
 finally:
     gl.os = dr_os
     gl.DIAG_MAX = _rv_saved[4]
 check("DIAG-ROT-FAIL: a rename that fails at the rotation still writes the "
       "line (the full file removed)",
-      dr == [["after the failed rename"]], repr(dr))
+      dr == [["bug diag rotate failed OSError(5, 'EIO'), 0 KB dropped",
+              "after the failed rename"], 1, (10, 2)], repr(dr))
 
 # OTA-GET-DEADLINE: a manifest or page GET gets OTA_GET_SMALL, the image
 # OTA_MAX (a dripping server held the loop 300 s for a 4 KB manifest)
@@ -28515,7 +28551,7 @@ try:
     for n_, sig_ in (("09", "1"), ("03", "8")):
         gr_.gsv("GP", ["GPGSV", "1", "1", n_, "01", "40", "100", "30", sig_])
     vm.append(gr_.st["view"].get("GP"))
-    _clock[0] += 1000
+    _clock[0] += gr_.GSV_SET_MS
     gr_.gsv("GP", ["GPGSV", "1", "1", "07", "01", "40", "100", "30", "1"])
     vm.append(gr_.st["view"].get("GP"))
 finally:
@@ -28543,25 +28579,33 @@ try:
     wk.append(_wk(b"GET /diag?f=0&o=0 HTTP/1.1\r\n\r\n"))
     wk.append(gl._web_key_ok(b"GET /status.json HTTP/1.1\r\n\r\n", False))
     wk.append(gl._web_key_ok(b"GET /hist?d=1 HTTP/1.1\r\nx-gps: 1\r\n\r\n", True))
-    gl._web_env({"WEB_TOKEN": "s3cret"})
+    gl.wifi["ip"] = "192.168.1.60"
+    wk.append(gl._web_key_ok(b"GET /hist?d=1 HTTP/1.1\r\nReferer: http://192.168.1.60/\r\n\r\n", True))
+    wk.append(gl._web_key_ok(b"GET /hist?d=1 HTTP/1.1\r\nReferer: http://evil.example/x\r\n\r\n", True))
+    gl._web_env({"WEB_TOKEN": "s3cret-token"})
     wk.append(gl.WEB_TOKEN)
     wk.append(_wk(b"GET /status.json HTTP/1.1\r\n\r\n"))
     wk.append(_wk(b"GET /status.json HTTP/1.1\r\nX-GPS: wrong!\r\n\r\n"))
-    wk.append(gl._web_key_ok(b"GET /status.json HTTP/1.1\r\nX-GPS: s3cret\r\n\r\n", False))
-    gl.WEB_TOKEN = None
-    gl._web_env({"WEB_TOKEN": "has space"})
-    wk.append(gl.WEB_TOKEN)
+    wk.append(gl._web_key_ok(b"GET /status.json HTTP/1.1\r\nX-GPS: s3cret-token\r\n\r\n", False))
+    for bad_ in ("has space", "short", "x" * 65, "a&b%c-long"):
+        gl._web_env({"WEB_TOKEN": bad_})
+        wk.append((gl.WEB_TOKEN, gl._web_tok_bad[0],
+                   gl._web_key_ok(b"GET /status.json HTTP/1.1\r\nX-GPS: 1\r\n\r\n", False)))
 finally:
     gl.WEB_TOKEN = wk_saved
-check("WEB-KEY: /hist and /diag without X-GPS are 403, status.json is not; "
-      "with WEB_TOKEN a missing or wrong one is 403, the right one passes; a "
-      "token with a space is refused",
+    gl._web_tok_bad[0] = False
+check("WEB-KEY: /hist and /diag without X-GPS are 403 (the board's own page's "
+      "Referer passes, another site's not), status.json is not; with WEB_TOKEN a "
+      "missing or wrong one is 403, the right one passes; a token with a space, "
+      "too short, too long or of other characters is refused and closes every "
+      "data route",
       wk == ["HTTP/1.0 403 Forbidden", "HTTP/1.0 403 Forbidden", True, True,
-             "s3cret", "HTTP/1.0 403 Forbidden", "HTTP/1.0 403 Forbidden",
-             True, None], repr(wk))
+             True, False,
+             "s3cret-token", "HTTP/1.0 403 Forbidden", "HTTP/1.0 403 Forbidden",
+             True] + [(None, True, False)] * 4, repr(wk))
 _wk_page = _slurp(os.path.join(ROOT, "web.html"))
 check("WEB-KEY-PAGE: the page sends X-GPS on status.json, /hist and /diag",
-      _wk_page.count("own(x);") == 3 and 'setRequestHeader("X-GPS", KEY)' in _wk_page,
+      _wk_page.count("own(x);") == 3 and 'try { x.setRequestHeader("X-GPS", KEY); } catch' in _wk_page,
       "")
 
 # OTA-FRESH: a manifest needs its end under hmac2 ("hmac" stays the string
@@ -28585,11 +28629,18 @@ try:
     of.append(gl._ota_fresh(dict(m_, expires=3 * 10 ** 8)))
     of.append(gl._ota_fresh({k: v for k, v in m_.items() if k != "hmac2"}))
     of.append(gl._hmac_hex(b"k", gl._ota_signed(m_)) == m_["hmac"])
+    # no clock: this firmware's build time is the floor (a replayed
+    # manifest that ended before it was built)
+    of_fb = gl.FW_BUILD
+    gl.FW_BUILD = gl.EPOCH_2020 + 2 * 10 ** 8 + 10
+    of.append(gl._ota_fresh(m_))
+    gl.FW_BUILD = of_fb
 finally:
     gl.OTA_KEY, gl.log["clock"] = of_saved
 check("OTA-FRESH: fresh, before its end fine; past it (a clock) expired; a "
       "moved end or none refused; hmac is the old string",
-      of == [None, None, "expired", "bad hmac2", "no expiry", True], repr(of))
+      of == [None, None, "expired", "bad hmac2", "no expiry", True, "expired"],
+      repr(of))
 # OTA-FRESH-TOOL: tools/firmware.py writes the same expires/hmac2
 _of_td = tempfile.mkdtemp(dir=_rv_td)
 with open(os.path.join(_of_td, "micropython-abc1234.bin"), "wb") as f:
@@ -28640,11 +28691,127 @@ check("BUILD-TOOLS: PORT defaults to /dev/ttyACM0; MicroPython v1.29.0 and "
       "scp run with BatchMode and a connect timeout; a failed otadata erase "
       "says what to run",
       "PORT=${PORT:-/dev/ttyACM0}" in _bf_src
-      and '"$MPY_DIR v1.29.0" "$IDF_DIR v5.5.2"' in _bf_src
+      and 'tool_tag "$MPY_DIR" v1.29.0' in _bf_src and 'tool_tag "$IDF_DIR" v5.5.2' in _bf_src
       and "git status --porcelain -- $SRC_FILES" in _bf_src
-      and "SSHO=(-o BatchMode=yes -o ConnectTimeout=10)" in _bf_src
+      and "SSHO=(-o BatchMode=yes -o ConnectTimeout=10" in _bf_src
       and _bf_src.count('"${SSHO[@]}"') >= 4
       and "otadata (0xd000) is not erased" in _bf_src, "")
+
+# TLS-HOLD-DIAG: a held upload says so once a boot, naming what to set (a
+# board updated over the air with no /ca.der waited for good, unsaid); an
+# http GEO_URL is said at the start too
+hd_dir = os.path.join(_rv_td, "holddiag")
+os.makedirs(hd_dir)
+hd_tls = sys.modules.get("tls")
+sys.modules["tls"] = RvTls
+hd = []
+try:
+    gl.CA_FILE = os.path.join(hd_dir, "ca.der")
+    online(hd_dir)
+    tls_ctx_reset()
+    gl._tls_context()
+    gl.UPLOAD_UNVERIFIED = "0"
+    gl._unv_said[0] = False
+    diag_clear()
+    make_trk(os.path.join(hd_dir, "20261116_130000.trk"), 3)
+    gl.wifi["home"] = True
+    pump()
+    pump()
+    hd.append(len([l for l in _rv_diag() if l.startswith("upload err unverified")]))
+    gl.up["url"] = "http://d.example"
+    diag_clear()
+    gl._up_env({})
+    hd.append([l for l in _rv_diag() if "http" in l])
+finally:
+    gl.UPLOAD_UNVERIFIED = "1"
+    gl._unv_said[0] = False
+    gl.CA_FILE = "/ca.der"
+    gl.wifi["home"] = False
+    if hd_tls is None:
+        sys.modules.pop("tls", None)
+    else:
+        sys.modules["tls"] = hd_tls
+    tls_ctx_reset()
+check("TLS-HOLD-DIAG: a held upload is one diag line a boot; http is said at "
+      "the start",
+      hd == [1, ["upload GEO_URL http: in the clear, uploads off"]], repr(hd))
+
+# OTA-DONE-GIVEUP: a remove that keeps failing ends the pending state after
+# OTA_DONE_MAX (it held the radio on, the memory reboot and any later
+# update for good); the note stays for the next boot
+og_dir = os.path.join(_rv_td, "otagiveup")
+os.makedirs(og_dir)
+og_saved = (gl.OTA_SHADOW, gl.OTA_PENDING, gl.OTA_TRIES, gl.OTA_MARK, gl.os,
+            dict(gl.ota))
+og = []
+try:
+    gl.OTA_SHADOW = (os.path.join(og_dir, "gps_logger.mpy"),)
+    gl.OTA_PENDING = os.path.join(og_dir, "ota.pending")
+    gl.OTA_TRIES = os.path.join(og_dir, "ota.tries")
+    gl.OTA_MARK = os.path.join(og_dir, "ota.mark")
+    for p_ in (gl.OTA_SHADOW[0] + ".ota-old", gl.OTA_PENDING):
+        with open(p_, "w") as f:
+            f.write("x")
+    gl.ota.update(pend=300, valid=True, confirmed=True, paths=(), done_err=0)
+    diag_clear()
+
+    def _og_rm(p):
+        if p.endswith(".ota-old"):
+            raise OSError(5, "EIO")
+        os.remove(p)
+    gl.os = _rv_os(remove=_og_rm)
+    for i_ in range(gl.OTA_DONE_MAX):
+        try:
+            gl._ota_done()
+            og.append("returned")
+        except OSError:
+            og.append("raised")
+    og.append((gl.ota["pend"], gl.ota["state"], os.path.exists(gl.OTA_PENDING),
+               len([l for l in _rv_diag() if "pending ended" in l])))
+finally:
+    (gl.OTA_SHADOW, gl.OTA_PENDING, gl.OTA_TRIES, gl.OTA_MARK, gl.os) = og_saved[:5]
+    gl.ota.clear()
+    gl.ota.update(og_saved[5])
+check("OTA-DONE-GIVEUP: OTA_DONE_MAX failed runs end the pending state (one "
+      "diag line), the note left for the next boot",
+      og == ["raised"] * (gl.OTA_DONE_MAX - 1) + ["returned",
+             (None, "ok (leftover)", True, 1)], repr(og))
+
+# RCV-GST-WATCH: a receiver that refused GST is not "setup lost: no GST"
+# either (the watch set it up again every ~40 s)
+gw = []
+gw_saved = dict(gr_.st)
+try:
+    now_ = time.ticks_ms()
+    for nak_ in (True, False):
+        gr_.st.update(setup_ok=True, setup_at=now_ - gr_.UC_GST_LOST - 1,
+                      extra=0, gst_at=None, rx=now_, rx_back=None,
+                      gst_nak=nak_, gst_said=None)
+        gr_._uc_watch(now_)
+        gw.append(gr_.st["extra"])
+finally:
+    gr_.st.clear()
+    gr_.st.update(gw_saved)
+check("RCV-GST-WATCH: no GST after a refused GST is no lost setup; without "
+      "the refusal it is", gw == [0, 1], repr(gw))
+
+check("DEPLOY-CA: a CA_DER given and not there stops the deploy, a relative "
+      "one is the caller's; the DER check reads the long length too; a cut "
+      "swap leaves the board stopped, not reset onto a mixed set",
+      'echo "CA_DER=$CA_DER: no such file" >&2' in _dp_src
+      and "CA_DER=$PWD/$CA_DER" in _dp_src
+      and _dp_src.index("CA_DER=$PWD/$CA_DER") < _dp_src.index('cd "$(dirname "$0")"')
+      and '"$CA_HEAD" != 3082' in _dp_src and "print('swapped', n)" in _dp_src
+      and "Swap FAILED part way" in _dp_src, "")
+check("BUILD-TOOLS-2: the toolchain tags through a function (a path with a "
+      "space), ssh keeps the link alive, a failed listing warns, the sources' "
+      "sum is taken before the copies, the resume checks its files and end",
+      "tool_tag \"$MPY_DIR\" v1.29.0" in _bf_src
+      and "ServerAliveInterval=10" in _bf_src
+      and _bf_src.count("could not list $OTA_DEST") == 2
+      and _bf_src.index("SRC_SUM=$(src_sum)") < _bf_src.index('cp gps_logger.py "$OUT')
+      and "a file it names is missing" in _bf_src
+      and "it ends in under a week" in _bf_src, "")
 
 gl.DIAG, gl.DIAG_FILE, gl.DIAG_OLD, gl.free, gl.DIAG_MAX = _rv_saved
 diag_clear()

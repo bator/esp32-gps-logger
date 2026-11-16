@@ -70,7 +70,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `DIAG` | Seconds between [diagnostic log](usage.md#diagnostic-log) lines, 10–3600; `0` turns it off. Default 60. |
 | `WEB` | `1`/`0`: the [status page](usage.md#status-page), and the radio staying on at home for it. Default 1. |
 | `WEB_AWAY` | `1`/`0`: with `WEB` on, the page is served on the non-home networks too (e.g. a phone hotspot), to everyone there, without a password, and the radio stays on for it instead of sleeping once all is uploaded. `0`: off home nothing is served, also while the radio is on for an upload. Default 0. |
-| `WEB_TOKEN` | 1–64 printable ASCII characters, no spaces: `status.json`, `/hist` and `/diag` answer only a request whose `X-GPS` header is this token; open the page as `http://<board ip>/#k=<token>` (bookmark it). Without it `/hist` and `/diag` still want an `X-GPS` header (any value; the page sends one), so a page of another site cannot keep the board busy decoding. Unset by default. |
+| `WEB_TOKEN` | 8–64 characters of `A-Za-z0-9._~+/=-`: `status.json`, `/hist` and `/diag` answer only a request whose `X-GPS` header is this token; open the page as `http://<board ip>/#k=<token>` (bookmark it). A token that breaks these rules is refused and closes all three (a diag line says so), it is not taken as "no token". It keeps casual LAN visitors out; on plain http it is no defence against someone who can sniff the LAN. Without it `/hist` and `/diag` still want an `X-GPS` header (any value; the page sends one) or a `Referer` of the board's own page (an older page, e.g. one open across an OTA), so a page of another site cannot keep the board busy decoding. Unset by default. |
 | `UPLOAD_UNVERIFIED` | Where an upload that is not verified TLS (an `http://` `GEO_URL`, or `https://` without `/ca.der`) may go: `0` nowhere (the default), `home` only on a home network, `1` everywhere. The home LAN is flat: any host on it can answer for the server (ARP, DNS), take the Bearer key and, with a 2xx, make the board delete tracks it never stored. So put the server's root certificate on the board (`ca.der` next to `deploy.sh`, see below) rather than turning this on. While it waits the state is `err unverified`. The old `UPLOAD_AWAY_UNVERIFIED` (`1`: everywhere, `0`: home) is still read when this key is missing. |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
@@ -78,8 +78,12 @@ HOSTNAME=Dawarich-GPS-tracker
   `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `UPLOAD_UNVERIFIED`, `UPLOAD_AWAY_UNVERIFIED`). SSIDs, passwords, `GEO_URL`,
   `API_KEY` and `WEB_TOKEN` are taken verbatim, since they may contain `#`.
 - **The server's certificate:** `./deploy.sh` copies `ca.der` from the repo
-  folder (gitignored; or `CA_DER=/path/to/root.der`) to the board's `/ca.der`
-  with the other files, checked by size and SHA-256. It is the DER root
+  folder (gitignored; or `CA_DER=path/to/root.der`, relative to where you
+  run it; one that is not there stops the deploy) to the board's `/ca.der`
+  with the other files, checked by size and SHA-256. Without one the board's
+  `/ca.der` is left as it is. A held upload says so once a boot in the
+  diagnostic log (`upload err unverified: … put /ca.der on the board, or
+  UPLOAD_UNVERIFIED=home|1`). It is the DER root
   certificate the server's chain ends in, at most 4 KB, e.g. for a Let's
   Encrypt server `openssl x509 -in /etc/ssl/certs/ISRG_Root_X1.pem -outform der -out ca.der`
   (check which root your server uses: `openssl s_client -connect host:443 -showcerts`).
@@ -280,7 +284,9 @@ reading the old manifest meanwhile still finds its files. A build that is
 not newer than the published manifest's is refused (a board only takes a
 newer one; `FORCE=1` publishes it anyway); the published build itself
 again (the same build and commit: a publish whose `ssh` broke after the
-renames) only does the cleanup below. `ssh` and `scp` run with
+renames) only does the cleanup below, if the folder lists, the files it
+names are there and it ends more than a week on; else it is published
+again (the same names, each moved in). `ssh` and `scp` run with
 `BatchMode=yes` and a 10 s connect timeout (no password prompt, no hang),
 and an `OTA_DEST` folder that is not there is refused (`mkdir` it for a
 first publish). The sources are checked again right before the upload: one

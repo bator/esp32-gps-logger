@@ -245,7 +245,7 @@ var KEY = (function () {
     return k ? decodeURIComponent(k[1]) : "1";
   } catch (e) { return "1"; }
 })();
-function own(x) { x.setRequestHeader("X-GPS", KEY); }
+function own(x) { try { x.setRequestHeader("X-GPS", KEY); } catch (e) {} }
 
 function esc(v) {
   if (v == null) return "-";

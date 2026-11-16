@@ -43,6 +43,12 @@ case "${VENV:-.venv}" in
     /*) ;;
     *) [ -z "${VENV:-}" ] || VENV=$PWD/$VENV ;;
 esac
+# (CA_DER too: a relative one was looked for in the script's folder, not
+# found, and skipped without a word)
+case "${CA_DER:-}" in
+    ""|/*) ;;
+    *) CA_DER=$PWD/$CA_DER ;;
+esac
 cd "$(dirname "$0")"
 
 PORT=${PORT:-/dev/ttyACM0}               # the Heltec's USB Serial/JTAG
@@ -194,15 +200,24 @@ esac
 # (gitignored). Without it the logger posts no unverified TLS (see
 # UPLOAD_UNVERIFIED in docs/setup.md).
 CA_SRC=${CA_DER:-ca.der}
-if [ -e "$CA_SRC" ]; then
+if [ -n "${CA_DER:-}" ] && [ ! -f "$CA_SRC" ]; then
+    echo "CA_DER=$CA_DER: no such file" >&2
+    exit 1
+fi
+if [ -f "$CA_SRC" ]; then
     CA_N=$(wc -c < "$CA_SRC")
-    if [ "$CA_N" -gt 4096 ] || [ "$(head -c 1 "$CA_SRC" | od -An -tx1 | tr -d ' ')" != 30 ]; then
+    # (a DER SEQUENCE: 0x30, then a long length, 0x81 or 0x82, as every
+    # certificate over 127 bytes has)
+    CA_HEAD=$(head -c 2 "$CA_SRC" | od -An -tx1 | tr -d ' \n')
+    if [ "$CA_N" -gt 4096 ] || { [ "$CA_HEAD" != 3081 ] && [ "$CA_HEAD" != 3082 ]; }; then
         echo "$CA_SRC is not a DER certificate of at most 4096 bytes" >&2
         exit 1
     fi
     cp "$CA_SRC" "$BUILD/ca.der"
     FILES="ca.der $FILES"
     echo "Root certificate: $CA_SRC ($CA_N B) -> /ca.der"
+else
+    echo "No ca.der (CA_DER=...): the board's /ca.der is left as it is"
 fi
 
 # Free flash, after dropping the .dpl files of an earlier failed deploy:
@@ -280,7 +295,7 @@ echo "Copied and checked: $FILES"
 # count from the next boot.
 RESET=(+ reset)
 [ "$OTAPEND" = False ] || RESET=()
-"$MPREMOTE" connect "$PORT" \
+if ! "$MPREMOTE" connect "$PORT" \
     exec "
 import os
 for n in '$FILES'.split():
@@ -292,6 +307,7 @@ for n in '$FILES'.split():
         os.stat(n + '.dpl')
         os.remove(n)
         os.rename(n + '.dpl', n)
+    print('swapped', n)
 'web.html' in os.listdir() and os.remove('web.html')
 'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
 'gps_clock.py' in os.listdir() and os.remove('gps_clock.py')
@@ -305,7 +321,14 @@ $RM_MPY and 'gps_tft.mpy' in os.listdir() and os.remove('gps_tft.mpy')
 $RM_MPY and 'gps_tft_font.mpy' in os.listdir() and os.remove('gps_tft_font.mpy')" \
     + exec "from machine import RTC; RTC().memory(b'0')" \
     + ls : \
-    ${RESET[@]+"${RESET[@]}"}
+    ${RESET[@]+"${RESET[@]}"}; then
+    # (the "swapped" lines above say which went in: a mixed set, which the
+    # EXIT trap's reset would boot into; the board is left stopped instead)
+    trap 'rm -rf "$BUILD"' EXIT
+    echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
+    echo "The board is left stopped (no reset onto a mixed set): run ./deploy.sh again" >&2
+    exit 1
+fi
 if [ "$OTAPEND" = False ]; then
     trap 'rm -rf "$BUILD"' EXIT          # (the reset done: only the build dir)
 else
