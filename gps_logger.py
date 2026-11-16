@@ -456,7 +456,9 @@ def _diag_one(line):
         room = free()
         if room is not None and room < MIN_FREE:
             return                       # the tracks keep the reserve
-        size = _file_size(DIAG_FILE)
+        # (a stat EIO raises, counted: taken for "not there" the line went
+        # on the end of a full file, past DIAG_MAX into the tracks' flash)
+        size = _size_or_gone(DIAG_FILE)
         if size is not None and size >= DIAG_MAX:
             _rm(DIAG_OLD)
             try:
@@ -467,7 +469,7 @@ def _diag_one(line):
                 # grow past DIAG_MAX into the tracks' flash: counted
                 _diag_errs[0] += 1
                 _rm(DIAG_FILE)
-                if _file_size(DIAG_FILE) is not None:
+                if _size_or_gone(DIAG_FILE) is not None:
                     return
                 line = "bug diag rotate failed %r, %d KB dropped\n%s" % (
                     e, size // 1024, line)
@@ -784,13 +786,19 @@ SCAN_ERR = WLAN_ERR + (MemoryError,)     # scan() builds its list on the heap
                                          # ("Wifi Unknown Error 0x...") for an
                                          # unmapped IDF error (no memory)
 
+_env_partial = [False]                   # load_env stopped part way (EIO)
+
 def load_env(path):
     """KEY=VALUE lines -> dict. Surrounding quotes are stripped.
 
     Read as bytes: a .env saved as ANSI (Notepad) raised UnicodeError at
     every boot. A value that is not UTF-8 stays bytes for SSID/WPA2 keys
-    (connect() takes bytes) and is skipped for the others; never raises."""
+    (connect() takes bytes) and is skipped for the others; never raises.
+    A read stopped part way (EIO) sets _env_partial: a key after it is
+    missing, not unset (_web_env: a WEB_TOKEN there left every data route
+    open)."""
     env = {}
+    _env_partial[0] = False
     try:
         with open(path, "rb") as f:
             for line in f:
@@ -818,12 +826,14 @@ def load_env(path):
                 env[k] = v
     except OSError as e:
         if not _enoent(e):               # (no .env on the device: nothing
+            _env_partial[0] = True
             try:                         # to say; an EIO in the middle
                 _say("env read stopped by OSError %s, the rest skipped"
                      % (e.args[0] if e.args else "?"))
             except Exception:            # left a part of it unsaid)
                 pass
     except Exception as e:               # (the type only: no value)
+        _env_partial[0] = True
         try:
             _say("env read stopped by %s, the rest skipped" % type(e).__name__)
         except Exception:
@@ -1323,13 +1333,19 @@ def _learn_home(w):
 def _home_aps_load():
     """The hidden home's BSSIDs learned before the reboot: the keep-alive
     wake and "home in range" know it before it connected once. A missing
-    or damaged file (or a line that is no BSSID) is no error."""
+    or damaged file (or a line that is no BSSID) is no error. One that
+    cannot be read (EIO) is not saved over this boot (_home_aps_ro): the
+    next learnt BSSID wrote the part read as the whole list, the mesh's
+    other APs gone for good."""
     aps = wifi["home_aps"] = []
+    _home_aps_ro[0] = False
     if not HOME_APS_FILE:
         return
     try:
         f = open(HOME_APS_FILE, "rb")
-    except OSError:
+    except OSError as e:
+        if not _enoent(e):
+            _home_aps_unread(e)
         return
     try:
         for _ in range(4 * HOME_AP_MAX):     # bounded, garbage lines too
@@ -1344,10 +1360,19 @@ def _home_aps_load():
                 aps.append(b)
                 if len(aps) >= HOME_AP_MAX:
                     break
-    except (OSError, ValueError):
+    except OSError as e:
+        _home_aps_unread(e)
+    except ValueError:
         pass
     finally:
         f.close()
+
+_home_aps_ro = [False]                   # HOME_APS_FILE not read whole: kept
+
+def _home_aps_unread(e):
+    _home_aps_ro[0] = True
+    _bug_once("bug home aps not read %s: kept as it is this boot" % repr(e)[:50],
+              ("home aps read", type(e)))
 
 def _home_aps_save():
     """HOME_APS_FILE rewritten (a few bytes, only when the list changed);
@@ -1355,7 +1380,7 @@ def _home_aps_save():
     Written to a .tmp and renamed over: a write error or a power cut in a
     "wb" over the file left it empty, the hidden home's BSSIDs gone after
     the next boot."""
-    if not HOME_APS_FILE:
+    if not HOME_APS_FILE or _home_aps_ro[0]:
         return
     tmp = HOME_APS_FILE + ".tmp"
     try:
@@ -4130,7 +4155,7 @@ def up_reset():
               lowpy_at=None, lowpy_seen=None, ok_at=None,
               lowidf_boot=lowboot, next_at=time.ticks_ms(),
               rm_err={}, env_u=None, env_k=None, srv=None, err_ssid=None,
-              srv_hold={}, err_files=0, pos_wr={})
+              srv_hold={}, err_files=0, pos_wr={}, hd=set())
     # the SSLContext now, in the boot's heap before the WiFi starts (made
     # at the first POST it could grow the heap and pin that area)
     _tls_ctx[0] = None
@@ -4148,6 +4173,11 @@ def up_reset():
             _rm(LOG_DIR + "/" + n)
         elif n.endswith(".pos") and n[:-4] not in have:
             _rm(LOG_DIR + "/" + n)       # orphan .pos or .bad.pos
+        elif n.endswith(HIST_DONE):
+            if n[:-len(HIST_DONE)] in have:
+                up["hd"].add(LOG_DIR + "/" + n[:-len(HIST_DONE)])
+            else:
+                _rm(LOG_DIR + "/" + n)   # (its track gone)
         elif n.endswith(".err"):
             up["err_files"] += 1         # (parked: the page counts them)
     try:
@@ -5194,26 +5224,36 @@ def _ca_size():
 
 def _der_certs(b):
     """The DER certificates one after the other in b (each a SEQUENCE:
-    0x30, a long length 0x81 n or 0x82 n n), as bytes: [b] when it is not
-    such a run of two or more (modtls then judges the whole)."""
+    0x30, a long length 0x81 n or 0x82 n n), as bytes; white space after
+    the last is dropped (a concat, an editor's newline). b that does not
+    start as DER (PEM: modtls reads its chain itself): [b]. Anything else
+    after a whole certificate raises ValueError ("ca err"): given whole, mbedtls
+    parsed the first root alone and dropped the rest without a word (the
+    away server's root gone: every POST there a TLS error that looked like
+    the network)."""
+    n = len(b)
+    if not n or b[0] != 0x30:
+        return [b]
     out = []
     i = 0
-    n = len(b)
     while i < n:
-        if b[i] != 0x30 or i + 2 > n:
-            return [b]
-        k = b[i + 1]
-        if k == 0x81 and i + 3 <= n:
-            end = i + 3 + b[i + 2]
-        elif k == 0x82 and i + 4 <= n:
-            end = i + 4 + (b[i + 2] << 8 | b[i + 3])
-        else:
-            return [b]
-        if end > n:
-            return [b]
+        end = None
+        if b[i] == 0x30 and i + 2 <= n:
+            k = b[i + 1]
+            if k == 0x81 and i + 3 <= n:
+                end = i + 3 + b[i + 2]
+            elif k == 0x82 and i + 4 <= n:
+                end = i + 4 + (b[i + 2] << 8 | b[i + 3])
+        if end is None or end > n:
+            if not out:                  # (no DER at all: modtls judges it)
+                return [b]
+            if not bytes(b[i:]).strip():
+                break
+            raise ValueError("%s: %d B after certificate %d not DER"
+                             % (CA_FILE, n - i, len(out)))
         out.append(b[i:end])
         i = end
-    return out if len(out) > 1 else [b]
+    return out
 
 def _tls_context():
     """The SSLContext every POST wraps its socket with: made (and CA_FILE
@@ -5332,7 +5372,7 @@ def _up_env(env):
         v = "home" if v.lower() == "home" else v
         t = v if v == "home" else _truthy(v)
         if t is None:
-            print("UPLOAD_UNVERIFIED not 0/home/1, using", UPLOAD_UNVERIFIED)
+            _env_refused("UPLOAD_UNVERIFIED", "not 0/home/1", UPLOAD_UNVERIFIED)
         else:
             UPLOAD_UNVERIFIED = t if t == "home" else ("1" if t else "0")
     else:
@@ -5340,6 +5380,8 @@ def _up_env(env):
         t = _truthy(v) if v else None
         if t is not None:
             UPLOAD_UNVERIFIED = "1" if t else "home"
+        elif v:
+            _env_refused("UPLOAD_AWAY_UNVERIFIED", "not 1/0", UPLOAD_UNVERIFIED)
     ts = _tls_state()
     if ts == "unverified":
         print("WARNING: no %s - the server is not verified" % CA_FILE)
@@ -5357,7 +5399,9 @@ def _away_unverified():
     m = UPLOAD_UNVERIFIED
     if m == "1" or (m == "home" and at_home()):
         return False
-    return _tls_state() != "verified"
+    # ("ca err": a CA_FILE there that cannot be read is no missing one;
+    # _tls_ready says so and posts nothing: "put it on the board" misled)
+    return _tls_state() not in ("verified", "ca err")
 
 def _hold_unverified(now):
     """UPLOAD_UNVERIFIED and no verified TLS: not on this network. An
@@ -5376,6 +5420,7 @@ def _hold_unverified(now):
 _unv_said = [False]                      # _hold_unverified's line this boot
 
 _rtc_set = [False]                       # board clock set from the GPS once
+_rtc_ntp = [None]                        # the NTP answer that set it (None: a fix)
 
 def _rtc_sync(now):
     """mbedTLS checks the server certificate's dates against the board
@@ -5393,11 +5438,15 @@ def _rtc_sync(now):
         if s is None:
             return
         s += _age(now, st["pos_at"]) // 1000
-    elif not _rtc_set[0] and (log["clock"] or _ntp[0]):
+    elif (log["clock"] or _ntp[0]) and (
+            not _rtc_set[0] or (not log["clock"] and _rtc_ntp[0] is not _ntp[0])):
         # no fix now: the clock a fix gave this boot, else NTP's answer,
-        # until a fix sets it (an Anchor: its UTC runs on with the uptime)
+        # until a fix sets it (an Anchor: its UTC runs on with the uptime);
+        # a newer NTP answer corrects one an older answer set (a wrong one
+        # stayed the board's clock for the whole run)
         s = _utc_s(log["clock"] or _ntp[0])
         src = " gps" if log["clock"] else " ntp"
+        _rtc_ntp[0] = None if log["clock"] else _ntp[0]
     else:
         return
     d = s // 86400
@@ -6085,8 +6134,10 @@ def upload_tick():
         # were on the flash twice while they waited)
         # (not again for a batch that went up before and whose .pos write
         # failed: each retry of it added the points to the history again)
+        # (a reboot between: HIST_DONE's note on the flash says so)
         pw = up["pos_wr"].get(path)
-        if not (pw and pw[0] == off):
+        hd = path in up["hd"]
+        if not (pw and pw[0] == off) and not (hd and _hist_done(path) == off):
             _hist_batch(path, off, new_off, key)
         try:
             commit_offset(path, n, new_off, eof, key1)
@@ -6095,8 +6146,13 @@ def upload_tick():
             return
         except MemoryError:              # (the batch goes again: no
             up["skip"] = path            # _schedule, no state, it was sent
-            _low_mem(now)                # once more after TICK_PAUSE)
+            if not (pw and pw[0] == off):    # once more after TICK_PAUSE;
+                up["pos_wr"][path] = [off, 0]   # its points drawn: not again)
+            _low_mem(now)
             return
+        if hd:
+            up["hd"].discard(path)
+            _rm(path + HIST_DONE)
         up["sent"] += n_ok
         up["ok_at"] = _stamp()
         up["fail4"] = 0
@@ -6168,6 +6224,18 @@ def _fs_err(now):
     _up_err("fs err")
     _schedule(now)
 
+HIST_DONE = ".hd"                        # <track>.hd: the offset of a batch that
+                                         # went up and into the history, its .pos
+                                         # not written (a reboot then drew it twice)
+
+def _hist_done(path):
+    """The offset in path's HIST_DONE note, None without one."""
+    try:
+        with open(path + HIST_DONE) as f:
+            return int(f.read(16))
+    except (OSError, ValueError):
+        return None
+
 def _pos_wr_err(path, off, e, now):
     """The batch at off went up (2xx) and its .pos (or the delete at EOF)
     could not be written: sent again at the retry, without an end before.
@@ -6178,6 +6246,12 @@ def _pos_wr_err(path, off, e, now):
         pw[1] += 1
     else:
         pw = up["pos_wr"][path] = [off, 1]
+        try:                             # (best effort: the flash that took
+            with open(path + HIST_DONE, "w") as f:   # no .pos may take no
+                f.write("%d\n" % off)              # note either)
+            up["hd"].add(path)
+        except OSError:
+            pass
     print("upload pos write", path, repr(e))
     if pw[1] >= READ_ERR_MAX:
         if pw[1] == READ_ERR_MAX:
@@ -6388,6 +6462,41 @@ def _ota_manifest_ok(m):
 
 OTA_EXPIRY = "|expires=%d"               # (hmac2: the signed string, then this)
 EPOCH_2020 = 1577836800                  # Unix time of 2020-01-01 (FW_BUILD's)
+OTA_SEEN = "/ota.seen"                   # the newest signed build and end seen
+OTA_EXPIRE_S = 7776000                   # s a manifest lasts (tools/firmware.py EXPIRE_S)
+
+def _ota_seen():
+    """(build, expires) of the newest manifest that checked (hmac, hmac2,
+    fresh): an older build is no update after it (a replay of a manifest
+    the server replaced, signed and fresh still), and its signing time
+    (expires - OTA_EXPIRE_S) is a floor for the clock where there is none.
+    (0, 0) without the file (or OTA_SEEN None: no record)."""
+    s = ota.get("seen")
+    if s is None:
+        s = (0, 0)
+        if OTA_SEEN:
+            try:
+                with open(OTA_SEEN) as f:
+                    a = f.read(48).split()
+                s = (int(a[0]), int(a[1]))
+            except (OSError, ValueError, IndexError):
+                pass
+        ota["seen"] = s
+    return s
+
+def _ota_seen_note(build, e):
+    b0, e0 = _ota_seen()
+    if not OTA_SEEN or (build <= b0 and e <= e0):
+        return
+    s = ota["seen"] = (max(b0, build), max(e0, e))
+    tmp = OTA_SEEN + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write("%d %d\n" % s)
+        os.rename(tmp, OTA_SEEN)
+    except OSError as x:                 # (kept for this boot in ota)
+        _rm(tmp)
+        _bug_once("bug ota seen not saved %s" % repr(x)[:50], ("ota seen", type(x)))
 
 def _ota_fresh(m):
     """The manifest's freshness: "expires" (seconds since 2020, UTC) and
@@ -6405,7 +6514,8 @@ def _ota_fresh(m):
     # (no clock: indoors, NTP dropped by the LAN; this firmware's own build
     # time is a floor no replay can turn back: a manifest that ended
     # before it was built is expired without one)
-    now = _utc_s(c) if c is not None else FW_BUILD - EPOCH_2020
+    now = (_utc_s(c) if c is not None else
+           max(FW_BUILD - EPOCH_2020, _ota_seen()[1] - OTA_EXPIRE_S))
     if now > e:
         return "expired"
     return None
@@ -6852,6 +6962,12 @@ def _ota_check():
         ota["state"] = why
         _ota_say("ota build %d: manifest %s" % (build, why))
         return
+    b0 = _ota_seen()[0]
+    if build < b0:                       # (a newer one was signed since)
+        ota["state"] = "superseded"
+        _ota_say("ota build %d: older than build %d seen signed, refused" % (build, b0))
+        return
+    _ota_seen_note(build, m["expires"])
     ota["said"] = None
     if _ota_held(build):                 # (OTA_TRIES_MAX tries: a while)
         ota["state"] = "rolled back"
@@ -7307,7 +7423,8 @@ _web_poll = None                         # its poll, None: accept() asks itself
 
 def _web_env(env):
     """WEB=0 in .env: no status page, the radio sleeps at home as before.
-    WEB_AWAY=1: the radio stays on for the page on a non-home network too.
+    WEB_AWAY=1: the radio stays on for the page on a non-home network too
+    (with a WEB_TOKEN only: without one it is refused).
     WEB_TOKEN: the position, the track and the diag go only to a request
     with it as its X-GPS header (the page sends what #k= in its URL gave);
     WEB_TOKEN_LEN characters of letters, digits and ._~+/=- (what a URL
@@ -7328,6 +7445,11 @@ def _web_env(env):
             _web_tok_bad[0] = True
             _env_refused("WEB_TOKEN", "not %d-%d of A-Za-z0-9._~+/=-"
                          % WEB_TOKEN_LEN, "every data route refused")
+    elif _env_partial[0]:                # (it may be in the part not read)
+        WEB_TOKEN = None
+        _web_tok_bad[0] = True
+        _env_refused("WEB_TOKEN", "not read (.env read part way)",
+                     "every data route refused")
     v = _plain(env.get("WEB"))
     if v:
         t = _truthy(v)
@@ -7340,6 +7462,9 @@ def _web_env(env):
         t = _truthy(v)
         if t is None:
             _env_refused("WEB_AWAY", "not 1/0", 1 if WEB_AWAY else 0)
+        elif t and WEB_TOKEN is None:    # (a foreign network: the position
+            WEB_AWAY = False             # and the track to whoever is on it)
+            _env_refused("WEB_AWAY", "1 without WEB_TOKEN", 0)
         else:
             WEB_AWAY = t
 
@@ -8068,9 +8193,11 @@ def _web_reply(c, req):
     parts = None
     data = path.startswith((b"/status.json", b"/hist?", b"/diag?"))
     if data and not _web_key_ok(req, not path.startswith(b"/status.json")):
+        # (what to do first: the page shows the first 60 characters)
         _web_send(c, "403 Forbidden", "text/plain",
-                  ("an X-GPS header (WEB_TOKEN) is needed: open the page "
-                   "as http://%s/#k=<WEB_TOKEN>" % (wifi["ip"] or "<board ip>"),))
+                  ("WEB_TOKEN in .env refused or not read: data routes closed" if _web_tok_bad[0] else
+                   "open the page as http://%s/#k=<WEB_TOKEN> (an X-GPS header)"
+                   % (wifi["ip"] or "<board ip>"),))
         return
     if path.startswith(b"/status.json"):
         _web_status(c, path.startswith(b"/status.json?diag"))
@@ -8455,6 +8582,16 @@ def _web_bug(e):
     _web_errs[0] += 1
     _bug_once("web error %s" % repr(e)[:60], ("web error", type(e)))
 
+WEB_ACCEPT_OK = (11, 110, 103, 104)      # EAGAIN, ETIMEDOUT, ECONNABORTED,
+                                         # ECONNRESET: no broken listen socket
+
+def _web_broken(why):
+    """The listen socket errs: closed, opened again after WEB_RETRY."""
+    _bug_once("web error listen socket %s: opened again" % why,
+              ("web listen broken",))
+    _web_close()
+    _web_fail_at[0] = time.ticks_ms()
+
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
     within WEB_DEADLINE. Off home only with WEB_AWAY (which also keeps the
@@ -8476,14 +8613,22 @@ def web_tick():
             return
         _web_fail_at[0] = None
     if _web_poll is not None:
-        for _ in _web_poll.ipoll(0):
+        for x in _web_poll.ipoll(0):
+            if x[1] & (getattr(select, "POLLERR", 8) | getattr(select, "POLLHUP", 16)):
+                _web_broken("poll %d" % x[1])
+                return
             break
         else:
             return                       # nobody waiting
     try:
         c = _web_sock.accept()[0]
-    except OSError:
-        return                           # nobody waiting (EAGAIN)
+    except OSError as e:
+        # nobody waiting (EAGAIN), or one gone before it was taken; any
+        # other error is a socket that will not take one again (a netif
+        # reset under it): each pass returned here, the page dead for good
+        if (e.args[0] if e.args else None) not in WEB_ACCEPT_OK:
+            _web_broken(repr(e)[:50])
+        return
     _web_end[0] = time.ticks_add(time.ticks_ms(), WEB_DEADLINE * 1000)
     try:
         req = _web_read(c)
@@ -8691,7 +8836,14 @@ def _ntp_ask():
         t += 1 << 32
         if t > lo + NTP_ERA:
             return None
+    # (and no later than NTP_AHEAD after the build: an answer of 2040 from
+    # whoever is on the path made every certificate look expired, the
+    # verified POSTs and the OTA stopped until a fix)
+    if lo and t >= lo + NTP_AHEAD:
+        return None
     return t if lo <= t < FIX_S_END else None
+
+NTP_AHEAD = 157680000                    # s (5 years) an answer may be past the build
 
 def _need_rtc():
     """The board clock matters (a verified TLS request checks the dates of

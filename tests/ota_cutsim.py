@@ -95,6 +95,7 @@ _ota_saved2 = (gl.OTA_MARK, gl.OTA_SHADOW)
 gl.esp32 = _FakeEsp32
 gl.OTA_PENDING = os.path.join(_ota_dir, "ota.pending")
 gl.OTA_BAD = os.path.join(_ota_dir, "ota.bad")
+gl.OTA_SEEN = None                       # (its builds go up and down by case)
 gl.OTA_TRIES = os.path.join(_ota_dir, "ota.tries")
 gl.OTA_MARK = os.path.join(_ota_dir, "ota.mark")
 gl.OTA_SHADOW = (os.path.join(_ota_dir, "gps_logger.mpy"),

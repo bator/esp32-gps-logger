@@ -472,8 +472,8 @@ served only with `WEB_AWAY=1`, which also keeps the radio connected for it
 there; without it the board serves nothing off home, also while the radio
 is on for an upload (the page has no password: a hotspot or a friend's
 network got the live position, the 7-day track and the diag log with its
-SSIDs). With `WEB_AWAY=1` it answers everyone on those networks, with no
-password. Those networks use DHCP: find
+SSIDs). `WEB_AWAY=1` takes a `WEB_TOKEN` (refused without one): the data
+then go only to a request with the token. Those networks use DHCP: find
 the board's address in the hotspot or router client list (by its DHCP
 hostname, `HOSTNAME`) or in the `web http://…/`
 console line.

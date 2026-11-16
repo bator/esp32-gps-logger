@@ -238,14 +238,13 @@ var ADDR_M = 25, ADDR_S = 20;
 var GPS_OK_S = 3, GPS_SILENT_S = 10;   // s since the last whole NMEA sentence: amber, red
 var UPLOAD_LATE_S = 1800;               // points waiting and no upload for this long: amber
 // the X-GPS header the board's data routes want: its WEB_TOKEN as #k=...
-// in the URL (bookmark it; no browser storage), else "1" (no token set)
-var KEY = (function () {
-  try {
-    var k = /[#&]k=([^&]+)/.exec(location.hash);
-    return k ? decodeURIComponent(k[1]) : "1";
-  } catch (e) { return "1"; }
-})();
-function own(x) { try { x.setRequestHeader("X-GPS", KEY); } catch (e) {} }
+// in the URL (bookmark it; no browser storage), else "1" (no token set);
+// read at each request: one typed in after a 403 counts without a reload
+function own(x) {
+  var k = null;
+  try { k = /[#&]k=([^&]+)/.exec(location.hash); k = k && decodeURIComponent(k[1]); } catch (e) {}
+  try { x.setRequestHeader("X-GPS", k || "1"); } catch (e) {}
+}
 
 function esc(v) {
   if (v == null) return "-";
@@ -891,6 +890,8 @@ function histNext(i) {
   x.timeout = 10000;
   x.onload = function () {
     if (h !== hist) return;             // another day was picked meanwhile
+    // (a 403 or 5xx is no day without points: cached as one till the page closed)
+    if (x.status === 403 || x.status >= 500) return x.onerror();
     var ok = x.status === 200, t = ok ? x.responseText : "",
       nx = ok ? x.getResponseHeader("X-Hist-Next") : null, end = ok ? x.getResponseHeader("X-Hist-End") : null,
       sk = ok ? x.getResponseHeader("X-Hist-Seek") : null;

@@ -102,11 +102,67 @@ done
 cp main.py "$BUILD/main.py"
 "$PY" tools/web_min.py web.html "$BUILD/web.html.gz"
 
+# The swap (LittleFS renames over an existing file in one step; other file
+# systems need the old one removed first), main.py last. $1 True: every .dpl
+# must be there (the first try: the copy check just saw them); False: what is
+# left of a cut one, a file already swapped skipped (it must be there). The
+# old plain web.html goes in the same step: the board inflates web.html.gz
+# for a client without gzip now (a staged OTA page, /web.html.gz.new, is
+# left alone). A leftover gps_logger.py would be imported instead of the
+# .mpy (or the frozen module: '' comes first in sys.path); the display's
+# .py/.mpy stay on a frozen firmware without them (KEEP_TFT). The RTC
+# boot-fail counter cleared so a previous crash lock (REPL after 5 failures)
+# does not survive this deploy reset (power-on also clears it).
+swap_py() {
+    printf '%s' "
+import os
+F = '$FILES'.split()
+if $1:
+    for n in F:
+        os.stat(n + '.dpl')
+for n in F:
+    if n + '.dpl' not in os.listdir():
+        os.stat(n)
+        continue
+    try:
+        os.rename(n + '.dpl', n)
+    except OSError:
+        os.stat(n + '.dpl')
+        os.remove(n)
+        os.rename(n + '.dpl', n)
+    print('swapped', n)
+D = ['web.html', 'gps_logger.py', 'gps_clock.py', 'gps_receiver.py']
+if not $KEEP_TFT:
+    D += ['gps_tft.py', 'gps_tft_font.py']
+if $RM_MPY:
+    D += ['gps_logger.mpy', 'gps_clock.mpy', 'gps_receiver.mpy']
+    if not $KEEP_TFT:
+        D += ['gps_tft.mpy', 'gps_tft_font.mpy']
+for n in D:
+    n in os.listdir() and os.remove(n)
+from machine import RTC
+RTC().memory(b'0')"
+}
+
 # The logger stopped by the sessions below runs again on every exit (the
 # last step's own reset clears this). Unknown whether an OTA is pending:
 # no reset either.
 restart_logger() {
     local rc=$?
+    # cut in the swap (a Ctrl-C, a lost link): a reset now booted a mixed
+    # set (the old main.py over new modules), and left stopped the WDT
+    # did the same a little later; the rest of it goes in first
+    if [ "${SWAPPING:-0}" = 1 ]; then
+        SWAPPING=0
+        if ! "$MPREMOTE" connect "$PORT" exec "$(swap_py False)" >/dev/null 2>&1; then
+            echo "Swap cut part way and not finished (the files not swapped are <name>.dpl):" >&2
+            echo "run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
+            rm -rf "$BUILD"
+            exit 1
+        fi
+        echo "Swap cut part way: the rest swapped in" >&2
+        [ "$rc" != 0 ] || rc=1
+    fi
     if [ "${OTAPEND:-}" = False ]; then
         "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1 || true
     else
@@ -163,6 +219,7 @@ try:
 except ImportError:
     print('plain')" | tr -d '\r' | grep -E '^(frozen [A-Za-z0-9._-]+ [A-Za-z0-9._-]+( [A-Za-z0-9._-]+){0,4}|plain)$' | tail -n 1 || true)
 RM_MPY=0                                 # (a frozen logger: drop a gps_logger.mpy that shadows it)
+KEEP_TFT=0                               # (a frozen firmware without the display's code: its .py/.mpy stay)
 case "$FROZEN" in
     frozen*)
         read -r _ FCOMMIT FSHA FTFT FBOOT FCLOCK FRX <<< "$FROZEN"
@@ -188,6 +245,7 @@ case "$FROZEN" in
             fi
             FILES="web.html.gz main.py"
             RM_MPY=1
+            [ -n "$FTFT" ] && [ "$FTFT" != - ] || KEEP_TFT=1
             echo "Firmware has the logger frozen in ($FCOMMIT): main.py and the page only;"
             echo "tools/build_firmware.sh --flash updates the logger itself"
         fi ;;
@@ -282,56 +340,33 @@ for n in '$FILES'.split():
 fi
 echo "Copied and checked: $FILES"
 
-# Swap them in (LittleFS renames over an existing file in one step; other
-# file systems need the old one removed first). The old plain web.html goes
-# in the same step: the board inflates web.html.gz for a client without
-# gzip now (a staged OTA page, /web.html.gz.new, is left alone).
-# A leftover gps_logger.py would be imported instead of the .mpy (or the
-# frozen module: '' comes first in sys.path).
-# Clear the RTC boot-fail counter so a previous crash lock (REPL after 5
-# failures) does not survive this deploy reset. Power-on also clears it.
-# With an OTA pending (FORCE_PENDING=1) no reset: it would abort the
-# pending image; the EXIT trap runs the logger again and the new files
-# count from the next boot.
-RESET=(+ reset)
-[ "$OTAPEND" = False ] || RESET=()
-if ! "$MPREMOTE" connect "$PORT" \
-    exec "
-import os
-for n in '$FILES'.split():
-    os.stat(n + '.dpl')
-for n in '$FILES'.split():
-    try:
-        os.rename(n + '.dpl', n)
-    except OSError:
-        os.stat(n + '.dpl')
-        os.remove(n)
-        os.rename(n + '.dpl', n)
-    print('swapped', n)
-'web.html' in os.listdir() and os.remove('web.html')
-'gps_logger.py' in os.listdir() and os.remove('gps_logger.py')
-'gps_clock.py' in os.listdir() and os.remove('gps_clock.py')
-'gps_receiver.py' in os.listdir() and os.remove('gps_receiver.py')
-'gps_tft.py' in os.listdir() and os.remove('gps_tft.py')
-'gps_tft_font.py' in os.listdir() and os.remove('gps_tft_font.py')
-$RM_MPY and 'gps_logger.mpy' in os.listdir() and os.remove('gps_logger.mpy')
-$RM_MPY and 'gps_clock.mpy' in os.listdir() and os.remove('gps_clock.mpy')
-$RM_MPY and 'gps_receiver.mpy' in os.listdir() and os.remove('gps_receiver.mpy')
-$RM_MPY and 'gps_tft.mpy' in os.listdir() and os.remove('gps_tft.mpy')
-$RM_MPY and 'gps_tft_font.mpy' in os.listdir() and os.remove('gps_tft_font.mpy')" \
-    + exec "from machine import RTC; RTC().memory(b'0')" \
-    + ls : \
-    ${RESET[@]+"${RESET[@]}"}; then
-    # (the "swapped" lines above say which went in: a mixed set, which the
-    # EXIT trap's reset would boot into; the board is left stopped instead)
-    trap 'rm -rf "$BUILD"' EXIT
-    echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
-    echo "The board is left stopped (no reset onto a mixed set): run ./deploy.sh again" >&2
-    exit 1
+# Swap them in (swap_py). With an OTA pending (FORCE_PENDING=1) no reset:
+# it would abort the pending image; the EXIT trap runs the logger again and
+# the new files count from the next boot.
+SWAPPING=1
+if ! "$MPREMOTE" connect "$PORT" exec "$(swap_py True)"; then
+    # (the "swapped" lines above say which went in: the rest goes in now, the
+    # same way, rather than a reset onto a mixed set)
+    echo "Swap failed part way: swapping the rest in" >&2
+    if ! "$MPREMOTE" connect "$PORT" exec "$(swap_py False)"; then
+        SWAPPING=0
+        trap 'rm -rf "$BUILD"' EXIT
+        echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
+        echo "No reset onto a mixed set: run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
+        exit 1
+    fi
 fi
+SWAPPING=0
+# The reset in a session of its own: one that fails (the USB link gone with
+# it) is no failed swap, every file is in
 if [ "$OTAPEND" = False ]; then
-    trap 'rm -rf "$BUILD"' EXIT          # (the reset done: only the build dir)
+    if "$MPREMOTE" connect "$PORT" ls : + reset; then
+        trap 'rm -rf "$BUILD"' EXIT      # (the reset done: only the build dir)
+    else
+        echo "WARNING: every file is in, the reset failed: trying it once more" >&2
+    fi
 else
+    "$MPREMOTE" connect "$PORT" ls : || true
     echo "No reset (OTA pending or unknown): the new files count from the next boot" >&2
 fi
 
