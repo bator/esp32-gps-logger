@@ -217,9 +217,12 @@ def pass_(dt=None):
         print("BUG", r._bugs); bad[0] += 1
     check()
 def run_for(ms, step=None):
+    """Passes for ms; step (a long silence's 5 s) only up to 6 s before the
+    end, then the loop's own 20-60 ms (5 s passes ran up to 5 s past it: a
+    restart "at the silence's end" came seconds after)."""
     end = clk[0] + ms
     while clk[0] < end:
-        pass_(step)
+        pass_(step if step is not None and end - clk[0] > step + 6000 else None)
 def block(ms, timer):
     end = clk[0] + ms
     while clk[0] < end:

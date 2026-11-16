@@ -7277,19 +7277,30 @@ if mpy_f32:
     # each one's time said; one starts 200 s before the ticks wrap
     import time as _rs_time
     _rs_runs = [(str(x_), "40") for x_ in (1, 6, 14, 16, 17)] + [("3", "30", "x", str((1 << 30) - 200000))]
-    _rs_p = [(r_, _rs_time.time(), subprocess.Popen(
-        [mpy_f32, "-X", "heapsize=64M", os.path.join(ROOT, "tests", "rcv_sim.py")] + list(r_),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)) for r_ in _rs_runs]
-    _rs_out = []
-    for r_, t0_, p_ in _rs_p:
-        try:
-            o_, _ = p_.communicate(timeout=900)
-            last_ = o_.decode(errors="replace").strip().splitlines()[-1:] or [""]
-            _rs_out.append(last_[0])
-            print("rcv_sim %s: %.0f s" % (" ".join(r_), _rs_time.time() - t0_))
-        except Exception as e:
-            p_.kill()
-            _rs_out.append(repr(e))
+    # (each to its own file: on pipes read one after the other a chatty run
+    # filled its 64 KB and waited, the "parallel" runs went one by one)
+    _rs_p, _rs_out = [], []
+    try:
+        for r_ in _rs_runs:
+            fo_ = tempfile.TemporaryFile()
+            _rs_p.append((r_, _rs_time.time(), fo_, subprocess.Popen(
+                [mpy_f32, "-X", "heapsize=64M", os.path.join(ROOT, "tests", "rcv_sim.py")] + list(r_),
+                stdout=fo_, stderr=subprocess.STDOUT)))
+        for r_, t0_, fo_, p_ in _rs_p:
+            try:
+                p_.wait(timeout=900)
+                fo_.seek(0)
+                last_ = fo_.read().decode(errors="replace").strip().splitlines()[-1:] or [""]
+                _rs_out.append(last_[0])
+                print("rcv_sim %s: %.0f s" % (" ".join(r_), _rs_time.time() - t0_))
+            except Exception as e:
+                _rs_out.append(repr(e))
+    finally:
+        for r_, t0_, fo_, p_ in _rs_p:
+            if p_.poll() is None:
+                p_.kill()
+                p_.wait()
+            fo_.close()
     check("RCV-SIM: the receiver simulator holds on 6 runs (dates, range, setup; silences "
           "near GPS_SILENT, reads blocked over a minute, restarts at a silence's end, the "
           "ticks wrap)", all(re.match(r"seed \d+ bad 0 ", l_) for l_ in _rs_out), repr(_rs_out))
@@ -7320,8 +7331,9 @@ check("TRACK-FUZZ: 33 seeds of power cuts and write faults: no duplicate, no gar
 _oc = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "ota_cutsim.py")],
                      capture_output=True, text=True, timeout=900)
 _oc_lines = [l_ for l_ in _oc.stdout.splitlines() if l_.startswith(("ok ", "FAULT "))]
-check("OTA-CUTSIM: a power cut at each OTA flash step, three modes: no fault",
-      _oc.returncode == 0 and len(_oc_lines) == 3 and all(l_.startswith("ok ") for l_ in _oc_lines),
+check("OTA-CUTSIM: a power cut at each OTA flash step (also right after an open for "
+      "writing), four modes (WiFi, none, a watchdog before ota_boot, a crashing build): no fault",
+      _oc.returncode == 0 and len(_oc_lines) == 4 and all(l_.startswith("ok ") for l_ in _oc_lines),
       repr(_oc_lines or _oc.stderr[-300:]))
 
 # The same smoke under CPython (keeps the script itself working)
@@ -16267,6 +16279,13 @@ if web_min:
         _wm_rb = subprocess.run([sys.executable, _wm_tool, _wm_bad], capture_output=True, text=True)
         _wm_d2.append(_wm_rb.returncode == 1 and "line 2" in _wm_rb.stderr
                       and "SyntaxError" in _wm_rb.stderr)
+        # (a script dropped or added: zip let it by)
+        try:
+            web_min.ast_check("<script>\na();\n</script>\n<script>\nb();\n</script>\n",
+                              "<script>\na();\n</script>\n")
+            _wm_d2.append(False)
+        except web_min.MinifyError:
+            _wm_d2.append(True)
         # (a regex's spaces folded parses still: node --check misses it,
         # the AST compare in the build does not)
         try:
@@ -18636,6 +18655,14 @@ try:
             m_b = gl._ota_mark_get()
             gl.ota_boot()
             out.append((m_b, gl._ota_bad(), gl._ota_tries()))
+            _ota_reset()                         # (d): an empty mark (a cut write)
+            _pend(200)
+            _set_mark("")
+            fz.BUILD = 100
+            gl.FW_BUILD, gl.FW_COMMIT = 100, "abc0100"
+            _reset_cause[0] = 3
+            gb.unshadow()
+            out.append(gl._ota_mark_get())
             _ota_reset()                         # (c): crash() over "valid"
             _pend(200)
             _set_mark("valid")
@@ -18656,7 +18683,7 @@ try:
           "(bad), not an install cut; a 'valid' left by a cut gives way to the cause "
           "note (a try, not bad); crash() leaves 'valid'",
           rn == [("ran", "rolled back", [200], (None, 0)), ("cause 1", [], (200, 1)),
-                 "valid"], repr(rn))
+                 "cause 3", "valid"], repr(rn))
 
     # OTA-WRITE-DIAG: a try count or a mark that could not be written was
     # silent (the old firmware then misread the rollback, the build came

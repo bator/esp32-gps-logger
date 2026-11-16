@@ -54,6 +54,7 @@ def run(seed, n_steps=3000, plp=0.01, memp=0.03, cc=0.5, statp=0.005):
     stat_eio = [0.0]
     hist_max = {}                        # day file -> the largest size seen
     hist_shrunk = []
+    hist_gone = []                       # the newest day's file removed
     free_ = [10 ** 8]
     committed = {}
     fault = {"write": 0.0, "close": 0.0, "pl": 0.0}
@@ -143,8 +144,13 @@ def run(seed, n_steps=3000, plp=0.01, memp=0.03, cc=0.5, statp=0.005):
             maybe_pl()
             if p not in committed:
                 raise OSError(errno.ENOENT)
+            if p.startswith(gl.HIST_DIR + "/"):
+                days = sorted(k[-12:-4] for k in committed if k.startswith(gl.HIST_DIR + "/"))
+                today = gl._stamp_s(base + sec[0])[0][:10].replace("-", "")
+                if days and p[-12:-4] == days[-1] and p[-12:-4] >= today:
+                    hist_gone.append(p[-12:])    # (today's: no trim takes it)
             del committed[p]
-            hist_max.pop(p, None)        # (a day trimmed: no shrink)
+            hist_max.pop(p, None)        # (an older day trimmed: no shrink)
             return
         os.remove(p)
 
@@ -282,7 +288,7 @@ def run(seed, n_steps=3000, plp=0.01, memp=0.03, cc=0.5, statp=0.005):
         return {"seed": seed, "recorded": len(recorded), "got": len(got), "extra": extra,
                 "unexplained": unexplained, "garbage": len(garbage), "order": order,
                 "garbage_lines": garbage[:2],
-                "hist_shrunk": hist_shrunk[:2], "hist_garbage": hist_garbage, "hist_lines": hist_lines[:2],
+                "hist_shrunk": hist_shrunk[:2] + hist_gone[:2], "hist_garbage": hist_garbage, "hist_lines": hist_lines[:2],
                 "left": len(gl.log["batch"])}
     finally:
         for k, v in saved.items():

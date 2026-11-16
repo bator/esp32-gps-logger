@@ -105,8 +105,9 @@ def _cause():
     before it ran (a Ctrl-C or a stall, then the watchdog) was taken for
     the new build's, a watchdog verdict on a good build. Never raises."""
     m = _mark()
-    if m is not None and m not in ("ran", "valid"):
-        return
+    if m is not None and m not in ("", "ran", "valid"):
+        return                           # ("": a write a power cut emptied,
+                                         # no verdict: this boot's cause goes in)
     try:
         c = machine.reset_cause()
         with open(OTA_MARK, "w") as f:

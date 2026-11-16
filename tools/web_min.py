@@ -363,13 +363,13 @@ def ast_check(src, page):
     nothing (node_check). Raises MinifyError."""
     node = shutil.which("node")
     if not node:
+        print("web_min: no node: the stripped script is not checked", file=sys.stderr)
         return
-    pairs = [(m.group(3), n.group(3))
-             for m, n in zip((m for m in _BLOCK.finditer(src)
-                              if m.group(1) and m.group(2).lower() == "script"),
-                             (n for n in _BLOCK.finditer(page)
-                              if n.group(1) and n.group(2).lower() == "script"))]
-    for a, b in pairs:
+    sa = [m.group(3) for m in _BLOCK.finditer(src) if m.group(1) and m.group(2).lower() == "script"]
+    sb = [m.group(3) for m in _BLOCK.finditer(page) if m.group(1) and m.group(2).lower() == "script"]
+    if len(sa) != len(sb):               # (zip let a dropped or added one by)
+        raise MinifyError("the stripped page has %d scripts, its source %d" % (len(sb), len(sa)))
+    for a, b in zip(sa, sb):
         paths = []
         try:
             for t in (a, b):
@@ -383,6 +383,7 @@ def ast_check(src, page):
             for path in paths:
                 os.remove(path)
         if "Cannot find module" in r.stderr or "bad option" in r.stderr:
+            print("web_min: this node has no acorn: only node --check", file=sys.stderr)
             return                       # (a node without its acorn to reach)
         if r.stdout.strip() != "same":
             raise MinifyError("the stripped script is not the same program as the source "

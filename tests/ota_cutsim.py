@@ -8,7 +8,12 @@ cut it runs on without one until it is stable. At the end: the running
 firmware has its own module and page, a new one is confirmed, nothing good
 is marked bad.
 
-    python3 tests/ota_cutsim.py [plain|nowifi|wdt ...]   -> exit 1 on a fault
+    python3 tests/ota_cutsim.py [plain|nowifi|wdt|crash ...]   -> exit 1 on a fault
+
+A cut lands before each open for writing, right after it (the empty file
+LittleFS leaves) and at each write, rename, remove and set_boot; a run
+that never settles in 12 boots is a fault too. crash: the new build
+crashes at its first run.
 
 Runs the suite's harness (tests/test_gps_logger.py up to "# FLASH-CACHE:"),
 CPython only. Not deployed."""
@@ -141,6 +146,7 @@ def _ota_reset():
         sl.mem[:] = b"\0" * len(sl.mem)
         sl.boot = False
     for f in (gl.OTA_PENDING, gl.OTA_BAD, gl.OTA_TRIES,
+              getattr(gl, "OTA_DL", None) or os.path.join(_ota_dir, "-"),
               gl.OTA_MARK or os.path.join(_ota_dir, "-"),
               os.path.join(_ota_dir, "web.html.gz"),
               os.path.join(_ota_dir, "web.html.gz.new")):
@@ -171,7 +177,16 @@ _ropen = builtins.open
 def xopen(p, mode="r", *a, **k):
     if any(m in mode for m in "wa+"):
         hit("open %s %s" % (os.path.basename(str(p)), mode))
-    return _ropen(p, mode, *a, **k)
+    f = _ropen(p, mode, *a, **k)
+    if "w" in mode:
+        # (LittleFS: the "w" open made an empty file; a cut before its close
+        # leaves it so: an empty mark, note or count)
+        try:
+            hit("opened %s %s" % (os.path.basename(str(p)), mode))
+        except Cut:
+            f.close()
+            raise
+    return f
 class OsP(object):
     def __getattr__(s, n): return getattr(_os, n)
     def rename(s, a, b): hit("rename %s" % os.path.basename(a)); return _os.rename(a, b)
@@ -269,6 +284,10 @@ def one_boot(cause):
 
 def run_pending(wifi_ok, ticks=200):
     gl.wifi["state"] = "connected" if wifi_ok else "not found"
+    if MODE == "crash" and gl.FW_BUILD == 200:
+        # the new build crashes: run()'s crash branch, then its reset
+        gl._ota_mark("crash")
+        return "reset"
     for i in range(ticks):
         if gl.ota["pend"] is None:
             return "stable"
@@ -322,6 +341,8 @@ def lifecycle(n, wifi_ok=True, extra=None):
         if r == "reset":
             cause = 2; continue
         break
+    else:
+        trace.append("loop")             # (12 boots and never stable)
     return trace, summary(fw, shadowed)
 
 def summary(fw, shadowed):
@@ -349,16 +370,21 @@ def run_mode(mode):
         trace, s = lifecycle(n, mode != "nowifi")
         if not cut["log"]:
             return faults, n             # (past the last flash step: done)
-        fw_ok = s is not None and not any(w in s for w in (
-            "SHADOWS", "lost its", "unconfirmed", "old page", "page b", "BAD"))
-        if not fw_ok or "stuck" in trace:
+        bads = ("SHADOWS", "lost its", "unconfirmed", "old page", "page b")
+        if mode == "crash":
+            # (a crashing build: the old firmware back with its own module and
+            # page; bad, or a try where a cut took the crash mark)
+            fw_ok = s is not None and s.startswith("fw100") and not any(w in s for w in bads)
+        else:
+            fw_ok = s is not None and not any(w in s for w in bads + ("BAD",))
+        if not fw_ok or "stuck" in trace or "loop" in trace:
             faults.append((n, " ".join(trace), s))
     return faults, 120
 
 
 if __name__ == "__main__":
     bad = 0
-    for mode in sys.argv[1:] or ["plain", "nowifi", "wdt"]:
+    for mode in sys.argv[1:] or ["plain", "nowifi", "wdt", "crash"]:
         faults, n = run_mode(mode)
         print("%s %s: %d cut points, %d faults" % ("ok" if not faults else "FAULT", mode, n - 1,
                                                   len(faults)))
