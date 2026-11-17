@@ -225,14 +225,18 @@ restart_logger() {
         SWAPPING=0
         echo "Swap cut part way: swapping the rest in (up to a minute)" >&2
         if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec "$(swap_py False)" >/dev/null 2>&1; then
+            # (no reset onto the mixed set; the logger runs again without
+            # one as below: left stopped, the WDT booted the mixed set a
+            # little later anyway, and rolled a pending OTA back)
             echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
-            echo "No reset onto a mixed set: run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
-            rm -rf "$BUILD"
-            exit 1
+            echo "No reset onto a mixed set, the logger runs again without one: run ./deploy.sh again now" >&2
+            CUT=2
+            rc=1
+        else
+            echo "Swap cut part way: the rest swapped in" >&2
+            CUT=0
+            [ "$rc" != 0 ] || rc=1
         fi
-        echo "Swap cut part way: the rest swapped in" >&2
-        CUT=0
-        [ "$rc" != 0 ] || rc=1
     fi
     # an earlier deploy's swap left unfinished (/deploy.cut): this one did not
     # get to swap its own set in, so no reset onto what may be a mixed set
@@ -242,15 +246,15 @@ restart_logger() {
     if [ "${CUT:-0}" = 1 ]; then
         echo "An earlier swap is unfinished on the board (/deploy.cut): no reset onto a possibly" >&2
         echo "mixed set; the logger runs again without one: run ./deploy.sh again now" >&2
-        [ "$rc" != 0 ] || rc=1
     fi
-    if [ "${OTAPEND:-}" = False ] && [ "${CUT:-0}" != 1 ]; then
+    [ "${CUT:-0}" = 0 ] || [ "$rc" != 0 ] || rc=1
+    if [ "${OTAPEND:-}" = False ] && [ "${CUT:-0}" = 0 ]; then
         if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1; then
             echo "WARNING: the reset failed: power the board off and on (or 'mpremote reset')" >&2
             [ "$rc" != 0 ] || rc=1
         fi
     else
-        [ "${CUT:-0}" = 1 ] || echo "Running the logger again without a reset (OTA pending or unknown)" >&2
+        [ "${CUT:-0}" != 0 ] || echo "Running the logger again without a reset (OTA pending or unknown)" >&2
         ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec --no-follow \
             "import gps_logger; gps_logger.run()" >/dev/null 2>&1 || true
     fi
@@ -368,7 +372,7 @@ read -r _ BSIZE BFREE <<< "$FREE" || true
 case "${BSIZE:-x}${BFREE:-x}" in
     *[!0-9]*) echo "Could not read the free flash of the board: $FREE" >&2; exit 1 ;;
 esac
-NEED=0
+NEED=1                                   # (/deploy.cut, made before the renames)
 for f in $FILES; do
     NEED=$(( NEED + ($(wc -c < "$BUILD/$f") + BSIZE - 1) / BSIZE + 1 ))
 done

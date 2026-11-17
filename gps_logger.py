@@ -802,21 +802,35 @@ _ENV_SEC = (("SSID", 1, 0), ("SSID2", 1, 0), ("SSID3", 1, 0),
             ("SSID3_HOME", 0, 1), ("HOME1", 0, 1), ("HOME2", 0, 1),
             ("HOME3", 0, 1), ("UPLOAD_UNVERIFIED", 0, 1))
 _ENV_RAW = tuple(k for k, raw, _ in _ENV_SEC if raw)
+# (the keys taken verbatim, a "#" in them no comment: see _plain)
+_ENV_VERBATIM = ("GEO_URL", "API_KEY", "WEB_TOKEN", "OTA_KEY", "OTA_URL")
 _ENV_GUARD = tuple(k for k, _, closed in _ENV_SEC if closed)
 
+def _env_key_fits(k, b):
+    """k (bytes past ASCII 0xFF-marked in it) is b with those in its
+    letters' places."""
+    return len(k) == len(b) and all(a == c or a > 127 for a, c in zip(k, b))
+
 def _env_key_guess(k):
-    """The keys of _ENV_GUARD a key with bytes past ASCII (k) may have been:
-    the same without them (an NBSP, a BOM in the middle), or the same
-    length with them where its letters were (a byte gone bad). Every one
-    that fits: "WPA2_" and a bad byte is WPA2_2 or WPA2_3 (before, only the
-    first, and SSID3 was tried open). -> a list, empty for none."""
-    r = bytes(c for c in k if c < 128).strip()
-    out = []
-    for n in _ENV_GUARD:
-        b = n.encode()
-        if r == b or (len(k) == len(b)
-                      and all(a == c or a > 127 for a, c in zip(k, b))):
-            out.append(n)
+    """The keys of _ENV_GUARD a key with bytes past ASCII (k) may have been,
+    every one that fits ("WPA2_" and a bad byte is WPA2_2 or WPA2_3), by
+    the first rule that finds one: the same length with them where its
+    letters were (a byte gone bad: SSID\xb2_HOME is SSID2_HOME or
+    SSID3_HOME, not SSID_HOME too: network #1 lost its home flag); the
+    same without them (an NBSP, a BOM in the middle); a run of them as one
+    letter (a UTF-8 letter, two bytes, or U+FFFD, three, where an ANSI
+    byte was: none fitted, the key counted as unset, the routes stayed
+    open). -> a list, empty for none."""
+    out = [n for n in _ENV_GUARD if _env_key_fits(k, n.encode())]
+    if not out:
+        r = bytes(c for c in k if c < 128).strip()
+        out = [n for n in _ENV_GUARD if r == n.encode()]
+    if not out:
+        q = bytearray()
+        for c in k:
+            if c < 128 or not q or q[-1] != 255:
+                q.append(c if c < 128 else 255)
+        out = [n for n in _ENV_GUARD if _env_key_fits(q, n.encode())]
     return out
 
 def load_env(path):
@@ -861,7 +875,17 @@ def load_env(path):
                 try:
                     v = v.decode()
                 except UnicodeError:
-                    if k not in _ENV_RAW:
+                    # (a flag or a name whose comment alone is not UTF-8,
+                    # SSID_HOME=1 # otthoni hálózat as ANSI: the value
+                    # before the "#"; it made the home network not home)
+                    c = v.split(b"#", 1)[0].strip()
+                    if k in _ENV_RAW:
+                        pass
+                    elif (k not in _ENV_VERBATIM and b"#" in v
+                          and all(b < 128 for b in c)):
+                        v = c.decode()
+                        _say("env %s: its comment not UTF-8, dropped" % k)
+                    else:
                         _say("env %s not UTF-8, skipped" % k)
                         _env_skipped.append(k)
                         continue
@@ -1007,20 +1031,34 @@ def _load_nets(env):
                       % (pk, sk))
         home = not x                     # (the first network by default)
         hk3 = "HOME" + (x or "1")
-        t = _truthy(env.get(hk2))
-        if t is None:
-            t = _truthy(env.get(hk3))
+        t, bad = None, None
+        for hk in (hk2, hk3):
+            # (SSIDn_HOME first; one not read is not looked past: its 0
+            # overrode a HOMEn=1)
+            if hk in _env_skipped:
+                bad = hk
+                break
+            v = env.get(hk)
+            if v is not None:
+                t = _truthy(v)
+                if t is None and _plain(v):
+                    # (n, nem, "0 ; hotspot": home by default, nothing said)
+                    bad = hk
+                    _env_refused(hk, "not 1/0", "not home")
+                break
+        if t is None and bad is None and _env_partial[0]:
+            bad = hk2
         if t is not None:
             home = t
-        elif home and (_env_partial[0] or hk2 in _env_skipped
-                       or hk3 in _env_skipped):
+        elif bad is not None:
             # (its home flag may have been there, a 0: home by default sent
             # the key over unverified TLS with UPLOAD_UNVERIFIED=home on a
             # phone's hotspot)
+            if home and (bad in _env_skipped or _env_partial[0]):
+                _say("env %s not read (.env read part way, or its line "
+                     "garbled): %s not home (no OTA, no home stay there)"
+                     % (bad, sk))
             home = False
-            _say("env %s not read (.env read part way, or its line "
-                 "garbled): %s not home (no OTA, no home stay there)"
-                 % (hk2, sk))
         hidden = bool(_truthy(env.get(hidk)))
         n = {"ssid": s, "pw": "" if p is None else p,
              "home": home, "hidden": hidden, "bssid": None,
@@ -1032,7 +1070,7 @@ def _load_nets(env):
             n["raw"] = s
             n["ssid"] = "".join(chr(c) for c in s)
         nets.append(n)
-    for k in env:
+    for k in list(env) + _env_skipped:  # (a skipped one too: not UTF-8)
         if k[:4] in ("SSID", "WPA2") and k not in known:
             _say("env %s ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, "
                       "WPA2_3 only)" % k)
@@ -7255,6 +7293,7 @@ def ota_boot():
         _ota_drop(OTA_PAGES)
         _rm(OTA_PENDING)
         _rm(OTA_MARK)
+        _rm(OTA_DL)
         _ota_wait_tried()
         if esp32 is not None:
             _ota_valid()
@@ -7319,6 +7358,8 @@ def ota_boot():
     _ota_shadow(False)                   # (main.py did, before the import)
     _rm(OTA_PENDING)
     _rm(OTA_MARK)
+    _rm(OTA_DL)                          # (it booted and rolled back: no cut;
+                                         # left, the next boot counted one)
     ota["state"] = "rolled back"
     try:
         wdt = cause == machine.WDT_RESET
@@ -8550,14 +8591,15 @@ def _hist_seek(f, o, end, t):
 def _hist_span(f, size, e=None):
     """The UTC times of day (s) of a day history .trb's first and last
     point: the earliest keyframe's, the latest keyframe's or decoded
-    point's after it (its deltas only, up to the next keyframe, are
-    decoded). A late append (an earlier track uploaded after a later one)
-    puts keyframes out of time order: before, the first in the file was
-    taken and only the last one's deltas read (a day the picker left
-    out). -> the day's _hsp entry [size, span, first, hi, hk, off, more,
-    pk, late]: span [first, last], [first, last, 1] when the file is not
-    in time order (the page then reads a past day's file whole), None
-    without a keyframe or while the keyframe scan is not through.
+    point's after it (its deltas only, up to the next keyframe earlier in
+    time, are decoded). A late append (an earlier track uploaded after a
+    later one) puts keyframes out of time order: before, the first in the
+    file was taken and only the last one's deltas read (a day the picker
+    left out). -> the day's _hsp entry [size, span, first, hi, hk, off,
+    more, pk, late]: span [first, last], [first, last, 1] when the file is
+    not in time order (late: /hist says so, X-Hist-Late, and the page reads
+    a past day's file whole), None without a keyframe or while the
+    keyframe scan is not through.
     When HIST_SEEK_MS runs out it stops at a record start (off, more 1)
     and the next call goes on from there; e, the entry of an earlier call,
     also lets a grown file be scanned from where that one got to (a day
@@ -8582,8 +8624,8 @@ def _hist_span(f, size, e=None):
                 if k <= pk:              # (equal: an append drawn again;
                     late = 1             # one append's keyframes rise)
                 pk = k
-                if k >= hi:
-                    hi, hk = k, _rd[0] + a
+                if k > hi:               # (the first of equal ones: a
+                    hi, hk = k, _rd[0] + a   # copy drawn again after it)
         i += 1
         if not i & 63:
             feed()
@@ -8612,8 +8654,10 @@ def _hist_span(f, size, e=None):
         if a == b:
             s[0] = None
             continue
-        # (the next keyframe: a late append's, earlier in time)
-        if _rd[0] + a > hk and _rbuf[a] == 61 and _kf_s(a, b) >= 0:
+        # (the next keyframe earlier in time: a late append's; one of the
+        # same time, a batch drawn again, is decoded on: a shorter or a
+        # longer copy, the last point the longer one's)
+        if _rd[0] + a > hk and _rbuf[a] == 61 and 0 <= _kf_s(a, b) < hi:
             break
         if _kb_rec(a, b, s) > 0 and s[0] is not None:
             t = max(t, s[0] % 86400)

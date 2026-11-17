@@ -1220,7 +1220,18 @@ ft.hlKeep = (() => {
   c.hist.pts.push(...trip(11));
   c.hist.pts.sort((a, b) => a[0] - b[0]);
   c.trackPaint();
-  return [c.hist.hl, c.hist.trips.length, c.hist.trips[c.hist.hl].t0 === t0];
+  const kept = [c.hist.hl, c.hist.trips.length, c.hist.trips[c.hist.hl].t0 === t0];
+  // Enter on a row drawn before a late track came: the focus on the picked
+  // trip's row now, not on the old index's
+  c.hist = c.histNew(null);
+  c.hist.pts.push(...trip(8), ...trip(14));
+  c.trackPaint();
+  c.hist.pts.push(...trip(11));
+  c.hist.pts.sort((a, b) => a[0] - b[0]);
+  const q = [];
+  c.document.querySelector = (sel) => { q.push(sel); return null; };
+  c.trKey({key: "Enter", preventDefault() {}}, 1);
+  return kept.concat([c.hist.hl, q]);
 })();
 // 12. a past day whose /hist answers 403 (or 5xx) is no day without
 // points: not cached, an error, asked again (it stayed "no trip" till the

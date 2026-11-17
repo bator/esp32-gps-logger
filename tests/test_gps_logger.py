@@ -7300,7 +7300,9 @@ else:
 # RCV-SIM: tests/rcv_sim.py, a stateful UC6580 and the loop on a fake clock,
 # on single-precision floats: no fix dated with a day it was not sent on (a
 # day of silence dated the next GGA-only second a day back: seeds 6, 14,
-# 16, 17 of 40 events), no position out of range, no exception or bug, the
+# 16, 17 of 40 events, before its GSA rounds came with a fix), no position
+# out of range, no exception or bug, no 3D fix type without a 3D GSA round
+# since the fix came back, a banner glued to a cut sentence a restart, the
 # setup back at the end
 if mpy_f32:
     # the seeds side by side (one at a time a busy machine timed one out),
@@ -7503,6 +7505,11 @@ for c in cmds:
             sys.exit(1)
         env = dict(os.environ)
         swap = "print('swapped', n)" in c[1]
+        noex = os.path.join(os.path.dirname(dev), "swap-noexec")
+        if swap and env.get("FAKE_SWAP_NOEXEC") and not os.path.exists(noex):
+            open(noex, "w").close()             # (the first swap never ran:
+            print("could not enter raw repl")   # no traceback, no marker)
+            sys.exit(1)
         if swap and env.get("FAKE_DPL_GONE"):   # (gone since the copy check)
             gone = os.path.join(dev, env["FAKE_DPL_GONE"] + ".dpl")
             if os.path.exists(gone):
@@ -11317,7 +11324,21 @@ try:
           sp8 == [min(_hsec(x) for x in l3a), max(_hsec(x) for x in l3a)]
           and sp9 == [min(_hsec(x) for x in l3b), max(_hsec(x) for x in l3a), 1]
           and _l3_at and 0 not in _l3_at, repr((sp8, sp9, _l3_at[:3])))
-    for d_ in (l2, l3):
+    # (a batch drawn again under its own keyframe, a reset between the draw
+    # and its commit: the shorter copy after the longer, or the longer
+    # after the shorter; the last point the longer one's either way)
+    tie_ = []
+    for d_, ks_ in (("20261123", (60, 30)), ("20261124", (30, 60))):
+        p_ = _drive(d_, 60, t0=36000, seed=11)
+        for k_ in ks_:
+            hist_add(p_, k_)
+        gl._hd[1] = None
+        for _ in range(12):
+            sp_ = gl._hist_spans().get(d_)
+        tie_.append(sp_ == [min(_hsec(x) for x in p_), max(_hsec(x) for x in p_), 1])
+    check("HIST-SPAN-TIE: a batch drawn again under the same keyframe: the "
+          "longer copy's last point, marked late", tie_ == [True, True], repr(tie_))
+    for d_ in (l2, l3, "20261123", "20261124"):
         os.remove(gl.HIST_DIR + "/" + d_ + gl.TRB)   # (the day lists after: as before)
         gl._hsp.pop(d_, None)
     gl._hd[1] = None
@@ -15624,6 +15645,7 @@ else:
         ("env WPA2_2 not read (.env read part way, or its line garbled): SSID2 dropped", "env"),
         ("env UPLOAD_UNVERIFIED not read (.env read part way, or its line garbled): 0, "
          "UPLOAD_AWAY_UNVERIFIED not used", "env"),
+        ("env SSID_HOME: its comment not UTF-8, dropped", "env"),
         ("gps setup lost: no GST", "setup"),
         ("gps setup not taken: no GST (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -16061,7 +16083,8 @@ else:
           repr(ft.get("lateStop")))
     check("PAGE-HL-KEEP: the picked trip is found again by its start after a "
           "late track sorted an earlier trip in",
-          ft.get("hlKeep") == [2, 3, True], repr(ft.get("hlKeep")))
+          ft.get("hlKeep") == [2, 3, True, 2, ['.tr.go[data-k="2"]']],
+          repr(ft.get("hlKeep")))
     check("PAGE-TIMELINE: trips split at stops over 5 min, a few standing "
           "fixes folded into the stop; trip rows (km, time, km/h) and stop "
           "rows; the picked trip marked",
@@ -18079,13 +18102,23 @@ try:
         gl.ota["failed"] = None
         gl.ota_boot()
         _co_old = (os.path.exists(gl.OTA_DL), gl.ota.get("failed"))
+        # (a rollback: the install booted, no cut; its note left, the next
+        # boot counted one)
+        _ota_reset()
+        with open(gl.OTA_PENDING, "w") as f:
+            f.write("200 abc0200\n")
+        with open(gl.OTA_DL, "w") as f:
+            f.write("200 1")
+        gl.ota_boot()
+        _co_old += (gl.ota.get("state"), os.path.exists(gl.OTA_DL))
     finally:
         gl._diag_write = _co_dw
     check("OTA-CUT-ONCE: a cut install counted once (one try, one diag line) "
           "however often the board boots before the next install; the running "
           "build's note is dropped, no cut",
           _co == [((200, 1), "install cut")] * 4 and _co_n == 1
-          and _co_own == (False, None, []) and _co_old == (False, None),
+          and _co_own == (False, None, [])
+          and _co_old == (False, None, "rolled back", False),
           repr((_co, _co_n, _co_own, _co_old)))
     # GAP-STAGED-WRITE: the install writes "staged" before set_boot and
     # removes it once set_boot is through (OTA-STAGED wrote it by hand)
@@ -29429,7 +29462,8 @@ try:
     hq.append((len(hq_hist), os.path.exists(hq_p + gl.HIST_DONE)))
     gl.write_offset = hq_saved[0]
     gl.up["hold"].clear()                # (its BACKOFF_MAX hold over)
-    pump()
+    gl.up["pos_wr"].clear()              # (a reboot between: RAM's gone,
+    pump()                               # the note on the flash holds it)
     hq.append((len(hq_hist), os.path.exists(hq_p + gl.HIST_DONE),
                gl.up["state"]))
 finally:
@@ -29970,6 +30004,18 @@ finally:
 check("ENV-KEY-AMBIG: a garbled key that fits WPA2_2 and WPA2_3 marks both; "
       "the network whose password was not read is dropped, not tried open",
       ea == [["WPA2_2", "WPA2_3"], ["A", "B"]], repr(ea))
+# ENV-KEY-MULTI: a letter turned into a UTF-8 one (two bytes) or U+FFFD
+# (three: a UTF-8 editor's mark for a bad ANSI byte) is that key garbled
+# (none fitted: the routes stayed open, SSID2 was tried open); a byte in a
+# letter's place is that letter, not the key without it (SSID\xb2_HOME is
+# SSID2_HOME or SSID3_HOME, not SSID_HOME: network #1 lost its home flag)
+em_ = [gl._env_key_guess(k_) for k_ in (
+    b"WPA2_\xef\xbf\xbd", b"WEB_T\xc3\x96KEN", b"UPLOAD_UNVERIFIE\xc3\x84",
+    b"SSID\xb2_HOME", b"Megjegyz\xc3\xa9s", b"Megjegyz\xe9s", b"\xc3\x89rt\xc3\xa9k")]
+check("ENV-KEY-MULTI: two- and three-byte garbles guessed; a replaced letter "
+      "is not a dropped one; plain words are no key",
+      em_ == [["WPA2_2", "WPA2_3"], ["WEB_TOKEN"], ["UPLOAD_UNVERIFIED"],
+              ["SSID2_HOME", "SSID3_HOME"], [], [], []], repr(em_))
 
 # ENV-HOME-CLOSED: the home flag fails closed: a .env read part way, or a
 # garbled SSID_HOME/HOME1 line, makes the first network not home (it may
@@ -29983,7 +30029,11 @@ try:
                          (False, b"SSID=Phone\nWPA2=x\nHOM\xc51=0\n"),
                          (True, b"SSID=Phone\nWPA2=x\nSSID_HOME=1\n"),
                          (False, b"SSID=Phone\nWPA2=x\nSSID_HOME=0 # h\xe1l\xf3zat\n"),
-                         (False, b"SSID=Caf\xe9\nWPA2=x\n")):
+                         (False, b"SSID=Caf\xe9\nWPA2=x\n"),
+                         (False, b"SSID=Phone\nWPA2=x\nSSID_HOME=n\n"),
+                         (False, b"SSID=Phone\nWPA2=x\nSSID_HOME=0 ; hotspot\n"),
+                         (False, b"SSID=Phone\nWPA2=x\nSSID_HOM\xc5=0\nHOME1=1\n"),
+                         (False, b"SSID=Home\nWPA2=x\nSSID_HOME=1 # otthoni h\xe1l\xf3zat\n")):
         p_ = os.path.join(_rv_td, "env-home")
         with open(p_, "wb") as f:
             f.write(body_)
@@ -29994,9 +30044,12 @@ finally:
     gl._env_partial[0] = False
     del gl._env_skipped[:]
 check("ENV-HOME-CLOSED: a home flag not read (part way, garbled key, a value "
-      "not UTF-8: it was kept as bytes for its SSID prefix, no flag) is not "
-      "home; a clean file's default, a flag read and an ANSI SSID are kept",
-      eh == [[True], [False], [False], [False], [True], [False], [True]], repr(eh))
+      "not UTF-8: it was kept as bytes for its SSID prefix, no flag), or one "
+      "that is no 1/0 (n, \"0 ; hotspot\"), is not home, its HOME1 alias not "
+      "looked past it; a clean file's default, a flag read, an ANSI SSID and "
+      "a flag whose comment alone is ANSI are kept",
+      eh == [[True], [False], [False], [False], [True], [False], [True], [False],
+             [False], [False], [True]], repr(eh))
 
 # ENV-UNV-CLOSED: UPLOAD_UNVERIFIED not read (garbled, not UTF-8, past an I/O
 # error) stays 0: the old UPLOAD_AWAY_UNVERIFIED=1 next to it made uploads
@@ -30209,10 +30262,16 @@ try:
     # refused: 25 s; none set up): unknown again, the elevation written
     _rmc(7, "V")
     _rmc(8, "A")                         # (publishes the fixless second 7)
+    gr_.st["dim_at"] = None
+    _rmc(9, "A")                         # (the fix back: timed from now, not
+    dm_.append((gr_.st["dim"],))         # from the fixless second)
     gr_.st["dim_at"] = time.ticks_ms() - gr_._gsa_wait() - 1
-    _rmc(9, "A")
+    _rmc(10, "A")
     gr_.st["alt"] = 100.0
     dm_.append((gr_.st["dim"], gl._fields(_clock[0])[0]))
+    gr_.handle(gsa_)
+    gr_._gps_restarted()                 # (a fix right after it: not the one
+    dm_.append((gr_.st["dim"],))         # before it)
 finally:
     gr_.st.clear()
     gr_.st.update(dm_saved[0])
@@ -30221,7 +30280,8 @@ finally:
     gr_._day[:] = dm_saved[2]
 check("RCV-DIM-LOST: after a second without a fix the elevation waits for the "
       "next GSA round (the screen keeps 3D); a 3D round brings it back",
-      dm_ == [(3, 3), (0, 3, 0, "", ""), (3, "100.0"), (None, "100.0")], repr(dm_))
+      dm_ == [(3, 3), (0, 3, 0, "", ""), (3, "100.0"), (0,), (None, "100.0"), (0,)],
+      repr(dm_))
 
 # RCV-SETTLE-LOST: a restart found by its lost setup (no banner) re-arms the
 # settle rule as a seen restart does (its first minute's drift was a walk)
@@ -30232,27 +30292,63 @@ check("RCV-DIM-LOST: after a second without a fix the elevation waits for the "
 sl_ = []
 sl_saved = dict(gr_.st)
 try:
-    for case_ in ("held", "lost", "refused"):
+    for case_ in ("held", "back", "nofix", "refused", "stray"):
         now_ = time.ticks_ms()
+        sa_ = now_ - 600000
         g_ = now_ - gr_.UC_GST_LOST - 1000
+        if case_ == "refused":           # (no GST since that setup)
+            g_ = sa_ - 1000
+        run_ = g_ + 5000 if case_ == "back" else now_ - 300000
         gr_.st.update(fix_first=now_ - 600000, settled=True, gst_said=now_,
-                      setup_ok=True, setup_at=now_ - 600000, extra=0,
+                      setup_ok=True, setup_at=sa_, extra=0, dim=3,
                       gst_nak=False, gst_at=g_, rx=now_, rx_back=None,
-                      ep_run=now_ - 300000 if case_ != "lost" else g_ + 5000,
-                      ep_at=now_ - 200, date="2026-11-17",
-                      gst_fails=1 if case_ == "refused" else 0)
+                      ep_run=run_, ep_at=now_ - (10000 if case_ == "nofix" else 200),
+                      date="2026-11-17",
+                      gst_fails=1 if case_ in ("refused", "stray") else 0)
         gr_._uc_watch(now_)
-        sl_.append((gr_.st["extra"], gr_.st["fix_first"] == g_,
-                    gr_.st["fix_first"] is None, gr_.st["settled"],
-                    gr_.st["date"]))
+        ff_ = gr_.st["fix_first"]
+        sl_.append((gr_.st["extra"],
+                    "gst" if ff_ == g_ else "run" if ff_ == run_ else
+                    None if ff_ is None else "old",
+                    gr_.st["settled"], gr_.st["date"], gr_.st["dim"]))
 finally:
     gr_.st.clear()
     gr_.st.update(sl_saved)
 check("RCV-SETTLE-LOST: a lost setup's settle minute runs from the last GST "
-      "when the fix held, from the next fix when lost; a refusal re-arms "
-      "nothing and keeps the date",
-      sl_ == [(1, True, False, False, None), (1, False, True, False, None),
-              (1, False, False, True, "2026-11-17")], repr(sl_))
+      "when the fix held, from its run's start when it came back after it, "
+      "from the next fix with none now; a refusal (no GST since the setup) "
+      "re-arms nothing and keeps the date; a stray FAIL with GST after the "
+      "setup is a restart; the fix type is not known after a restart",
+      sl_ == [(1, "gst", False, None, 0), (1, "run", False, None, 0),
+              (1, None, False, None, 0), (1, "old", True, "2026-11-17", 3),
+              (1, "gst", False, None, 0)], repr(sl_))
+
+# RCV-FAILS-EARLY: a GST after the setup clears its FAIL count, a second of
+# several fixes the rate's (left until _setup_check's verdict, a stray FAIL
+# later made it "refused" twice); a FAIL count makes the GSA wait 1 Hz's
+fe_ = []
+fe_saved = (dict(gr_.st), dict(gr_.ep), list(gr_._day))
+try:
+    gr_.reset()
+    gr_.st.update(setup_at=time.ticks_ms() - 1000, gst_fails=1, rate_fails=1)
+    fe_.append(gr_._gsa_wait())
+    gr_.handle(_nmea("GNGST,120000.00,1.0,2.0,1.5,30.0,1.2,1.3,2.5").encode())
+    fe_.append(gr_.st["gst_fails"])
+    for ms_ in ("00", "20", "40"):
+        gr_.handle(_nmea("GNGGA,1200%s.%s,4730.0000,N,01900.0000,E,1,20,0.8,100.0,M,40.0,M,,"
+                         % ("01", ms_)).encode())
+    gr_.handle(_nmea("GNGGA,120002.00,4730.0000,N,01900.0000,E,1,20,0.8,100.0,M,40.0,M,,").encode())
+    fe_.append((gr_.st["rate_fails"], gr_._gsa_wait()))
+finally:
+    gr_.st.clear()
+    gr_.st.update(fe_saved[0])
+    gr_.ep.clear()
+    gr_.ep.update(fe_saved[1])
+    gr_._day[:] = fe_saved[2]
+check("RCV-FAILS-EARLY: GST after the setup clears gst_fails, a multi-fix "
+      "second rate_fails; the GSA wait is 1 Hz's while the rate FAILed",
+      fe_ == [(gr_.GSA_EVERY * gr_.GPS_HZ + 2) * 1000, 0,
+              (0, (gr_.GSA_EVERY + 2) * 1000)], repr(fe_))
 
 # RCV-BANNER-GLUED: the start-up banner after a sentence the restart cut (no
 # CR/LF between) is a restart, not a bad sentence; a sentence after a banner
@@ -30329,7 +30425,7 @@ def deploy_again(dev, env_extra):
     """deploy.sh once more in deploy_run's copy, against the same fake board
     (what it holds after the run before): (rc, stdout, stderr, logger)."""
     work = os.path.dirname(dev)
-    for n_ in ("log", "logger", "swap-cut", "swap-muted", "reset-failed"):
+    for n_ in ("log", "logger", "swap-cut", "swap-muted", "reset-failed", "swap-noexec"):
         try:
             os.remove(os.path.join(work, n_))
         except OSError:
@@ -30362,7 +30458,8 @@ if shutil.which("bash") and shutil.which("sha256sum") and web_min:
     rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "0", "FAKE_RENAME_ALL": "1",
                                            "FAKE_FROZEN": "full"})
     cr.append((rc != 0, "Swap FAILED part way" in err,
-               os.path.exists(os.path.join(dev, "deploy.cut")), _cr_dpl(dev)))
+               os.path.exists(os.path.join(dev, "deploy.cut")), _cr_dpl(dev),
+               _cr_lg(dev_logger(dev))))
     rc, out, err, lg = deploy_again(dev, {"FAKE_FREE_BLOCKS": "1", "FAKE_FROZEN": "full"})
     cr.append((rc != 0, "Not enough free flash" in err, "no reset onto a possibly" in err,
                _cr_dpl(dev), _cr_lg(lg)))
@@ -30378,15 +30475,34 @@ if shutil.which("bash") and shutil.which("sha256sum") and web_min:
     open(os.path.join(dev, "deploy.cut"), "w").close()   # (left with no swap)
     rc, out, err, lg = deploy_again(dev, {"FAKE_FREE_BLOCKS": "1", "FAKE_FROZEN": "full"})
     cr.append((rc != 0, _cr_lg(lg)))
+    # (a stale marker: the trap's roll forward that swapped all in, and a
+    # whole swap whose reset failed once, clear it and reset)
+    open(os.path.join(dev, "deploy.cut"), "w").close()
+    rc, out, err, lg = deploy_again(dev, {"FAKE_RENAME_MAX": "1", "FAKE_SWAP_KILL": "1",
+                                          "FAKE_FROZEN": "full"})
+    cr.append((os.path.exists(os.path.join(dev, "deploy.cut")), _cr_lg(lg)[-1:]))
+    open(os.path.join(dev, "deploy.cut"), "w").close()
+    rc, out, err, lg = deploy_again(dev, {"FAKE_RESET_FAIL": "1", "FAKE_FROZEN": "full"})
+    cr.append((rc, os.path.exists(os.path.join(dev, "deploy.cut")), _cr_lg(lg)))
+    # (the first swap session never ran, no answer: the roll forward makes
+    # its own marker and swaps all in; without it the marker's removal
+    # failed: "FAILED", the logger stopped, every file in)
+    rc, out, err, lg = deploy_again(dev, {"FAKE_SWAP_NOEXEC": "1", "FAKE_FROZEN": "full"})
+    cr.append((rc, "Deployed" in out, os.path.exists(os.path.join(dev, "deploy.cut")),
+               _cr_lg(lg)[-1:]))
     check("DEPLOY-CUT-RERUN: a swap failed part way leaves /deploy.cut; a rerun "
           "failing before its swap resets nothing but runs the logger again (an "
           "OTA pending too) and drops the old .dpl first; a clean rerun swaps all "
           "in, the marker gone, then resets",
-          cr == [(True, True, True, ["main.py.dpl", "web.html.gz.dpl"]),
+          cr == [(True, True, True, ["main.py.dpl", "web.html.gz.dpl"],
+                  ["run import gps_logger"]),
                  (True, True, True, [], ["run import gps_logger"]),
                  (True, True, [], ["run import gps_logger"]),
                  (0, False, [], True, ["reset"]),
-                 (True, ["run import gps_logger"])], repr(cr))
+                 (True, ["run import gps_logger"]),
+                 (False, ["reset"]),
+                 (0, False, ["reset"]),
+                 (0, True, False, ["reset"])], repr(cr))
 else:
     skip_check("DEPLOY-CUT-RERUN", "no bash, sha256sum or web_min")
 

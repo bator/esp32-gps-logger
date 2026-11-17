@@ -1131,7 +1131,9 @@ function trKey(e, k) {                  // Enter or Space on a trip; the focus k
   if (e.key !== "Enter" && e.key !== " ") return;
   e.preventDefault();
   hlTrip(k);
-  var r = document.querySelector && document.querySelector('.tr.go[data-k="' + k + '"]');
+  // (the row of the trip picked: k's place moves when a late track sorted
+  // an earlier trip in, and the focus went to the row before)
+  var r = document.querySelector && document.querySelector('.tr.go[data-k="' + (hist.hl == null ? k : hist.hl) + '"]');
   if (r) r.focus();
 }
 // GPX 1.1 of the shown day: a track segment per gap (pure, for tests)

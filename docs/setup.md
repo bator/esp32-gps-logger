@@ -53,7 +53,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | Key | Meaning |
 |-----|---------|
 | `SSID`, `WPA2` / `SSID2`, `WPA2_2` / `SSID3`, `WPA2_3` | Networks #1–#3 |
-| `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` | `1`/`0` (or `true`/`false`): treat as home. #1 is home by default, #2 and #3 are not. |
+| `HOME1` / `SSID_HOME`, `HOME2` / `SSID2_HOME`, `HOME3` / `SSID3_HOME` | `1`/`0` (or `true`/`false`): treat as home. #1 is home by default, #2 and #3 are not. Any other value (`n`, `0 ; hotspot`) is a diag line (`env SSID_HOME not 1/0, using not home`) and the network is not home; `SSIDn_HOME` wins over `HOMEn`, and one whose line could not be read is not looked past. |
 | `SSID_HIDDEN`, `SSID2_HIDDEN`, `SSID3_HIDDEN` | `1`: hidden SSID, tried although the scan never lists it by name: in every round whose scan shows an AP with an empty SSID (a hidden network still beacons), and in the first round after a link loss, a wake or an arrival and every 4th round otherwise. Set it for every hidden network: without it a hidden SSID is tried only in those first and 4th rounds (up to ~40 minutes apart). |
 | `IP`, `GW`, `MASK`, `DNS` (and `IP2`…, `IP3`…) | Static IP per network. `GW` is required; `MASK` defaults to `255.255.255.0`, `DNS` to the gateway. An invalid entry falls back to DHCP with a line in the [diagnostic log](usage.md#diagnostic-log) (`env IP needs a valid IP and GW, using DHCP`). |
 | `GEO_URL` | Dawarich origin. Use `https://`; see [Upload](internals.md#upload). |
@@ -99,13 +99,17 @@ HOSTNAME=Dawarich-GPS-tracker
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored. A file saved as ANSI does not stop the boot: an SSID or password
   (`SSID`, `SSID2`, `SSID3`, `WPA2`, `WPA2_2`, `WPA2_3` only) that is not
-  UTF-8 is used byte for byte, any other such value (a home flag with an
-  accented comment too) is skipped
+  UTF-8 is used byte for byte; a flag or a name whose comment alone is not
+  UTF-8 (`SSID_HOME=1 # otthoni hálózat` saved as ANSI) keeps the value
+  before the `#` (`env SSID_HOME: its comment not UTF-8, dropped`); any
+  other such value is skipped
   with a line in the diagnostic log, and so is a line whose key is not
-  plain ASCII. Such a key that looks like `WEB_TOKEN`, a `WPA2` or a home
-  flag (the same without its odd bytes, or with them in its letters'
-  places; every key it may be, `WPA2_` and a bad byte is `WPA2_2` and
-  `WPA2_3`) counts as that key garbled, not unset: `WEB_TOKEN` closes the
+  plain ASCII. Such a key that looks like `WEB_TOKEN`, a `WPA2`, a home
+  flag or `UPLOAD_UNVERIFIED` (with its odd bytes in its letters' places;
+  else the same without them; else a run of them as one letter, a UTF-8
+  letter or the `U+FFFD` an editor writes for a bad byte; every key it may
+  be, `WPA2_` and a bad byte is `WPA2_2` and `WPA2_3`) counts as that key
+  garbled, not unset: `WEB_TOKEN` closes the
   data routes, a `WPA2` drops its network (it is not tried as an open one),
   a home flag makes its network not home. A `.env` read part way (an I/O
   error) does the same for what it did not get to: network #1 is not home
@@ -157,9 +161,10 @@ renames them over the old files, `main.py` last, removing an old plain
 (a Ctrl-C, a lost link, a failed rename) is finished before any reset: the
 files left as `.dpl` are swapped in by a second session (a reset then
 booted a mixed set, the old `main.py` over new modules); one that cannot
-be finished leaves the board stopped and says so (`Swap FAILED part way`:
-run `deploy.sh` again at once, the watchdog resets a stopped logger). It
-leaves `/deploy.cut` on the board: a later deploy that fails before its own
+be finished is said (`Swap FAILED part way`: run `deploy.sh` again at
+once) and runs the logger again without a reset (left stopped, the watchdog
+booted the mixed set a little later anyway, and rolled a pending OTA back).
+It leaves `/deploy.cut` on the board: a later deploy that fails before its own
 swap does not reset onto what may be a mixed set (`An earlier swap is
 unfinished`), it runs the logger again without a reset (an OTA pending is
 not rolled back by the watchdog); its old `.dpl` files go before the

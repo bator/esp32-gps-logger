@@ -440,8 +440,10 @@ that day at the first reply whose last point is past the local day's end
 reply's `X-Hist-Late: 0` says that file, as it is now, is in time order: a
 track uploaded after a newer one (held back, retried) sits further on in it
 (`1`), and the day is read whole, as when the header is not there (the file
-not scanned at its size yet). A picked trip is kept by its start time when
-a late track sorts an earlier one in. A day without a file is a `204` (the page asks for today's
+not scanned at its size yet: after a boot the days are scanned one a
+status poll, and a day picked before its scan reads its second UTC day
+whole). A picked trip is kept by its start time when a late track sorts an
+earlier one in, and Enter on its row keeps the focus on it. A day without a file is a `204` (the page asks for today's
 every minute before its first point). `status.json`'s `day_span` gives each
 `.trb` day's first and last point (seconds into the UTC day; one day read a
 request, kept with its file size), the earliest and the latest in time even
