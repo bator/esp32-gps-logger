@@ -228,6 +228,17 @@ const dl = (ms, la) => la + ",18.0,100.0,2,1.0," + iso(d0 + ms) + "\n";
 c0.histParse(c0.hist.days[0], dl(7200000, "47.0") + dl(7201000, "47.001"));
 c0.histParse(c0.hist.days[0], dl(3600000, "47.01") + dl(3601000, "47.011"));
 ft.late = [c0.hist.pts.map((q) => q[0] - d0), Math.round(c0.tripsOf(c0.hist.pts).reduce((a, t) => a + t.km, 0) * 1000)];
+// a reply ending past the shown day's end stops the read only where the
+// board says its file is in time order (day_span [a, b]); not with [a, b, 1]
+// (a late append further on) nor without a span (not read yet)
+ft.lateStop = [undefined, [3600, 90000], [3600, 90000, 1]].map((sp) => {
+  c0.hist = c0.histNew("20261030");
+  const u = c0.hist.days[c0.hist.days.length - 1];
+  c0.boardSpans = {};
+  if (sp) c0.boardSpans[u] = sp;
+  return c0.histParse(u, dl(3600000, "47.0") + dl(86400000 + 600000, "47.0"));
+});
+c0.boardSpans = {};
 // a 20 km drive, the live position at its end: the whole track inside the
 // map's band (zoom 13 at least cut both ends off); without a fix, a past
 // day or a picked trip the track decides
@@ -1170,6 +1181,7 @@ ft.histEnd = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTi
   c.mapD = null;
   c.trackPaint = () => {};
   c.hist = c.histNew("20261108");        // Nov 8 local: 23:00Z Nov 7 to 23:00Z Nov 8
+  c.boardSpans = {"20261108": [43200, 83460]};   // (in time order: may stop early)
   c.histLoad();
   const said = (body, hh) => { const r = urls[urls.length - 1]; r.status = 200; r.responseText = body; r.headers = hh; r.onload(); };
   const ln = (h, m) => trkLine(Date.UTC(2026, 10, 8, h, m, 0), 47.1, 18.4);

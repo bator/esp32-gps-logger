@@ -858,8 +858,11 @@ function histParse(day, text) {
   // (the km come from tripsOf: the Day figures and the timeline sum the trips)
   if (late) hist.pts.sort(function (a, b) { return a[0] - b[0]; });
   // -> the text's last point is past the day's end (in time order): a past
-  // day's last UTC day need not be read on
-  return !late && lt >= hist.end;
+  // day's last UTC day need not be read on, unless the board says the file
+  // is not in time order (day_span's third item): a late append further on
+  // was left unread (a trip missing from the map, the km and the GPX)
+  var sp = boardSpans[day];
+  return !late && lt >= hist.end && !!sp && sp.length === 2;
 }
 function histLoad() {
   var now = Date.now();
@@ -938,7 +941,7 @@ function dayList(days, spans) {        // -> YYYYMMDD days oldest first, today (
     var s = String(days[i]);
     if (!/^\d{8}$/.test(s)) continue;
     var u = Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)), sp = spans && spans[s];
-    var ends = sp && sp.length === 2 && sp[0] >= 0 && sp[1] >= sp[0] && sp[1] < 86400 ? [sp[0] * 1000, sp[1] * 1000] : [0, 86399999];
+    var ends = sp && sp.length >= 2 && sp[0] >= 0 && sp[1] >= sp[0] && sp[1] < 86400 ? [sp[0] * 1000, sp[1] * 1000] : [0, 86399999];
     for (var k = 0; k < 2; k++) {
       var l = localYmd(u + ends[k]);
       if (l < today && out.indexOf(l) < 0) out.push(l);

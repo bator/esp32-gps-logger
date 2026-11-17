@@ -6,7 +6,7 @@
 from machine import UART
 import sys, time, select
 from gps_clock import age as _age, recent as _recent, TICKS_CAP, \
-    stamp as _stamp
+    stamp as _stamp, ymd_ok as _ymd_ok
 
 
 def _diag_write(line):                   # (bound by the logger)
@@ -106,7 +106,7 @@ def reset():
     st.clear()
     st.update(start=time.ticks_ms(), start_s=_stamp(), rx=None, rx_b=0,
               good=None, ok=0, err=0, bug=0,
-              quality=None, fixtype=None, valid=False,
+              quality=None, fixtype=None, dim=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, used=None, view={},
               hdop=None, ttff=None, pos_at=None, hdop_at=None,
@@ -245,6 +245,8 @@ def _publish():
     now = time.ticks_ms()
     a = ep["g"] or ep["r"]
     st["valid"] = a is not None
+    if a is None:
+        st["dim"] = 0                    # (unknown until a GSA round again)
     if a is not None and st["fix_first"] is None:
         st["fix_first"] = now
     st["epochs"] = a[4] if a else 0
@@ -313,10 +315,11 @@ def _published(now):
         st["q_thin"] += 1
 
 # a published second as a tuple in this order (seq first, pos_at at 8): one
-# small allocation a second rather than a dict. fixtype: GSA's when the second
-# was published (a queued Fix's altitude is judged by its own)
+# small allocation a second rather than a dict. dim: GSA's fix type when the
+# second was published, 0 when not known since a fix was lost (a queued
+# Fix's altitude is judged by its own)
 _SNAP = ("seq", "lat", "lon", "alt", "hdop", "hdop_at", "std", "std_at",
-         "pos_at", "time", "date", "valid", "epochs", "fixtype")
+         "pos_at", "time", "date", "valid", "epochs", "dim")
 
 def _snap():
     return tuple(st[k] for k in _SNAP)
@@ -371,7 +374,13 @@ def rmc(talker, f):
         if d != c[0]:
             if not d.isdigit():          # (a corrupt digit: bad sentence)
                 raise ValueError(d)
-            c[0], c[1] = d, "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
+            # (a real date only: "321126", a flip the checksum let through,
+            # or a receiver past a week rollover was a fix every second of
+            # which the logger dropped, a trip opened; dateless instead)
+            c[0] = d
+            c[1] = ("20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
+                    if _ymd_ok(2000 + int(d[4:6]), int(d[2:4]), int(d[0:2]),
+                               0, 0, 0) else None)
         date = c[1]
     timed = _second(f[1])
     st["speed"] = None if kn is None else kn * 1.852
@@ -408,11 +417,14 @@ def gsa(talker, f):
     the uptime's. Only a 2D or 3D mode is kept: GSA comes every
     GSA_EVERY s, RMC every second, so after a "1" (no fix) round an RMC
     valid again showed "Fix" for up to 5 s (measured indoors: 14 of 201
-    rounds). The last dimension stands until the next 2D/3D round."""
+    rounds). The last dimension stands until the next 2D/3D round, for the
+    screen; dim, what a published second's elevation is judged by, is 0
+    from a second without a fix until the next 2D/3D round (the fixtype
+    of the fix before the loss gave a regained 2D fix an elevation)."""
     ft = _num(f[2], int)
     _uc_gsa(talker, f)                   # (first: a field that fails there
     if ft in (2, 3):                     # leaves no fix type, no count)
-        st["fixtype"] = ft
+        st["fixtype"] = st["dim"] = ft
     t = _sec[0]
     if t is not None:
         if t != st["gsa_t"]:
@@ -1056,6 +1068,9 @@ def _uc_watch(now):
 def _setup_lost(now, why):
     st["extra"] = 1                      # (its usual backoff, under a minute)
     _date_lost()
+    # (a restart whose banner was lost, its setup gone: the settle rule
+    # anew, as _gps_restarted does; its first minute's drift was a walk)
+    st.update(fix_first=None, settled=False)
     print("gps setup lost:", why)
     said = st["gst_said"]
     if not _recent(now, said, GPS_NOT_TAKEN_SAY):
@@ -1136,6 +1151,15 @@ _HKEY = {ord(k[0]) << 16 | ord(k[1]) << 8 | ord(k[2]): k for k in HANDLERS}
 _TALK = {}
 TALK_MAX = 8                             # talkers kept (GP GN GL GA GB ...)
 
+def _bad_line(line, s, e):
+    """A sentence that fails its checksum: a bad one, or the start-up
+    banner glued to a sentence the restart cut (no CR/LF between): a
+    restart then, not a bad sentence (it waited for _uc_watch, ~30 s)."""
+    if line.find(b"FWVer", s, e) >= 0:
+        _gps_restarted()
+    else:
+        st["err"] = (st["err"] + 1) & CNT_MASK
+
 def handle(line, s=0, e=None):
     """One NMEA sentence: line[s:e] (read_uart hands over its buffer and
     the line's bounds). The whitespace, the last "$" (garbage or a cut-off
@@ -1153,18 +1177,21 @@ def handle(line, s=0, e=None):
     while e > s and _space(v[e - 1]):
         e -= 1
     i = line.rfind(b"$", s, e)
+    if i < 0 or i > s:
+        # the UC6580's start-up banner, plain text (its FWVer line once);
+        # a sentence after it is read (one before it: _bad_line)
+        fw = line.find(b"FWVer", s, e)
+        if fw >= 0:
+            _gps_restarted()
+            if i < fw:
+                return
     if i > s:
         s = i
-    if s >= e:
-        return
-    if i < 0:
-        # the UC6580's start-up banner, plain text (its FWVer line once)
-        if line.find(b"FWVer", s, e) >= 0:
-            _gps_restarted()
+    if s >= e or i < 0:
         return
     star = line.rfind(b"*", s, e)
     if star < 0:
-        st["err"] = (st["err"] + 1) & CNT_MASK
+        _bad_line(line, s, e)
         return
     p = v[s + 1:star]                    # (one view: checksum and text)
     c = hi = 0
@@ -1175,7 +1202,7 @@ def handle(line, s=0, e=None):
     # a non-hex one, -1, makes h negative: no match)
     h = _hex(v[star + 1]) << 4 | _hex(v[star + 2]) if star + 3 == e else -1
     if c != h:
-        st["err"] = (st["err"] + 1) & CNT_MASK
+        _bad_line(line, s, e)
         return
     st["good"] = time.ticks_ms()         # the last whole frame (GPS link)
     k = -1                               # a 5-character address: its type

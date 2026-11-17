@@ -79,7 +79,8 @@ HOSTNAME=Dawarich-GPS-tracker
   `API_KEY` and `WEB_TOKEN` are taken verbatim, since they may contain `#`.
 - **The server's certificate:** `./deploy.sh` copies `ca.der` from the repo
   folder (gitignored; or `CA_DER=path/to/root.der`, relative to where you
-  run it; one that is not there stops the deploy) to the board's `/ca.der`
+  run it; one that is not there, or not a DER of at most 4 KB, stops the
+  deploy before it talks to the board) to the board's `/ca.der`
   with the other files, checked by size and SHA-256. Without one the board's
   `/ca.der` is left as it is. A held upload says so once a boot in the
   diagnostic log (`upload err unverified: … put /ca.der on the board, or
@@ -99,10 +100,14 @@ HOSTNAME=Dawarich-GPS-tracker
   ignored. A file saved as ANSI does not stop the boot: an SSID or password
   that is not UTF-8 is used byte for byte, any other such value is skipped
   with a line in the diagnostic log, and so is a line whose key is not
-  plain ASCII. Such a key that looks like `WEB_TOKEN` or a `WPA2` (the same
-  without its odd bytes, or with them in its letters' places) counts as
-  that key garbled, not unset: `WEB_TOKEN` closes the data routes, a `WPA2`
-  drops its network (it is not tried as an open one).
+  plain ASCII. Such a key that looks like `WEB_TOKEN`, a `WPA2` or a home
+  flag (the same without its odd bytes, or with them in its letters'
+  places; every key it may be, `WPA2_` and a bad byte is `WPA2_2` and
+  `WPA2_3`) counts as that key garbled, not unset: `WEB_TOKEN` closes the
+  data routes, a `WPA2` drops its network (it is not tried as an open one),
+  a home flag makes its network not home. A `.env` read part way (an I/O
+  error) does the same for what it did not get to: network #1 is not home
+  by default then (`env SSID_HOME not read …: SSID not home`).
 - A value out of range or unreadable keeps the default and says so in the
   [diagnostic log](usage.md#diagnostic-log), on the console too (in the field there
   is none): `env KEEPALIVE not 0 or 5-600 s, using 5 s`, the key named,
@@ -151,7 +156,10 @@ renames them over the old files, `main.py` last, removing an old plain
 files left as `.dpl` are swapped in by a second session (a reset then
 booted a mixed set, the old `main.py` over new modules); one that cannot
 be finished leaves the board stopped and says so (`Swap FAILED part way`:
-run `deploy.sh` again at once, the watchdog resets a stopped logger). A
+run `deploy.sh` again at once, the watchdog resets a stopped logger). It
+leaves `/deploy.cut` on the board: the next deploy keeps the `.dpl` files
+until its own copy is checked, and one that fails before its swap resets
+nothing (`An earlier swap is unfinished`). A
 copied file gone before the first rename is refused on the board's own word
 (`Swap refused`, the old install stays); no answer at all counts as a swap
 cut part way. A
@@ -459,7 +467,10 @@ hangs before its own check is a watchdog rollback (bad), not a cut. An
 install begun notes itself in `/ota.dl`: one a reset cut waits
 `OTA_RETRY` (an hour) before the next, and every third in a row counts as a
 try (`ota build N install cut by a reset`): a brownout under the
-download's load reinstalled it at every boot. Once confirmed
+download's load reinstalled it at every boot. A cut is counted once, at
+the first boot after it (the note marked counted), however often the board
+boots before the next install; a note of the running build (a reset after
+`set_boot`) is dropped. Once confirmed
 (`mark_app_valid`), a crash or stop no longer marks the image, and a
 `valid` mark left by a power cut gives way to the old firmware's reset
 cause. A boot without a pending note confirms the running image and

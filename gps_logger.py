@@ -789,19 +789,25 @@ SCAN_ERR = WLAN_ERR + (MemoryError,)     # scan() builds its list on the heap
 _env_partial = [False]                   # load_env stopped part way (EIO)
 _env_skipped = []                        # keys whose value it skipped (not UTF-8)
                                          # or whose garbled key it guessed
-_ENV_GUARD = ("WEB_TOKEN", "WPA2", "WPA2_2", "WPA2_3")
+# (each fails closed when missing for a garbled line: WEB_TOKEN closes the
+# routes, a WPA2 drops its network, a home flag makes its network not home)
+_ENV_GUARD = ("WEB_TOKEN", "WPA2", "WPA2_2", "WPA2_3", "SSID_HOME",
+              "SSID2_HOME", "SSID3_HOME", "HOME1", "HOME2", "HOME3")
 
 def _env_key_guess(k):
-    """The key of _ENV_GUARD a key with bytes past ASCII (k) may have been:
+    """The keys of _ENV_GUARD a key with bytes past ASCII (k) may have been:
     the same without them (an NBSP, a BOM in the middle), or the same
-    length with them where its letters were (a byte gone bad); else None."""
+    length with them where its letters were (a byte gone bad). Every one
+    that fits: "WPA2_" and a bad byte is WPA2_2 or WPA2_3 (before, only the
+    first, and SSID3 was tried open). -> a list, empty for none."""
     r = bytes(c for c in k if c < 128).strip()
+    out = []
     for n in _ENV_GUARD:
         b = n.encode()
         if r == b or (len(k) == len(b)
                       and all(a == c or a > 127 for a, c in zip(k, b))):
-            return n
-    return None
+            out.append(n)
+    return out
 
 def load_env(path):
     """KEY=VALUE lines -> dict. Surrounding quotes are stripped.
@@ -834,11 +840,12 @@ def load_env(path):
                     # routes stayed open, the network was tried open; any
                     # other is just skipped, a "Megjegyzés=" closed nothing)
                     g = _env_key_guess(k)
-                    if g is None:
+                    if not g:
                         _say("env a key not plain ASCII, its line skipped")
                     else:
-                        _env_skipped.append(g)
-                        _say("env %s: its key not plain ASCII, its line skipped" % g)
+                        _env_skipped.extend(g)
+                        _say("env %s: its key not plain ASCII, its line "
+                             "skipped" % " or ".join(g))
                     continue
                 k = k.decode()
                 try:
@@ -989,11 +996,20 @@ def _load_nets(env):
             _say("env %s empty: %s is tried as an open network"
                       % (pk, sk))
         home = not x                     # (the first network by default)
+        hk3 = "HOME" + (x or "1")
         t = _truthy(env.get(hk2))
         if t is None:
-            t = _truthy(env.get("HOME" + (x or "1")))
+            t = _truthy(env.get(hk3))
         if t is not None:
             home = t
+        elif home and (_env_partial[0] or hk2 in _env_skipped
+                       or hk3 in _env_skipped):
+            # (its home flag may have been there, a 0: home by default sent
+            # the key over unverified TLS with UPLOAD_UNVERIFIED=home on a
+            # phone's hotspot)
+            home = False
+            _say("env %s not read (.env read part way, or its line "
+                 "garbled): %s not home" % (hk2, sk))
         hidden = bool(_truthy(env.get(hidk)))
         n = {"ssid": s, "pw": "" if p is None else p,
              "home": home, "hidden": hidden, "bssid": None,
@@ -3199,7 +3215,8 @@ def _fields(now, fx=None):
     when not known). Also what the departure ring keeps (_RE)."""
     ele = ""
     alt = _fv(fx, "alt")
-    if alt is not None and _fv(fx, "fixtype") != 2:
+    ft = _fv(fx, "dim")
+    if alt is not None and ft != 2 and ft != 0:
         ele = "%.1f" % alt
     hdop = _fresh_hdop(now, fx)
     return ele, "" if hdop is None else "%.1f" % hdop
@@ -5131,16 +5148,25 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     if why:                              # a flash or memory problem: the
         up["state"] = "fs err"           # .bad itself has room
         return False
-    _hist_batch(path, off, new_off, key)
+    # (its points drawn once: a .pos write that failed brought the batch
+    # back, and the next 422 added them to the history again; HIST_DONE as
+    # on the 2xx path)
+    hd = path in up["hd"]
+    if not (hd and _hist_done(path) == off):
+        _hist_batch(path, off, new_off, key)
     try:
         commit_offset(path, n, new_off, eof, key1)
     except (OSError, MemoryError) as e:
         # the copy landed but the offset did not: the next try copies the
         # batch again (duplicates in .bad, deduplicated by Dawarich)
         print("quarantine offset", repr(e))
+        _hist_done_note(path, off)
         gc.collect()
         _up_err("low mem" if isinstance(e, MemoryError) else "fs err")
         return False
+    if hd:
+        up["hd"].discard(path)
+        _rm(path + HIST_DONE)
     up["allow_bad"] = False
     up["state"] = "quarantine"
     return True
@@ -6372,9 +6398,10 @@ OTA_BAD = "/ota.bad"                     # builds that failed their health
 OTA_TRIES = "/ota.tries"                 # "<build> <n>": its rollbacks after
                                          # a power-on or with no WiFi/manifest
 OTA_TRIES_MAX = 2                        # such rollbacks before it is held
-OTA_DL = "/ota.dl"                       # "<build> <n>": an install begun (the
-                                         # download on), n of them cut by a
-                                         # reset in a row; gone with its end
+OTA_DL = "/ota.dl"                       # "<build> <n>[ 1]": an install begun
+                                         # (the download on), n of them cut
+                                         # by a reset in a row, 1: the last
+                                         # cut counted; gone with its end
 OTA_CUT_PER_TRY = 3                      # cut installs that count one try (a
                                          # brownout under the download's load
                                          # reinstalled it every boot: 600 slot
@@ -6791,37 +6818,52 @@ def _ota_held(build):
     return left if left > 0 else 0
 
 def _ota_dl_get():
-    """[build, n] of OTA_DL, or None."""
+    """[build, n, counted] of OTA_DL, or None."""
     try:
         with open(OTA_DL) as f:
             v = [int(x) for x in f.read().split()]
-        return v if len(v) == 2 else None
+        if len(v) == 2:
+            v.append(0)
+        return v if len(v) == 3 else None
     except (OSError, ValueError):
         return None
+
+def _ota_dl_put(build, n, counted):
+    """OTA_DL written. Never raises."""
+    try:
+        with open(OTA_DL, "w") as f:
+            f.write("%d %d 1" % (build, n) if counted else
+                    "%d %d" % (build, n))
+    except Exception as e:
+        _diag_write("ota dl note not written: %r" % e)
 
 def _ota_dl_begin(build):
     """An install of build begins: one more in a row when the last one of
     it was cut (its OTA_DL still there). Never raises."""
     v = _ota_dl_get()
-    n = v[1] + 1 if v and v[0] == build else 1
-    try:
-        with open(OTA_DL, "w") as f:
-            f.write("%d %d" % (build, n))
-    except Exception as e:
-        _diag_write("ota dl note not written: %r" % e)
+    _ota_dl_put(build, v[1] + 1 if v and v[0] == build else 1, 0)
 
 def _ota_cut_seen():
     """At boot, an install that a reset cut (its OTA_DL there, no pending
     note it got to): OTA_RETRY before the next one, not OTA_FIRST, and
     every OTA_CUT_PER_TRY-th a try (held as a rollback's, never blamed).
-    The note stays, for the count."""
+    The note stays, for the count, marked counted: a later boot (before
+    the next install) counted the same cut again, a try each time, and an
+    odd try count lifted the hold. A note of the running build (a reset
+    between set_boot and its removal) is no cut: dropped."""
     v = _ota_dl_get()
     if v is None:
         return
-    build, n = v
+    build, n, counted = v
+    if build == FW_BUILD:
+        _rm(OTA_DL)
+        return
     ota["failed"] = (build, _stamp(), "install cut")
+    if counted:
+        return
     if n % OTA_CUT_PER_TRY == 0:
         _ota_try(build)
+    _ota_dl_put(build, n, 1)
     _diag_write("ota build %d install cut by a reset (%d in a row): next in "
                 "%d min" % (build, n, OTA_RETRY // 60000))
 
@@ -7210,6 +7252,8 @@ def ota_boot():
         valid = mark == "valid"          # (a power cut while confirming)
         if not valid:
             _rm(OTA_MARK)                # (a run before this one stopped)
+        _rm(OTA_DL)                      # (it booted: a reset after
+                                         # set_boot left it, no cut)
         ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
                    confirmed=False, done_err=0,
                    probed=False, probe_at=None, probe_err=None,
@@ -7412,6 +7456,7 @@ def _ota_done():
         return
     ota.pop("done_err", None)
     _rm(OTA_TRIES)
+    _rm(OTA_DL)
     _rm(OTA_MARK)
     # the pending state ends last: a MemoryError in a step above (the
     # guard swallows it) leaves it set, and the next tick runs the steps
@@ -8471,19 +8516,24 @@ def _hist_seek(f, o, end, t):
 
 def _hist_span(f, size, e=None):
     """The UTC times of day (s) of a day history .trb's first and last
-    point: the first keyframe's, the latest keyframe's or decoded point's
-    after the last keyframe (its deltas only are decoded). -> the day's
-    _hsp entry [size, span, first, hi, lk, off, more]: span [first, last],
-    None without a keyframe or while the keyframe scan is not through.
+    point: the earliest keyframe's, the latest keyframe's or decoded
+    point's after it (its deltas only, up to the next keyframe, are
+    decoded). A late append (an earlier track uploaded after a later one)
+    puts keyframes out of time order: before, the first in the file was
+    taken and only the last one's deltas read (a day the picker left
+    out). -> the day's _hsp entry [size, span, first, hi, hk, off, more,
+    pk, late]: span [first, last], [first, last, 1] when the file is not
+    in time order (the page then reads a past day's file whole), None
+    without a keyframe or while the keyframe scan is not through.
     When HIST_SEEK_MS runs out it stops at a record start (off, more 1)
     and the next call goes on from there; e, the entry of an earlier call,
     also lets a grown file be scanned from where that one got to (a day
     grows by appends at its footer). Before, a day too long for one scan
     had no span for good, and a growing one was read from 0 at each poll."""
     end = _hist_end(f, size)
-    first, hi, lk, o = -1, -1, -1, 0
+    first, hi, hk, o, pk, late = -1, -1, -1, 0, -1, 0
     if e is not None and size >= e[0] and 0 < e[5] <= end:
-        first, hi, lk, o = e[2], e[3], e[4], e[5]
+        first, hi, hk, o, pk, late = e[2], e[3], e[4], e[5], e[7], e[8]
     i = 0
     t0 = time.ticks_ms()
     _rd_open(o)
@@ -8494,40 +8544,50 @@ def _hist_span(f, size, e=None):
         if a < b and _rbuf[a] == 61:
             k = _kf_s(a, b)
             if k >= 0:
-                if first < 0:
+                if first < 0 or k < first:
                     first = k
-                hi = max(hi, k)
-                lk = _rd[0] + a
+                if k < pk:
+                    late = 1
+                pk = k
+                if k >= hi:
+                    hi, hk = k, _rd[0] + a
         i += 1
         if not i & 63:
             feed()
             _rcv.read_uart()
             if time.ticks_diff(time.ticks_ms(), t0) > HIST_SEEK_MS:
-                return [size, None, first, hi, lk, _rd[0] + _rd[2], 1]
+                return [size, None, first, hi, hk, _rd[0] + _rd[2], 1, pk,
+                        late]
     # where the next append begins; only past a footer: without one the
     # last append may be cut, and the file is read again from its start
     o = end if end < size else 0
-    if lk < 0:
-        return [size, None, first, hi, lk, o, 0]
+    if hk < 0:
+        return [size, None, first, hi, hk, o, 0, pk, late]
     s = _kw
     s[0] = None
     t = hi
-    _rd_open(lk)
+    _rd_open(hk)
     while _rd[0] + _rd[2] < end:
         if not _rd_rec(f):
             break
         a, b = _rd[1], _rd[2]
         if a == b:
             s[0] = None
-        elif _kb_rec(a, b, s) > 0 and s[0] is not None:
+            continue
+        # (the next keyframe: a late append's, earlier in time)
+        if _rd[0] + a > hk and _rbuf[a] == 61 and _kf_s(a, b) >= 0:
+            break
+        if _kb_rec(a, b, s) > 0 and s[0] is not None:
             t = max(t, s[0] % 86400)
-    return [size, [first, t], first, hi, lk, o, 0]
+    return [size, [first, t, 1] if late else [first, t], first, hi, hk, o,
+            0, pk, late]
 
 _hsp = {}                                # day -> _hist_span's entry
 
 def _hist_spans():
-    """{"YYYYMMDD": [first, last]}: each .trb day's first and last point (s
-    into the UTC day, _hist_span) for the page's day picker (a UTC day
+    """{"YYYYMMDD": [first, last(, 1)]}: each .trb day's first and last
+    point (s into the UTC day, _hist_span; 1: not in time order) for the
+    page's day picker (a UTC day
     offers the local days of both: east of UTC its last hour is the next
     local day, offered only when a point is there). Kept per day with the
     file's size: one day (re)read a call at most, the others as they
@@ -8548,7 +8608,7 @@ def _hist_spans():
                 with open(name, "rb") as f:
                     e = _hsp[d] = _hist_span(f, size, e)
             except OSError:
-                e = _hsp[d] = [size, None, -1, -1, -1, 0, 0]
+                e = _hsp[d] = [size, None, -1, -1, -1, 0, 0, -1, 0]
         if e is not None and e[0] == size and e[1]:
             out[d] = e[1]
     return out

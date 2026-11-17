@@ -108,6 +108,33 @@ done
 cp main.py "$BUILD/main.py"
 "$PY" tools/web_min.py web.html "$BUILD/web.html.gz"
 
+# The upload server's root certificate (DER, at most 4 KB) goes up as
+# /ca.der when there is one: CA_DER=path, or ca.der next to this script
+# (gitignored). Without it the logger posts no unverified TLS (see
+# UPLOAD_UNVERIFIED in docs/setup.md). Checked here, before the first
+# session: a CA_DER typo stopped the logger twice and reset the board
+CA_SRC=${CA_DER:-ca.der}
+CA_UP=0
+if [ -n "${CA_DER:-}" ] && [ ! -f "$CA_SRC" ]; then
+    echo "CA_DER=$CA_DER: no such file" >&2
+    exit 1
+fi
+if [ -f "$CA_SRC" ]; then
+    CA_N=$(wc -c < "$CA_SRC")
+    # (a DER SEQUENCE: 0x30, then a long length, 0x81 or 0x82, as every
+    # certificate over 127 bytes has)
+    CA_HEAD=$(head -c 2 "$CA_SRC" | od -An -tx1 | tr -d ' \n')
+    if [ "$CA_N" -gt 4096 ] || { [ "$CA_HEAD" != 3081 ] && [ "$CA_HEAD" != 3082 ]; }; then
+        echo "$CA_SRC is not a DER certificate of at most 4096 bytes" >&2
+        exit 1
+    fi
+    cp "$CA_SRC" "$BUILD/ca.der"
+    CA_UP=1
+    echo "Root certificate: $CA_SRC ($CA_N B) -> /ca.der"
+else
+    echo "No ca.der (CA_DER=...): the board's /ca.der is left as it is"
+fi
+
 # The swap (LittleFS renames over an existing file in one step; other file
 # systems need the old one removed first), main.py last. $1 True: every .dpl
 # must be there (the first try: the copy check just saw them); False: what is
@@ -149,6 +176,7 @@ else:
         if (os.stat(n)[6], binascii.hexlify(h.digest()).decode()) != E[n]:
             raise OSError('not the copy, not swapped: ' + n)
     print('roll forward ok')
+open('deploy.cut', 'w').close()
 for n in F:
     if n + '.dpl' not in os.listdir():
         os.stat(n)
@@ -172,6 +200,7 @@ if $SEEN_RESET:
     D += ['ota.seen']
 for n in D:
     n in os.listdir() and os.remove(n)
+os.remove('deploy.cut')
 from machine import RTC
 RTC().memory(b'0')"
 }
@@ -201,7 +230,19 @@ restart_logger() {
             exit 1
         fi
         echo "Swap cut part way: the rest swapped in" >&2
+        CUT=0
         [ "$rc" != 0 ] || rc=1
+    fi
+    # an earlier deploy's swap left unfinished (/deploy.cut, its .dpl kept):
+    # this one did not get to swap its own set in, so no reset onto the mixed
+    # set either (before, the rerun the FAILED line asks for dropped those
+    # .dpl and, failing before its swap, reset onto it)
+    if [ "${CUT:-0}" = 1 ]; then
+        echo "An earlier swap is unfinished on the board (/deploy.cut): no reset onto a mixed set;" >&2
+        echo "its .dpl files are kept: run ./deploy.sh again" >&2
+        rm -rf "$BUILD"
+        [ "$rc" != 0 ] || rc=1
+        exit "$rc"
     fi
     if [ "${OTAPEND:-}" = False ]; then
         if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1; then
@@ -223,7 +264,17 @@ trap restart_logger EXIT
 BOARD=$("$MPREMOTE" connect "$PORT" exec "
 import os, sys
 print('ota.pending', 'ota.pending' in os.listdir())
+print('deploy.cut', 'deploy.cut' in os.listdir())
 print(sys.implementation._machine)" | tr -d '\r' || true)
+# (a swap cut and not finished: its .dpl are the rest of that install, kept
+# until this one's copy is checked; no reset onto the mixed set before)
+CUT=0
+CUTPY=False
+if grep -qE '^deploy.cut True$' <<< "$BOARD"; then
+    CUT=1
+    CUTPY=True
+    echo "An earlier swap is unfinished on the board (/deploy.cut): its .dpl kept until this copy is checked" >&2
+fi
 OTAPEND=$(grep -E '^ota.pending (True|False)$' <<< "$BOARD" | tail -n 1 | cut -d' ' -f2 || true)
 if [ "$OTAPEND" != False ]; then
     if [ "$OTAPEND" = True ]; then
@@ -300,38 +351,16 @@ case "$FROZEN" in
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
-# The upload server's root certificate (DER, at most 4 KB) goes up as
-# /ca.der when there is one: CA_DER=path, or ca.der next to this script
-# (gitignored). Without it the logger posts no unverified TLS (see
-# UPLOAD_UNVERIFIED in docs/setup.md).
-CA_SRC=${CA_DER:-ca.der}
-if [ -n "${CA_DER:-}" ] && [ ! -f "$CA_SRC" ]; then
-    echo "CA_DER=$CA_DER: no such file" >&2
-    exit 1
-fi
-if [ -f "$CA_SRC" ]; then
-    CA_N=$(wc -c < "$CA_SRC")
-    # (a DER SEQUENCE: 0x30, then a long length, 0x81 or 0x82, as every
-    # certificate over 127 bytes has)
-    CA_HEAD=$(head -c 2 "$CA_SRC" | od -An -tx1 | tr -d ' \n')
-    if [ "$CA_N" -gt 4096 ] || { [ "$CA_HEAD" != 3081 ] && [ "$CA_HEAD" != 3082 ]; }; then
-        echo "$CA_SRC is not a DER certificate of at most 4096 bytes" >&2
-        exit 1
-    fi
-    cp "$CA_SRC" "$BUILD/ca.der"
-    FILES="ca.der $FILES"
-    echo "Root certificate: $CA_SRC ($CA_N B) -> /ca.der"
-else
-    echo "No ca.der (CA_DER=...): the board's /ca.der is left as it is"
-fi
+if [ "$CA_UP" = 1 ]; then FILES="ca.der $FILES"; fi
 
-# Free flash, after dropping the .dpl files of an earlier failed deploy:
+# Free flash, after dropping the .dpl files of an earlier failed deploy
+# (not those of a swap left unfinished, /deploy.cut: this copy replaces them):
 # each new file needs its size rounded up to whole blocks, plus one block
 # of metadata, while the old one still exists
 FREE=$("$MPREMOTE" connect "$PORT" exec "
 import os
 for n in os.listdir():
-    if n.endswith('.dpl'):
+    if n.endswith('.dpl') and not $CUTPY:
         os.remove(n)
 s = os.statvfs('/')
 print('free', s[0], s[3])" | tr -d '\r' | grep '^free ' | tail -n 1 || true)
@@ -376,7 +405,7 @@ if [ "$GOT"$'\n' != "$EXPECT" ]; then
     printf '%s' "$EXPECT" >&2
     echo "Got:" >&2
     printf '%s\n' "$GOT" >&2
-    "$MPREMOTE" connect "$PORT" exec "
+    [ "$CUT" = 1 ] || "$MPREMOTE" connect "$PORT" exec "
 import os
 for n in '$FILES'.split():
     try:
@@ -416,6 +445,7 @@ if ! SWAPPED=$("$MPREMOTE" connect "$PORT" exec "$(swap_py True)"); then
 fi
 printf '%s\n' "$SWAPPED" | tr -d '\r'
 SWAPPING=0
+CUT=0
 # The reset in a session of its own: one that fails (the USB link gone with
 # it) is no failed swap, every file is in
 if [ "$OTAPEND" = False ]; then

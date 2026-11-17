@@ -118,7 +118,10 @@ class Rx:
             if random.random() >= self.rmc_drop:
                 self.put(cs("GNRMC,%s,A,%s,N,01903.98765,E,%.1f,90.0,%s,,,A,V" % (t, lat, random.choice([0.1, 0.5, 20.0]), ddmmyy)))
             self.put(cs("GNGGA,%s,%s,N,01903.98765,E,1,20,0.8,100.0,M,40.0,M,," % (t, lat)))
-            k = self.utc_ms(ms) // 1000 - self.utc0; self.emitted[k >> 3] |= 1 << (k & 7)
+            k = self.utc_ms(ms) // 1000 - self.utc0
+            if k >> 3 >= len(self.emitted):  # (grown: runs past 40 days)
+                self.emitted.extend(bytearray((k >> 3) - len(self.emitted) + 86400 // 8))
+            self.emitted[k >> 3] |= 1 << (k & 7)
         else:
             self.put(cs("GNRMC,%s,V,,,,,,,170126,,,N,V" % t))
             self.put(cs("GNGGA,%s,,,,,0,00,99.9,,,,,," % t))
