@@ -108,6 +108,33 @@ done
 cp main.py "$BUILD/main.py"
 "$PY" tools/web_min.py web.html "$BUILD/web.html.gz"
 
+# The upload server's root certificate (DER, at most 4 KB) goes up as
+# /ca.der when there is one: CA_DER=path, or ca.der next to this script
+# (gitignored). Without it the logger posts no unverified TLS (see
+# UPLOAD_UNVERIFIED in docs/setup.md). Checked here, before the first
+# session: a CA_DER typo stopped the logger twice and reset the board
+CA_SRC=${CA_DER:-ca.der}
+CA_UP=0
+if [ -n "${CA_DER:-}" ] && [ ! -f "$CA_SRC" ]; then
+    echo "CA_DER=$CA_DER: no such file" >&2
+    exit 1
+fi
+if [ -f "$CA_SRC" ]; then
+    CA_N=$(wc -c < "$CA_SRC")
+    # (a DER SEQUENCE: 0x30, then a long length, 0x81 or 0x82, as every
+    # certificate over 127 bytes has)
+    CA_HEAD=$(head -c 2 "$CA_SRC" | od -An -tx1 | tr -d ' \n')
+    if [ "$CA_N" -gt 4096 ] || { [ "$CA_HEAD" != 3081 ] && [ "$CA_HEAD" != 3082 ]; }; then
+        echo "$CA_SRC is not a DER certificate of at most 4096 bytes" >&2
+        exit 1
+    fi
+    cp "$CA_SRC" "$BUILD/ca.der"
+    CA_UP=1
+    echo "Root certificate: $CA_SRC ($CA_N B) -> /ca.der"
+else
+    echo "No ca.der (CA_DER=...): the board's /ca.der is left as it is"
+fi
+
 # The swap (LittleFS renames over an existing file in one step; other file
 # systems need the old one removed first), main.py last. $1 True: every .dpl
 # must be there (the first try: the copy check just saw them); False: what is
@@ -126,6 +153,7 @@ F = '$FILES'.split()
 if $1:
     for n in F:
         os.stat(n + '.dpl')
+    open('deploy.cut', 'w').close()
     print('preflight ok')
 else:
     import hashlib, binascii
@@ -148,6 +176,7 @@ else:
         f.close()
         if (os.stat(n)[6], binascii.hexlify(h.digest()).decode()) != E[n]:
             raise OSError('not the copy, not swapped: ' + n)
+    open('deploy.cut', 'w').close()
     print('roll forward ok')
 for n in F:
     if n + '.dpl' not in os.listdir():
@@ -172,6 +201,7 @@ if $SEEN_RESET:
     D += ['ota.seen']
 for n in D:
     n in os.listdir() and os.remove(n)
+os.remove('deploy.cut')
 from machine import RTC
 RTC().memory(b'0')"
 }
@@ -195,21 +225,36 @@ restart_logger() {
         SWAPPING=0
         echo "Swap cut part way: swapping the rest in (up to a minute)" >&2
         if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec "$(swap_py False)" >/dev/null 2>&1; then
+            # (no reset onto the mixed set; the logger runs again without
+            # one as below: left stopped, the WDT booted the mixed set a
+            # little later anyway, and rolled a pending OTA back)
             echo "Swap FAILED part way: the files not swapped are still <name>.dpl." >&2
-            echo "No reset onto a mixed set: run ./deploy.sh again now (the WDT resets a stopped logger)" >&2
-            rm -rf "$BUILD"
-            exit 1
+            echo "No reset onto a mixed set, the logger runs again without one: run ./deploy.sh again now" >&2
+            CUT=2
+            rc=1
+        else
+            echo "Swap cut part way: the rest swapped in" >&2
+            CUT=0
+            [ "$rc" != 0 ] || rc=1
         fi
-        echo "Swap cut part way: the rest swapped in" >&2
-        [ "$rc" != 0 ] || rc=1
     fi
-    if [ "${OTAPEND:-}" = False ]; then
+    # an earlier deploy's swap left unfinished (/deploy.cut): this one did not
+    # get to swap its own set in, so no reset onto what may be a mixed set
+    # (before, the rerun the FAILED line asks for reset onto it); the logger
+    # runs again without one, as with an OTA pending (left stopped, the WDT
+    # booted it a little later, and rolled a pending OTA back)
+    if [ "${CUT:-0}" = 1 ]; then
+        echo "An earlier swap is unfinished on the board (/deploy.cut): no reset onto a possibly" >&2
+        echo "mixed set; the logger runs again without one: run ./deploy.sh again now" >&2
+    fi
+    [ "${CUT:-0}" = 0 ] || [ "$rc" != 0 ] || rc=1
+    if [ "${OTAPEND:-}" = False ] && [ "${CUT:-0}" = 0 ]; then
         if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1; then
             echo "WARNING: the reset failed: power the board off and on (or 'mpremote reset')" >&2
             [ "$rc" != 0 ] || rc=1
         fi
     else
-        echo "Running the logger again without a reset (OTA pending or unknown)" >&2
+        [ "${CUT:-0}" != 0 ] || echo "Running the logger again without a reset (OTA pending or unknown)" >&2
         ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec --no-follow \
             "import gps_logger; gps_logger.run()" >/dev/null 2>&1 || true
     fi
@@ -223,7 +268,16 @@ trap restart_logger EXIT
 BOARD=$("$MPREMOTE" connect "$PORT" exec "
 import os, sys
 print('ota.pending', 'ota.pending' in os.listdir())
+print('deploy.cut', 'deploy.cut' in os.listdir())
 print(sys.implementation._machine)" | tr -d '\r' || true)
+# (a swap cut and not finished: no reset onto what may be a mixed set until
+# this one has swapped its own set in; its .dpl go as any others, this copy
+# replaces them)
+CUT=0
+if grep -qE '^deploy.cut True$' <<< "$BOARD"; then
+    CUT=1
+    echo "An earlier swap is unfinished on the board (/deploy.cut): no reset until this one's swap" >&2
+fi
 OTAPEND=$(grep -E '^ota.pending (True|False)$' <<< "$BOARD" | tail -n 1 | cut -d' ' -f2 || true)
 if [ "$OTAPEND" != False ]; then
     if [ "$OTAPEND" = True ]; then
@@ -300,32 +354,11 @@ case "$FROZEN" in
     *) echo "Could not tell whether the firmware has the logger frozen in: '$FROZEN'" >&2
        exit 1 ;;
 esac
-# The upload server's root certificate (DER, at most 4 KB) goes up as
-# /ca.der when there is one: CA_DER=path, or ca.der next to this script
-# (gitignored). Without it the logger posts no unverified TLS (see
-# UPLOAD_UNVERIFIED in docs/setup.md).
-CA_SRC=${CA_DER:-ca.der}
-if [ -n "${CA_DER:-}" ] && [ ! -f "$CA_SRC" ]; then
-    echo "CA_DER=$CA_DER: no such file" >&2
-    exit 1
-fi
-if [ -f "$CA_SRC" ]; then
-    CA_N=$(wc -c < "$CA_SRC")
-    # (a DER SEQUENCE: 0x30, then a long length, 0x81 or 0x82, as every
-    # certificate over 127 bytes has)
-    CA_HEAD=$(head -c 2 "$CA_SRC" | od -An -tx1 | tr -d ' \n')
-    if [ "$CA_N" -gt 4096 ] || { [ "$CA_HEAD" != 3081 ] && [ "$CA_HEAD" != 3082 ]; }; then
-        echo "$CA_SRC is not a DER certificate of at most 4096 bytes" >&2
-        exit 1
-    fi
-    cp "$CA_SRC" "$BUILD/ca.der"
-    FILES="ca.der $FILES"
-    echo "Root certificate: $CA_SRC ($CA_N B) -> /ca.der"
-else
-    echo "No ca.der (CA_DER=...): the board's /ca.der is left as it is"
-fi
+if [ "$CA_UP" = 1 ]; then FILES="ca.der $FILES"; fi
 
-# Free flash, after dropping the .dpl files of an earlier failed deploy:
+# Free flash, after dropping the .dpl files of an earlier failed deploy (a
+# swap left unfinished too: this copy replaces them, and kept they took the
+# flash a nearly full board needed for it):
 # each new file needs its size rounded up to whole blocks, plus one block
 # of metadata, while the old one still exists
 FREE=$("$MPREMOTE" connect "$PORT" exec "
@@ -339,7 +372,7 @@ read -r _ BSIZE BFREE <<< "$FREE" || true
 case "${BSIZE:-x}${BFREE:-x}" in
     *[!0-9]*) echo "Could not read the free flash of the board: $FREE" >&2; exit 1 ;;
 esac
-NEED=0
+NEED=1                                   # (/deploy.cut, made before the renames)
 for f in $FILES; do
     NEED=$(( NEED + ($(wc -c < "$BUILD/$f") + BSIZE - 1) / BSIZE + 1 ))
 done
@@ -404,7 +437,7 @@ if ! SWAPPED=$("$MPREMOTE" connect "$PORT" exec "$(swap_py True)"); then
         # its word: no answer at all (a link lost after the renames began)
         # is a swap cut part way, not "nothing"
         SWAPPING=0
-        echo "Swap refused: a copied file is gone, nothing changed (the old install stays)" >&2
+        echo "Swap refused by the board (a copied file gone, no room for its marker): nothing changed, the old install stays" >&2
         exit 1
     fi
     # (the "swapped" lines above say which went in: the rest goes in now, the
@@ -416,6 +449,7 @@ if ! SWAPPED=$("$MPREMOTE" connect "$PORT" exec "$(swap_py True)"); then
 fi
 printf '%s\n' "$SWAPPED" | tr -d '\r'
 SWAPPING=0
+CUT=0
 # The reset in a session of its own: one that fails (the USB link gone with
 # it) is no failed swap, every file is in
 if [ "$OTAPEND" = False ]; then

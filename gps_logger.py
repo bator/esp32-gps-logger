@@ -789,19 +789,49 @@ SCAN_ERR = WLAN_ERR + (MemoryError,)     # scan() builds its list on the heap
 _env_partial = [False]                   # load_env stopped part way (EIO)
 _env_skipped = []                        # keys whose value it skipped (not UTF-8)
                                          # or whose garbled key it guessed
-_ENV_GUARD = ("WEB_TOKEN", "WPA2", "WPA2_2", "WPA2_3")
+# The security-relevant keys in one table (two lists drifted apart: an
+# SSID_HOME not UTF-8 was kept as bytes for its "SSID", read as no flag,
+# home): (key, its value kept as bytes when not UTF-8 (the radio takes an
+# ANSI SSID or password as it is), its line not read fails closed (WEB_TOKEN
+# closes the routes, a WPA2 drops its network, a home flag makes it not
+# home, UPLOAD_UNVERIFIED stays 0: the old UPLOAD_AWAY_UNVERIFIED is not
+# looked at))
+_ENV_SEC = (("SSID", 1, 0), ("SSID2", 1, 0), ("SSID3", 1, 0),
+            ("WPA2", 1, 1), ("WPA2_2", 1, 1), ("WPA2_3", 1, 1),
+            ("WEB_TOKEN", 0, 1), ("SSID_HOME", 0, 1), ("SSID2_HOME", 0, 1),
+            ("SSID3_HOME", 0, 1), ("HOME1", 0, 1), ("HOME2", 0, 1),
+            ("HOME3", 0, 1), ("UPLOAD_UNVERIFIED", 0, 1))
+_ENV_RAW = tuple(k for k, raw, _ in _ENV_SEC if raw)
+# (the keys taken verbatim, a "#" in them no comment: see _plain)
+_ENV_VERBATIM = ("GEO_URL", "API_KEY", "WEB_TOKEN", "OTA_KEY", "OTA_URL")
+_ENV_GUARD = tuple(k for k, _, closed in _ENV_SEC if closed)
+
+def _env_key_fits(k, b):
+    """k (bytes past ASCII 0xFF-marked in it) is b with those in its
+    letters' places."""
+    return len(k) == len(b) and all(a == c or a > 127 for a, c in zip(k, b))
 
 def _env_key_guess(k):
-    """The key of _ENV_GUARD a key with bytes past ASCII (k) may have been:
-    the same without them (an NBSP, a BOM in the middle), or the same
-    length with them where its letters were (a byte gone bad); else None."""
-    r = bytes(c for c in k if c < 128).strip()
-    for n in _ENV_GUARD:
-        b = n.encode()
-        if r == b or (len(k) == len(b)
-                      and all(a == c or a > 127 for a, c in zip(k, b))):
-            return n
-    return None
+    """The keys of _ENV_GUARD a key with bytes past ASCII (k) may have been,
+    every one that fits ("WPA2_" and a bad byte is WPA2_2 or WPA2_3), by
+    the first rule that finds one: the same length with them where its
+    letters were (a byte gone bad: SSID\xb2_HOME is SSID2_HOME or
+    SSID3_HOME, not SSID_HOME too: network #1 lost its home flag); the
+    same without them (an NBSP, a BOM in the middle); a run of them as one
+    letter (a UTF-8 letter, two bytes, or U+FFFD, three, where an ANSI
+    byte was: none fitted, the key counted as unset, the routes stayed
+    open). -> a list, empty for none."""
+    out = [n for n in _ENV_GUARD if _env_key_fits(k, n.encode())]
+    if not out:
+        r = bytes(c for c in k if c < 128).strip()
+        out = [n for n in _ENV_GUARD if r == n.encode()]
+    if not out:
+        q = bytearray()
+        for c in k:
+            if c < 128 or not q or q[-1] != 255:
+                q.append(c if c < 128 else 255)
+        out = [n for n in _ENV_GUARD if _env_key_fits(q, n.encode())]
+    return out
 
 def load_env(path):
     """KEY=VALUE lines -> dict. Surrounding quotes are stripped.
@@ -834,17 +864,28 @@ def load_env(path):
                     # routes stayed open, the network was tried open; any
                     # other is just skipped, a "Megjegyzés=" closed nothing)
                     g = _env_key_guess(k)
-                    if g is None:
+                    if not g:
                         _say("env a key not plain ASCII, its line skipped")
                     else:
-                        _env_skipped.append(g)
-                        _say("env %s: its key not plain ASCII, its line skipped" % g)
+                        _env_skipped.extend(g)
+                        _say("env %s: its key not plain ASCII, its line "
+                             "skipped" % " or ".join(g))
                     continue
                 k = k.decode()
                 try:
                     v = v.decode()
                 except UnicodeError:
-                    if k[:4] not in ("SSID", "WPA2"):
+                    # (a flag or a name whose comment alone is not UTF-8,
+                    # SSID_HOME=1 # otthoni hálózat as ANSI: the value
+                    # before the "#"; it made the home network not home)
+                    c = v.split(b"#", 1)[0].strip()
+                    if k in _ENV_RAW:
+                        pass
+                    elif (k not in _ENV_VERBATIM and b"#" in v
+                          and all(b < 128 for b in c)):
+                        v = c.decode()
+                        _say("env %s: its comment not UTF-8, dropped" % k)
+                    else:
                         _say("env %s not UTF-8, skipped" % k)
                         _env_skipped.append(k)
                         continue
@@ -989,11 +1030,35 @@ def _load_nets(env):
             _say("env %s empty: %s is tried as an open network"
                       % (pk, sk))
         home = not x                     # (the first network by default)
-        t = _truthy(env.get(hk2))
-        if t is None:
-            t = _truthy(env.get("HOME" + (x or "1")))
+        hk3 = "HOME" + (x or "1")
+        t, bad = None, None
+        for hk in (hk2, hk3):
+            # (SSIDn_HOME first; one not read is not looked past: its 0
+            # overrode a HOMEn=1)
+            if hk in _env_skipped:
+                bad = hk
+                break
+            v = env.get(hk)
+            if v is not None:
+                t = _truthy(v)
+                if t is None and _plain(v):
+                    # (n, nem, "0 ; hotspot": home by default, nothing said)
+                    bad = hk
+                    _env_refused(hk, "not 1/0", "not home")
+                break
+        if t is None and bad is None and _env_partial[0]:
+            bad = hk2
         if t is not None:
             home = t
+        elif bad is not None:
+            # (its home flag may have been there, a 0: home by default sent
+            # the key over unverified TLS with UPLOAD_UNVERIFIED=home on a
+            # phone's hotspot)
+            if home and (bad in _env_skipped or _env_partial[0]):
+                _say("env %s not read (.env read part way, or its line "
+                     "garbled): %s not home (no OTA, no home stay there)"
+                     % (bad, sk))
+            home = False
         hidden = bool(_truthy(env.get(hidk)))
         n = {"ssid": s, "pw": "" if p is None else p,
              "home": home, "hidden": hidden, "bssid": None,
@@ -1005,7 +1070,7 @@ def _load_nets(env):
             n["raw"] = s
             n["ssid"] = "".join(chr(c) for c in s)
         nets.append(n)
-    for k in env:
+    for k in list(env) + _env_skipped:  # (a skipped one too: not UTF-8)
         if k[:4] in ("SSID", "WPA2") and k not in known:
             _say("env %s ignored (SSID, SSID2, SSID3 and WPA2, WPA2_2, "
                       "WPA2_3 only)" % k)
@@ -3199,7 +3264,8 @@ def _fields(now, fx=None):
     when not known). Also what the departure ring keeps (_RE)."""
     ele = ""
     alt = _fv(fx, "alt")
-    if alt is not None and _fv(fx, "fixtype") != 2:
+    ft = _fv(fx, "dim")
+    if alt is not None and ft != 2 and ft != 0:
         ele = "%.1f" % alt
     hdop = _fresh_hdop(now, fx)
     return ele, "" if hdop is None else "%.1f" % hdop
@@ -5131,16 +5197,31 @@ def _quarantine_batch(path, off, n, new_off, eof, key=None, key1=None):
     if why:                              # a flash or memory problem: the
         up["state"] = "fs err"           # .bad itself has room
         return False
-    _hist_batch(path, off, new_off, key)
+    # (its points drawn once: a .pos write that failed brought the batch
+    # back, and the next 422 added them to the history again; HIST_DONE as
+    # on the 2xx path)
+    # (in RAM too, pos_wr: a flash that took no .pos may take no note
+    # either)
+    pw = up["pos_wr"].get(path)
+    hd = path in up["hd"]
+    if not (pw and pw[0] == off) and not (hd and _hist_done(path) == off):
+        _hist_batch(path, off, new_off, key)
     try:
         commit_offset(path, n, new_off, eof, key1)
     except (OSError, MemoryError) as e:
         # the copy landed but the offset did not: the next try copies the
         # batch again (duplicates in .bad, deduplicated by Dawarich)
         print("quarantine offset", repr(e))
-        gc.collect()
+        gc.collect()                     # (first: the note's open() after a
+        if not (pw and pw[0] == off):    # MemoryError raised one again)
+            up["pos_wr"][path] = [off, 0]
+        _hist_done_note(path, off)
         _up_err("low mem" if isinstance(e, MemoryError) else "fs err")
         return False
+    up["pos_wr"].pop(path, None)
+    if hd:
+        up["hd"].discard(path)
+        _rm(path + HIST_DONE)
     up["allow_bad"] = False
     up["state"] = "quarantine"
     return True
@@ -5410,6 +5491,13 @@ def _up_env(env):
             _env_refused("UPLOAD_UNVERIFIED", "not 0/home/1", UPLOAD_UNVERIFIED)
         else:
             UPLOAD_UNVERIFIED = t if t == "home" else ("1" if t else "0")
+    elif ("UPLOAD_UNVERIFIED" in _env_skipped
+          or _env_partial[0] and env.get("UPLOAD_AWAY_UNVERIFIED")):
+        # (its line not read, garbled or past an I/O error: it may have been
+        # a 0 next to an old UPLOAD_AWAY_UNVERIFIED=1, unverified everywhere)
+        UPLOAD_UNVERIFIED = "0"
+        _say("env UPLOAD_UNVERIFIED not read (.env read part way, or its "
+             "line garbled): 0, UPLOAD_AWAY_UNVERIFIED not used")
     else:
         v = _plain(env.get("UPLOAD_AWAY_UNVERIFIED"))
         t = _truthy(v) if v else None
@@ -6188,7 +6276,8 @@ def upload_tick():
             up["skip"] = path            # _schedule, no state, it was sent
             if not (pw and pw[0] == off):    # once more after TICK_PAUSE;
                 up["pos_wr"][path] = [off, 0]   # its points drawn: not again,
-            _hist_done_note(path, off)          # a reboot between too)
+            gc.collect()                        # a reboot between too; the
+            _hist_done_note(path, off)          # note's open() after gc)
             _low_mem(now)
             return
         if hd:
@@ -6278,7 +6367,7 @@ def _hist_done_note(path, off):
         with open(path + HIST_DONE, "w") as f:
             f.write("%d\n" % off)
         up["hd"].add(path)
-    except OSError:
+    except (OSError, MemoryError):       # (pos_wr in RAM still holds it)
         pass
 
 def _hist_done(path):
@@ -6372,9 +6461,10 @@ OTA_BAD = "/ota.bad"                     # builds that failed their health
 OTA_TRIES = "/ota.tries"                 # "<build> <n>": its rollbacks after
                                          # a power-on or with no WiFi/manifest
 OTA_TRIES_MAX = 2                        # such rollbacks before it is held
-OTA_DL = "/ota.dl"                       # "<build> <n>": an install begun (the
-                                         # download on), n of them cut by a
-                                         # reset in a row; gone with its end
+OTA_DL = "/ota.dl"                       # "<build> <n>[ 1]": an install begun
+                                         # (the download on), n of them cut
+                                         # by a reset in a row, 1: the last
+                                         # cut counted; gone with its end
 OTA_CUT_PER_TRY = 3                      # cut installs that count one try (a
                                          # brownout under the download's load
                                          # reinstalled it every boot: 600 slot
@@ -6791,37 +6881,53 @@ def _ota_held(build):
     return left if left > 0 else 0
 
 def _ota_dl_get():
-    """[build, n] of OTA_DL, or None."""
+    """[build, n, counted] of OTA_DL, or None."""
     try:
         with open(OTA_DL) as f:
             v = [int(x) for x in f.read().split()]
-        return v if len(v) == 2 else None
+        if len(v) == 2:
+            v.append(0)
+        return v if len(v) == 3 else None
     except (OSError, ValueError):
         return None
+
+def _ota_dl_put(build, n, counted):
+    """OTA_DL written. Never raises."""
+    try:
+        with open(OTA_DL, "w") as f:
+            f.write("%d %d 1" % (build, n) if counted else
+                    "%d %d" % (build, n))
+    except Exception as e:
+        _diag_write("ota dl note not written: %r" % e)
 
 def _ota_dl_begin(build):
     """An install of build begins: one more in a row when the last one of
     it was cut (its OTA_DL still there). Never raises."""
     v = _ota_dl_get()
-    n = v[1] + 1 if v and v[0] == build else 1
-    try:
-        with open(OTA_DL, "w") as f:
-            f.write("%d %d" % (build, n))
-    except Exception as e:
-        _diag_write("ota dl note not written: %r" % e)
+    _ota_dl_put(build, v[1] + 1 if v and v[0] == build else 1, 0)
 
 def _ota_cut_seen():
     """At boot, an install that a reset cut (its OTA_DL there, no pending
     note it got to): OTA_RETRY before the next one, not OTA_FIRST, and
     every OTA_CUT_PER_TRY-th a try (held as a rollback's, never blamed).
-    The note stays, for the count."""
+    The note stays, for the count, marked counted: a later boot (before
+    the next install) counted the same cut again, a try each time, and an
+    odd try count lifted the hold. A note of the running build or an older
+    one (a reset between set_boot and its removal, a newer build flashed
+    over USB) is no cut: dropped."""
     v = _ota_dl_get()
     if v is None:
         return
-    build, n = v
+    build, n, counted = v
+    if build <= FW_BUILD:                # (a USB flash of a newer one: that
+        _rm(OTA_DL)                      # note was dead state for good)
+        return
     ota["failed"] = (build, _stamp(), "install cut")
+    if counted:
+        return
     if n % OTA_CUT_PER_TRY == 0:
         _ota_try(build)
+    _ota_dl_put(build, n, 1)
     _diag_write("ota build %d install cut by a reset (%d in a row): next in "
                 "%d min" % (build, n, OTA_RETRY // 60000))
 
@@ -7187,6 +7293,7 @@ def ota_boot():
         _ota_drop(OTA_PAGES)
         _rm(OTA_PENDING)
         _rm(OTA_MARK)
+        _rm(OTA_DL)
         _ota_wait_tried()
         if esp32 is not None:
             _ota_valid()
@@ -7210,6 +7317,8 @@ def ota_boot():
         valid = mark == "valid"          # (a power cut while confirming)
         if not valid:
             _rm(OTA_MARK)                # (a run before this one stopped)
+        _rm(OTA_DL)                      # (it booted: a reset after
+                                         # set_boot left it, no cut)
         ota.update(pend=build, pend_at=time.ticks_ms(), wifi_seen=False,
                    confirmed=False, done_err=0,
                    probed=False, probe_at=None, probe_err=None,
@@ -7249,6 +7358,8 @@ def ota_boot():
     _ota_shadow(False)                   # (main.py did, before the import)
     _rm(OTA_PENDING)
     _rm(OTA_MARK)
+    _rm(OTA_DL)                          # (it booted and rolled back: no cut;
+                                         # left, the next boot counted one)
     ota["state"] = "rolled back"
     try:
         wdt = cause == machine.WDT_RESET
@@ -7412,6 +7523,7 @@ def _ota_done():
         return
     ota.pop("done_err", None)
     _rm(OTA_TRIES)
+    _rm(OTA_DL)
     _rm(OTA_MARK)
     # the pending state ends last: a MemoryError in a step above (the
     # guard swallows it) leaves it set, and the next tick runs the steps
@@ -8299,7 +8411,11 @@ def _web_hist(c, path):
     bytes at most, no X-Hist-Next (the page counts bytes). With t=HHMMSS
     (a .trb day) no lines: X-Hist-Next is where the points from that UTC
     time on begin (_hist_seek), X-Hist-Seek 1 when the seek ran out of
-    time (ask again with t from there). A day without a file is a 204 (the
+    time (ask again with t from there). X-Hist-Late 0/1: whether the file
+    as it is now is in time order (_hist_span's scan of this size; none
+    when not scanned yet): the page stops a past day early only on a 0
+    (day_span's third item could be 15 s older than the file read, a late
+    upload in between cut the day and it was cached so). A day without a file is a 204 (the
     page asks for today's before its first point, every minute: a 404 was
     a console error each time); a bad day, o or t a 404."""
     d, o, t = "", 0, -1
@@ -8346,9 +8462,12 @@ def _web_hist(c, path):
                               nxt, end, more))
                 return
             k, nxt = _hist_lines(f, o, end, None)
+            e = _hsp.get(d)
+            lh = ("X-Hist-Late: %d\r\n" % e[8]
+                  if e is not None and e[0] == size and e[1] else "")
             _web_head(c, "200 OK", "text/plain",
                       "Content-Length: %d\r\nX-Hist-Next: %d\r\n"
-                      "X-Hist-End: %d\r\n" % (k, nxt, end))
+                      "X-Hist-End: %d\r\n%s" % (k, nxt, end, lh))
             _hist_lines(f, o, nxt, c)
             return
         _web_bytes(c, f, o, size, "")
@@ -8471,19 +8590,25 @@ def _hist_seek(f, o, end, t):
 
 def _hist_span(f, size, e=None):
     """The UTC times of day (s) of a day history .trb's first and last
-    point: the first keyframe's, the latest keyframe's or decoded point's
-    after the last keyframe (its deltas only are decoded). -> the day's
-    _hsp entry [size, span, first, hi, lk, off, more]: span [first, last],
-    None without a keyframe or while the keyframe scan is not through.
+    point: the earliest keyframe's, the latest keyframe's or decoded
+    point's after it (its deltas only, up to the next keyframe earlier in
+    time, are decoded). A late append (an earlier track uploaded after a
+    later one) puts keyframes out of time order: before, the first in the
+    file was taken and only the last one's deltas read (a day the picker
+    left out). -> the day's _hsp entry [size, span, first, hi, hk, off,
+    more, pk, late]: span [first, last], [first, last, 1] when the file is
+    not in time order (late: /hist says so, X-Hist-Late, and the page reads
+    a past day's file whole), None without a keyframe or while the
+    keyframe scan is not through.
     When HIST_SEEK_MS runs out it stops at a record start (off, more 1)
     and the next call goes on from there; e, the entry of an earlier call,
     also lets a grown file be scanned from where that one got to (a day
     grows by appends at its footer). Before, a day too long for one scan
     had no span for good, and a growing one was read from 0 at each poll."""
     end = _hist_end(f, size)
-    first, hi, lk, o = -1, -1, -1, 0
+    first, hi, hk, o, pk, late = -1, -1, -1, 0, -1, 0
     if e is not None and size >= e[0] and 0 < e[5] <= end:
-        first, hi, lk, o = e[2], e[3], e[4], e[5]
+        first, hi, hk, o, pk, late = e[2], e[3], e[4], e[5], e[7], e[8]
     i = 0
     t0 = time.ticks_ms()
     _rd_open(o)
@@ -8494,40 +8619,57 @@ def _hist_span(f, size, e=None):
         if a < b and _rbuf[a] == 61:
             k = _kf_s(a, b)
             if k >= 0:
-                if first < 0:
+                if first < 0 or k < first:
                     first = k
-                hi = max(hi, k)
-                lk = _rd[0] + a
+                if k <= pk:              # (equal: an append drawn again;
+                    late = 1             # one append's keyframes rise)
+                pk = k
+                if k > hi:               # (the first of equal ones: a
+                    hi, hk = k, _rd[0] + a   # copy drawn again after it)
         i += 1
         if not i & 63:
             feed()
             _rcv.read_uart()
             if time.ticks_diff(time.ticks_ms(), t0) > HIST_SEEK_MS:
-                return [size, None, first, hi, lk, _rd[0] + _rd[2], 1]
+                return [size, None, first, hi, hk, _rd[0] + _rd[2], 1, pk,
+                        late]
     # where the next append begins; only past a footer: without one the
     # last append may be cut, and the file is read again from its start
     o = end if end < size else 0
-    if lk < 0:
-        return [size, None, first, hi, lk, o, 0]
+    if hk < 0:
+        return [size, None, first, hi, hk, o, 0, pk, late]
     s = _kw
     s[0] = None
     t = hi
-    _rd_open(lk)
+    _rd_open(hk)
+    i = 0
     while _rd[0] + _rd[2] < end:
         if not _rd_rec(f):
             break
+        i += 1
+        if not i & 63:                   # (a stretch without a keyframe
+            feed()                       # after it, damaged: walked unfed)
+            _rcv.read_uart()
         a, b = _rd[1], _rd[2]
         if a == b:
             s[0] = None
-        elif _kb_rec(a, b, s) > 0 and s[0] is not None:
+            continue
+        # (the next keyframe earlier in time: a late append's; one of the
+        # same time, a batch drawn again, is decoded on: a shorter or a
+        # longer copy, the last point the longer one's)
+        if _rd[0] + a > hk and _rbuf[a] == 61 and 0 <= _kf_s(a, b) < hi:
+            break
+        if _kb_rec(a, b, s) > 0 and s[0] is not None:
             t = max(t, s[0] % 86400)
-    return [size, [first, t], first, hi, lk, o, 0]
+    return [size, [first, t, 1] if late else [first, t], first, hi, hk, o,
+            0, pk, late]
 
 _hsp = {}                                # day -> _hist_span's entry
 
 def _hist_spans():
-    """{"YYYYMMDD": [first, last]}: each .trb day's first and last point (s
-    into the UTC day, _hist_span) for the page's day picker (a UTC day
+    """{"YYYYMMDD": [first, last(, 1)]}: each .trb day's first and last
+    point (s into the UTC day, _hist_span; 1: not in time order) for the
+    page's day picker (a UTC day
     offers the local days of both: east of UTC its last hour is the next
     local day, offered only when a point is there). Kept per day with the
     file's size: one day (re)read a call at most, the others as they
@@ -8548,7 +8690,7 @@ def _hist_spans():
                 with open(name, "rb") as f:
                     e = _hsp[d] = _hist_span(f, size, e)
             except OSError:
-                e = _hsp[d] = [size, None, -1, -1, -1, 0, 0]
+                e = _hsp[d] = [size, None, -1, -1, -1, 0, 0, -1, 0]
         if e is not None and e[0] == size and e[1]:
             out[d] = e[1]
     return out

@@ -436,11 +436,20 @@ found by the keyframes' text without decoding the deltas (`HIST_SEEK_MS`;
 day no longer reads the whole UTC day before it (~16 replies of ~2.4 s for
 its last hour). A past local day that ends inside a UTC day stops reading
 that day at the first reply whose last point is past the local day's end
-(points in time order), not at the UTC day's own end. A day without a file is a `204` (the page asks for today's
+(points in time order), not at the UTC day's own end, but only when the
+reply's `X-Hist-Late: 0` says that file, as it is now, is in time order: a
+track uploaded after a newer one (held back, retried) sits further on in it
+(`1`), and the day is read whole, as when the header is not there (the file
+not scanned at its size yet: after a boot the days are scanned one a
+status poll, and a day picked before its scan reads its second UTC day
+whole). A picked trip is kept by its start time when a late track sorts an
+earlier one in, and Enter on its row keeps the focus on it. A day without a file is a `204` (the page asks for today's
 every minute before its first point). `status.json`'s `day_span` gives each
 `.trb` day's first and last point (seconds into the UTC day; one day read a
-request, kept with its file size), so the day picker offers a UTC day's next
-local day only when a point is there. A day is ~6-7 bytes a point
+request, kept with its file size), the earliest and the latest in time even
+when a late upload put them out of file order, and a third item `1` then
+(`[first, last, 1]`), so the day picker offers a UTC day's next local day
+only when a point is there. A day is ~6-7 bytes a point
 (~50 as text): a 2 h drive at 1 Hz ~50 KB instead of ~370 KB, the 7 days
 of 2 h a day ~0.35 MB instead of ~2.6 MB. Days written as text by older
 firmware (`/hist/YYYYMMDD.trk`) are listed and drawn as before (sent as

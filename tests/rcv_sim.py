@@ -62,6 +62,15 @@ class Rx:
         self.drop = 0.0                  # chance a sentence is lost
         self.rmc_drop = 0.0
         self.cut = 0.0
+        self.glue = 0.0                  # chance a restart's banner follows a cut sentence
+        self.bad_date = 0.0              # chance an RMC's date does not exist
+        self.mode2 = 0.0                 # chance a GSA round with a fix says 2D
+        self.mode = None                 # the last GSA round's mode since a loss
+                                         # (None: none since; "r": a restart)
+        self.no3 = set()                 # fix seconds no 3D GSA round stood for
+        self.last_ep = None              # the last epoch's ms
+        self.lost = 0                    # sentences lost on the way (dropped,
+                                         # cut, the UART buffer full)
         self.out = []
         self.pending = []                # replies (at ms, bytes)
         self.restarts = 0
@@ -79,19 +88,30 @@ class Rx:
         return t, "%02d%02d%02d" % (d, m, y % 100), "%04d-%02d-%02d" % (y, m, d), "%02d:%02d:%02d" % (r // 3600, r // 60 % 60, r % 60)
     def put(self, s):
         if random.random() < self.drop:
+            self.lost += 1
             return
         b = s.encode() if isinstance(s, str) else s
         if random.random() < self.cut:
             b = b[:random.randint(0, len(b) - 1)]
+            self.lost += 1
         room = self.RXBUF - len(self.buf)
         if room <= 0:
+            self.lost += 1
             return
+        if room < len(b):
+            self.lost += 1
         self.buf.extend(b[:room])
     def restart(self, ms):
         self.restarts += 1
         self.defaults()
         self.fixless_until = ms + random.choice([0, 1000, 5000, 30000])
-        self.put("\r\nUC6580 FWVer R3.4.21\r\n")
+        self.mode = "r"                  # (its banner may be lost: not judged)
+        # (no CR/LF before it now and then: glued to a sentence the restart cut)
+        if R2.random() < self.glue:
+            self.put("$GNGGA,123519.00,4807.0")
+            self.put("UC6580 FWVer R3.4.21\r\n")
+        else:
+            self.put("\r\nUC6580 FWVer R3.4.21\r\n")
         self.next_ep = ms + 300
     def pump(self, now):
         while self.pending and self.pending[0][0] <= now:
@@ -110,26 +130,51 @@ class Rx:
                 continue
             self.epoch(ms0)
     def epoch(self, ms):
+        lost0 = self.lost
+        # (a restart re-grids the epochs: the second just sent may come again,
+        # fixless now; the receiver drops it as one already published)
+        dup = self.last_ep is not None and ms <= self.last_ep
+        self.last_ep = ms
         t, ddmmyy, date, hms = self.stamp(ms)
         fix = ms >= self.fixless_until
         k = (self.utc_ms(ms) // (1000 // self.hz)) % (self.hz * 5)
         lat = "4730.%05d" % random.randint(0, 99999)
         if fix:
             if random.random() >= self.rmc_drop:
-                self.put(cs("GNRMC,%s,A,%s,N,01903.98765,E,%.1f,90.0,%s,,,A,V" % (t, lat, random.choice([0.1, 0.5, 20.0]), ddmmyy)))
+                # (a date that does not exist now and then, the checksum held:
+                # dateless, the second keeps the day's date or none at midnight)
+                dd = R2.choice(BAD_DATES) if R2.random() < self.bad_date else ddmmyy
+                self.put(cs("GNRMC,%s,A,%s,N,01903.98765,E,%.1f,90.0,%s,,,A,V" % (t, lat, random.choice([0.1, 0.5, 20.0]), dd)))
             self.put(cs("GNGGA,%s,%s,N,01903.98765,E,1,20,0.8,100.0,M,40.0,M,," % (t, lat)))
-            k = self.utc_ms(ms) // 1000 - self.utc0; self.emitted[k >> 3] |= 1 << (k & 7)
+            # (its own name: k, reused here, was the second since utc0, and
+            # the GSA round (k == 0) never came with a fix, GST at 5 Hz only
+            # in seconds divisible by 5)
+            ks = self.utc_ms(ms) // 1000 - self.utc0
+            if ks >> 3 >= len(self.emitted):  # (grown: runs past 40 days)
+                self.emitted.extend(bytearray((ks >> 3) - len(self.emitted) + 86400 // 8))
+            self.emitted[ks >> 3] |= 1 << (ks & 7)
         else:
             self.put(cs("GNRMC,%s,V,,,,,,,170126,,,N,V" % t))
             self.put(cs("GNGGA,%s,,,,,0,00,99.9,,,,,," % t))
+            self.mode = None
         if self.gst and k % (self.hz * 1) == 0:
             self.put(cs("GNGST,%s,1.0,2.0,1.5,30.0,1.2,1.3,2.5" % t))
         if k == 0:
+            m = (2 if R2.random() < self.mode2 else 3) if fix else 1
+            if fix:
+                self.mode = m
             for sysid in (1, 4):
-                self.put(cs("GNGSA,A,3,01,02,03,04,05,06,07,08,09,10,11,12,1.2,0.8,0.9,%d" % sysid))
+                self.put(cs("GNGSA,A,%d,01,02,03,04,05,06,07,08,09,10,11,12,1.2,0.8,0.9,%d" % (m, sysid)))
             self.put(cs("GPGSV,1,1,04,01,45,120,40,02,30,200,35,03,10,300,20,04,60,050,45,1"))
             if self.txt:
                 self.put(cs("GPTXT,01,01,02,ANTENNA OK"))
+        # (a sentence lost: what the receiver saw is not known, not judged
+        # until the next whole GSA round; no GSA round since the fix came
+        # back: its second may not be 3D)
+        if self.lost != lost0 or dup:
+            self.mode = "r"
+        elif fix and self.mode is None:
+            self.no3.add(ks)
     def write(self, b, now):
         s = bytes(b).decode()
         self.out.append(s)
@@ -164,6 +209,17 @@ class Uart:
     def write(self, b):
         self.rx.write(b, clk[0]); return len(b)
 
+BAD_DATES = ("321126", "000000", "290226", "311126", "171399")
+class _Lcg:
+    """The new knobs' own random numbers: the seeds' main stream as before
+    them (RCV-SIM's seeds replay what they did)."""
+    def __init__(self, seed):
+        self.x = (seed * 2654435761 + 1) % (1 << 31)
+    def random(self):
+        self.x = (1103515245 * self.x + 12345) % (1 << 31)
+        return self.x / (1 << 31)
+    def choice(self, s):
+        return s[int(self.random() * len(s))]
 class _M: pass
 machine = _M()
 machine.UART = lambda *a, **k: None
@@ -181,6 +237,7 @@ seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 400
 VERB = len(sys.argv) > 3 and sys.argv[3] == "v"
 random.seed(seed)
+R2 = _Lcg(seed)
 # 2026-11-15 23:58:30 UTC
 utc0 = (C.days(2026, 11, 15) - C.EPOCH_DAYS) * 86400 + 23 * 3600 + 58 * 60 + 30
 rx = Rx(utc0 - clk[0] // 1000)
@@ -200,6 +257,13 @@ def check():
             lat, lon = f[r.F_LAT], f[r.F_LON]
             if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                 print("RANGE", lat, lon); bad[0] += 1
+            # the elevation's fix type: 3D only after a 3D GSA round since the
+            # fix came back (the one before the loss gave a 2D fix one)
+            if f[r.F_FIXTYPE] == 3 and f[r.F_DATE] is not None:
+                v = C.dt_s(f[r.F_DATE], f[r.F_TIME])
+                if v is not None and v - rx.utc0 in rx.no3:
+                    print("DIM 3 without a 3D round", f[r.F_DATE], f[r.F_TIME], "seed", seed, "events", events[-3:])
+                    bad[0] += 1
             if f[r.F_DATE] is not None and not was_emitted(rx, f[r.F_DATE], f[r.F_TIME]):
                 print("WRONG DATE", f[r.F_DATE], f[r.F_TIME], "true", rx.stamp(clk[0])[2:], "seed", seed, "events", events[-4:])
                 bad[0] += 1
@@ -235,6 +299,9 @@ for ev in range(N):
     rx.rmc_drop = random.choice([0, 0, 0.3, 1.0]) if random.random() < 0.2 else rx.rmc_drop
     rx.drop = random.choice([0, 0, 0.05]) if random.random() < 0.2 else rx.drop
     rx.cut = random.choice([0, 0, 0.05]) if random.random() < 0.2 else rx.cut
+    rx.glue = R2.choice([0, 0.5]) if R2.random() < 0.2 else rx.glue
+    rx.bad_date = R2.choice([0, 0, 0.15]) if R2.random() < 0.2 else rx.bad_date
+    rx.mode2 = R2.choice([0, 0.3]) if R2.random() < 0.2 else rx.mode2
     if x < 0.08:
         d = r.GPS_SILENT + random.randint(-1500, 1500); note("silence near", d)
         rx.silent_until = clk[0] + d
@@ -253,7 +320,7 @@ for ev in range(N):
             pass_(random.randint(1, 30))
         rx.restart(clk[0])
         if random.random() < 0.3:
-            rx.buf = bytearray()
+            rx.buf = bytearray(); rx.mode = "r"
         continue
     x = random.random()
     if x < 0.30:
@@ -289,6 +356,13 @@ rx.ignore = rx.mute_cmd = False; rx.drop = rx.cut = rx.rmc_drop = 0
 rx.fixless_until = 0; rx.silent_until = 0
 run_for(20 * 60000)
 s = r.st
+# a banner glued to a sentence the restart cut is a restart, no bad one
+e0, b0 = s["err"], s["gps_boots"]
+rx.glue = 1.0; rx.restart(clk[0]); rx.glue = 0
+run_for(5000)
+if s["err"] != e0 or s["gps_boots"] != b0 + 1:
+    print("GLUE err", e0, s["err"], "boots", b0, s["gps_boots"]); bad[0] += 1
+run_for(5 * 60000)
 ok = rx.hz == 5 and rx.gst == 1
 if not ok:
     print("STUCK hz", rx.hz, "gst", rx.gst, "setup_ok", s["setup_ok"], "extra", s["extra"], "wait", s["setup_wait"], "at", s["setup_at"], "boot_at", s["boot_at"], "storm", s["storm_at"], "events", events[-5:])

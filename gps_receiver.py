@@ -6,7 +6,7 @@
 from machine import UART
 import sys, time, select
 from gps_clock import age as _age, recent as _recent, TICKS_CAP, \
-    stamp as _stamp
+    stamp as _stamp, ymd_ok as _ymd_ok
 
 
 def _diag_write(line):                   # (bound by the logger)
@@ -106,7 +106,7 @@ def reset():
     st.clear()
     st.update(start=time.ticks_ms(), start_s=_stamp(), rx=None, rx_b=0,
               good=None, ok=0, err=0, bug=0,
-              quality=None, fixtype=None, valid=False,
+              quality=None, fixtype=None, dim=None, dim_at=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, used=None, view={},
               hdop=None, ttff=None, pos_at=None, hdop_at=None,
@@ -245,6 +245,18 @@ def _publish():
     now = time.ticks_ms()
     a = ep["g"] or ep["r"]
     st["valid"] = a is not None
+    if a is None:
+        st["dim"], st["dim_at"] = 0, None    # (unknown until a GSA round)
+    elif st["dim"] == 0:
+        # (no GSA round within its period since the fix came back: unknown,
+        # not "no elevation": at 1 Hz (the rate refused) GSA comes every
+        # 25 s, without GSA never, and the elevation went for good; timed
+        # from the fix's return, not the last fixless second: after a
+        # silence the first fix was "unknown" at once)
+        if st["dim_at"] is None:
+            st["dim_at"] = now
+        elif not _recent(now, st["dim_at"], _gsa_wait()):
+            st["dim"] = None
     if a is not None and st["fix_first"] is None:
         st["fix_first"] = now
     st["epochs"] = a[4] if a else 0
@@ -262,6 +274,9 @@ def _publish():
     st["ep_at"] = now
     if n > 1:
         st["ep5_at"], st["ep1_n"] = now, 0
+        sa = st["setup_at"]
+        if st["rate_fails"] and sa is not None and time.ticks_diff(now, sa) >= 0:
+            st["rate_fails"], st["rate_nak"] = 0, False   # (as GST's: taken)
     else:
         st["ep1_n"] += 1
     if not st["checked"]:                # _setup_check: did GPS_HZ take?
@@ -313,10 +328,11 @@ def _published(now):
         st["q_thin"] += 1
 
 # a published second as a tuple in this order (seq first, pos_at at 8): one
-# small allocation a second rather than a dict. fixtype: GSA's when the second
-# was published (a queued Fix's altitude is judged by its own)
+# small allocation a second rather than a dict. dim: GSA's fix type when the
+# second was published, 0 when not known since a fix was lost (a queued
+# Fix's altitude is judged by its own)
 _SNAP = ("seq", "lat", "lon", "alt", "hdop", "hdop_at", "std", "std_at",
-         "pos_at", "time", "date", "valid", "epochs", "fixtype")
+         "pos_at", "time", "date", "valid", "epochs", "dim")
 
 def _snap():
     return tuple(st[k] for k in _SNAP)
@@ -371,7 +387,13 @@ def rmc(talker, f):
         if d != c[0]:
             if not d.isdigit():          # (a corrupt digit: bad sentence)
                 raise ValueError(d)
-            c[0], c[1] = d, "20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
+            # (a real date only: "321126", a flip the checksum let through,
+            # or a receiver past a week rollover was a fix every second of
+            # which the logger dropped, a trip opened; dateless instead)
+            c[0] = d
+            c[1] = ("20%s-%s-%s" % (d[4:6], d[2:4], d[0:2])
+                    if _ymd_ok(2000 + int(d[4:6]), int(d[2:4]), int(d[0:2]),
+                               0, 0, 0) else None)
         date = c[1]
     timed = _second(f[1])
     st["speed"] = None if kn is None else kn * 1.852
@@ -398,6 +420,13 @@ def gga(talker, f):
             ep["hdop"][0] += hd
             ep["hdop"][1] += 1
 
+def _gsa_wait():
+    """ms a GSA round may take to come: GPS_HZ * GSA_EVERY fixes apart (its
+    setup), at 1 Hz when the rate was refused (once too: the receiver at
+    1 Hz since); plus 2 s."""
+    return (GSA_EVERY * (GPS_HZ if st["rate_nak"] or st["rate_fails"] else 1)
+            + 2) * 1000
+
 def gsa(talker, f):
     """Fix type. One per system and round on a multi-GNSS receiver; more
     than GSA_MAX in a second means the GSA rate of the setup was lost:
@@ -408,11 +437,14 @@ def gsa(talker, f):
     the uptime's. Only a 2D or 3D mode is kept: GSA comes every
     GSA_EVERY s, RMC every second, so after a "1" (no fix) round an RMC
     valid again showed "Fix" for up to 5 s (measured indoors: 14 of 201
-    rounds). The last dimension stands until the next 2D/3D round."""
+    rounds). The last dimension stands until the next 2D/3D round, for the
+    screen; dim, what a published second's elevation is judged by, is 0
+    from a second without a fix until the next 2D/3D round (the fixtype
+    of the fix before the loss gave a regained 2D fix an elevation)."""
     ft = _num(f[2], int)
     _uc_gsa(talker, f)                   # (first: a field that fails there
     if ft in (2, 3):                     # leaves no fix type, no count)
-        st["fixtype"] = ft
+        st["fixtype"] = st["dim"] = ft
     t = _sec[0]
     if t is not None:
         if t != st["gsa_t"]:
@@ -463,9 +495,22 @@ def gst(talker, f):
     shows here while its HDOP already looks good."""
     sl, sn = _num(f[6]), _num(f[7])      # (read first: _num)
     timed = _second(f[1])
-    st["gst_at"] = time.ticks_ms()       # it comes (_setup_check)
+    now = st["gst_at"] = time.ticks_ms() # it comes (_setup_check)
+    sa = st["setup_at"]
+    if st["gst_fails"] and sa is not None and time.ticks_diff(now, sa) >= 0:
+        # (a GST after the setup: its FAIL was a hit line, a late answer;
+        # left counted until _setup_check's verdict, a stray FAIL later made
+        # it "refused" twice, and _uc_watch took a restart for a refusal)
+        st["gst_fails"], st["gst_nak"] = 0, False
     if timed and sl is not None and sn is not None and sl > 0 and sn > 0:
         ep["std"] = sl if sl > sn else sn
+
+def _restart_marks(fix_first):
+    """A restart (seen, or found by its lost setup): the date dropped, the
+    fix type not known (a fix right after it kept the one before), the
+    settle rule anew from fix_first (None: the next fix)."""
+    _date_lost()
+    st.update(fix_first=fix_first, settled=False, dim=0, dim_at=None)
 
 def _date_lost():
     """The date kept from before is no longer the receiver's: a restart, a
@@ -517,8 +562,8 @@ def _gps_restarted():
     # the model asked anew (_uc_setup); the settle rule anew, and not the
     # second it was in: published by the next sentence, its fixes would start
     # the rule before a real fix
-    st.update(svs=None, svs_at=None, gps_ver=None, fix_first=None, naks=None,
-              settled=False)
+    st.update(svs=None, svs_at=None, gps_ver=None, naks=None)
+    _restart_marks(None)
     # GPS_SYS asked (and set) anew after a restart of its own (a power dip:
     # back at the default mask, kept so for the run); not after the one a
     # mask sent just now makes (UC_SYS_SETTLE), at most UC_SYS_MAX a boot
@@ -1041,7 +1086,7 @@ def _uc_watch(now):
                 and st["ep1_n"] >= UC_GST_LOST // 2000
                 and not _recent(now, st["ep5_at"], UC_GST_LOST)
                 and not _recent(now, st["rx_back"], UC_GST_LOST)):
-            _setup_lost(now, "1 fix/s")
+            _setup_lost(now, "1 fix/s", st["ep5_at"])
         return
     g = st["gst_at"]
     if _age(now, at) < UC_GST_LOST or _recent(now, g, UC_GST_LOST):
@@ -1051,11 +1096,34 @@ def _uc_watch(now):
                                          # GST a second later, not yet seen)
     if not _recent(now, st["rx"], NO_DATA):
         return                           # silent: _gps_mute's case
-    _setup_lost(now, "GST refused once, asked again" if st["gst_fails"] else "no GST")
+    if st["gst_fails"] and (g is None or time.ticks_diff(g, at) < 0):
+        # (GST refused once, asked again, none since the setup: the
+        # receiver answered, no restart (one since: its FAIL was stray, a
+        # restart now);
+        # no date dropped, no settle rule: a fix up broke the segment, and
+        # the next minute counted only moving)
+        _setup_lost(now, "GST refused once, asked again", restart=False)
+    else:
+        _setup_lost(now, "no GST", g)
 
-def _setup_lost(now, why):
+def _setup_lost(now, why, since=None, restart=True):
+    """The setup lost: set up again (extra). since: the stamp the restart
+    was at the latest (the last GST, the last second of several fixes; None
+    when not known); restart False for none (a refusal). A restart whose banner was lost, its
+    setup gone: the date dropped and the settle rule anew, as
+    _gps_restarted does, its minute from the restart (from the detection,
+    UC_GST_LOST later, the restart's first 30 s of drift were a walk and
+    30 s of good points after the minute dropped) when the fix held since,
+    else from the next fix."""
     st["extra"] = 1                      # (its usual backoff, under a minute)
-    _date_lost()
+    if restart:
+        # (the fix up now: from since, or from its run's start when it came
+        # back after since, the restart's first fix; None for the next fix)
+        run = st["ep_run"]
+        ff = None
+        if since is not None and run is not None and _recent(now, st["ep_at"], NO_DATA):
+            ff = since if time.ticks_diff(since, run) >= 0 else run
+        _restart_marks(ff)
     print("gps setup lost:", why)
     said = st["gst_said"]
     if not _recent(now, said, GPS_NOT_TAKEN_SAY):
@@ -1136,6 +1204,15 @@ _HKEY = {ord(k[0]) << 16 | ord(k[1]) << 8 | ord(k[2]): k for k in HANDLERS}
 _TALK = {}
 TALK_MAX = 8                             # talkers kept (GP GN GL GA GB ...)
 
+def _bad_line(line, s, e):
+    """A sentence that fails its checksum: a bad one, or the start-up
+    banner glued to a sentence the restart cut (no CR/LF between): a
+    restart then, not a bad sentence (it waited for _uc_watch, ~30 s)."""
+    if line.find(b"FWVer", s, e) >= 0:
+        _gps_restarted()
+    else:
+        st["err"] = (st["err"] + 1) & CNT_MASK
+
 def handle(line, s=0, e=None):
     """One NMEA sentence: line[s:e] (read_uart hands over its buffer and
     the line's bounds). The whitespace, the last "$" (garbage or a cut-off
@@ -1153,18 +1230,21 @@ def handle(line, s=0, e=None):
     while e > s and _space(v[e - 1]):
         e -= 1
     i = line.rfind(b"$", s, e)
+    if i < 0 or i > s:
+        # the UC6580's start-up banner, plain text (its FWVer line once);
+        # a sentence after it is read (one before it: _bad_line)
+        fw = line.find(b"FWVer", s, e)
+        if fw >= 0:
+            _gps_restarted()
+            if i < fw:
+                return
     if i > s:
         s = i
-    if s >= e:
-        return
-    if i < 0:
-        # the UC6580's start-up banner, plain text (its FWVer line once)
-        if line.find(b"FWVer", s, e) >= 0:
-            _gps_restarted()
+    if s >= e or i < 0:
         return
     star = line.rfind(b"*", s, e)
     if star < 0:
-        st["err"] = (st["err"] + 1) & CNT_MASK
+        _bad_line(line, s, e)
         return
     p = v[s + 1:star]                    # (one view: checksum and text)
     c = hi = 0
@@ -1175,7 +1255,7 @@ def handle(line, s=0, e=None):
     # a non-hex one, -1, makes h negative: no match)
     h = _hex(v[star + 1]) << 4 | _hex(v[star + 2]) if star + 3 == e else -1
     if c != h:
-        st["err"] = (st["err"] + 1) & CNT_MASK
+        _bad_line(line, s, e)
         return
     st["good"] = time.ticks_ms()         # the last whole frame (GPS link)
     k = -1                               # a 5-character address: its type
