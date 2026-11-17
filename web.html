@@ -858,11 +858,9 @@ function histParse(day, text) {
   // (the km come from tripsOf: the Day figures and the timeline sum the trips)
   if (late) hist.pts.sort(function (a, b) { return a[0] - b[0]; });
   // -> the text's last point is past the day's end (in time order): a past
-  // day's last UTC day need not be read on, unless the board says the file
-  // is not in time order (day_span's third item): a late append further on
-  // was left unread (a trip missing from the map, the km and the GPX)
-  var sp = boardSpans[day];
-  return !late && lt >= hist.end && !!sp && sp.length === 2;
+  // day's last UTC day need not be read on (histNext: only when the board
+  // says that file is in time order, X-Hist-Late 0)
+  return !late && lt >= hist.end;
 }
 function histLoad() {
   var now = Date.now();
@@ -903,7 +901,9 @@ function histNext(i) {
     // lines (a .trk day ignores t) need no seek either
     if (ok && sk !== "1") delete h.t[day];
     if (sk !== null && nx !== null) { h.off[day] = +nx; histNext(i); return; }
-    var past = t && histParse(day, t);
+    // (a late append further on, X-Hist-Late 1 or not known: read on, it
+    // was left unread: a trip missing from the map, the km and the GPX)
+    var past = t && histParse(day, t) && x.getResponseHeader("X-Hist-Late") === "0";
     // a .trb day: its decoded lines, X-Hist-Next where to ask from next,
     // again while short of X-Hist-End (and of the shown day's end); a .trk
     // day (older firmware): bytes
@@ -1123,6 +1123,7 @@ function kpis(trips) {
 }
 function hlTrip(k) {                    // a trip on the map (again: the whole day)
   hist.hl = hist.hl === k ? null : k;
+  hist.hlT = hist.hl == null ? null : hist.trips[k].t0;
   tpKey = trkKey = "";
   if (mapD) placeMap(mapD); else trackPaint();
 }
@@ -1248,8 +1249,18 @@ function fitView(lat, lon, el, live, band) {
   }
   return {z: z, sc: sc, X: X, Y: Y};
 }
+// the day's trips, built again when points came; the picked one found by its
+// start time, not its place in the list (a track uploaded late sorted an
+// earlier trip in: the map and the timeline jumped to another trip)
+function tripsNow() {
+  if (hist.trips && hist.tn === hist.pts.length) return;
+  var ts = hist.trips = tripsOf(hist.pts), j = ts.length, h = hist.hlT;
+  hist.tn = hist.pts.length;
+  if (hist.hl != null) { while (j-- && !(ts[j].t0 <= h && h <= ts[j].t1)); hist.hl = j < 0 ? null : j; }
+}
 function hlRange() {
-  var t = hist.hl == null || !hist.trips ? null : hist.trips[hist.hl];
+  if (hist.hl != null) tripsNow();
+  var t = hist.hl == null ? null : hist.trips[hist.hl];
   return t ? [t.i0, t.i1] : null;
 }
 // the shown track's start (a ring) and end (a dot), the size kept on screen
@@ -1279,7 +1290,7 @@ var tpKey = "";
 function trackPaint() {
   // (read once at least, or not: no "no trip" before the day is in)
   var busy = hist.busy || !hist.at || hist.err;
-  if (hist.trips === undefined || hist.tn !== hist.pts.length) { hist.trips = tripsOf(hist.pts); hist.tn = hist.pts.length; }
+  tripsNow();
   // the last trip open (a point in the last 5 min) in the key: once it
   // closes its end place is asked (the panel was not drawn again: no end
   // name, ever)

@@ -153,6 +153,7 @@ F = '$FILES'.split()
 if $1:
     for n in F:
         os.stat(n + '.dpl')
+    open('deploy.cut', 'w').close()
     print('preflight ok')
 else:
     import hashlib, binascii
@@ -175,8 +176,8 @@ else:
         f.close()
         if (os.stat(n)[6], binascii.hexlify(h.digest()).decode()) != E[n]:
             raise OSError('not the copy, not swapped: ' + n)
+    open('deploy.cut', 'w').close()
     print('roll forward ok')
-open('deploy.cut', 'w').close()
 for n in F:
     if n + '.dpl' not in os.listdir():
         os.stat(n)
@@ -233,24 +234,23 @@ restart_logger() {
         CUT=0
         [ "$rc" != 0 ] || rc=1
     fi
-    # an earlier deploy's swap left unfinished (/deploy.cut, its .dpl kept):
-    # this one did not get to swap its own set in, so no reset onto the mixed
-    # set either (before, the rerun the FAILED line asks for dropped those
-    # .dpl and, failing before its swap, reset onto it)
+    # an earlier deploy's swap left unfinished (/deploy.cut): this one did not
+    # get to swap its own set in, so no reset onto what may be a mixed set
+    # (before, the rerun the FAILED line asks for reset onto it); the logger
+    # runs again without one, as with an OTA pending (left stopped, the WDT
+    # booted it a little later, and rolled a pending OTA back)
     if [ "${CUT:-0}" = 1 ]; then
-        echo "An earlier swap is unfinished on the board (/deploy.cut): no reset onto a mixed set;" >&2
-        echo "its .dpl files are kept: run ./deploy.sh again" >&2
-        rm -rf "$BUILD"
+        echo "An earlier swap is unfinished on the board (/deploy.cut): no reset onto a possibly" >&2
+        echo "mixed set; the logger runs again without one: run ./deploy.sh again now" >&2
         [ "$rc" != 0 ] || rc=1
-        exit "$rc"
     fi
-    if [ "${OTAPEND:-}" = False ]; then
+    if [ "${OTAPEND:-}" = False ] && [ "${CUT:-0}" != 1 ]; then
         if ! ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" reset >/dev/null 2>&1; then
             echo "WARNING: the reset failed: power the board off and on (or 'mpremote reset')" >&2
             [ "$rc" != 0 ] || rc=1
         fi
     else
-        echo "Running the logger again without a reset (OTA pending or unknown)" >&2
+        [ "${CUT:-0}" = 1 ] || echo "Running the logger again without a reset (OTA pending or unknown)" >&2
         ${TMO[@]+"${TMO[@]}"} "$MPREMOTE" connect "$PORT" exec --no-follow \
             "import gps_logger; gps_logger.run()" >/dev/null 2>&1 || true
     fi
@@ -266,14 +266,13 @@ import os, sys
 print('ota.pending', 'ota.pending' in os.listdir())
 print('deploy.cut', 'deploy.cut' in os.listdir())
 print(sys.implementation._machine)" | tr -d '\r' || true)
-# (a swap cut and not finished: its .dpl are the rest of that install, kept
-# until this one's copy is checked; no reset onto the mixed set before)
+# (a swap cut and not finished: no reset onto what may be a mixed set until
+# this one has swapped its own set in; its .dpl go as any others, this copy
+# replaces them)
 CUT=0
-CUTPY=False
 if grep -qE '^deploy.cut True$' <<< "$BOARD"; then
     CUT=1
-    CUTPY=True
-    echo "An earlier swap is unfinished on the board (/deploy.cut): its .dpl kept until this copy is checked" >&2
+    echo "An earlier swap is unfinished on the board (/deploy.cut): no reset until this one's swap" >&2
 fi
 OTAPEND=$(grep -E '^ota.pending (True|False)$' <<< "$BOARD" | tail -n 1 | cut -d' ' -f2 || true)
 if [ "$OTAPEND" != False ]; then
@@ -353,14 +352,15 @@ case "$FROZEN" in
 esac
 if [ "$CA_UP" = 1 ]; then FILES="ca.der $FILES"; fi
 
-# Free flash, after dropping the .dpl files of an earlier failed deploy
-# (not those of a swap left unfinished, /deploy.cut: this copy replaces them):
+# Free flash, after dropping the .dpl files of an earlier failed deploy (a
+# swap left unfinished too: this copy replaces them, and kept they took the
+# flash a nearly full board needed for it):
 # each new file needs its size rounded up to whole blocks, plus one block
 # of metadata, while the old one still exists
 FREE=$("$MPREMOTE" connect "$PORT" exec "
 import os
 for n in os.listdir():
-    if n.endswith('.dpl') and not $CUTPY:
+    if n.endswith('.dpl'):
         os.remove(n)
 s = os.statvfs('/')
 print('free', s[0], s[3])" | tr -d '\r' | grep '^free ' | tail -n 1 || true)
@@ -405,7 +405,7 @@ if [ "$GOT"$'\n' != "$EXPECT" ]; then
     printf '%s' "$EXPECT" >&2
     echo "Got:" >&2
     printf '%s\n' "$GOT" >&2
-    [ "$CUT" = 1 ] || "$MPREMOTE" connect "$PORT" exec "
+    "$MPREMOTE" connect "$PORT" exec "
 import os
 for n in '$FILES'.split():
     try:
@@ -433,7 +433,7 @@ if ! SWAPPED=$("$MPREMOTE" connect "$PORT" exec "$(swap_py True)"); then
         # its word: no answer at all (a link lost after the renames began)
         # is a swap cut part way, not "nothing"
         SWAPPING=0
-        echo "Swap refused: a copied file is gone, nothing changed (the old install stays)" >&2
+        echo "Swap refused by the board (a copied file gone, no room for its marker): nothing changed, the old install stays" >&2
         exit 1
     fi
     # (the "swapped" lines above say which went in: the rest goes in now, the

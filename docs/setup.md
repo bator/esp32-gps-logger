@@ -71,7 +71,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `WEB` | `1`/`0`: the [status page](usage.md#status-page), and the radio staying on at home for it. Default 1. |
 | `WEB_AWAY` | `1`/`0`: with `WEB` on, the page is served on the non-home networks too (e.g. a phone hotspot), and the radio stays on for it instead of sleeping once all is uploaded. Only with a `WEB_TOKEN`: without one `WEB_AWAY=1` is refused (a diag line), as the position and the track would go to everyone on that network. `0`: off home nothing is served, also while the radio is on for an upload. Default 0. |
 | `WEB_TOKEN` | 8–64 characters of `A-Za-z0-9._~+/=-`: `status.json`, `/hist` and `/diag` answer only a request whose `X-GPS` header is this token; open the page as `http://<board ip>/#k=<token>` (bookmark it). A token that breaks these rules is refused and closes all three (a diag line says so), it is not taken as "no token". It keeps casual LAN visitors out; on plain http it is no defence against someone who can sniff the LAN. Without it `/hist` and `/diag` still want an `X-GPS` header (any value; the page sends one) or a `Referer` of the board's own page (an older page, e.g. one open across an OTA), so a page of another site cannot keep the board busy decoding. A `.env` read only part way (a flash read error) without the token in the part read closes the three too (the token may be in the rest). The page reads `#k=` at each request: one typed in after a 403 counts without a reload. Unset by default. |
-| `UPLOAD_UNVERIFIED` | Where an upload that is not verified TLS (an `http://` `GEO_URL`, or `https://` without `/ca.der`) may go: `0` nowhere (the default), `home` only on a home network, `1` everywhere. The home LAN is flat: any host on it can answer for the server (ARP, DNS), take the Bearer key and, with a 2xx, make the board delete tracks it never stored. So put the server's root certificate on the board (`ca.der` next to `deploy.sh`, see below) rather than turning this on. While it waits the state is `err unverified`; a value that is none of these is a diag line (`env UPLOAD_UNVERIFIED not 0/home/1`) and the default holds. A `/ca.der` that is there but cannot be read is `ca err`, not `err unverified`. The old `UPLOAD_AWAY_UNVERIFIED` (`1`: everywhere, `0`: home) is still read when this key is missing. |
+| `UPLOAD_UNVERIFIED` | Where an upload that is not verified TLS (an `http://` `GEO_URL`, or `https://` without `/ca.der`) may go: `0` nowhere (the default), `home` only on a home network, `1` everywhere. The home LAN is flat: any host on it can answer for the server (ARP, DNS), take the Bearer key and, with a 2xx, make the board delete tracks it never stored. So put the server's root certificate on the board (`ca.der` next to `deploy.sh`, see below) rather than turning this on. While it waits the state is `err unverified`; a value that is none of these is a diag line (`env UPLOAD_UNVERIFIED not 0/home/1`) and the default holds. A `/ca.der` that is there but cannot be read is `ca err`, not `err unverified`. The old `UPLOAD_AWAY_UNVERIFIED` (`1`: everywhere, `0`: home) is still read when this key is missing, not when its line could not be read (garbled, not UTF-8, past an I/O error: `0` then). |
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `IP*`/`GW*`/`MASK*`/`DNS*`,
@@ -98,7 +98,9 @@ HOSTNAME=Dawarich-GPS-tracker
   quotes: `IP="192.168.1.60" # static` is `192.168.1.60`.
 - Invalid names fall back to the defaults. A UTF-8 BOM (Windows Notepad) is
   ignored. A file saved as ANSI does not stop the boot: an SSID or password
-  that is not UTF-8 is used byte for byte, any other such value is skipped
+  (`SSID`, `SSID2`, `SSID3`, `WPA2`, `WPA2_2`, `WPA2_3` only) that is not
+  UTF-8 is used byte for byte, any other such value (a home flag with an
+  accented comment too) is skipped
   with a line in the diagnostic log, and so is a line whose key is not
   plain ASCII. Such a key that looks like `WEB_TOKEN`, a `WPA2` or a home
   flag (the same without its odd bytes, or with them in its letters'
@@ -157,9 +159,11 @@ files left as `.dpl` are swapped in by a second session (a reset then
 booted a mixed set, the old `main.py` over new modules); one that cannot
 be finished leaves the board stopped and says so (`Swap FAILED part way`:
 run `deploy.sh` again at once, the watchdog resets a stopped logger). It
-leaves `/deploy.cut` on the board: the next deploy keeps the `.dpl` files
-until its own copy is checked, and one that fails before its swap resets
-nothing (`An earlier swap is unfinished`). A
+leaves `/deploy.cut` on the board: a later deploy that fails before its own
+swap does not reset onto what may be a mixed set (`An earlier swap is
+unfinished`), it runs the logger again without a reset (an OTA pending is
+not rolled back by the watchdog); its old `.dpl` files go before the
+free-flash count as any others. A clean deploy removes the marker. A
 copied file gone before the first rename is refused on the board's own word
 (`Swap refused`, the old install stays); no answer at all counts as a swap
 cut part way. A

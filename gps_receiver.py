@@ -106,7 +106,7 @@ def reset():
     st.clear()
     st.update(start=time.ticks_ms(), start_s=_stamp(), rx=None, rx_b=0,
               good=None, ok=0, err=0, bug=0,
-              quality=None, fixtype=None, dim=None, valid=False,
+              quality=None, fixtype=None, dim=None, dim_at=None, valid=False,
               time=None, date=None, lat=None, lon=None, alt=None,
               speed=None, used=None, view={},
               hdop=None, ttff=None, pos_at=None, hdop_at=None,
@@ -247,6 +247,12 @@ def _publish():
     st["valid"] = a is not None
     if a is None:
         st["dim"] = 0                    # (unknown until a GSA round again)
+        st["dim_at"] = now
+    elif st["dim"] == 0 and not _recent(now, st["dim_at"], _gsa_wait()):
+        # (no GSA round since the fix came back, within its period: unknown,
+        # not "no elevation": at 1 Hz (the rate refused) GSA comes every
+        # 25 s, without GSA never, and the elevation went for good)
+        st["dim"] = None
     if a is not None and st["fix_first"] is None:
         st["fix_first"] = now
     st["epochs"] = a[4] if a else 0
@@ -406,6 +412,11 @@ def gga(talker, f):
         if hd is not None and hd > 0:   # (0 or below: no HDOP, not perfect)
             ep["hdop"][0] += hd
             ep["hdop"][1] += 1
+
+def _gsa_wait():
+    """ms a GSA round may take to come: GPS_HZ * GSA_EVERY fixes apart (its
+    setup), at 1 Hz when the rate was refused; plus 2 s."""
+    return (GSA_EVERY * (GPS_HZ if st["rate_nak"] else 1) + 2) * 1000
 
 def gsa(talker, f):
     """Fix type. One per system and round on a multi-GNSS receiver; more
@@ -1053,7 +1064,7 @@ def _uc_watch(now):
                 and st["ep1_n"] >= UC_GST_LOST // 2000
                 and not _recent(now, st["ep5_at"], UC_GST_LOST)
                 and not _recent(now, st["rx_back"], UC_GST_LOST)):
-            _setup_lost(now, "1 fix/s")
+            _setup_lost(now, "1 fix/s", st["ep5_at"])
         return
     g = st["gst_at"]
     if _age(now, at) < UC_GST_LOST or _recent(now, g, UC_GST_LOST):
@@ -1063,14 +1074,31 @@ def _uc_watch(now):
                                          # GST a second later, not yet seen)
     if not _recent(now, st["rx"], NO_DATA):
         return                           # silent: _gps_mute's case
-    _setup_lost(now, "GST refused once, asked again" if st["gst_fails"] else "no GST")
+    if st["gst_fails"]:
+        # (GST refused once, asked again: the receiver answered, no restart;
+        # no date dropped, no settle rule: a fix up broke the segment, and
+        # the next minute counted only moving)
+        _setup_lost(now, "GST refused once, asked again", restart=False)
+    else:
+        _setup_lost(now, "no GST", g)
 
-def _setup_lost(now, why):
+def _setup_lost(now, why, since=None, restart=True):
+    """The setup lost: set up again (extra). since: the stamp the restart
+    was at the latest (the last GST, the last second of several fixes; None
+    when not known); restart False for none (a refusal). A restart whose banner was lost, its
+    setup gone: the date dropped and the settle rule anew, as
+    _gps_restarted does, its minute from the restart (from the detection,
+    UC_GST_LOST later, the restart's first 30 s of drift were a walk and
+    30 s of good points after the minute dropped) when the fix held since,
+    else from the next fix."""
     st["extra"] = 1                      # (its usual backoff, under a minute)
-    _date_lost()
-    # (a restart whose banner was lost, its setup gone: the settle rule
-    # anew, as _gps_restarted does; its first minute's drift was a walk)
-    st.update(fix_first=None, settled=False)
+    if restart:
+        _date_lost()
+        run = st["ep_run"]
+        held = (since is not None and run is not None
+                and time.ticks_diff(since, run) >= 0
+                and _recent(now, st["ep_at"], NO_DATA))
+        st.update(fix_first=since if held else None, settled=False)
     print("gps setup lost:", why)
     said = st["gst_said"]
     if not _recent(now, said, GPS_NOT_TAKEN_SAY):

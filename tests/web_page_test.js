@@ -228,17 +228,6 @@ const dl = (ms, la) => la + ",18.0,100.0,2,1.0," + iso(d0 + ms) + "\n";
 c0.histParse(c0.hist.days[0], dl(7200000, "47.0") + dl(7201000, "47.001"));
 c0.histParse(c0.hist.days[0], dl(3600000, "47.01") + dl(3601000, "47.011"));
 ft.late = [c0.hist.pts.map((q) => q[0] - d0), Math.round(c0.tripsOf(c0.hist.pts).reduce((a, t) => a + t.km, 0) * 1000)];
-// a reply ending past the shown day's end stops the read only where the
-// board says its file is in time order (day_span [a, b]); not with [a, b, 1]
-// (a late append further on) nor without a span (not read yet)
-ft.lateStop = [undefined, [3600, 90000], [3600, 90000, 1]].map((sp) => {
-  c0.hist = c0.histNew("20261030");
-  const u = c0.hist.days[c0.hist.days.length - 1];
-  c0.boardSpans = {};
-  if (sp) c0.boardSpans[u] = sp;
-  return c0.histParse(u, dl(3600000, "47.0") + dl(86400000 + 600000, "47.0"));
-});
-c0.boardSpans = {};
 // a 20 km drive, the live position at its end: the whole track inside the
 // map's band (zoom 13 at least cut both ends off); without a fix, a past
 // day or a picked trip the track decides
@@ -1181,16 +1170,58 @@ ft.histEnd = inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTi
   c.mapD = null;
   c.trackPaint = () => {};
   c.hist = c.histNew("20261108");        // Nov 8 local: 23:00Z Nov 7 to 23:00Z Nov 8
-  c.boardSpans = {"20261108": [43200, 83460]};   // (in time order: may stop early)
   c.histLoad();
   const said = (body, hh) => { const r = urls[urls.length - 1]; r.status = 200; r.responseText = body; r.headers = hh; r.onload(); };
   const ln = (h, m) => trkLine(Date.UTC(2026, 10, 8, h, m, 0), 47.1, 18.4);
   said("", {"X-Hist-Next": "0", "X-Hist-End": "0", "X-Hist-Seek": "0"});      // Nov 7 from 23:00Z: the seek
   said("", {"X-Hist-Next": "0", "X-Hist-End": "0"});                        // nothing there
   said(ln(12, 0) + ln(22, 58), {"X-Hist-Next": "500", "X-Hist-End": "3000"});  // Nov 8, its first reply
-  said(ln(22, 59) + ln(23, 1), {"X-Hist-Next": "1000", "X-Hist-End": "3000"}); // past the local day's end
+  said(ln(22, 59) + ln(23, 1), {"X-Hist-Next": "1000", "X-Hist-End": "3000", "X-Hist-Late": "0"}); // past the local day's end
   return [urls.map((r) => r.url), c.hist.busy, c.hist.done, c.hist.pts.length];
 });
+// a reply past the shown day's end stops the read only on the board's word
+// that the file is in time order now (X-Hist-Late 0); a 1 (a late append
+// further on) or none (not scanned at this size) reads on (day_span's third
+// item was up to 15 s older than the file read: a late upload in between
+// cut the day, cached so)
+ft.lateStop = ["0", "1", null].map((lh) => inTz("Europe/Budapest", () => new Date(2026, 10, 11, 7, 0, 0).getTime(), (c) => {
+  const urls = [];
+  c.XMLHttpRequest = function () { urls.push(this); };
+  c.XMLHttpRequest.prototype.open = function (mm, u) { this.url = u; };
+  c.XMLHttpRequest.prototype.setRequestHeader = function () {};
+  c.XMLHttpRequest.prototype.send = function () {};
+  c.XMLHttpRequest.prototype.overrideMimeType = function () {};
+  c.XMLHttpRequest.prototype.getResponseHeader = function (n) { return this.headers && n in this.headers ? this.headers[n] : null; };
+  c.document = {getElementById: () => null};
+  c.mapD = null;
+  c.trackPaint = () => {};
+  c.boardSpans = {"20261108": [43200, 83460]};   // (day_span in order: no say)
+  c.hist = c.histNew("20261108");
+  c.histLoad();
+  const said = (body, hh) => { const r = urls[urls.length - 1]; r.status = 200; r.responseText = body; r.headers = hh; r.onload(); };
+  const ln = (h, m) => trkLine(Date.UTC(2026, 10, 8, h, m, 0), 47.1, 18.4);
+  said("", {"X-Hist-Next": "0", "X-Hist-End": "0", "X-Hist-Seek": "0"});
+  said("", {"X-Hist-Next": "0", "X-Hist-End": "0"});
+  const h = {"X-Hist-Next": "1000", "X-Hist-End": "3000"};
+  if (lh !== null) h["X-Hist-Late"] = lh;
+  said(ln(12, 0) + ln(23, 1), h);
+  return [urls.length, c.hist.busy];
+}));
+// the picked trip kept by its start: a track uploaded late sorted an earlier
+// trip in, the pick (an index) moved to another trip
+ft.hlKeep = (() => {
+  const c = page(1600).c, base = new Date(2026, 10, 10, 0, 0, 0).getTime(), dLat = 1 / 110.54;
+  const trip = (h) => { const o = []; for (let k = 0; k <= 15; k++) o.push([base + h * 3600000 + k * 60000, 47.5 + k * 0.1 * dLat, 19.08, 100]); return o; };
+  c.hist = c.histNew(null);
+  c.hist.pts.push(...trip(8), ...trip(14));
+  c.trackPaint();
+  c.hlTrip(1);
+  const t0 = c.hist.trips[c.hist.hl].t0;
+  c.hist.pts.push(...trip(11));
+  c.hist.pts.sort((a, b) => a[0] - b[0]);
+  c.trackPaint();
+  return [c.hist.hl, c.hist.trips.length, c.hist.trips[c.hist.hl].t0 === t0];
+})();
 // 12. a past day whose /hist answers 403 (or 5xx) is no day without
 // points: not cached, an error, asked again (it stayed "no trip" till the
 // page closed)

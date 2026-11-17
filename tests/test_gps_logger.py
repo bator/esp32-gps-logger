@@ -10502,7 +10502,7 @@ ip_bodies = ("GPRMC,120000.00,A,4730.000,N,01900.000,E,0.1,90.0,171026,,,A",
              "\xe9GRMC,120000.00,A,4730.000,N,01900.000,E,0.1,,171026,,,A",
              "\xe9GGSV,3,1,12,01,40,083,46")
 ip_keys = ("ok", "err", "good", "valid", "lat", "time", "date", "quality", "used",
-           "fixtype", "view", "extra", "speed", "seq")
+           "fixtype", "dim", "view", "extra", "speed", "seq")
 ip_bad = []
 for n_ in range(1500):
     body = ip_rnd.choice(ip_bodies).encode()
@@ -11285,8 +11285,41 @@ try:
         sp7 = gl._hist_spans()
     l2want = [min(_hsec(x) for x in l2a + l2b),
               max(_hsec(x) for x in l2a + l2b), 1]
-    os.remove(gl.HIST_DIR + "/" + l2 + gl.TRB)   # (the day lists after: as before)
-    gl._hsp.pop(l2, None)
+    # (/hist says whether the file as it is now is in time order: the page
+    # stops a past day early on a 0 only; none for a file not scanned at
+    # this size)
+    xl_ = [_hget(b"d=%s&o=0" % d_.encode())[1].get("X-Hist-Late") for d_ in (l2, day)]
+    hist_add([_hl(l2, "235000")], 1)
+    xl_.append(_hget(b"d=%s&o=0" % l2.encode())[1].get("X-Hist-Late"))
+    check("HIST-LATE-HEAD: /hist's X-Hist-Late: 1 for a file out of time order, "
+          "0 in order, none once the file grew (not scanned at this size)",
+          xl_ == ["1", "0", None], repr(xl_))
+    # (a day scanned in order, then grown by a late append: the scan goes on
+    # from its old end, pk carried, and marks it late)
+    l3 = "20261128"
+    l3a = _drive(l3, 120, t0=36000, seed=9)
+    hist_add(l3a, len(l3a))
+    gl._hd[1] = None
+    for _ in range(12):
+        sp8 = gl._hist_spans().get(l3)
+    l3b = _drive(l3, 120, t0=28800, seed=10)
+    hist_add(l3b, len(l3b))
+    gl._hd[1] = None
+    _l3_at, _l3_open = [], gl._rd_open
+    try:
+        gl._rd_open = lambda o_: (_l3_at.append(o_), _l3_open(o_))
+        for _ in range(12):
+            sp9 = gl._hist_spans().get(l3)
+    finally:
+        gl._rd_open = _l3_open
+    check("HIST-SPAN-LATE-GROWN: a day in order grown by a late append is "
+          "scanned on from its old end and marked late",
+          sp8 == [min(_hsec(x) for x in l3a), max(_hsec(x) for x in l3a)]
+          and sp9 == [min(_hsec(x) for x in l3b), max(_hsec(x) for x in l3a), 1]
+          and _l3_at and 0 not in _l3_at, repr((sp8, sp9, _l3_at[:3])))
+    for d_ in (l2, l3):
+        os.remove(gl.HIST_DIR + "/" + d_ + gl.TRB)   # (the day lists after: as before)
+        gl._hsp.pop(d_, None)
     gl._hd[1] = None
     check("HIST-SPAN-LATE: a late append whose first append is not the "
           "earliest: the earliest keyframe and the latest point (not the "
@@ -15589,6 +15622,8 @@ else:
         ("gps refused CFGSYS,h135155", "setup"),
         ("gps GPS_SYS sent 3 times this boot: not again", "grx"),
         ("env WPA2_2 not read (.env read part way, or its line garbled): SSID2 dropped", "env"),
+        ("env UPLOAD_UNVERIFIED not read (.env read part way, or its line garbled): 0, "
+         "UPLOAD_AWAY_UNVERIFIED not used", "env"),
         ("gps setup lost: no GST", "setup"),
         ("gps setup not taken: no GST (2 more)", "setup"),
         ("gps silent 60 s, no bytes from the receiver", "gsil"),
@@ -16020,10 +16055,13 @@ else:
           ft.get("late") == [[3600000, 3601000, 7200000, 7201000], 221],
           repr(ft.get("late")))
     check("PAGE-LATE-STOP: a past day's reply past its end stops the read "
-          "only when day_span says the file is in time order (2 items); "
-          "a late append (3rd item 1) or no span yet: read on",
-          ft.get("lateStop") == [False, True, False],
+          "only on X-Hist-Late 0 (the file in time order now); 1 or none: "
+          "read on",
+          ft.get("lateStop") == [[3, False], [4, True], [4, True]],
           repr(ft.get("lateStop")))
+    check("PAGE-HL-KEEP: the picked trip is found again by its start after a "
+          "late track sorted an earlier trip in",
+          ft.get("hlKeep") == [2, 3, True], repr(ft.get("hlKeep")))
     check("PAGE-TIMELINE: trips split at stops over 5 min, a few standing "
           "fixes folded into the stop; trip rows (km, time, km/h) and stop "
           "rows; the picked trip marked",
@@ -16504,11 +16542,11 @@ if os.path.exists(_wm_gz):
         _wm_data = f.read()
 _wm_w = gl.WEB_GZ_WBITS
 check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
-      "mtime, not over 25600 B (35.7 KB, then 28.5 before A+C; 25000 until the battery icon, 25400 until the X-GPS key); the CSS and the markup only lose comments and "
+      "mtime, not over 25700 B (35.7 KB, then 28.5 before A+C; 25000 until the battery icon, 25400 until the X-GPS key, 25600 until the picked trip kept by its start); the CSS and the markup only lose comments and "
       "white space; stripping again changes nothing; web.html itself keeps its comments",
       web_min and _wm_r.returncode == 0
       and _gunzip_w(_wm_data, _wm_w) == _wm_page.encode("utf-8") and _wm_data[4:8] == b"\0\0\0\0"
-      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25600
+      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25700
       and web_min.minify(_wm_page) == _wm_page and "<!--" not in _wm_page
       and "/*" not in _wm_page[_wm_page.index("<style>"):_wm_page.index("</style>")]
       and _wm_css(_wm_page) == _wm_css(page_src) and _wm_html(_wm_page) == _wm_html(page_src)
@@ -18036,13 +18074,19 @@ try:
         gl.ota_boot()
         _co_own = (os.path.exists(gl.OTA_DL), gl.ota.get("failed"),
                    [m_ for m_ in _co_d if "install cut" in m_])
+        with open(gl.OTA_DL, "w") as f:  # (an older build's: a newer one
+            f.write("50 2")              # flashed over USB since)
+        gl.ota["failed"] = None
+        gl.ota_boot()
+        _co_old = (os.path.exists(gl.OTA_DL), gl.ota.get("failed"))
     finally:
         gl._diag_write = _co_dw
     check("OTA-CUT-ONCE: a cut install counted once (one try, one diag line) "
           "however often the board boots before the next install; the running "
           "build's note is dropped, no cut",
           _co == [((200, 1), "install cut")] * 4 and _co_n == 1
-          and _co_own == (False, None, []), repr((_co, _co_n, _co_own)))
+          and _co_own == (False, None, []) and _co_old == (False, None),
+          repr((_co, _co_n, _co_own, _co_old)))
     # GAP-STAGED-WRITE: the install writes "staged" before set_boot and
     # removes it once set_boot is through (OTA-STAGED wrote it by hand)
     _ota_reset()
@@ -28869,7 +28913,7 @@ _dp_lists = [l_ for l_ in re.findall(r'^\s*FILES="([^"]*)"', _dp_src, re.M)
 check("DEPLOY-SWAP: every FILES list ends in main.py; the swap stats each "
       ".dpl first; mpy-cross 1.29 is checked; ca.der goes up when there is one",
       len(_dp_lists) == 3 and all(l.split()[-1] == "main.py" for l in _dp_lists)
-      and "if $1:\n    for n in F:\n        os.stat(n + '.dpl')\n    print('preflight ok')\nelse:" in _dp_src
+      and "if $1:\n    for n in F:\n        os.stat(n + '.dpl')\n    open('deploy.cut', 'w').close()\n    print('preflight ok')\nelse:" in _dp_src
       and "os.stat(n + '.dpl')\n        print('removing', n)\n        os.remove(n)" in _dp_src
       and "1.29.*) ;;" in _dp_src and 'FILES="ca.der $FILES"' in _dp_src
       and "ca.der" in _slurp(os.path.join(ROOT, ".gitignore")), repr(_dp_lists))
@@ -29394,6 +29438,37 @@ finally:
 check("HIST-DONE-QUAR: a quarantined batch whose .pos failed is not drawn "
       "again at the next 422; the note goes with the commit",
       hq == [(1, True), (1, False, "quarantine")], repr(hq))
+# (the note not written either, the flash that took no .pos: RAM's pos_wr
+# keeps it out of the history, as on the 2xx path)
+hq2 = []
+hq2_dir = os.path.join(_rv_td, "histdoneq2")
+os.makedirs(hq2_dir)
+hq2_saved = (gl.write_offset, gl._hist_batch, gl.MAX_GLOBAL_PAYLOAD, gl._hist_done_note)
+hq2_hist = []
+try:
+    online(hq2_dir)
+    gl.MAX_GLOBAL_PAYLOAD = 99
+    hq2_p = os.path.join(hq2_dir, "20261116_140000.trk")
+    make_trk(hq2_p, gl.UPLOAD_BATCH + 20)
+    _post_code[0] = 422
+
+    def _hq2_wo(*a, **k):
+        raise OSError(5, "EIO")
+    gl.write_offset = _hq2_wo
+    gl._hist_done_note = lambda *a: None
+    gl._hist_batch = lambda *a: hq2_hist.append(a[:2])
+    pump()
+    gl.write_offset = hq2_saved[0]
+    gl.up["hold"].clear()
+    pump()
+    hq2.append((len(hq2_hist), gl.up["state"], hq2_p in gl.up["pos_wr"]))
+finally:
+    (gl.write_offset, gl._hist_batch, gl.MAX_GLOBAL_PAYLOAD,
+     gl._hist_done_note) = hq2_saved
+    _post_code[0] = 201
+check("HIST-DONE-QUAR-RAM: no note on the flash either: the batch is drawn "
+      "once (pos_wr), its entry gone with the commit",
+      hq2 == [(1, "quarantine", False)], repr(hq2))
 
 # RCV-GST-NAK2: GST is "refused" only twice in a row (one FAIL: a hit line,
 # a late answer, took GST and the watch off until a restart); an OK clears it
@@ -29906,7 +29981,9 @@ try:
                          (True, b"SSID=Phone\nWPA2=x\n"),
                          (False, b"SSID=Phone\nWPA2=x\nSSID_HOM\xc5=0\n"),
                          (False, b"SSID=Phone\nWPA2=x\nHOM\xc51=0\n"),
-                         (True, b"SSID=Phone\nWPA2=x\nSSID_HOME=1\n")):
+                         (True, b"SSID=Phone\nWPA2=x\nSSID_HOME=1\n"),
+                         (False, b"SSID=Phone\nWPA2=x\nSSID_HOME=0 # h\xe1l\xf3zat\n"),
+                         (False, b"SSID=Caf\xe9\nWPA2=x\n")):
         p_ = os.path.join(_rv_td, "env-home")
         with open(p_, "wb") as f:
             f.write(body_)
@@ -29916,9 +29993,32 @@ try:
 finally:
     gl._env_partial[0] = False
     del gl._env_skipped[:]
-check("ENV-HOME-CLOSED: a home flag not read (part way, garbled key) is not "
-      "home; a clean file's default and a flag read are kept",
-      eh == [[True], [False], [False], [False], [True]], repr(eh))
+check("ENV-HOME-CLOSED: a home flag not read (part way, garbled key, a value "
+      "not UTF-8: it was kept as bytes for its SSID prefix, no flag) is not "
+      "home; a clean file's default, a flag read and an ANSI SSID are kept",
+      eh == [[True], [False], [False], [False], [True], [False], [True]], repr(eh))
+
+# ENV-UNV-CLOSED: UPLOAD_UNVERIFIED not read (garbled, not UTF-8, past an I/O
+# error) stays 0: the old UPLOAD_AWAY_UNVERIFIED=1 next to it made uploads
+# unverified everywhere; read, or the old key alone, as before
+eu = []
+eu_saved = gl.UPLOAD_UNVERIFIED
+try:
+    for part_, skip_, env_ in ((False, [], {"UPLOAD_AWAY_UNVERIFIED": "1"}),
+                               (False, ["UPLOAD_UNVERIFIED"], {"UPLOAD_AWAY_UNVERIFIED": "1"}),
+                               (True, [], {"UPLOAD_AWAY_UNVERIFIED": "1"}),
+                               (True, [], {"UPLOAD_UNVERIFIED": "home"})):
+        gl.UPLOAD_UNVERIFIED = "0"
+        gl._env_partial[0] = part_
+        gl._env_skipped[:] = skip_
+        gl._up_env(env_)
+        eu.append(gl.UPLOAD_UNVERIFIED)
+finally:
+    gl._env_partial[0] = False
+    del gl._env_skipped[:]
+    gl.UPLOAD_UNVERIFIED = eu_saved
+check("ENV-UNV-CLOSED: UPLOAD_UNVERIFIED not read is 0, the old key not used",
+      eu == ["1", "0", "0", "home"], repr(eu))
 
 # WEB-ERRNO-MORE: the names MicroPython's errno lacks (ENFILE: lwIP out of
 # sockets) are newlib's numbers, not dropped; a reopened listen socket starts
@@ -30105,6 +30205,14 @@ try:
                 gl._fields(_clock[0])[0], gl._fields(_clock[0], gr_._snap())[0]))
     gr_.handle(gsa_)
     dm_.append((gr_.st["dim"], gl._fields(_clock[0])[0]))
+    # no GSA round within its period after the fix came back (1 Hz, the rate
+    # refused: 25 s; none set up): unknown again, the elevation written
+    _rmc(7, "V")
+    _rmc(8, "A")                         # (publishes the fixless second 7)
+    gr_.st["dim_at"] = time.ticks_ms() - gr_._gsa_wait() - 1
+    _rmc(9, "A")
+    gr_.st["alt"] = 100.0
+    dm_.append((gr_.st["dim"], gl._fields(_clock[0])[0]))
 finally:
     gr_.st.clear()
     gr_.st.update(dm_saved[0])
@@ -30113,22 +30221,38 @@ finally:
     gr_._day[:] = dm_saved[2]
 check("RCV-DIM-LOST: after a second without a fix the elevation waits for the "
       "next GSA round (the screen keeps 3D); a 3D round brings it back",
-      dm_ == [(3, 3), (0, 3, 0, "", ""), (3, "100.0")], repr(dm_))
+      dm_ == [(3, 3), (0, 3, 0, "", ""), (3, "100.0"), (None, "100.0")], repr(dm_))
 
 # RCV-SETTLE-LOST: a restart found by its lost setup (no banner) re-arms the
 # settle rule as a seen restart does (its first minute's drift was a walk)
+# (its minute from the restart, the last GST, when the fix held since: from
+# the detection, UC_GST_LOST later, the restart's first 30 s were a walk;
+# a fix lost since: from the next one; a GST refused once (the receiver
+# answered, no restart): no settle rule, no date dropped)
 sl_ = []
 sl_saved = dict(gr_.st)
 try:
-    gr_.st.update(fix_first=time.ticks_ms() - 600000, settled=True,
-                  gst_said=time.ticks_ms())
-    gr_._setup_lost(time.ticks_ms(), "no GST")
-    sl_.append((gr_.st["fix_first"], gr_.st["settled"]))
+    for case_ in ("held", "lost", "refused"):
+        now_ = time.ticks_ms()
+        g_ = now_ - gr_.UC_GST_LOST - 1000
+        gr_.st.update(fix_first=now_ - 600000, settled=True, gst_said=now_,
+                      setup_ok=True, setup_at=now_ - 600000, extra=0,
+                      gst_nak=False, gst_at=g_, rx=now_, rx_back=None,
+                      ep_run=now_ - 300000 if case_ != "lost" else g_ + 5000,
+                      ep_at=now_ - 200, date="2026-11-17",
+                      gst_fails=1 if case_ == "refused" else 0)
+        gr_._uc_watch(now_)
+        sl_.append((gr_.st["extra"], gr_.st["fix_first"] == g_,
+                    gr_.st["fix_first"] is None, gr_.st["settled"],
+                    gr_.st["date"]))
 finally:
     gr_.st.clear()
     gr_.st.update(sl_saved)
-check("RCV-SETTLE-LOST: _setup_lost starts the settle rule anew",
-      sl_ == [(None, False)], repr(sl_))
+check("RCV-SETTLE-LOST: a lost setup's settle minute runs from the last GST "
+      "when the fix held, from the next fix when lost; a refusal re-arms "
+      "nothing and keeps the date",
+      sl_ == [(1, True, False, False, None), (1, False, True, False, None),
+              (1, False, False, True, "2026-11-17")], repr(sl_))
 
 # RCV-BANNER-GLUED: the start-up banner after a sentence the restart cut (no
 # CR/LF between) is a restart, not a bad sentence; a sentence after a banner
@@ -30220,32 +30344,49 @@ def deploy_again(dev, env_extra):
     return r.returncode, r.stdout, r.stderr, dev_logger(dev)
 
 
-# DEPLOY-CUT-RERUN: a swap that failed part way leaves /deploy.cut and the
-# rest of its install as .dpl; the rerun its FAILED line asks for keeps
-# them until its own copy is checked, and failing before its swap (a copy
-# check failed) resets nothing (before: the .dpl were dropped at once and
-# the board reset onto the mixed set); a clean rerun finishes it
+# DEPLOY-CUT-RERUN: a swap that failed part way leaves /deploy.cut; a rerun
+# that fails before its own swap resets nothing (before round 9: it reset
+# onto the mixed set) but runs the logger again without a reset (round 9 left
+# it stopped: the WDT booted the mixed set anyway, and rolled a pending OTA
+# back), an OTA pending too; it drops the old .dpl before its free-flash
+# count (kept, a nearly full board had no room for the rerun); a marker with
+# no swap behind it is no reset either, until a clean deploy clears it
 if shutil.which("bash") and shutil.which("sha256sum") and web_min:
     cr = []
+
+    def _cr_dpl(dev_):
+        return sorted(n_ for n_ in os.listdir(dev_) if n_.endswith(".dpl"))
+
+    def _cr_lg(lg_):
+        return [l_.split(";")[0] for l_ in lg_ if l_.startswith(("reset", "run"))]
     rc, out, err, dev, calls = deploy_run({"FAKE_RENAME_MAX": "0", "FAKE_RENAME_ALL": "1",
                                            "FAKE_FROZEN": "full"})
     cr.append((rc != 0, "Swap FAILED part way" in err,
-               os.path.exists(os.path.join(dev, "deploy.cut")),
-               sorted(n_ for n_ in os.listdir(dev) if n_.endswith(".dpl"))))
-    rc, out, err, lg = deploy_again(dev, {"FAKE_TRUNC": "main.py", "FAKE_FROZEN": "full"})
-    cr.append((rc != 0, "Copy check FAILED" in err, "/deploy.cut" in err,
-               sorted(n_ for n_ in os.listdir(dev) if n_.endswith(".dpl")),
-               [l_ for l_ in lg if l_.startswith(("reset", "run"))]))
+               os.path.exists(os.path.join(dev, "deploy.cut")), _cr_dpl(dev)))
+    rc, out, err, lg = deploy_again(dev, {"FAKE_FREE_BLOCKS": "1", "FAKE_FROZEN": "full"})
+    cr.append((rc != 0, "Not enough free flash" in err, "no reset onto a possibly" in err,
+               _cr_dpl(dev), _cr_lg(lg)))
+    with open(os.path.join(dev, "ota.pending"), "w") as f:
+        f.write("1793557995 6b62646\n")
+    rc, out, err, lg = deploy_again(dev, {"FAKE_TRUNC": "main.py", "FORCE_PENDING": "1",
+                                          "FAKE_FROZEN": "full"})
+    cr.append((rc != 0, "Copy check FAILED" in err, _cr_dpl(dev), _cr_lg(lg)))
+    os.remove(os.path.join(dev, "ota.pending"))
     rc, out, err, lg = deploy_again(dev, {"FAKE_FROZEN": "full"})
-    cr.append((rc, os.path.exists(os.path.join(dev, "deploy.cut")),
-               sorted(n_ for n_ in os.listdir(dev) if n_.endswith(".dpl")),
+    cr.append((rc, os.path.exists(os.path.join(dev, "deploy.cut")), _cr_dpl(dev),
                dev_file(dev, "main.py") != b"old main", lg[-1:]))
+    open(os.path.join(dev, "deploy.cut"), "w").close()   # (left with no swap)
+    rc, out, err, lg = deploy_again(dev, {"FAKE_FREE_BLOCKS": "1", "FAKE_FROZEN": "full"})
+    cr.append((rc != 0, _cr_lg(lg)))
     check("DEPLOY-CUT-RERUN: a swap failed part way leaves /deploy.cut; a rerun "
-          "failing before its swap keeps the .dpl and resets nothing; a clean "
-          "rerun swaps all in, the marker gone, then resets",
+          "failing before its swap resets nothing but runs the logger again (an "
+          "OTA pending too) and drops the old .dpl first; a clean rerun swaps all "
+          "in, the marker gone, then resets",
           cr == [(True, True, True, ["main.py.dpl", "web.html.gz.dpl"]),
-                 (True, True, True, ["main.py.dpl", "web.html.gz.dpl"], []),
-                 (0, False, [], True, ["reset"])], repr(cr))
+                 (True, True, True, [], ["run import gps_logger"]),
+                 (True, True, [], ["run import gps_logger"]),
+                 (0, False, [], True, ["reset"]),
+                 (True, ["run import gps_logger"])], repr(cr))
 else:
     skip_check("DEPLOY-CUT-RERUN", "no bash, sha256sum or web_min")
 
@@ -30298,7 +30439,18 @@ if shutil.which("bash") and shutil.which("sha256sum") and mpy_bin:
                 '$(sha256sum "$2/$f" | cut -d" " -f1)"$\'\\n\'; done\n'
                 'eval "$(sed -n \'/^swap_py() {/,/^}/p\' "$3")"\nswap_py "$1"\n')
 
-    def _sm_case(first_, page_in):
+    # (a file system whose rename does not replace: the remove-then-rename
+    # fallback; the unix port's rename replaces, the os module overridden)
+    sm_lib2 = os.path.join(sm_dir, "lib2")
+    os.makedirs(sm_lib2)
+    shutil.copy(os.path.join(sm_lib, "machine.py"), sm_lib2)
+    with open(os.path.join(sm_lib2, "os.py"), "w") as f:
+        f.write("import sys\n_p = sys.path\nsys.path = []\nimport os as _os\n"
+                "sys.path = _p\nlistdir, stat, remove = _os.listdir, _os.stat, _os.remove\n"
+                "def rename(a, b):\n    if b in _os.listdir():\n"
+                "        raise OSError(17)\n    _os.rename(a, b)\n")
+
+    def _sm_case(first_, page_in, lib_=None):
         dev_ = tempfile.mkdtemp(dir=sm_dir)
         for n_, b_ in (("main.py", b"old"), ("web.html", b"old page"),
                        ("ota.seen", b"1"), ("gps_logger.mpy", b"OLD"),
@@ -30316,14 +30468,15 @@ if shutil.which("bash") and shutil.which("sha256sum") and mpy_bin:
                                 os.path.join(ROOT, "deploy.sh")],
                                capture_output=True, text=True).stdout
         r_ = subprocess.run([mpy_bin, "-c", code_], cwd=dev_, capture_output=True,
-                            text=True, env=dict(os.environ, MICROPYPATH=sm_lib))
+                            text=True, env=dict(os.environ, MICROPYPATH=lib_ or sm_lib))
         return (r_.returncode,
                 [l_ for l_ in r_.stdout.split("\n")
-                 if l_.startswith(("preflight", "roll", "swapped"))],
+                 if l_.startswith(("preflight", "roll", "swapped", "removing"))],
                 sorted(os.listdir(dev_)), dev_file(dev_, "main.py"))
     sm_.append(_sm_case("True", None))
     sm_.append(_sm_case("False", b"new page"))
     sm_.append(_sm_case("False", b"other page"))
+    sm_.append(_sm_case("True", None, sm_lib2))
     check("DEPLOY-SWAP-MPY: the swap under MicroPython: every .dpl in, the stale "
           "files and /deploy.cut gone; the roll forward finishes a cut swap, "
           "refuses one whose swapped file is not the copy",
@@ -30332,7 +30485,10 @@ if shutil.which("bash") and shutil.which("sha256sum") and mpy_bin:
           and sm_[1] == (0, ["roll forward ok", "swapped main.py"],
                          [".rtc", "main.py", "web.html.gz"], b"new main")
           and sm_[2][0] != 0 and sm_[2][1] == [] and sm_[2][3] == b"old"
-          and "deploy.cut" in sm_[2][2], repr(sm_))
+          and "deploy.cut" in sm_[2][2]
+          and sm_[3] == (0, ["preflight ok", "swapped web.html.gz", "removing main.py",
+                             "swapped main.py"],
+                         [".rtc", "main.py", "web.html.gz"], b"new main"), repr(sm_))
 else:
     skip_check("DEPLOY-SWAP-MPY", "no bash, sha256sum or MICROPYTHON")
 

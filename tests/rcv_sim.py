@@ -62,6 +62,8 @@ class Rx:
         self.drop = 0.0                  # chance a sentence is lost
         self.rmc_drop = 0.0
         self.cut = 0.0
+        self.glue = 0.0                  # chance a restart's banner follows a cut sentence
+        self.bad_date = 0.0              # chance an RMC's date does not exist
         self.out = []
         self.pending = []                # replies (at ms, bytes)
         self.restarts = 0
@@ -91,7 +93,12 @@ class Rx:
         self.restarts += 1
         self.defaults()
         self.fixless_until = ms + random.choice([0, 1000, 5000, 30000])
-        self.put("\r\nUC6580 FWVer R3.4.21\r\n")
+        # (no CR/LF before it now and then: glued to a sentence the restart cut)
+        if random.random() < self.glue:
+            self.put("$GNGGA,123519.00,4807.0")
+            self.put("UC6580 FWVer R3.4.21\r\n")
+        else:
+            self.put("\r\nUC6580 FWVer R3.4.21\r\n")
         self.next_ep = ms + 300
     def pump(self, now):
         while self.pending and self.pending[0][0] <= now:
@@ -116,7 +123,10 @@ class Rx:
         lat = "4730.%05d" % random.randint(0, 99999)
         if fix:
             if random.random() >= self.rmc_drop:
-                self.put(cs("GNRMC,%s,A,%s,N,01903.98765,E,%.1f,90.0,%s,,,A,V" % (t, lat, random.choice([0.1, 0.5, 20.0]), ddmmyy)))
+                # (a date that does not exist now and then, the checksum held:
+                # dateless, the second keeps the day's date or none at midnight)
+                dd = random.choice(BAD_DATES) if random.random() < self.bad_date else ddmmyy
+                self.put(cs("GNRMC,%s,A,%s,N,01903.98765,E,%.1f,90.0,%s,,,A,V" % (t, lat, random.choice([0.1, 0.5, 20.0]), dd)))
             self.put(cs("GNGGA,%s,%s,N,01903.98765,E,1,20,0.8,100.0,M,40.0,M,," % (t, lat)))
             k = self.utc_ms(ms) // 1000 - self.utc0
             if k >> 3 >= len(self.emitted):  # (grown: runs past 40 days)
@@ -167,6 +177,7 @@ class Uart:
     def write(self, b):
         self.rx.write(b, clk[0]); return len(b)
 
+BAD_DATES = ("321126", "000000", "290226", "311126", "171399")
 class _M: pass
 machine = _M()
 machine.UART = lambda *a, **k: None
@@ -238,6 +249,8 @@ for ev in range(N):
     rx.rmc_drop = random.choice([0, 0, 0.3, 1.0]) if random.random() < 0.2 else rx.rmc_drop
     rx.drop = random.choice([0, 0, 0.05]) if random.random() < 0.2 else rx.drop
     rx.cut = random.choice([0, 0, 0.05]) if random.random() < 0.2 else rx.cut
+    rx.glue = random.choice([0, 0.5]) if random.random() < 0.2 else rx.glue
+    rx.bad_date = random.choice([0, 0, 0.15]) if random.random() < 0.2 else rx.bad_date
     if x < 0.08:
         d = r.GPS_SILENT + random.randint(-1500, 1500); note("silence near", d)
         rx.silent_until = clk[0] + d

@@ -436,9 +436,12 @@ found by the keyframes' text without decoding the deltas (`HIST_SEEK_MS`;
 day no longer reads the whole UTC day before it (~16 replies of ~2.4 s for
 its last hour). A past local day that ends inside a UTC day stops reading
 that day at the first reply whose last point is past the local day's end
-(points in time order), not at the UTC day's own end, but only when
-`day_span` says that file is in time order: a track uploaded after a newer
-one (held back, retried) sits further on in it, and the day is read whole. A day without a file is a `204` (the page asks for today's
+(points in time order), not at the UTC day's own end, but only when the
+reply's `X-Hist-Late: 0` says that file, as it is now, is in time order: a
+track uploaded after a newer one (held back, retried) sits further on in it
+(`1`), and the day is read whole, as when the header is not there (the file
+not scanned at its size yet). A picked trip is kept by its start time when
+a late track sorts an earlier one in. A day without a file is a `204` (the page asks for today's
 every minute before its first point). `status.json`'s `day_span` gives each
 `.trb` day's first and last point (seconds into the UTC day; one day read a
 request, kept with its file size), the earliest and the latest in time even
