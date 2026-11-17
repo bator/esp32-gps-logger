@@ -388,7 +388,12 @@ function evLine(a, l) {
     a.pend = [];
     return;
   }
-  a.pend.push([evKind(l), l]);
+  // a boot: the config lines before it are its own (each boot writes its
+  // .env notes again): "Config" is the running one's, not a day of old
+  // fixed ones (a /ca.der put up since kept "GEO_URL https without" there)
+  var k = evKind(l);
+  if (k === "boot") { delete a.g.env; for (var i = a.pend.length; i--;) if (a.pend[i][0] === "env") a.pend.splice(i, 1); }
+  a.pend.push([k, l]);
   // (no utc for hours: the oldest at the last time known)
   if (a.pend.length > EV_PEND) { var p = a.pend.shift(); evAdd(a.g, p[0], p[1], a.t1); }
 }

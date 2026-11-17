@@ -316,7 +316,8 @@ Below, three columns split by hairlines (one under the other on a phone):
   crash, caught bug, GPS reset loop, GPS silent, track write error, flash
   full, upload error, a rolled back update; amber: update check, memory
   reboot, clock back, WiFi failed / lost, upload waiting for memory, GPS
-  setup refused, `.env`; green / white: boots, updates, WiFi back; grey:
+  setup refused, `.env`, the running boot's notes only, each boot writes
+  them again; green / white: boots, updates, WiFi back; grey:
   receiver start, stay ended, display backlight, other), a detail (e.g. `5
   restarts in 3–24 s`, `krumpli · status 201 · 12 s each`, the silent time
   summed from `gps back after N s`, the updates `2e8bc6e → a3f2271 →
