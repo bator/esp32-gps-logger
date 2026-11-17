@@ -509,6 +509,19 @@ ft.dispKind = (() => {
   const html = c0.evView(a, {done: true}).evg;
   return [gs.map((g) => [g.k, g.name, g.n, g.det]), html.indexOf("undefined") < 0, html.indexOf("Display backlight") >= 0];
 })();
+// "Config" is the running boot's: the .env notes of the boots before it
+// (written again at each boot) go with a boot line, also ones still waiting
+// for a status line (a /ca.der put up since kept "GEO_URL https without"
+// there for a day)
+ft.envBoot = (() => {
+  const a = c0.evNew(), st = (u, t) => "up " + u + " utc " + t + " nmea 1/0 gpsboots 0 loops 0 sats 9/9 fix 3D_fix hdop 1.0";
+  for (const l of ["boot cause 2 prev_up 0 mhz 160 mem 1", "upload GEO_URL https without /ca.der: the server is not verified, uploads off",
+    "env WEB_AWAY 1 without WEB_TOKEN, using 0", st(64, "20261116T150000Z"),
+    "env KEEPALIVE not 0 or 5-600 s, using 5 s",
+    "boot cause 2 prev_up 600 mhz 160 mem 1", "env WEB_AWAY 1 without WEB_TOKEN, using 0", st(64, "20261117T082000Z")]) c0.evLine(a, l);
+  const g = c0.evGroups(a).filter((x) => x.k === "env")[0];
+  return [g.n, g.det];
+})();
 ft.kpis = c0.kpis(trips);
 ft.kpisLong = c0.kpis([{t0: 0, t1: 4500000, km: 12.345}]);
 ft.gpx = c0.gpxText([[Date.UTC(2026, 9, 30, 8, 0, 0), 47.1, 18.4, 120.5, 5], [Date.UTC(2026, 9, 30, 8, 0, 1), 47.2, 18.5, null, null],

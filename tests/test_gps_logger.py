@@ -15518,11 +15518,13 @@ else:
     ev_n = {"crash": 1, "bug": 2, "gloop": 4, "gsil": 2, "track": 1,
             "full": 1, "upl": 3, "ota": 2, "otax": 1, "reboot": 1,
             "tback": 1, "wfail": 4, "wlost": 1, "low": 1, "setup": 5,
-            "env": 2, "boot": 2, "wback": 1, "stay": 1, "grx": 2,
+            "boot": 2, "wback": 1, "stay": 1, "grx": 2,
             "other": 2}
+    # (no "env": its 2 lines came before the last boot, whose notes Config
+    # shows; PAGE-ENV-BOOT)
     # the latest first; at the same last time by severity, then count
     ev_order = ["boot", "grx", "ota", "upl", "bug", "crash", "track", "full",
-                "setup", "env", "otax", "reboot", "tback", "wlost", "low",
+                "setup", "otax", "reboot", "tback", "wlost", "low",
                 "wback", "stay", "other", "gsil", "gloop", "wfail"]
     lms = ev.get("lastMs") or []
     check("PAGE-EV: groups - counts by kind ('(+N more)', '(N more)' and "
@@ -15595,8 +15597,9 @@ else:
     check("PAGE-EV: the list - a row a kind with its name, detail, "
           "per-hour sparkline, count and last seen",
           # (the minor kinds - Receiver start, Stay ended, Other - one
-          # "Minor" row at the end: 22 rows before)
-          evg.count('<div class="er') == 20
+          # "Minor" row at the end: 22 rows before; no Config: its lines
+          # came before the last boot)
+          evg.count('<div class="er') == 19
           and re.search(r'<div class="er t-mut"><time>[^<]*</time><span>Minor <em>Receiver start 3 '
                         r'&middot; Stay ended 1 &middot; Other 2</em></span><i class="sk"></i><b>6</b></div>$',
                         evg) is not None
@@ -16081,6 +16084,10 @@ else:
           "read on",
           ft.get("lateStop") == [[3, False], [4, True], [4, True]],
           repr(ft.get("lateStop")))
+    check("PAGE-ENV-BOOT: the Config group is the running boot's .env notes "
+          "only (a fixed one of an earlier boot, waiting or committed, goes)",
+          ft.get("envBoot") == [1, "WEB_AWAY 1 without WEB_TOKEN, using 0"],
+          repr(ft.get("envBoot")))
     check("PAGE-HL-KEEP: the picked trip is found again by its start after a "
           "late track sorted an earlier trip in",
           ft.get("hlKeep") == [2, 3, True, 2, ['.tr.go[data-k="2"]']],
@@ -16565,11 +16572,11 @@ if os.path.exists(_wm_gz):
         _wm_data = f.read()
 _wm_w = gl.WEB_GZ_WBITS
 check("WEB-MIN-PAGE: the page stripped and gzipped with the board's window, no name or "
-      "mtime, not over 25700 B (35.7 KB, then 28.5 before A+C; 25000 until the battery icon, 25400 until the X-GPS key, 25600 until the picked trip kept by its start); the CSS and the markup only lose comments and "
+      "mtime, not over 25800 B (35.7 KB, then 28.5 before A+C; 25000 until the battery icon, 25400 until the X-GPS key, 25600 until the picked trip kept by its start, 25700 until Config by boot); the CSS and the markup only lose comments and "
       "white space; stripping again changes nothing; web.html itself keeps its comments",
       web_min and _wm_r.returncode == 0
       and _gunzip_w(_wm_data, _wm_w) == _wm_page.encode("utf-8") and _wm_data[4:8] == b"\0\0\0\0"
-      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25700
+      and web_min.wbits() == _wm_w and 0 < len(_wm_data) <= 25800
       and web_min.minify(_wm_page) == _wm_page and "<!--" not in _wm_page
       and "/*" not in _wm_page[_wm_page.index("<style>"):_wm_page.index("</style>")]
       and _wm_css(_wm_page) == _wm_css(page_src) and _wm_html(_wm_page) == _wm_html(page_src)
