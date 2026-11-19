@@ -12005,6 +12005,64 @@ try:
     check("WB-2: without WEB_AWAY a hotspot drop still sleeps",
           gl.wifi["state"] == "sleep", gl.wifi["state"])
 
+    # WEB-NET: SSIDn_WEB=1, the page on one's own phone hotspot without it
+    # being home (a home flag on the phone made every place it went "home":
+    # home stays, OTA): no WEB_AWAY, no WEB_TOKEN
+    wn_said = []
+    wn_say = gl._say
+    gl._say = wn_said.append
+    try:
+        wn_nets = gl._load_nets({"SSID": "home", "WPA2": "x", "SSID3": "hot",
+                                 "WPA2_3": "y", "SSID3_WEB": "1"})
+        wn_good_said = list(wn_said)
+        del wn_said[:]
+        wn_bad = gl._load_nets({"SSID": "home", "WPA2": "x", "SSID2": "hot",
+                                "WPA2_2": "y", "SSID2_WEB": "igen"})
+    finally:
+        gl._say = wn_say
+    check("WEB-NET: SSID3_WEB=1 marks the page network, not home; no 'ignored'",
+          [(n["home"], n.get("web")) for n in wn_nets] == [(True, False),
+                                                        (False, True)]
+          and wn_good_said == [],
+          repr(([(n["home"], n.get("web")) for n in wn_nets], wn_good_said)))
+    check("WEB-NET: SSID2_WEB not 1/0 is a diag line and no page there",
+          [n.get("web") for n in wn_bad] == [False, False]
+          and wn_said == ["env SSID2_WEB not 1/0, using no page there"],
+          repr(([n.get("web") for n in wn_bad], wn_said)))
+    check("WEB-NET: SSIDn_WEB is a fail-closed key (its line garbled: no page)",
+          "SSID3_WEB" in gl._ENV_GUARD and "SSID_WEB" in gl._ENV_GUARD)
+    gl.WEB, gl.WEB_AWAY = True, False
+    wn_n = rv_nets()
+    wn_n[1]["web"] = True
+    w = rv_connect(["hot"], [("hot", -50)], wn_n)
+    for _ in range(5):
+        _clock[0] += gl.WIFI_IDLE
+        gl.wifi_tick()
+    wn_state = (gl.wifi["state"], gl.wifi["ssid"], gl.wifi["home"],
+                w.active())
+    wn_open = []
+    wn_real_open = gl._web_open
+    gl._web_open = lambda: wn_open.append(1)
+    try:
+        gl._web_close()
+        gl._web_fail_at[0] = None
+        gl.web_tick()
+    finally:
+        gl._web_open = wn_real_open
+        gl._web_fail_at[0] = None
+    check("WEB-NET: on the SSIDn_WEB hotspot the radio stays connected, not home",
+          wn_state == ("connected", "hot", False, True), repr(wn_state))
+    check("WEB-NET: ... and web_tick listens there", wn_open == [1],
+          repr(wn_open))
+    w = rv_connect(["hot"], [("hot", -50)], wn_n)
+    for _ in range(60):
+        _clock[0] += 1000
+        gl.wifi_tick()
+        gl.keepalive_tick(_clock[0])
+    back = wb_drop(w, [("hot", -50)], ["hot"], 20)
+    check("WEB-NET: a blip of the SSIDn_WEB hotspot searches on (not 1 h asleep)",
+          back is not None and back <= 120, repr(back))
+
     # WB-3: down_at was set by any failed round, also the hourly one after
     # a deliberate sleep (all uploaded): _web_search took that for a fresh
     # drop and searched for WEB_SEARCH (~7 extra rounds in ~35 min)
