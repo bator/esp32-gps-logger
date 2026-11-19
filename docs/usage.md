@@ -478,7 +478,8 @@ measured at most every 30 s and the waiting files are
 counted at most every 10 s. For the page
 the radio stays connected at home (idling connected costs ~20–30 mA);
 `WEB=0` in `.env` turns both off. On the other networks the page is
-served only with `WEB_AWAY=1`, which also keeps the radio connected for it
+served only on one with `SSIDn_WEB=1` (your own hotspot: served and the radio
+kept on like at home, the network not home otherwise) or with `WEB_AWAY=1`, which also keeps the radio connected for it
 there; without it the board serves nothing off home, also while the radio
 is on for an upload (the page has no password: a hotspot or a friend's
 network got the live position, the 7-day track and the diag log with its

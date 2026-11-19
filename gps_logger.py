@@ -800,7 +800,8 @@ _ENV_SEC = (("SSID", 1, 0), ("SSID2", 1, 0), ("SSID3", 1, 0),
             ("WPA2", 1, 1), ("WPA2_2", 1, 1), ("WPA2_3", 1, 1),
             ("WEB_TOKEN", 0, 1), ("SSID_HOME", 0, 1), ("SSID2_HOME", 0, 1),
             ("SSID3_HOME", 0, 1), ("HOME1", 0, 1), ("HOME2", 0, 1),
-            ("HOME3", 0, 1), ("UPLOAD_UNVERIFIED", 0, 1))
+            ("HOME3", 0, 1), ("SSID_WEB", 0, 1), ("SSID2_WEB", 0, 1),
+            ("SSID3_WEB", 0, 1), ("UPLOAD_UNVERIFIED", 0, 1))
 _ENV_RAW = tuple(k for k, raw, _ in _ENV_SEC if raw)
 # (the keys taken verbatim, a "#" in them no comment: see _plain)
 _ENV_VERBATIM = ("GEO_URL", "API_KEY", "WEB_TOKEN", "OTA_KEY", "OTA_URL")
@@ -1010,7 +1011,8 @@ def _load_nets(env):
     for x in ("", "2", "3"):
         sk, pk, hk2, hidk = ("SSID" + x, "WPA2_" + x if x else "WPA2",
                              "SSID" + x + "_HOME", "SSID" + x + "_HIDDEN")
-        known += (sk, pk, hk2, hidk)
+        webk = "SSID" + x + "_WEB"
+        known += (sk, pk, hk2, hidk, webk)
         s = env.get(sk)
         if not s:
             continue
@@ -1060,8 +1062,24 @@ def _load_nets(env):
                      % (bad, sk))
             home = False
         hidden = bool(_truthy(env.get(hidk)))
+        # SSIDn_WEB=1: the page is served there (one's own phone's hotspot)
+        # and keeps the radio on, without the network being home: no home
+        # stay, no OTA, no roaming veto. Its line not read, or a value not
+        # 1/0: no page there (it would show the position and the track)
+        web = False
+        if webk in _env_skipped:
+            _env_refused(webk, "not read (its line garbled)", "no page there")
+        else:
+            v = env.get(webk)
+            if v is not None:
+                t = _truthy(v)
+                if t is None:
+                    if _plain(v):
+                        _env_refused(webk, "not 1/0", "no page there")
+                else:
+                    web = t
         n = {"ssid": s, "pw": "" if p is None else p,
-             "home": home, "hidden": hidden, "bssid": None,
+             "home": home, "web": web, "hidden": hidden, "bssid": None,
              "ip": _static_ip(env, ("IP" + x, "MASK" + x, "GW" + x,
                                     "DNS" + x))}
         if isinstance(s, bytes):
@@ -1638,6 +1656,18 @@ def _net_home(ssid):
 def _net_hidden(ssid):
     return bool(_net(ssid).get("hidden"))
 
+def _net_web(ssid):
+    return bool(_net(ssid).get("web"))
+
+def _has_web():
+    """Any network with SSIDn_WEB=1 configured."""
+    return any(n.get("web") for n in wifi["nets"])
+
+def _web_link():
+    """The page is served on the link that is up: home, a network with
+    SSIDn_WEB=1 (not home for anything else), or any with WEB_AWAY."""
+    return bool(wifi["home"] or WEB_AWAY or _net_web(wifi["ssid"]))
+
 def _wifi_got_ip(w):
     # "connected" last: what raised on the way (a MemoryError formatting the
     # diag line) is done again on the next wifi_tick, not skipped for good
@@ -1761,11 +1791,11 @@ def _web_search(now):
     (it is served only while the radio is on anyway, see web_tick): no
     search, keep-alive or not (KEEPALIVE=0 searched 30 min after a hotspot
     drop)."""
-    if not WEB or not (WEB_AWAY or _has_home()):
+    if not WEB or not (WEB_AWAY or _has_home() or _has_web()):
         return False
     if not wifi["down_home"]:
-        if not WEB_AWAY:
-            return False                 # no page off home anyway
+        if not (WEB_AWAY or _net_web(wifi["down_ssid"])):
+            return False                 # no page there anyway
     elif PB_KEEPALIVE and _home_seeable(wifi["down_ssid"]):
         r = wifi["down_rssi"]
         if r is None or r >= SEEN_MIN_RSSI:
@@ -2255,7 +2285,7 @@ def wifi_tick():
             if (wifi["state"] == "connected"
                     and _age_s(wifi["idle_at"]) >= WIFI_IDLE // 1000):
                 wifi["idle_at"] = _stamp()
-                if WEB and (wifi["home"] or WEB_AWAY):
+                if WEB and _web_link():
                     pass                 # the status page keeps it on
                 elif _ota_wants_radio():
                     pass                 # so does a firmware to confirm
@@ -2318,7 +2348,8 @@ def wifi_tick():
                 return
             wifi["idle_at"] = _stamp()
             if (_nothing_to_send() and not _ota_wants_radio()
-                    and not (WEB and (WEB_AWAY or _has_home()))):
+                    and not (WEB and (WEB_AWAY or _has_home()
+                                      or _has_web()))):
                 wifi["wake_at"] = None
                 return
         wifi["wake"] = False
@@ -8828,12 +8859,12 @@ def _web_broken(why):
 
 def web_tick():
     """Listen while connected, close otherwise; answer one waiting client
-    within WEB_DEADLINE. Off home only with WEB_AWAY (which also keeps the
-    radio on for it there, wifi_tick): the page has no password, and a
+    within WEB_DEADLINE. Off home only on a network with SSIDn_WEB=1 or
+    with WEB_AWAY (which also keep the radio on for it there, wifi_tick,
+    _web_link): the page has no password, and a
     hotspot or a friend's network got the live position, the 7-day track
     and the diag log's SSIDs while the radio was up for the uploads."""
-    if not WEB or wifi["state"] != "connected" or not (
-            wifi["home"] or WEB_AWAY):
+    if not WEB or wifi["state"] != "connected" or not _web_link():
         _web_close()
         return
     if _web_sock is None:
