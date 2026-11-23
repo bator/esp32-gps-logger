@@ -57,13 +57,14 @@ Constants at the top of `gps_logger.py`; most never need changing.
 | `STILL_STEP` / `STILL_EXIT_SLOW` / `STILL_SLOW_GAIN` | 2 m / 10 / 5 m | Gain per leaving sample, or samples out there and their total gain |
 | `STILL_MOVE_HITS` | 3 | Consecutive window pairs 50–150 m away that move the anchor |
 | `STILL_HEARTBEAT` | 5 min | Anchor point interval away from home |
+| `HOME_HEARTBEAT` | 0 (off) | Anchor point interval at home (`.env` `HOME_HEARTBEAT`, 600–86400 s) |
 | `STILL_FILE` | 30 min | Age at which an away stay's file is closed on WiFi |
 | `STILL_HOME_HOLD` | 60 s | Wait after a refused home departure |
 | `STILL_GAP` | 30 s | Time without a usable fix that counts as a gap |
 | `STILL_GAP_STAY` / `STILL_GAP_JUMP` | 60 s / 1 km | After a gap, beyond `STILL_EXIT`: how long `STILL_MIN_FIXES` fixes within `STILL_RADIUS` must span, or one fix's distance, to end the stay |
 | `STILL_DEP_MAX` | 90 | Recent samples kept to write the way out |
 | `STILL_MEAN_N` | 1800 | Fixes the anchor mean averages over |
-| `HOLD_RELEASE` | 10 min | Without a fix this long, what a stay being proven holds is written |
+| `HOLD_RELEASE` | 10 min | Without a fix this long, what a stay being proven holds is written (at home: dropped) |
 | `STAY_WIFI` / `STAY_WIFI_LEARN` / `STAY_WIFI_MAX` | on / 3 / 16 | Away stay ends when its access points are gone: on, scans that learn them, how many kept |
 | `STAY_WIFI_MISS` / `STAY_WIFI_GONE` | 6 / 60 s | Scans in a row without any of them, and the least time they span |
 

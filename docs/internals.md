@@ -215,8 +215,12 @@ tell a stay from a drive, so the stay filter works on positions.
   it has been back within 50 m for 30 s, so a car leaving past the anchor writes
   none. Nor while the device keeps receding, 15 m out already (a walk out
   within 50 m): the way out keeps its first metres. Drift out there delays a
-  point by 5 minutes at most.
-- **At home** (a home network): no anchor points, also while the home link is
+  point by 5 minutes at most, and drift out past 50 m (indoors, for hours)
+  by 10 minutes at most. Each stay's start, end (`recede`, `gap`, `wifi`) and
+  anchor move is a diag line.
+- **At home** (a home network): no anchor points (`HOME_HEARTBEAT` in `.env`
+  turns on one every that many seconds, so a night at home is a visit and a
+  board gone quiet shows), also while the home link is
   down (a router restart) or the radio sleeps: a stay that began at home stays
   a home stay (`sleep_home`) until it ends. A non-home network (a phone
   hotspot) connected during it makes it an away stay; its first anchor point
@@ -271,7 +275,9 @@ tell a stay from a drive, so the stay filter works on positions.
   nor an open window that has spread out (its centroid over 100 m from both
   its first and its latest fix: a drive, which used to wait up to two
   minutes in RAM), and it is written 10 minutes after the fix was lost
-  (`HOLD_RELEASE`), or after no usable fix for as long (a receiver that
+  (`HOLD_RELEASE`; when the last fix was taken at home and the board is
+  home still, what lies within 50 m of it is dropped instead: drift indoors
+  after a boot went up as a 57 m trip), or after no usable fix for as long (a receiver that
   keeps a fix indoors at 30–100 m kept it in RAM for hours, and a reboot
   dropped it): the end of a trip into a garage or a house no longer waits
   in RAM only. A window that spread out on its own (its centroid over 75 m
