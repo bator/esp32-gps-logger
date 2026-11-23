@@ -44,6 +44,7 @@ API_KEY=your-dawarich-api-key
 DEVICE_ID=Dawarich-GPS-tracker
 HOSTNAME=Dawarich-GPS-tracker
 # KEEPALIVE=5
+# HOME_HEARTBEAT=3600
 # CPU_MHZ=80
 # DIAG=60
 # WEB=1
@@ -63,6 +64,7 @@ HOSTNAME=Dawarich-GPS-tracker
 | `HOSTNAME` | DHCP hostname, `[A-Za-z0-9-]{1,32}` (defaults to `DEVICE_ID`) |
 | `KEEPALIVE` | Seconds between power bank keep-alive pulses, 5–600; `0` turns it off (e.g. on a car charger). Default 5. |
 | `CPU_MHZ`, `CPU_MHZ_UP` | CPU clock in the main loop and during a POST: 20/40/80/160/240; `0` leaves the firmware default. Defaults 80 and 160. WiFi needs 80 or more: 20/40 are raised to 80 whenever the radio is used (a network set, or `KEEPALIVE` on). |
+| `HOME_HEARTBEAT` | Seconds between anchor points during a stay at home, 600–86400; `0` (the default) writes nothing at home. With 3600 a night at home is a Dawarich visit, and a board that stopped shows within the hour. Written only while connected to the home WiFi (a sleeping radio is woken for a round first) and never during a way out. |
 | `MIN_MOVE` | Metres from the last point before a new one, 0–50 (decimals allowed). Default 1: on foot about one point a second; 3 gave one every ~3 s. Read at boot. |
 | `OTA_URL` / `OTA_KEY` | Firmware updates over WiFi: the manifest's URL (http(s), on the LAN) and its HMAC key, the one in `OTA_KEY_FILE` on the build machine. Both or no updates. See [OTA](#5-firmware-updates-over-wifi-ota). |
 | `NTP_SERVER` | Where the display's clock and the route's day come from until the first fix. Default `pool.ntp.org`; empty: no NTP, `--:--` until a fix. A fix always wins; NTP never reaches a track, and sets the board clock (TLS certificate dates) only while no fix has. Once a fix has told the time it is not asked any more: that fix's clock (run on by the uptime) sets the board clock instead, also over one an NTP answer set. An answer counts only if it echoes the request (its originate time is the request's transmit time: a stray or late datagram is none), and the time is read past the NTP era change of 2036-02-07 too, but only for a firmware built less than 8 years before (a server saying 1900 is no 2036). An answer before the firmware's build (or the newest signed OTA build seen) or more than 5 years after it is refused, a later answer corrects the board clock an earlier one set, and NTP is asked again on another network and when a verified upload's TLS handshake fails on NTP's clock (a wrong answer would otherwise stand for 6 hours). |
@@ -76,7 +78,7 @@ HOSTNAME=Dawarich-GPS-tracker
 
 - Put comments on their own lines. A trailing `# ...` is ignored only on
   flag, IP and name keys (`HOME*`, `*_HIDDEN`, `*_WEB`, `IP*`/`GW*`/`MASK*`/`DNS*`,
-  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `UPLOAD_UNVERIFIED`, `UPLOAD_AWAY_UNVERIFIED`). SSIDs, passwords, `GEO_URL`,
+  `DEVICE_ID`, `HOSTNAME`, `KEEPALIVE`, `HOME_HEARTBEAT`, `CPU_MHZ*`, `GPS_SYS`, `MIN_MOVE`, `DIAG`, `WEB`, `WEB_AWAY`, `UPLOAD_UNVERIFIED`, `UPLOAD_AWAY_UNVERIFIED`). SSIDs, passwords, `GEO_URL`,
   `API_KEY` and `WEB_TOKEN` are taken verbatim, since they may contain `#`.
 - **The server's certificate:** `./deploy.sh` copies `ca.der` from the repo
   folder (gitignored; or `CA_DER=path/to/root.der`, relative to where you

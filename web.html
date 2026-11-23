@@ -318,7 +318,7 @@ var EVK = [
   ["env", /^(env |upload (API_KEY|GEO_URL) )/, "Config (.env)", 2, "warn"],
   ["boot", /^boot cause /, "Boot", 1, "boot"],
   ["wback", /^wifi back /, "WiFi back", 1, "ok"],
-  ["stay", /^stay left /, "Stay ended", 0, "mut"],
+  ["stay", /^stay /, "Stay", 0, "mut"],
   ["disp", /^tft light /, "Display backlight", 0, "mut"],
   ["grx", /^gps /, "Receiver start", 0, "mut"],
   ["other", /^/, "Other", -1, "mut"]
@@ -484,7 +484,7 @@ var EVD = {
   grx: function (d, l) { d.x = [l.slice(4)]; return 1; },
   setup: function (d, l) { evText(d, l.replace(/^gps (setup not taken: )?/, "")); return evMore(l); },
   tback: function (d, l) { evText(d, l.replace(/^time back /, "")); return 1; },
-  stay: function (d, l) { evText(d, l.replace(/^stay left /, "")); return 1; },
+  stay: function (d, l) { evText(d, l.replace(/^stay (left )?/, "")); return 1; },
   disp: function (d, l) { evText(d, l.replace(/^tft light (\d+)$/, "$1 %")); return 1; },
   other: function (d, l) {              // its first two words
     evText(d, l.split(" ").slice(0, 2).join(" "));

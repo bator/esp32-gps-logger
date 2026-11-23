@@ -5220,6 +5220,230 @@ try:
     check("HB: a home stay writes nothing without a fix either",
           len(sv_lines()) == n_before and gl.log["file"] is None)
 
+    nt_saved = rnd.getstate(), rv_sec[0]     # (later tests keep theirs:
+                                             # 8 + rv_sec // 3600 is the hour)
+    # HB-FAR: indoors the drift stays out past STILL_NEAR, under STILL_EXIT,
+    # its centroid on the anchor (no move): the gate on the last sample's
+    # distance held every anchor point back, an office stay was silent for
+    # 98 min (2026-11-20). Now 2 * STILL_HEARTBEAT at most between them.
+    sv_reset()
+    sv_drift(150)
+    ok0 = sv_active()
+    n0 = len([l for l in sv_lines() if l.split(",")[2] == ""])
+    for k in range(60 * 60):
+        s_ = 1 if k % 2 else -1
+        hb_fix(s_ * rnd.uniform(70, 90), rnd.uniform(-10, 10))
+    beats = [l for l in sv_lines() if l.split(",")[2] == ""][n0:]
+    secs = [hb_secs(l) for l in beats]
+    gaps = [b - a for a, b in zip(secs, secs[1:])]
+    check("HB-FAR: drift 70-90 m out for 60 min still writes an anchor point "
+          "every 2 * STILL_HEARTBEAT at most",
+          ok0 and sv_active() and len(beats) >= 5
+          and all(g <= 2 * gl.STILL_HEARTBEAT // 1000 + 2 for g in gaps),
+          "active=%s beats=%d gaps=%s" % (sv_active(), len(beats), gaps))
+
+    # HB-FAR-OUT: ... but no anchor point in a walk off that begins as the
+    # cap runs out: one 31 s into it lost the first 50 m of the way
+    hfo_bad = []
+    for lead in (40, 30, 20):
+        sv_reset()
+        sv_drift(150)
+        sl_ = gl.log["still"]
+        k = 0
+        while gl._age_s(sl_["hb_at"]) < 2 * gl.STILL_HEARTBEAT // 1000 - lead:
+            hb_fix((1 if k % 2 else -1) * rnd.uniform(70, 90),
+                   rnd.uniform(-10, 10))
+            k += 1
+        t_walk = rv_sec[0]
+        for j in range(400):
+            hb_fix(80 + j * 1.4, 0, speed=5.0)
+        t0_ = calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0))
+        late = [l for l in sv_lines() if l.split(",")[2] == ""
+                and hb_secs(l) - t0_ >= t_walk]
+        way = [sv_m(l) for l in sv_lines() if l.split(",")[2] != ""
+               and hb_secs(l) - t0_ >= t_walk]
+        if sv_active() or late or not way or min(way[:5]) > 100:
+            hfo_bad.append((lead, sv_active(), len(late), way[:3]))
+    check("HB-FAR-OUT: a walk off from the drift band as the cap runs out "
+          "gets no anchor point, its way out starts out there", not hfo_bad,
+          hfo_bad)
+
+    # HOME-HB: HOME_HEARTBEAT (opt-in) writes an anchor point that often at
+    # home, fix or not; 0 (the default) nothing, as before
+    _hh_saved = getattr(gl, "HOME_HEARTBEAT", None)
+    try:
+        gl.HOME_HEARTBEAT = 3600000
+        sv_reset(home=True)
+        sv_drift(150)
+        ok0, home0 = sv_active(), gl.log["still"]["home"]
+        n0 = len([l for l in sv_lines() if l.split(",")[2] == ""])
+        for _ in range(3 * 3600 + 120):
+            hb_fix(0, 0, nofix=True)
+        beats = [l for l in sv_lines() if l.split(",")[2] == ""][n0:]
+        secs = [hb_secs(l) for l in beats]
+        gaps = [b - a for a, b in zip(secs, secs[1:])]
+        check("HOME-HB: HOME_HEARTBEAT=3600 writes an anchor point an hour at "
+              "home, without a fix, and closes its file",
+              ok0 and home0 and sv_active() and len(beats) == 3
+              and all(3600 <= g <= 3602 for g in gaps)
+              and all(gl._dist(gl.log["still"]["anchor"][0],
+                               gl.log["still"]["anchor"][1],
+                               float(l.split(",")[0]),
+                               float(l.split(",")[1])) < 1 for l in beats)
+              and gl.log["file"] is None,
+              "ok=%s home=%s beats=%d gaps=%s file=%s" % (
+                  ok0, home0, len(beats), gaps, gl.log["file"]))
+        # the radio asleep (sleep_home): no point until a round is up on
+        # the home WiFi, a round asked for; a board that left without a fix
+        # stamped home all the while
+        sv_reset(home=True)
+        sv_drift(150)
+        gl.wifi.update(state="sleep", sleep_home=True, wake=False)
+        n0 = len(sv_lines())
+        for _ in range(3600 + 60):
+            hb_fix(0, 0, nofix=True)
+        asleep = (len(sv_lines()) - n0, gl.wifi.get("wake"))
+        gl.wifi.update(state="connected", home=True, sleep_home=False)
+        for _ in range(3):
+            hb_fix(0, 0, nofix=True)
+        woke = len([l for l in sv_lines()[n0:] if l.split(",")[2] == ""])
+        check("HOME-HB: with the radio asleep no anchor point, a round is "
+              "asked for; on the home WiFi it comes", sv_active()
+              and asleep == (0, True) and woke == 1, (asleep, woke))
+        # due 40 s into a walk out of the door: none in the way out
+        sv_reset(home=True)
+        sv_drift(150)
+        sl_ = gl.log["still"]
+        sl_["hb_at"] = gl._stamp() - (gl.HOME_HEARTBEAT // 1000 - 40)
+        t_walk = rv_sec[0]
+        gl.wifi.update(state="sleep", sleep_home=True)
+        for j in range(300):
+            hb_fix(j * 1.4, 0, speed=5.0)
+            if j == 60:                  # (a round up mid-walk)
+                gl.wifi.update(state="connected", home=True)
+        t0_ = calendar.timegm((2026, 10, 18, 8, 0, 0, 0, 0, 0))
+        late = [l for l in sv_lines() if l.split(",")[2] == ""
+                and hb_secs(l) - t0_ >= t_walk]
+        check("HOME-HB: an anchor point due in a walk out of the door is not "
+              "written", late == [], late)
+        gl.HOME_HEARTBEAT = 0
+        sv_reset(home=True)
+        sv_drift(150)
+        n0 = len(sv_lines())
+        for _ in range(2 * 3600):
+            hb_fix(0, 0, nofix=True)
+        check("HOME-HB: HOME_HEARTBEAT=0 (the default) writes nothing at home",
+              len(sv_lines()) == n0)
+        hh_env = []
+        _hh_say, gl._say = gl._say, lambda l: hh_env.append(l)
+        try:
+            for v_ in ("3600", "0", "5", "x", "90000", ""):
+                gl.HOME_HEARTBEAT = 7000
+                getattr(gl, "_home_heartbeat_env", lambda e: None)(
+                    {"HOME_HEARTBEAT": v_})
+                hh_env.append(gl.HOME_HEARTBEAT)
+        finally:
+            gl._say = _hh_say
+        check("HOME-HB: .env HOME_HEARTBEAT 0 or 600-86400 s, else refused "
+              "(said, the default kept)",
+              hh_env == [3600000, 0, "env HOME_HEARTBEAT not 0 or 600-86400 s, "
+                         "using 7 s", 7000,
+                         "env HOME_HEARTBEAT not 0 or 600-86400 s, using 7 s",
+                         7000,
+                         "env HOME_HEARTBEAT not 0 or 600-86400 s, using 7 s",
+                         7000, 7000], hh_env)
+    finally:
+        gl.HOME_HEARTBEAT = _hh_saved if _hh_saved is not None else 0
+
+    # STAY-DIAG: a stay's start, end and how it ended are diag lines: which
+    # of recede, gap or the access points ended the office stay was not
+    # known afterwards (2026-11-20)
+    sd_said = []
+    _sd_say, gl._say = gl._say, lambda l: sd_said.append(l)
+    try:
+        sv_reset()
+        sv_drift(150)
+        for i in range(1, 300):
+            sv_fix(i * 2.0, 0, 7.0)              # walking off, 600 m
+    finally:
+        gl._say = _sd_say
+    sd_stay = [l for l in sd_said if l.startswith("stay ")]
+    check("STAY-DIAG: a stay's start and its end (recede, how far) are diag "
+          "lines", not sv_active() and len(sd_stay) == 2
+          and sd_stay[0].startswith("stay away kept ")
+          and sd_stay[1].startswith("stay end recede far "), sd_said)
+
+    # HOLD-HOME: at home, HOLD_RELEASE without a fix, what a stay being
+    # proven held is drift, dropped: after a boot at home 34 points over 57 m
+    # went up as a trip (2026-11-21). Away it is written, as before.
+    for home in (True, False):
+        hh_said = []
+        _hh_say2, gl._say = gl._say, lambda l: hh_said.append(l)
+        try:
+            sv_reset(home=home)
+            sv_drift(90, box=15.0, step=5.0)     # 90 s: no stay proven
+            held = len(gl.log["batch"])
+            for _ in range((gl.HOLD_RELEASE + 2 * gl.FLUSH) // 1000):
+                hb_fix(0, 0, nofix=True)
+        finally:
+            gl._say = _hh_say2
+        lines = [l for l in sv_lines() if l.split(",")[2] != ""]
+        if home:
+            check("HOLD-HOME: at home the held drift is dropped after "
+                  "HOLD_RELEASE without a fix, a diag line",
+                  held >= 60 and not sv_active() and lines == []
+                  and gl.log["batch"] == []
+                  and any(l.startswith("stay drift dropped ") for l in hh_said),
+                  "held=%d lines=%d said=%s" % (held, len(lines), hh_said))
+        else:
+            check("HOLD-HOME: ... away it is written, as before",
+                  held >= 60 and len(lines) >= 60
+                  and not any(l.startswith("stay drift") for l in hh_said),
+                  "held=%d lines=%d" % (held, len(lines)))
+    # HOLD-HOME-2: the drop lets the hold go: the first fix back is kept,
+    # one diag line; a way in from farther out is kept; lines held away
+    # are written when home comes up meanwhile
+    hh_said = []
+    _hh_say3, gl._say = gl._say, lambda l: hh_said.append(l)
+    try:
+        sv_reset(home=True)
+        sv_drift(90, box=15.0, step=5.0)
+        for _ in range((gl.HOLD_RELEASE + 2 * gl.FLUSH) // 1000):
+            hb_fix(0, 0, nofix=True)
+        n0 = len(sv_lines())
+        hb_fix(100.0, 0)                 # the first fix back, 100 m out
+        first_kept = len(sv_lines()) == n0 + 1
+        drops = len([l for l in hh_said if l.startswith("stay drift")])
+        sv_reset(home=True)
+        for i in range(60):              # a walk in from 140 m, then sitting
+            sv_fix(140 - i * 1.5, 0, 5.0)
+        sv_drift(45, box=6.0, step=2.0)
+        for _ in range((gl.HOLD_RELEASE + 2 * gl.FLUSH) // 1000):
+            hb_fix(0, 0, nofix=True)
+        way_in = [sv_m(l) for l in sv_lines() if l.split(",")[2] != ""]
+        sv_reset()                       # away: fixes 3 km out, no stay
+        for i in range(95):
+            sv_fix(3000 + rnd.uniform(-20, 20), rnd.uniform(-20, 20))
+        held_away = len(gl.log["batch"])
+        for k_ in range((gl.HOLD_RELEASE + 2 * gl.FLUSH) // 1000):
+            if k_ == 400:
+                gl.wifi.update(state="connected", home=True)
+            hb_fix(0, 0, nofix=True)
+        away_lines = len([l for l in sv_lines() if l.split(",")[2] != ""])
+    finally:
+        gl._say = _hh_say3
+        gl.wifi.update(state="offline", home=False)
+    check("HOLD-HOME-2: after the drop the first fix back is kept (one diag "
+          "line); a way in from 140 m is kept beyond STILL_NEAR; lines held "
+          "away are written when home comes up meanwhile",
+          first_kept and drops == 1
+          and len([m for m in way_in if m > 60]) >= 50
+          and held_away >= 60 and away_lines >= held_away,
+          (first_kept, drops, len([m for m in way_in if m > 60]), held_away,
+           away_lines))
+    rnd.setstate(nt_saved[0])
+    rv_sec[0] = nt_saved[1]
+
     # STAYWIFI: without a fix on the way (a train), an away stay ended only
     # at home, and every heartbeat until then was stamped at the old place.
     # The keep-alive scans tell that the access points around are gone.
@@ -9337,6 +9561,8 @@ def _vb_reset():
     gl._vb_left[0] = None
     if hasattr(gl, "_vb_jump"):
         gl._vb_jump[:] = [0, None]
+    if hasattr(gl, "_vb_rise"):
+        gl._vb_rise[0] = None
 
 
 def _vb_read(uvs):
@@ -9548,6 +9774,54 @@ check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min, rounded to 10 min from an 
           vl_fit, vl_txt, vl_cases, vl_bat, vl_empty, vl_tft, vl_off, vl_off_hist, vl_noise,
           vl_seen, (vl_span, vl_cached), [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
           (vl_charge, vl_none, vl_none_left)))
+
+# VBAT-TOPUP: on USB the charger topped the cell up, 94 -> 99 % (4.11 ->
+# 4.18 V, +4 points: under VBAT_JUMP), and it settled back to 96 % over
+# 30 min: read as a discharge, ~15 h left while it drew 0.13 %/h (the
+# board's diag, 2026-11-23 05:30-07:02Z). No time left while a sample of
+# the last 30 min is at 99 % and up; a discharge from the top gets one.
+_vt_v = ([4.11] * 39 + [4.17, 4.18, 4.18, 4.16, 4.16, 4.15, 4.15, 4.15,
+                         4.15, 4.16, 4.15, 4.15, 4.14, 4.14, 4.14, 4.15]
+         + [4.14] * 5 + [4.15] + [4.14] * 3 + [4.15] + [4.14] * 9 + [4.15]
+         + [4.14] * 18)
+_vt_now = gl._vbat_now
+try:
+    _vb_reset()
+    vt_left = []
+    for v_ in _vt_v:
+        gl._vbat_now = lambda v_=v_: gl._vbat_pct(v_)
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        vt_left.append(gl._vbat_left())
+    _vb_reset()
+    vt_low = []                          # the same top-up 10 mV lower (98 %)
+    for v_ in _vt_v:
+        gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_ - 0.01, 2)
+                                                  if v_ > 4.11 else v_)
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        vt_low.append(gl._vbat_left())
+    _vb_reset()
+    vt_dis = []
+    for p_ in [99] * 10 + [98 - m // 6 for m in range(50)]:
+        gl._vbat_now = lambda p_=p_: p_
+        _clock[0] += 60000
+        gl.vbat_tick(_clock[0])
+        vt_dis.append(gl._vbat_left())
+finally:
+    gl._vbat_now = _vt_now
+    _vb_reset()
+vt_first = next((i for i, x in enumerate(vt_dis) if x is not None), None)
+check("VBAT-TOPUP: a charger's top-up on USB (to 99 %, or to 98 %: under "
+      "VBAT_JUMP both) and the settling after it give no time left; a "
+      "discharge from 99 % on the battery gets one as before",
+      len(_vt_v) == 93 and all(x is None for x in vt_left)
+      and all(x is None for x in vt_low)
+      and vt_first is not None and 10 <= vt_first <= 25
+      and abs(vt_dis[-1] - 90 * 360) < 0.25 * 90 * 360,
+      "%r / %r / %r %r" % ([x for x in vt_left if x is not None][:5],
+                           [x for x in vt_low if x is not None][:5],
+                           vt_first, vt_dis[-3:]))
 
 # NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
 # bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
@@ -15654,12 +15928,12 @@ else:
           (evt[-900:], evg[:300]))
     check("PAGE-EV: the list - a row a kind with its name, detail, "
           "per-hour sparkline, count and last seen",
-          # (the minor kinds - Receiver start, Stay ended, Other - one
+          # (the minor kinds - Receiver start, Stay, Other - one
           # "Minor" row at the end: 22 rows before; no Config: its lines
           # came before the last boot)
           evg.count('<div class="er') == 19
           and re.search(r'<div class="er t-mut"><time>[^<]*</time><span>Minor <em>Receiver start 3 '
-                        r'&middot; Stay ended 1 &middot; Other 2</em></span><i class="sk"></i><b>6</b></div>$',
+                        r'&middot; Stay 1 &middot; Other 2</em></span><i class="sk"></i><b>6</b></div>$',
                         evg) is not None
           and evg.count("t-mut") == 1
           and re.search(r'<div class="er t-bad"><time>10:46</time><span>GPS reset loop <em>'
@@ -15733,6 +16007,12 @@ else:
         ("track hist error 2 OSError(28) close", "track"),
         ("time back 20261102T100500Z 20261102T100400Z", "tback"),
         ("stay left wifi aps 3 scans 6", "stay"),
+        ("stay end recede far 212", "stay"),
+        ("stay end: home without a fix", "stay"),
+        ("stay away kept 12 out 0", "stay"),
+        ("stay moved 74 m", "stay"),
+        ("stay drift dropped 34 lines at home", "stay"),
+        ("stay kept: home in range", "stay"),
         ("track full 20261102T1000-20261102T1005 drop 3", "full"),
         ("upload: /gpx/20261102_100000.trk cannot be deleted, parked as "
          ".err", "track"),

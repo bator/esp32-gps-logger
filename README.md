@@ -22,7 +22,8 @@ u-blox receiver and an OLED).
   start unless moving: the receiver starts 15 m off.
 - **No zigzag while parked.** A position-based stay filter detects standing
   still. The indoor drift is never written. Away from home the stay shows up
-  as one anchor point every 5 minutes; at home nothing is written.
+  as one anchor point every 5 minutes; at home nothing is written, unless
+  `HOME_HEARTBEAT` asks for an anchor point that often.
 - **Power-loss safe files** on LittleFS, uploaded oldest first in batches of
   50 points, with a byte offset sidecar so nothing is sent twice or lost.
 - **Up to three WiFi networks** (home, phone hotspot, another place). The

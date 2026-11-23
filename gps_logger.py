@@ -99,6 +99,14 @@ VBAT_EVERY = 60                          # s between samples of the time left
 VBAT_HIST = 31                           # samples kept: 30 min
 VBAT_SPAN = 600                          # s of samples before a time left
 VBAT_DROP = 2                            # %-points the fit must fall over them
+VBAT_RISE = 3                            # %-points the mean of the last
+VBAT_RISE_N = 5                          # this many samples lies over the
+                                         # mean of the ones before: the
+                                         # charger topping up (94 -> 98 on
+                                         # USB, under VBAT_JUMP; one sample's
+                                         # +3 is 12 mV noise)
+VBAT_RISE_HOLD = 3600                    # s without a time left after it
+                                         # (the settling read as ~15 h left)
 VBAT_JUMP = 4                            # %-points off the last samples' median
                                          # that are the charger, not noise
                                          # (2 were ~20 mV: simulated at 8 mV of
@@ -156,6 +164,10 @@ STILL_SLOW_GAIN = 5                      # m those samples must gain in all
                                          # (a jump frozen for 10 s gains 0)
 STILL_FILE = 1800000                     # ms an away stay's file stays open
 STILL_HEARTBEAT = 300000                 # ms between anchor points (not home)
+HOME_HEARTBEAT = 0                       # ms between anchor points at home,
+                                         # 0 = none (.env HOME_HEARTBEAT=<s>):
+                                         # a home stay is a visit then, and a
+                                         # board gone quiet shows within it
 STILL_BACK = 30000                       # ms back within STILL_NEAR before a
                                          # due anchor point is written
 STILL_MOVE_HITS = 3                      # matching window pairs that move
@@ -1336,7 +1348,7 @@ def _home_veto(now, sl, fx=None):
         return True
     if home_in_range(fx):
         sl["veto_at"] = _stamp()
-        print("stay kept: home in range")
+        _say("stay kept: home in range")
         return True
     return False
 
@@ -1833,7 +1845,8 @@ def _wifi_off(w, state, wake_at=None):
     has passed and there is something to upload, or when a new stay wakes
     it, or at wake_at (ticks: a backed-off upload due again). A home stay
     stays a home stay while the radio sleeps (sleep_home), so it still
-    writes no anchor points; leaving clears it (_still_leave)."""
+    writes no anchor points (a HOME_HEARTBEAT one asks for a round first);
+    leaving clears it (_still_leave)."""
     if state == "sleep":
         wifi["sleep_home"] = bool(at_home() and log["still"]["active"])
     _radio_off(w)
@@ -2050,6 +2063,24 @@ def _keepalive_env(env):
         except ValueError:
             _env_refused("KEEPALIVE", "invalid", "%d s" % (PB_KEEPALIVE // 1000))
 
+def _home_heartbeat_env(env):
+    """HOME_HEARTBEAT=<seconds> in .env: 0 (the default) writes nothing at
+    home, as before; 600-86400 s an anchor point that often during a home
+    stay. Anything else keeps the default."""
+    global HOME_HEARTBEAT
+    v = _plain(env.get("HOME_HEARTBEAT"))
+    if not v:
+        return
+    try:
+        n = int(v)
+    except ValueError:
+        n = -1
+    if n == 0 or 600 <= n <= 86400:
+        HOME_HEARTBEAT = n * 1000
+    else:
+        _env_refused("HOME_HEARTBEAT", "not 0 or 600-86400 s",
+                     "%d s" % (HOME_HEARTBEAT // 1000))
+
 def _pb_pulse_radio(w):
     """Radio on, one scan (it holds ~100 mA ~2 s, and watches the stay's access
     points and the home network: _stay_scan, _home_seen), off again. Only
@@ -2172,6 +2203,7 @@ def wifi_start(env=None):
     up["url"] = env.get("GEO_URL", "").rstrip("/") or None
     up["key"] = env.get("API_KEY") or None
     _keepalive_env(env)
+    _home_heartbeat_env(env)
     if wifi["nets"] or PB_KEEPALIVE:
         # the radio is used (a network, or the keep-alive's scans): WiFi
         # needs 80 MHz or more (_set_freq); 20 / 40 are for a board with
@@ -2656,6 +2688,7 @@ def _still_state():
             "gap_ref": None, "gap_seen": None, "pos": None, "qs": None,
             "far_n": 0, "far_d": 0, "far_slow": 0, "far_0": 0,
             "last_at": None, "last_d": 0, "far_at": None, "file_at": None,
+            "last_home": False,
             "veto_at": None,
             "move_c": None, "wins": 0, "hold_tc": None, "aps": {},
             "ap_scans": 0, "ap_miss": 0, "ap_miss_at": None}
@@ -2674,7 +2707,36 @@ def _still_hold():
         return None
     la = sl["last_at"]
     if la is not None and _age_s(la) >= HOLD_RELEASE // 1000:
+        if sl["last_home"] and at_home():
+            _hold_drop(sl, _still_held(sl))
         return None
+    return _still_held(sl)
+
+def _hold_drop(sl, t):
+    """HOLD_RELEASE without a usable fix, the last one taken at home and
+    home still: what a stay being proven held from t on within STILL_NEAR
+    of where the fix was lost is drift indoors, dropped (written, it went
+    up as a trip: 34 points over 57 m after a boot at home, 2026-11-21);
+    a way in farther out is kept, as _still_enter keeps it. Away it is all
+    written, as before: it may be the start of a way. Then nothing is held
+    any more (else the first fix back, recorded before last_at moves on,
+    went too)."""
+    c = sl["pos"]
+    if t is None or c is None:
+        return
+    b = log["batch"]
+    i = len(b)
+    while i > 0 and b[i - 1][-17:-1] >= t:
+        i -= 1
+    keep = [x for x in b[i:] if _line_m(c, x) > STILL_NEAR]
+    n = len(b) - i - len(keep)
+    if n:
+        _say("stay drift dropped %d lines at home" % n)
+        b[i:] = keep
+    sl.update(win_at=None, prev=None, hold_tc=None)
+
+def _still_held(sl):
+    """_still_hold's time while a stay is being proven, or None."""
     h = sl["hold_tc"]                    # a window restarted after a gap
     c = None
     if sl["win_at"] is not None and sl["sum"][2]:
@@ -3390,6 +3452,7 @@ def _still_window(now, pos, fx=None):
     _still_gap(now, pos)
     q = sl["pos"]                        # (the usable fix before this one)
     sl["last_at"], sl["pos"] = _stamp(), pos
+    sl["last_home"] = bool(at_home())    # (a hold is dropped only at home)
     if sl["win_at"] is None:
         sl.update(win_at=_stamp(), win_tc=_tc(fx), ref=pos, sum=[0.0, 0.0, 0],
                   qs=[])
@@ -3506,15 +3569,46 @@ def _still_heartbeat(now, fx=None):
         h.pop(0)
     _record((t, _line("%.6f,%.6f" % (a[0], a[1]), ("", ""), tc)), a, fx)
 
+def _beat_held(sl, capped=True):
+    """Whether an anchor point now would land in a way out. Away (capped)
+    each of these holds it for 2 * STILL_HEARTBEAT since the last one at
+    most, and drift out past STILL_NEAR delays it no more than that
+    (indoors it stays out there, under STILL_EXIT, for hours: an office
+    stay wrote no anchor point for 98 min, 2026-11-20), but not while a
+    departure shows (a run out in the ring, receding samples counted): an
+    anchor 31 s into the walk off lost its first 50 m. At home (not
+    capped, an hour between them) they hold it as long as they last.
+    - The last usable sample recently out past STILL_NEAR: an excursion
+      or a departure.
+    - STILL_BACK after that: the car driving off past the anchor comes
+      within STILL_NEAR for seconds, and the anchor point due since the
+      walk to it, with the way out after it, read 44 m in a second
+      (158 km/h, measured).
+    - The departure ring a run already STILL_RUN out from where it began,
+      still within STILL_NEAR: a walk out. The anchor stamped 25 s into it
+      at 2 m/s, and the way out (only what follows the last line) began
+      52 m out, a second after it."""
+    recent = _recent_s(sl["last_at"], STILL_GAP // 1000)
+    n, i = sl["rn"], sl["ri"]
+    run = (n > 1 and recent
+           and _RF[3 * ((i + n - 1) % len(_RT)) + 2] - _RF[3 * i + 2]
+           >= STILL_RUN)
+    hb = sl["hb_at"]
+    young = not capped or (hb is not None
+                           and _age_s(hb) < 2 * STILL_HEARTBEAT // 1000)
+    if recent and sl["last_d"] > STILL_NEAR and (
+            young or run or sl["far_n"] or sl["far_slow"]):
+        return True
+    if young and (run or _recent_s(sl["far_at"], STILL_BACK // 1000)):
+        return True
+    return not capped and (
+        sl["gap_at"] is not None
+        or _recent_s(sl["veto_at"], STILL_HOME_HOLD // 1000))
+
 def _still_beat(now):
-    """Heartbeat of a stay away from home, run every tick, fix or not. Not
-    while the last usable sample was recently out past STILL_NEAR: that is
-    an excursion or a departure, and an anchor stamped then would land in
-    the middle of the way out. Nor for STILL_BACK after that: the car driving
-    off past the anchor comes within STILL_NEAR for seconds, and the anchor
-    point due since the walk to it, with the way out after it, read 44 m in
-    a second (158 km/h, measured). Drift out there every few seconds delays
-    it by at most one STILL_HEARTBEAT."""
+    """Heartbeat of a stay away from home (at home only with
+    HOME_HEARTBEAT, every that often), run every tick, fix or not; never
+    in a way out (_beat_held)."""
     sl = log["still"]
     if not sl["active"]:
         return
@@ -3526,9 +3620,35 @@ def _still_beat(now):
             # home had no fix (a train) and no WiFi verdict (no access
             # points at that place). Left running, it stamped the old place
             # next morning and swallowed a trip that did not recede from it
-            print("stay end: home without a fix")
+            _say("stay end: home without a fix")
             log["still"] = _still_state()
             _rt_trip()
+        elif sl["home"] and HOME_HEARTBEAT:
+            # opt-in: an anchor point every HOME_HEARTBEAT, so a night at
+            # home is a visit, not 22 h without a point (2026-11-21). The
+            # first one HOME_HEARTBEAT after the stay began; _still_close
+            # uploads it on a later tick. Only on the home WiFi: at_home()
+            # holds while the radio sleeps (sleep_home), also for a board
+            # that left without a fix and no departure, and that stay
+            # stamped home all the while; with the radio asleep a round is
+            # asked for first. Never in a way out (_beat_held, no cap: the
+            # walk out of the door lost its start to an anchor point)
+            if sl["hb_at"] is None:
+                sl["hb_at"] = _stamp()
+            elif (_recent_s(sl["hb_at"], HOME_HEARTBEAT // 1000)
+                  or _beat_held(sl, False)):
+                pass
+            elif wifi["state"] != "connected" or not wifi["home"]:
+                if wifi["state"] == "sleep":
+                    wifi["wake"] = True
+            else:
+                h = log["hb"]
+                h0 = h[-1] if h else None
+                _still_heartbeat(now)
+                if (h[-1] if h else None) == h0:
+                    # not written (its time not after the last line): again
+                    # in a second, not one STILL_HEARTBEAT short of an hour
+                    sl["hb_at"] = _stamp() + (1000 - HOME_HEARTBEAT) // 1000
         return
     # Rotate the anchor file so the stay uploads while it lasts (the usual
     # age-close is off during a stay: it would open a file per heartbeat).
@@ -3536,32 +3656,15 @@ def _still_beat(now):
             and wifi["state"] == "connected"
             and _age_s(sl["file_at"]) >= STILL_FILE // 1000):
         _still_close(now)
-    if _recent_s(sl["hb_at"], STILL_HEARTBEAT // 1000):
-        return
-    if (_recent_s(sl["last_at"], STILL_GAP // 1000)
-            and sl["last_d"] > STILL_NEAR):
-        return
-    if (_recent_s(sl["far_at"], STILL_BACK // 1000)
-            and sl["hb_at"] is not None
-            and _age_s(sl["hb_at"]) < 2 * STILL_HEARTBEAT // 1000):
-        return
-    # Nor while the departure ring is a run already STILL_RUN out from where
-    # it began, still within STILL_NEAR: a walk out. The anchor stamped 25 s
-    # into it at 2 m/s, and the way out (only what follows the last line)
-    # began 52 m out, a second after it. Late by at most one STILL_HEARTBEAT.
-    n, i = sl["rn"], sl["ri"]
-    if (n > 1 and _recent_s(sl["last_at"], STILL_GAP // 1000)
-            and sl["hb_at"] is not None
-            and _age_s(sl["hb_at"]) < 2 * STILL_HEARTBEAT // 1000
-            and _RF[3 * ((i + n - 1) % len(_RT)) + 2] - _RF[3 * i + 2]
-            >= STILL_RUN):
+    if _recent_s(sl["hb_at"], STILL_HEARTBEAT // 1000) or _beat_held(sl):
         return
     _still_heartbeat(now)
 
 def _still_close(now=None, fx=None):
     """Home stay: finish the track so it uploads; nothing more is written
-    until the stay ends. A retry from the tick (now given) flushes at most
-    every FLUSH while a flush keeps failing, as the main path does."""
+    until the stay ends (but a HOME_HEARTBEAT anchor point). A retry from
+    the tick (now given) flushes at most every FLUSH while a flush keeps
+    failing, as the main path does."""
     if log["file"] is None:
         return
     if (log["batch"] and now is not None
@@ -3736,7 +3839,7 @@ def _still_enter(now, anchor, since_tc, n, c=None, fx=None):
         sl["hb_at"] = _stamp() + (WIFI_WAKE_WAIT - STILL_HEARTBEAT) // 1000
     else:
         _still_heartbeat(now, fx)
-    print("stay", "home" if sl["home"] else "away", "kept", i, out)
+    _say("stay %s kept %d out %d" % ("home" if sl["home"] else "away", i, out))
 
 def _stay_scan(aps, fx=None):
     """One WiFi scan during an away stay. The first STAY_WIFI_LEARN scans
@@ -3777,7 +3880,7 @@ def _stay_scan(aps, fx=None):
                       % (len(known), sl["ap_miss"]))
                 _diag_write("stay left wifi aps %d scans %d"
                             % (len(known), sl["ap_miss"]))
-                _still_leave(wifi_seen=True, fx=fx)
+                _still_leave(wifi_seen=True, fx=fx, why="wifi")
             return
         sl["ap_miss"], sl["ap_miss_at"] = 0, None
     for r, b in seen:                    # recency first, then signal
@@ -3798,7 +3901,7 @@ def _ring_add(sl, now, pos, d, fx=None):
     one within STILL_TOL of the anchor (at the place: the way out begins at
     the last one), and one within STILL_NEAR over STILL_GAP after the one
     before: in calm reception the stay's jitter rarely moved STILL_DEP_STEP
-    or fell back, and a home stay (no anchor points: nothing to cut it)
+    or fell back, and a home stay (no anchor points, or an hour apart: nothing to cut it)
     wrote up to STILL_DEP_MAX samples hours old before the way out, the
     new track named after the first. One
     within STILL_DEP_STEP of the one before is left out: at walking pace
@@ -3840,13 +3943,15 @@ def _ring_add(sl, now, pos, d, fx=None):
             _RE[k + o:k + o + len(x)] = x.encode()
         o += w
 
-def _still_leave(wifi_seen=False, fx=None):
+def _still_leave(wifi_seen=False, fx=None, why="recede"):
     """End the stay and write the way out: the samples in the departure
     ring, a run whose distance from the anchor kept growing (within
     STILL_TOL), so the departure starts near the anchor, not STILL_EXIT
     away. With wifi_seen (the stay's access points are gone, _stay_scan)
     only if the last sample was out past STILL_NEAR: otherwise the ring is
-    the stay's drift, and the stay just ends."""
+    the stay's drift, and the stay just ends. why goes into the diag
+    line (recede, gap, wifi): which of them ended a stay was not known
+    afterwards (2026-11-20, an office stay silent for 98 min)."""
     sl = log["still"]
     n, i0, cap = sl["rn"], sl["ri"], len(_RT)
     _rt_trip(sl["rt0"] + _RT[i0] if n else None, fx)
@@ -3874,7 +3979,7 @@ def _still_leave(wifi_seen=False, fx=None):
             start_file(_tcn(tc), fx)
         _record((t, line), p, fx)
         prev = p
-    print("stay end", int(sl["far_d"]))
+    _say("stay end %s far %d" % (why, int(sl["far_d"])))
     wifi["sleep_home"] = False           # left: no longer at home
     log["still"] = _still_state()
 
@@ -3934,7 +4039,7 @@ def _still_active(now, pos, fx=None):
                 and _age_s(sl["gap_at"]) >= STILL_GAP_STAY // 1000):
             if not (sl["home"] and _home_veto(now, sl, fx)):
                 sl["far_d"] = d          # (for the "stay end" line)
-                _still_leave(fx=fx)
+                _still_leave(fx=fx, why="gap")
                 return
             sl.update(gap_ref=pos, gap_at=_stamp(), gap_n=1, far_n=0, far_d=0,
                       far_slow=0)
@@ -3980,6 +4085,7 @@ def _still_active(now, pos, fx=None):
                 else:
                     mc = sl["move_c"] = [hit[0], 1]
                 if mc[1] >= STILL_MOVE_HITS:
+                    o = sl["anchor"]
                     a = hit[0]
                     sl.update(anchor=a, aref=a, aoff=(0.0, 0.0),
                               n=min(hit[2], STILL_MEAN_N), hb_at=None,
@@ -3987,7 +4093,7 @@ def _still_active(now, pos, fx=None):
                     d = _dist(a[0], a[1], pos[0], pos[1])
                     sl["rn"] = 0         # (distances from the old anchor)
                     _ring_add(sl, now, pos, d, fx)
-                    print("stay moved")
+                    _say("stay moved %d m" % _dist(o[0], o[1], a[0], a[1]))
     sl["last_at"], sl["last_d"] = _stamp(), d
     if d > STILL_NEAR:
         sl["far_at"] = _stamp()
@@ -7898,6 +8004,7 @@ def _vb_ref():
     a, b, c = h[-3][1], h[-2][1], h[-1][1]
     return max(min(a, b), min(max(a, b), c))
 
+_vb_rise = [None]                        # uptime s of the charger's last lift
 _vb_jump = [0, None]                     # samples in a row that jumped (over
                                          # VBAT_JUMP off _vb_ref, or off the
                                          # plateau), the last one's uptime
@@ -7922,6 +8029,7 @@ def vbat_tick(now):
         del _vb_hist[:]
         _vb_jump[0], _vb_jump[1] = 0, None
         _vb_left[0] = None
+        _vb_rise[0] = None
         return
     r = _vb_ref() if _vb_hist else None
     # (off the charger's plateau at the top of the charge too: there a
@@ -7933,10 +8041,16 @@ def vbat_tick(now):
         if _vb_jump[0] < VBAT_AGAIN:
             return
         del _vb_hist[:]
+        if p > r:
+            _vb_rise[0] = t              # put on the charger
     _vb_jump[0], _vb_jump[1] = 0, None
     _vb_hist.append((t, p))
     if len(_vb_hist) > VBAT_HIST:
         del _vb_hist[0]
+    h, k = _vb_hist, VBAT_RISE_N
+    if len(h) >= 2 * k and (sum(x for _, x in h[-k:])
+                            - sum(x for _, x in h[-2 * k:-k])) >= VBAT_RISE * k:
+        _vb_rise[0] = t                  # topped up, under VBAT_JUMP
     _vb_left[0] = _vbat_fit()
 
 def _vbat_left():
@@ -7948,10 +8062,15 @@ def _vbat_fit():
     """The least-squares slope of the samples (VBAT_HIST, the last 30 min)
     carried down to 0 %, s, a minute at least. None until they span
     VBAT_SPAN and the fit falls VBAT_DROP points over them (on the charger,
-    or too short to tell), and at 99 % and up (the charger's lift)."""
+    or too short to tell), at 99 % and up (the charger's lift), and for
+    VBAT_RISE_HOLD after the charger lifted it (_vb_rise: on USB a top-up
+    94 -> 99 % fell back to 96 % over 30 min, read as ~15 h left while it
+    drew 0.13 % an hour, 2026-11-23)."""
     h = _vb_hist
     n = len(h)
     if n < 2 or h[-1][0] - h[0][0] < VBAT_SPAN or h[-1][1] >= 99:
+        return None
+    if _vb_rise[0] is not None and h[-1][0] - _vb_rise[0] < VBAT_RISE_HOLD:
         return None
     mt = sum(t for t, _ in h) / n
     mp = sum(p for _, p in h) / n

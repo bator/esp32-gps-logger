@@ -26,8 +26,9 @@ and shows the route and its state on the display (see [Hardware](hardware.md#har
 | `wifi lost <ssid> rssi N` / `wifi fail <ssid> status N after N ms` / `wifi back <ssid> after T, N failed tries, rssi N` | Also in the diagnostic log (and on the status page): the link dropping with its last RSSI, a failed try, and the reconnect with how long it was down. One line of a kind per 5 minutes (`WIFI_DIAG_GAP`), the ones in between counted as `(+N more)` |
 | `wifi sleep [home]` | Radio off, everything uploaded (`home`: during a home stay) |
 | `upload <file> <n> <ok> <http> <mem>` | One POST; `mem` is the free Python heap in bytes (`gc.mem_free()` without the largest IDF block) |
-| `stay home\|away kept N` | A stay began; N points of the way in were kept |
-| `stay moved` / `stay kept: home in range` / `stay end D` | Anchor moved; a home departure refused; the stay ended D m out |
+| `stay home\|away kept N out M` | A stay began; N points of the way in were kept, M of a way out already begun |
+| `stay moved D m` / `stay kept: home in range` / `stay end recede\|gap\|wifi far D` | Anchor moved D m; a home departure refused; the stay ended D m out, and how (receding, after a fix gap, its access points gone) |
+| `stay drift dropped N lines at home` | At home (the last fix taken there too), 10 minutes without a fix: the N lines a stay being proven held within 50 m of where the fix was lost were drift, not written |
 | `stay end: home without a fix` | An away stay ended at home without a usable fix |
 | `wifi home in range` | With `WEB`, a keep-alive scan saw home: a round starts now |
 | `upload <file> … <ms> ms` / `GEO_URL redirects (N)` / `parked <file>.err` | POST time; a redirect (not followed); an unreadable track set aside |
@@ -135,8 +136,8 @@ To queue a `.bad` again (a `.trb.bad` becomes a `.trk`):
 
 The console is gone once
 the board is on a power bank, so the logger also appends to `/diag.log` on
-flash: a `boot cause N` line at every start, one status line a minute, a `stay left wifi` line when an away
-stay ends without a fix (see [Stays](internals.md#stays)), `gps reset loop …` lines
+flash: a `boot cause N` line at every start, one status line a minute, the `stay …` lines above (a stay's
+start, end, anchor move; see [Stays](internals.md#stays)), `gps reset loop …` lines
 (when the receiver keeps restarting, so they can be set against where you
 were), `gps setup not taken: …` (at most one per 10 minutes,
 `GPS_NOT_TAKEN_SAY`, with `(N more)` for the ones between), `gps setup lost: no
@@ -228,7 +229,7 @@ last lines of the diagnostic log (the page itself reads the whole log, below).
 | `temp` | Chip temperature |
 | `vbat`, `vbat_swing` | Battery: median of 32 reads in V; their 10th-90th percentile spread |
 | `vbat_pct` | What is left, 0-100 %, from a 1S LiPo curve: Meshtastic's `OCV_ARRAY` from its 3.30 V on, where the board stops (Heltec's datasheet: 3.3 V at least), as 0 %: 4.19 V 100 %, 3.84 V 60 %, 3.30 V 0 %, linear between. On USB the charger lifts the voltage, so it reads high while charging |
-| `vbat_left_s` | About how long the battery lasts, from a sample a minute (`VBAT_EVERY`) over the last 30 min: the least-squares slope carried down to 0 %, a minute at least. `null` until the samples span 10 min and fall at least 2 points, and at 99 % and up (on the charger, or too short to tell). A jump of more than 4 points (`VBAT_JUMP`) off the median of the last 3 samples, on or off the charger, that holds the next sample too starts the samples again (one sample off alone, or less, is noise) |
+| `vbat_left_s` | About how long the battery lasts, from a sample a minute (`VBAT_EVERY`) over the last 30 min: the least-squares slope carried down to 0 %, a minute at least. `null` until the samples span 10 min and fall at least 2 points, and at 99 % and up (on the charger, or too short to tell), and for an hour after the charger lifted it (the mean of the last 5 samples 3 points or more over the 5 before, `VBAT_RISE`: a top-up on USB, and the settling after it, is no discharge). A jump of more than 4 points (`VBAT_JUMP`) off the median of the last 3 samples, on or off the charger, that holds the next sample too starts the samples again (one sample off alone, or less, is noise) |
 | `vbat_err` | ADC reads that failed (each kind a `bug vbat` line) |
 | `battery` | The page's text, `74 % (3.95 V), ~2 h 10 min left`, or `none, on USB` when the spread is over `VBAT_SWING` 0.5 V: without a battery the charger's output swings, measured 0.84-0.94 V on USB. The verdict, battery or none, turns on the second measurement in a row that says so (`VBAT_AGAIN`), one stray one is let go |
 | `mem`, `heap_kb`, `flash_kb` | Free Python heap and flash |
