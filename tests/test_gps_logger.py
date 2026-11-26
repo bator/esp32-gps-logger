@@ -9633,8 +9633,8 @@ finally:
     gl._diag_write = _vb_dw
 vb_sweep = [gl._vbat_pct(2.9 + i / 1000.0) for i in range(1401)]
 _vb_reset()
-check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 74 % (Meshtastic's LiPo "
-      "curve, 0 % at the board's 3.30 V); cached 30 s; the charger's swing 'none, on USB'; "
+check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 84 % (the cell's curve "
+      "under load, 2026-11-25, 0 % at the board's 3.30 V); cached 30 s; the charger's swing 'none, on USB'; "
       "one stray measurement kept out, the second turns it; a failed read counted, one "
       "diag line, the ADC made again; MemoryError and bugs go on; no ADC None, diag line "
       "unchanged",
@@ -9642,10 +9642,10 @@ check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 74 % (Meshtasti
       and vb_made == (gl.HELTEC_VBAT, _VbAdc.ATTN_2_5DB)
       and vb_steady == (3.95, 0.01)
       and (vb_rows["vbat"], vb_rows["vbat_swing"], vb_rows["battery"], vb_rows["vbat_pct"])
-      == (3.95, 0.01, "74 % (3.95 V)", 74) and vb_rows["vbat_err"] == 0
+      == (3.95, 0.01, "84 % (3.95 V)", 84) and vb_rows["vbat_err"] == 0
       and vb_c29 == (3.95, 0.01) and vb_c31 == (3.43, 0.0)
       and [gl._vbat_pct(x) for x in (4.25, 4.19, 4.12, 3.80, 3.36, 3.30, 3.10, 2.9)]
-      == [100, 100, 95, 55, 5, 0, 0, 0]
+      == [100, 100, 99, 70, 5, 0, 0, 0]
       and [gl._vbat_pct(x) for x in gl.VBAT_OCV] == list(range(100, -1, -10))
       and all(a <= b for a, b in zip(vb_sweep, vb_sweep[1:])) and vb_sweep[0] == 0
       and vb_sweep[-1] == 100
@@ -9670,7 +9670,7 @@ check("VBAT: divider on at import; steady 0.807 V x4.9 = 3.95 V, 74 % (Meshtasti
 # takes once a minute (the last 30 min, VBAT_HIST): the least-squares slope
 # carried down to 0 %, fitted once a sample, a minute at least. Nothing before
 # 10 min of samples, on a flat or rising (charging) line, at 99 % and up, or
-# without a battery; a jump of more than VBAT_JUMP points (on or off the
+# without a battery; a jump of more than VBAT_JUMP_MV (on or off the
 # charger) that holds a second sample starts the history again; +2 points
 # of noise, or one sample off alone, does not.
 gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]  # 0.5 %/min
@@ -9698,7 +9698,8 @@ try:
     vl_tft.append(gl._tft_bat())
     gl._vbat_left = _vl_left
     # off the charger: 20 min at 100 %, the lift gone (95 %), then 1 % in 6 min:
-    # the history starts at 95 %, the time left ~95 * 6 min once 10 min are in
+    # the history starts at the first 95 % (leaving 99 % starts it at once, no
+    # second sample as for a jump), the time left ~95 * 6 min once 10 min are in
     _vb_reset()
     seq = [100] * 20 + [95 - m // 6 for m in range(16)]
     vl_off = []
@@ -9709,7 +9710,7 @@ try:
         vl_off.append(gl._vbat_left())
     vl_off_hist = len(gl._vb_hist)
     # noise: +2 points keeps the history, one sample +5 off alone too, +5
-    # twice starts it again; +3 (under VBAT_JUMP) never
+    # twice starts it again; +3 (30 mV here, under VBAT_JUMP_MV) never
     _vb_reset()
     vl_noise = []
     for p_ in (50, 52, 57, 52, 57, 57):
@@ -9759,11 +9760,11 @@ check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min, rounded to 10 min from an 
           "~2 h 00 min", "~1 h 50 min"]
       and " " not in "".join(vl_txt)
       and vl_cases == [None, None, None, None, 60, 4200]
-      and vl_bat == "74 % (3.95 V), ~2 h 10 min left"
+      and vl_bat == "84 % (3.95 V), ~2 h 10 min left"
       and vl_empty == "0 % (3.30 V), ~1 min left"
       and vl_tft == [(65, "2 óra"), (65, "1 óra"), (65, "1 óra"), (65, "59 p"), (65, "45 p"),
                      (65, "3 óra"), (65, "1 p"), (65, None), None]
-      and all(x is None for x in vl_off[:30]) and vl_off_hist == 15
+      and all(x is None for x in vl_off[:30]) and vl_off_hist == 16
       and vl_off[-1] is not None and abs(vl_off[-1] - 93 * 360) < 0.2 * 93 * 360
       and vl_noise == [1, 2, 2, 3, 3, 1]
       and vl_seen == list(range(1, 32)) + [31] * 14 and vl_span == 1800
@@ -9775,8 +9776,9 @@ check("VBAT-LEFT: 0.5 %/min from 65 % is ~2 h 10 min, rounded to 10 min from an 
           vl_seen, (vl_span, vl_cached), [vl_rows.get(k) for k in ("vbat_left_s", "battery")],
           (vl_charge, vl_none, vl_none_left)))
 
-# VBAT-TOPUP: on USB the charger topped the cell up, 94 -> 99 % (4.11 ->
-# 4.18 V, +4 points: under VBAT_JUMP), and it settled back to 96 % over
+# VBAT-TOPUP: on USB the charger topped the cell up, 4.11 -> 4.18 V (94 ->
+# 99 % on the old curve, 98 -> 100 % on the measured one; under
+# VBAT_JUMP_MV), and it settled back to 4.14 V over
 # 30 min: read as a discharge, ~15 h left while it drew 0.13 %/h (the
 # board's diag, 2026-11-23 05:30-07:02Z). No time left while a sample of
 # the last 30 min is at 99 % and up; a discharge from the top gets one.
@@ -9794,13 +9796,20 @@ try:
         gl.vbat_tick(_clock[0])
         vt_left.append(gl._vbat_left())
     _vb_reset()
-    vt_low = []                          # the same top-up 10 mV lower (98 %)
-    for v_ in _vt_v:
-        gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_ - 0.01, 2)
-                                                  if v_ > 4.11 else v_)
+    # a top-up that only VBAT_RISE sees (made up: the measured one clamps at
+    # 100 %): 4.03 V (91 %) up 10 mV a minute to 4.11 V (98 %), under
+    # VBAT_JUMP_MV off the median and under 99 % all the way, then settling
+    # back 0.75 mV a minute, read as a discharge without it
+    _vt_lo = ([4.03] * 30 + [round(4.03 + 0.01 * k_, 3) for k_ in range(1, 9)]
+              + [round(4.11 - 0.00075 * k_, 4) for k_ in range(1, 51)])
+    vt_low = []
+    vt_low_rise = []
+    for v_ in _vt_lo:
+        gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
         _clock[0] += 60000
         gl.vbat_tick(_clock[0])
         vt_low.append(gl._vbat_left())
+        vt_low_rise.append(gl._vb_rise[0])
     _vb_reset()
     vt_dis = []
     for p_ in [99] * 10 + [98 - m // 6 for m in range(50)]:
@@ -9812,16 +9821,111 @@ finally:
     gl._vbat_now = _vt_now
     _vb_reset()
 vt_first = next((i for i, x in enumerate(vt_dis) if x is not None), None)
-check("VBAT-TOPUP: a charger's top-up on USB (to 99 %, or to 98 %: under "
-      "VBAT_JUMP both) and the settling after it give no time left; a "
+check("VBAT-TOPUP: a charger's top-up on USB (to 100 %; or 91 -> 98 % 10 mV a "
+      "minute, under VBAT_JUMP_MV and 99 %: VBAT_RISE) and the settling after it "
+      "give no time left; a "
       "discharge from 99 % on the battery gets one as before",
       len(_vt_v) == 93 and all(x is None for x in vt_left)
       and all(x is None for x in vt_low)
+      and max(gl._vbat_pct(round(v_, 2)) for v_ in _vt_lo) == 98
+      and vt_low_rise[30] is None and vt_low_rise[-1] is not None
       and vt_first is not None and 10 <= vt_first <= 25
       and abs(vt_dis[-1] - 90 * 360) < 0.25 * 90 * 360,
       "%r / %r / %r %r" % ([x for x in vt_left if x is not None][:5],
                            [x for x in vt_low if x is not None][:5],
                            vt_first, vt_dis[-3:]))
+
+# VBAT-CURVE: the discharge of 2026-11-25 (tests/vbat_discharge_2026-11-25.json,
+# the board's diag, a line a minute: USB off at 11:54Z, 4.07 -> 4.01 V, 3.42 V
+# at 15:03Z, on the charger at 15:04Z) through vbat_tick. VBAT_OCV is that
+# curve with the per cent in proportion to the time (a steady draw; 90 % at
+# the unplug, 0 % 219 min after it, the last 30 min estimated): each minute's
+# per cent is within 5 points of that line (the line is how VBAT_OCV was
+# made, so this holds the table to the data, not the estimated end).
+# Meshtastic's resting table it replaced was up to 20 points off (at about
+# 3.6 V; 8 the minute the USB came off).
+# Only the unplug starts the history again (the charger's one sample at the
+# end is let go); the time left is known from 10 min after it on.
+with open(os.path.join(ROOT, "tests", "vbat_discharge_2026-11-25.json")) as f:
+    _vc_rows = json.load(f)["rows"]
+_vc_t = [int(r_[0][9:11]) * 60 + int(r_[0][11:13]) - (11 * 60 + 54) for r_ in _vc_rows]
+_vc_saved = (gl.uptime_s, gl._vbat_now)
+_vc_up = [1000]
+gl.uptime_s = lambda now=None: _vc_up[0]
+_vc_off, _vc_resets, _vc_known = [], [], []
+try:
+    _vb_reset()
+    for t_, r_ in zip(_vc_t, _vc_rows):
+        _vc_up[0] = 100000 + 60 * t_
+        gl._vbat_now = lambda v_=r_[1]: gl._vbat_pct(v_)
+        n0_ = len(gl._vb_hist)
+        gl.vbat_tick(0)
+        if len(gl._vb_hist) < n0_ or (n0_ > 1 and len(gl._vb_hist) == 1):
+            _vc_resets.append(t_)
+        if 0 <= t_ <= 189:
+            _vc_off.append(abs(gl._vbat_pct(r_[1]) - (90 - 90 * t_ / 219.0)))
+            if gl._vbat_left() is not None:
+                _vc_known.append(t_)
+finally:
+    gl.uptime_s, gl._vbat_now = _vc_saved
+    _vb_reset()
+check("VBAT-CURVE: the measured discharge of 2026-11-25 reads in proportion to the "
+      "time (within 5 points a minute), only the unplug starts the history again, "
+      "the time left known from 10 min after it",
+      len(_vc_rows) == 200 and len(_vc_off) == 190 and max(_vc_off) <= 5
+      and _vc_resets == [1] and _vc_known and _vc_known[0] <= 11
+      and len(_vc_known) == 190 - _vc_known[0],
+      repr((len(_vc_rows), len(_vc_off), max(_vc_off) if _vc_off else None,
+            _vc_resets, _vc_known[:1], len(_vc_known))))
+
+# VBAT-FLAT: where the cell holds out, 3.56 -> 3.40 V at the measured 2.4
+# mV/min, a point is 4-5 mV: 4 points (the jump's old size) were 16 mV, under
+# 3 sigma of the board's 6.5 mV of noise, and started the history again up to
+# 3 times an hour, the time left gone at the end of the charge. In volts
+# (VBAT_JUMP_MV): ten seeds of 12 mV noise, no reset in 65 min, the time left
+# known from 10 min on (the noise can flatten the first fit for a minute)
+import random as _vf_random
+_vf_saved = (gl.uptime_s, gl._vbat_now)
+_vf_up = [1000]
+gl.uptime_s = lambda now=None: _vf_up[0]
+_vf = []
+try:
+    for seed_ in range(1, 11):
+        rnd_ = _vf_random.Random(seed_)
+        _vb_reset()
+        n_ = k_ = 0
+        for i_ in range(65):
+            _vf_up[0] = 1000 + 60 * i_
+            v_ = 3.56 - 0.0024 * i_ + rnd_.gauss(0, 0.012)
+            gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
+            m_ = len(gl._vb_hist)
+            gl.vbat_tick(0)
+            n_ += len(gl._vb_hist) == 1 and m_ > 1
+            k_ += i_ >= 11 and gl._vbat_left() is not None
+        _vf.append((n_, k_))
+finally:
+    gl.uptime_s, gl._vbat_now = _vf_saved
+    _vb_reset()
+check("VBAT-FLAT: 12 mV of noise where a point is 4-5 mV starts no new history "
+      "(ten seeds, 65 min), the time left known from 10 min on",
+      all(n_ == 0 and k_ >= 52 for n_, k_ in _vf), repr(_vf))
+
+# VBAT-INVERSE: _vbat_v, what a jump is measured in, is _vbat_pct's inverse:
+# every per cent back and forth is itself, the table strictly falls, 100 %
+# and over is its top, 0 % and under its bottom
+_vi = [gl._vbat_v(p_) for p_ in range(101)]
+check("VBAT-INVERSE: _vbat_v(p) back through _vbat_pct is p for 0-100 %, "
+      "VBAT_OCV strictly falls, the ends clamp; every whole per cent is a whole mV "
+      "(_vbat_mv, what a jump is measured in)",
+      [gl._vbat_pct(round(v_, 4)) for v_ in _vi] == list(range(101))
+      and all(a_ < b_ for a_, b_ in zip(_vi, _vi[1:]))
+      and all(a_ > b_ for a_, b_ in zip(gl.VBAT_OCV, gl.VBAT_OCV[1:]))
+      and gl._vbat_v(100) == gl._vbat_v(130) == gl.VBAT_OCV[0]
+      and gl._vbat_v(0) == gl._vbat_v(-5) == gl.VBAT_OCV[-1]
+      and abs(gl._vbat_v(95) - 4.075) < 1e-9
+      and [gl._vbat_mv(p_) for p_ in range(101)] == [int(round(v_ * 1000)) for v_ in _vi]
+      and all(abs(v_ * 1000 - round(v_ * 1000)) < 1e-6 for v_ in _vi),
+      repr(_vi[::10]))
 
 # NMEA-DIGITS: a time or date digit flipped past the checksum (two flipped
 # bits pass the XOR) makes the sentence bad, as a bad number does. Before, the
@@ -28314,7 +28418,9 @@ check("GAP-HALFLINE: half a sentence before a silence is not joined to the bytes
 # VBAT-NOISE: a jump was measured against the last sample alone, 2 points
 # (~20 mV): at 8 mV of noise the history started again 5 times in 6 h, the
 # time left known a third of the time. Against the median of the last 3,
-# VBAT_JUMP points: 6 h of a 0.6 mV/min discharge at 12 mV of noise, no reset
+# VBAT_JUMP_MV: 6 h of a 0.8 mV/min discharge at 12 mV of noise, no reset
+# (0.8 mV/min is 0.067 %/min at 4.0 V on the measured curve, VBAT_DROP in 30
+# min, and 0.078 %/min over the 6 h: about what 0.6 was on the old one)
 import random as _vn_random
 _vn_rnd = _vn_random.Random(1)
 _vn_saved = (gl.uptime_s, gl._vbat_now)
@@ -28325,7 +28431,7 @@ try:
     _vb_reset()
     for i_ in range(6 * 60):
         _vn_up[0] = 1000 + 60 * i_
-        v_ = 4.0 - 0.0006 * i_ + _vn_rnd.gauss(0, 0.012)
+        v_ = 4.0 - 0.0008 * i_ + _vn_rnd.gauss(0, 0.012)
         gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
         n0_ = len(gl._vb_hist)
         gl.vbat_tick(0)
@@ -28573,28 +28679,55 @@ finally:
 check("UPLOAD-LEFT-FUZZ: 'left' equals count_points every tick and every track goes "
       "(16 runs of mixed answers, damaged files too)", _lf_bad == [], repr(_lf_bad[:3]))
 
-# VBAT-UNPLUG-TOP: a top-up cut at 90-97 %: on the charger 4.20 V (100 %),
-# off it 4.145 V (96 %), a 4-point step, under VBAT_JUMP: the plateau kept
-# made the time left ~8 h for ~28 min (~35 h true). Leaving the plateau
-# by more than VBAT_DROP is a jump too
+# VBAT-UNPLUG-TOP: off the charger's plateau the samples start again. On the
+# old curve a top-up cut at 96 % (4.20 V on the charger, 4.145 V off it) was a
+# 4-point step under the jump, and the plateau kept made the time left ~8 h
+# for ~28 min (~35 h true). On the measured one everything from 4.13 V up is
+# 100 %: off a full charge (40 min at 4.19 V, then the cell's own 4.13 V at
+# the measured 0.41 %/min) there is no step at all, and the plateau kept made
+# the time left 1-2 days for 15-20 min. Leaving 99 % starts the history: at
+# the first sample under it (the old 4.145 V, a cut at 96 %: 4.09 V, 44 mV,
+# under VBAT_JUMP_MV), and off the full charge the time left is within a
+# quarter of the true one 20 and 25 min after the unplug
 _vu_saved = (gl.uptime_s, gl._vbat_now)
 _vu_up = [1000]
 gl.uptime_s = lambda now=None: _vu_up[0]
-_vu = []
+_vu = {}
 try:
+    for name_, seq_ in (
+            ("old", [4.20] * 30 + [4.145 - 0.0006 * i_ for i_ in range(60)]),
+            ("cut", [4.20] * 30 + [4.09 - 0.0008 * i_ for i_ in range(30)])):
+        _vb_reset()
+        first_ = None
+        for i_, v_ in enumerate(seq_):
+            _vu_up[0] = 1000 + 60 * i_
+            gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
+            gl.vbat_tick(0)
+            if first_ is None and i_ >= 30 and gl._vbat_pct(round(v_, 2)) < 99:
+                first_ = (i_, len(gl._vb_hist))
+        _vu[name_] = first_
     _vb_reset()
-    for i_ in range(60):
+    full_ = []
+    for i_ in range(40 + 30):
         _vu_up[0] = 1000 + 60 * i_
-        v_ = 4.20 if i_ < 30 else 4.145 - 0.0006 * (i_ - 30)
-        gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
+        m_ = i_ - 40
+        v_ = 4.19 if m_ < 0 else round(gl._vbat_v(100 - 0.41 * m_), 2)
+        gl._vbat_now = lambda v_=v_: gl._vbat_pct(v_)
         gl.vbat_tick(0)
-        if i_ in (31, 32):
-            _vu.append(len(gl._vb_hist))
+        if m_ in (20, 25):
+            full_.append((gl._vbat_left(), (100 - 0.41 * m_) / 0.41 * 60))
+    _vu["full"] = full_
 finally:
     gl.uptime_s, gl._vbat_now = _vu_saved
     _vb_reset()
-check("VBAT-UNPLUG-TOP: off the charger's plateau at 96 % the samples start again",
-      _vu == [1, 2], repr(_vu))
+check("VBAT-UNPLUG-TOP: off the charger's plateau the samples start again at the "
+      "first sample under 99 % (a cut at 96 %, the old 4.145 V); off a full charge "
+      "(no step: 4.19 -> 4.13 V, both 100 %) the time left is within a quarter of "
+      "the true one 20 and 25 min after the unplug",
+      _vu["cut"] == (30, 1) and _vu["old"] is not None and _vu["old"][1] == 1
+      and len(_vu["full"]) == 2
+      and all(l_ is not None and abs(l_ - t_) < 0.25 * t_ for l_, t_ in _vu["full"]),
+      repr(_vu))
 # VBAT-NOISE-SEEDS: ten noise seeds at 12 mV, at most one reset each in 6 h
 _vs_saved = (gl.uptime_s, gl._vbat_now)
 _vs_up = [1000]
@@ -28607,7 +28740,7 @@ try:
         n_ = 0
         for i_ in range(6 * 60):
             _vs_up[0] = 1000 + 60 * i_
-            v_ = 4.0 - 0.0006 * i_ + rnd_.gauss(0, 0.012)
+            v_ = 4.0 - 0.0008 * i_ + rnd_.gauss(0, 0.012)
             gl._vbat_now = lambda v_=v_: gl._vbat_pct(round(v_, 2))
             k_ = len(gl._vb_hist)
             gl.vbat_tick(0)

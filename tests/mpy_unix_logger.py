@@ -741,9 +741,20 @@ gl._vb_hist[:] = [(t, 80 - t / 120.0) for t in range(0, 1801, 60)]
 vb_left = gl._vbat_fit()
 gl._vb_left[0] = vb_left
 print("vbat", vb, gl._vbat_now(), vb_left, gl._tft_bat())
-check("vbat: 3.95 V is 74 %, 0.5 %/min from 65 % about 2 h 10 min, the display's text",
-      vb == (3.95, 0.0) and gl._vbat_now() == 74 and vb_left is not None
-      and 7700 <= vb_left <= 7900 and gl._tft_bat() == (74, "2 óra"))
+check("vbat: 3.95 V is 84 %, 0.5 %/min from 65 % about 2 h 10 min, the display's text",
+      vb == (3.95, 0.0) and gl._vbat_now() == 84 and vb_left is not None
+      and 7700 <= vb_left <= 7900 and gl._tft_bat() == (84, "2 óra"))
+# the jump's mV (_vbat_mv) in single precision: VBAT_OCV's points are whole mV
+# apart, so every whole per cent is its whole mV, as the host's double reads it
+# (compared as floats, the device took 20 of the 32 pairs exactly 45 mV apart
+# for a jump, the host 2)
+vb_omv = [int(x * 1000 + 0.5) for x in gl.VBAT_OCV]
+vb_exp = []
+for p_ in range(101):
+    i_ = min(9, (100 - p_) // 10)
+    vb_exp.append(vb_omv[i_] + (vb_omv[i_ + 1] - vb_omv[i_]) * (100 - 10 * i_ - p_) // 10)
+check("vbat: _vbat_mv of every whole per cent is its whole mV on VBAT_OCV",
+      [gl._vbat_mv(p_) for p_ in range(101)] == vb_exp)
 del machine.ADC
 gl._vb[:] = [None, None, None, None, None, 0]
 gl._vb_hist[:] = []

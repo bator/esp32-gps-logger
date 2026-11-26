@@ -102,21 +102,43 @@ VBAT_DROP = 2                            # %-points the fit must fall over them
 VBAT_RISE = 3                            # %-points the mean of the last
 VBAT_RISE_N = 5                          # this many samples lies over the
                                          # mean of the ones before: the
-                                         # charger topping up (94 -> 98 on
-                                         # USB, under VBAT_JUMP; one sample's
-                                         # +3 is 12 mV noise)
+                                         # charger topping up on USB under
+                                         # VBAT_JUMP_MV (+3 points are 12-36
+                                         # mV along VBAT_OCV, 33-36 at its top)
 VBAT_RISE_HOLD = 3600                    # s without a time left after it
                                          # (the settling read as ~15 h left)
-VBAT_JUMP = 4                            # %-points off the last samples' median
-                                         # that are the charger, not noise
-                                         # (2 were ~20 mV: simulated at 8 mV of
-                                         # noise, 5 resets in 6 h; at 4 none, the
-                                         # charger's lift is 10 and more)
-VBAT_OCV = (4.19, 4.06, 4.00, 3.92, 3.84, 3.76, 3.68, 3.60, 3.51, 3.41, 3.30)
-# V of a 1S LiPo at 100, 90 ... 0 %, linear between: Meshtastic's default
-# OCV_ARRAY (src/Power.h: 4.19 ... 3.30 V at 10 %, 3.10 V at 0 %) from its
-# 3.30 V on, where the board stops (Heltec's datasheet: 3.3 V at least) as 0 %;
-# on USB the charger lifts it (up to 4.2 V)
+VBAT_JUMP_MV = 45                        # mV off the last samples' median (their
+                                         # per cent back on VBAT_OCV, _vbat_mv)
+                                         # that are the charger, not noise. In
+                                         # mV: the curve's points are 4-12 mV,
+                                         # and 4 of them (the jump's old size)
+                                         # were 16 mV where the cell holds out,
+                                         # up to 3 resets an hour at the board's
+                                         # noise (6.5 mV sigma, 2026-11-25); at
+                                         # 45 none at 12 mV of noise there
+                                         # (simulated). The unplug step was 60
+                                         # mV (4.07 V on USB, 4.01 V on its own;
+                                         # 67 back on VBAT_OCV), the charger's
+                                         # lift 180 mV. Whole mV: the device's
+                                         # single precision decided the pairs
+                                         # exactly 45 mV apart otherwise
+VBAT_OCV = (4.13, 4.02, 3.90, 3.80, 3.71, 3.61, 3.55, 3.50, 3.46, 3.41, 3.30)
+# V of the cell (602535, 650 mAh) at 100, 90 ... 0 %, linear between, read
+# under the board's own load: the discharge of 2026-11-25 (at home on WiFi,
+# a 3D fix, 80 MHz; 4.01 -> 3.42 V in 189 min, a sample a minute,
+# tests/vbat_discharge_2026-11-25.json), the per cent in proportion to the
+# time (a steady draw): 90 % at the unplug, 0 % 219 min after it. Meshtastic's
+# resting OCV_ARRAY it replaces read 8 points low the minute the USB came off
+# (the load's 60 mV) and up to 20 behind the time, at about 3.6 V. Not
+# measured, estimated: 100 % (4.19 V at rest less the 60 mV), the 90 % where
+# the test began (4.07 V at rest after a charge) and its end, 0 % at 3.30 V
+# (where the board stops, Heltec's datasheet: 3.3 V at least) 219 min in.
+# The test ended on the charger at 3.42 V at 189 min; 219 assumes the slope
+# doubles under 3.41 V (a LiPo's knee). Every row scales with that end: on
+# the end slope carried on (0.13 V/h, 0 % at ~240 min) the rows under 90 %
+# would be up to 30 mV lower. Off WiFi the draw is lower, so it reads a
+# little high there; on USB the board's load is off the cell, so it reads ~5
+# points high (4.07 V at rest is 95 %), more while the charger lifts it
 Pin(HELTEC_VBAT_CTL, Pin.OUT, value=1)
 
 # The receiver (gps_receiver.py): its UART, the NMEA, the seconds it publishes
@@ -7992,6 +8014,22 @@ def _vbat_pct(v):
             return round(100 - 10 * (i - (v - o[i]) / (o[i - 1] - o[i])))
     return 0
 
+def _vbat_v(p):
+    """The voltage VBAT_OCV gives p % (_vbat_pct's inverse, linear between)."""
+    o = VBAT_OCV
+    if p >= 100:
+        return o[0]
+    if p <= 0:
+        return o[-1]
+    i = int((100 - p) // 10)
+    return o[i] + (o[i + 1] - o[i]) * (100 - 10 * i - p) / 10.0
+
+def _vbat_mv(p):
+    """_vbat_v in whole mV, what a jump is measured in: VBAT_OCV's points are
+    whole mV apart, so a whole per cent is a whole mV, and the device's
+    single precision compares as the tests' double."""
+    return int(_vbat_v(p) * 1000 + 0.5)
+
 _vb_hist = []                            # [(uptime s, %)] on the battery
 
 def _vb_ref():
@@ -8006,17 +8044,17 @@ def _vb_ref():
 
 _vb_rise = [None]                        # uptime s of the charger's last lift
 _vb_jump = [0, None]                     # samples in a row that jumped (over
-                                         # VBAT_JUMP off _vb_ref, or off the
-                                         # plateau), the last one's uptime
+                                         # VBAT_JUMP_MV off _vb_ref), the last
+                                         # one's uptime
 def vbat_tick(now):
     """Every VBAT_EVERY s a sample of what is left, and _vbat_fit once (the
     display asks every TFT_STATE). No battery starts the history again, so
-    does a jump of more than VBAT_JUMP points (against the median of the
-    last 3 kept, _vb_ref) that holds VBAT_AGAIN
+    does a jump of more than VBAT_JUMP_MV (against the median of the
+    last 3 kept, _vb_ref, both back in mV: _vbat_mv) that holds VBAT_AGAIN
     samples in a row: put on the charger (it lifts the voltage) or taken off
     it (the lift gone at once: the samples on the charger made a steep
     line, half the time left for 25 min). One sample off alone is let go:
-    2 points are ~20 mV, and a noisy reading started the samples again
+    a noisy reading started the samples again
     (simulated: at 8 mV of noise the time left was known a quarter of the
     time)."""
     t = uptime_s(now)
@@ -8031,11 +8069,15 @@ def vbat_tick(now):
         _vb_left[0] = None
         _vb_rise[0] = None
         return
+    if p < 99 and _vb_hist and _vb_hist[-1][1] >= 99:
+        # off the top: everything from VBAT_OCV[0] up reads 100 %, the
+        # charger's plateau and a full cell just off it alike, so the unplug
+        # can be no step at all; the plateau kept made the time left a day
+        # for 20 min (and a quarter of the true one on the old curve)
+        del _vb_hist[:]
+        _vb_jump[0], _vb_jump[1] = 0, None
     r = _vb_ref() if _vb_hist else None
-    # (off the charger's plateau at the top of the charge too: there a
-    # point is ~13 mV, the unplug step 4 points, under VBAT_JUMP, and the
-    # plateau kept made the time left a quarter of the true one)
-    if r is not None and (abs(p - r) > VBAT_JUMP or (r >= 99 and r - p > VBAT_DROP)):
+    if r is not None and abs(_vbat_mv(p) - _vbat_mv(r)) > VBAT_JUMP_MV:
         _vb_jump[0] += 1
         _vb_jump[1] = t
         if _vb_jump[0] < VBAT_AGAIN:
@@ -8050,7 +8092,7 @@ def vbat_tick(now):
     h, k = _vb_hist, VBAT_RISE_N
     if len(h) >= 2 * k and (sum(x for _, x in h[-k:])
                             - sum(x for _, x in h[-2 * k:-k])) >= VBAT_RISE * k:
-        _vb_rise[0] = t                  # topped up, under VBAT_JUMP
+        _vb_rise[0] = t                  # topped up, under VBAT_JUMP_MV
     _vb_left[0] = _vbat_fit()
 
 def _vbat_left():
