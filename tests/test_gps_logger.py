@@ -9878,6 +9878,54 @@ check("VBAT-CURVE: the measured discharge of 2026-11-25 reads in proportion to t
       repr((len(_vc_rows), len(_vc_off), max(_vc_off) if _vc_off else None,
             _vc_resets, _vc_known[:1], len(_vc_known))))
 
+# VBAT-UNPLUG-HOLD: the charger's lift holds the time left back for
+# VBAT_RISE_HOLD (the settling on USB is no discharge), but it held on after
+# the unplug too: on 2026-11-28 (tests/vbat_charge_2026-11-28.json) the
+# charger started at 13:53Z, the USB came off at ~14:01Z, and the time left
+# would have come only at 14:54Z, an hour after the plug-in. Off the charger
+# (leaving 99 %, or a jump down) the hold ends: the time left is known 10
+# min after the unplug and stays known. A jump down off USB under 99 % (a
+# charge cut at 95 %, 4.07 -> 4.01 V) ends it too
+with open(os.path.join(ROOT, "tests", "vbat_charge_2026-11-28.json")) as f:
+    _vh_rows = json.load(f)["rows"]
+_vh_saved = (gl.uptime_s, gl._vbat_now)
+_vh_up = [0]
+gl.uptime_s = lambda now=None: _vh_up[0]
+_vh = {}
+try:
+    _vb_reset()
+    known_ = []
+    for r_ in _vh_rows:
+        hm_ = int(r_[0][9:11]) * 60 + int(r_[0][11:13])
+        _vh_up[0] = hm_ * 60
+        gl._vbat_now = lambda v_=r_[1]: gl._vbat_pct(v_)
+        gl.vbat_tick(0)
+        if hm_ >= 14 * 60 + 2:
+            known_.append((r_[0][9:13], gl._vbat_left() is not None))
+    _vh["day"] = known_
+    _vb_reset()
+    cut_ = []
+    seq_ = [4.07] * 40 + [4.11] * 10 + [4.01 - 0.0024 * k_ for k_ in range(25)]
+    for i_, v_ in enumerate(seq_):
+        _vh_up[0] = 60 * i_
+        gl._vbat_now = lambda v_=round(v_, 2): gl._vbat_pct(v_)
+        gl.vbat_tick(0)
+        if i_ == 40 + 10 + 24:
+            cut_.append((gl._vbat_left(), gl._vb_rise[0]))
+    _vh["cut"] = cut_
+finally:
+    gl.uptime_s, gl._vbat_now = _vh_saved
+    _vb_reset()
+_vh_first = next((hm_ for hm_, k_ in _vh["day"] if k_), None)
+check("VBAT-UNPLUG-HOLD: off the charger the hold after its lift ends: on 2026-11-28 "
+      "the time left is known from 10 min after the unplug (not an hour after the "
+      "plug-in) and stays known; a jump down off USB ends it too",
+      len(_vh_rows) == 56 and _vh_first is not None and _vh_first <= "1413"
+      and all(k_ for hm_, k_ in _vh["day"] if hm_ >= _vh_first)
+      and len(_vh["cut"]) == 1 and _vh["cut"][0][0] is not None
+      and _vh["cut"][0][1] is None,
+      repr((_vh_first, _vh["day"][-3:], _vh["cut"])))
+
 # VBAT-FLAT: where the cell holds out, 3.56 -> 3.40 V at the measured 2.4
 # mV/min, a point is 4-5 mV: 4 points (the jump's old size) were 16 mV, under
 # 3 sigma of the board's 6.5 mV of noise, and started the history again up to

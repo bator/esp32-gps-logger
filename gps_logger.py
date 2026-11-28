@@ -8073,9 +8073,13 @@ def vbat_tick(now):
         # off the top: everything from VBAT_OCV[0] up reads 100 %, the
         # charger's plateau and a full cell just off it alike, so the unplug
         # can be no step at all; the plateau kept made the time left a day
-        # for 20 min (and a quarter of the true one on the old curve)
+        # for 20 min (and a quarter of the true one on the old curve). Off
+        # the charger the hold after its lift ends too (VBAT_RISE_HOLD is
+        # for the settling on USB: kept, the time left was gone for an hour
+        # from the plug-in, 50 min after the unplug, 2026-11-28)
         del _vb_hist[:]
         _vb_jump[0], _vb_jump[1] = 0, None
+        _vb_rise[0] = None
     r = _vb_ref() if _vb_hist else None
     if r is not None and abs(_vbat_mv(p) - _vbat_mv(r)) > VBAT_JUMP_MV:
         _vb_jump[0] += 1
@@ -8083,8 +8087,7 @@ def vbat_tick(now):
         if _vb_jump[0] < VBAT_AGAIN:
             return
         del _vb_hist[:]
-        if p > r:
-            _vb_rise[0] = t              # put on the charger
+        _vb_rise[0] = t if p > r else None   # put on the charger, or off it
     _vb_jump[0], _vb_jump[1] = 0, None
     _vb_hist.append((t, p))
     if len(_vb_hist) > VBAT_HIST:
